@@ -1,21 +1,35 @@
 
 void() CSQC_Ent_Remove =
 {
+	if (self == csqc_authority_proxy)
+	{
+		csqc_authority_proxy = world;
+		csqc_proxy_seen = FALSE;
+		csqc_proxy_entnum = 0;
+		csqc_baseline_valid = FALSE;
+		csqc_prediction_valid = FALSE;
+		csqc_present_valid = FALSE;
+		csqc_dbg_seed_source = 0;
+	}
+
 	remove(self);
 };
 
 void() CSQC_Shutdown =
 {
+	CSQC_ResetPredictionState();
 };
 
 noref void(float apiver, string enginename, float enginever) CSQC_Init =
 {
 	drawfont = loadfont("", "Courier Prime Code", "12,16,24,32,64,72,128,256,512", -1, 0, 0);
 	precache_everything();
+	registercommand("pred_debug");
 };
 
 noref void() CSQC_WorldLoaded =
 {
+	CSQC_ResetPredictionState();
 };
 
 // CSQC_Ent_Update is implemented in cl_player.qc
@@ -32,11 +46,16 @@ void(float width, float height, float menushown) CSQC_UpdateView =
 	setproperty(VF_DRAWENGINESBAR, 0);
 	setproperty(VF_DRAWCROSSHAIR, 0);
 
+	CSQC_BuildPresentationView();
+
 	// use predicted player position for the camera if prediction is active
-	if (localplayer && csqc_prediction_valid)
+	if (predicted_player && csqc_prediction_valid)
 	{
-		campos = localplayer.origin + localplayer.view_ofs;
-		camang = input_angles;
+		if (csqc_present_valid)
+			campos = csqc_present_origin + csqc_present_view_ofs;
+		else
+			campos = predicted_player.origin + predicted_player.view_ofs;
+		camang = view_angles;
 		setproperty(VF_ORIGIN, campos);
 		setproperty(VF_ANGLES, camang);
 	}
@@ -51,6 +70,7 @@ void(float width, float height, float menushown) CSQC_UpdateView =
 
 	//does what you think it does
 	renderscene();
+	CSQC_DrawPredictionDebug();
 	
 	/*
 	sui_begin(g_width, g_height);
@@ -69,6 +89,13 @@ float(string cmd) CSQC_ConsoleCommand =
 	tokenize(cmd);
 	switch(argv(0))
 	{
+		case "pred_debug":
+			if (argv(1) != "")
+				csqc_pred_debug = stof(argv(1));
+			else
+				csqc_pred_debug = !csqc_pred_debug;
+			print(sprintf("pred_debug %g\n", csqc_pred_debug));
+			return TRUE;
 		default:
 			return FALSE;
 	}
@@ -81,8 +108,10 @@ float(float evtype, float scanx, float chary, float devid) CSQC_InputEvent =
 	switch(evtype)
 	{
 	case IE_KEYDOWN:
+		CSQC_UpdateLiveInputFromBind(scanx, TRUE);
 		return FALSE;
 	case IE_KEYUP:
+		CSQC_UpdateLiveInputFromBind(scanx, FALSE);
 		return FALSE;
 	case IE_MOUSEDELTA:
 		return FALSE;

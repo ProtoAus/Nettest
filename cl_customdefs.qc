@@ -31,6 +31,7 @@ vector campos;
 vector camang;
 
 entity localplayer;
+entity predicted_player;
 
 vector() readvector =
 {

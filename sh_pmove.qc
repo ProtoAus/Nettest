@@ -19,6 +19,9 @@ Eye : view_ofs.z = 48
 
 vector PM_MINS             = '-16 -16 0';
 vector PM_MAXS             = '16 16 56';
+vector PM_DUCK_MAXS        = '16 16 28';
+vector PM_VIEW_OFS         = '0 0 48';
+vector PM_DUCK_VIEW_OFS    = '0 0 24';
 
 float  PM_STEPSIZE         = 18;
 float  PM_FLYFRICTION      = 4;
@@ -27,6 +30,11 @@ float  PM_MIN_STEP_NORMAL  = 0.7;   // floor normal.z must be >= this
 float  PM_MAX_CLIP_PLANES  = 5;
 float  PM_MAX_JUMPFIX_DP   = -0.1;  // ramp-fix dot-product threshold
 float  PM_BTN_JUMP         = 2;     // bit in input_buttons
+float  PM_BTN_DUCK         = 32;    // +button6 via DP_INPUTBUTTONS
+float  PM_DUCK_TIME        = 0.4;
+float  PM_DUCKING_MULTIPLIER = 0.333;
+float  PM_FIXEDSTEP        = 0.01;
+float  PM_FIXEDSTEP_EPSILON = 0.000001;
 
 // ============================================================================
 //  Blocked flags  (returned by slide / step functions)
@@ -54,6 +62,11 @@ float  PM_MOVETYPE_NONE      = 4;
 .float pm_waterjumptime;  // seconds remaining in water-jump launch
 .float pm_jump_held;      // true while jump button is held (prevent pogo)
 .float pm_jump_msec;      // msec accumulator for jump timer (0 = expired)
+.float pm_in_duck;        // true while transitioning into a crouch
+.float pm_duck_msec;      // GoldSrc-style duck transition timer
+.float pm_oldbuttons;     // previous input_buttons state for edge detection
+.float pm_timecarry;      // leftover command time for fixed-step simulation
+.entity pm_prediction_proxy; // owner-only SSQC->CSQC authoritative snapshot proxy
 
 // ============================================================================
 //  Per-move working globals  (loaded from self at the start of PM_PlayerMove)
@@ -84,23 +97,161 @@ float  mv_wateraccelerate;
 float  mv_entgravity;
 float  mv_spectatormaxspeed;
 
+void() PM_CategorizePosition;
+void() PM_PlayerMove;
+void() PM_PlayerMoveStep;
+
 // ============================================================================
 //  8.  PM_Trace  –  tracebox wrapper using the shared hull
 // ============================================================================
 
+vector PM_CurrentMaxs()
+{
+    if (self.flags & FL_DUCKING)
+        return PM_DUCK_MAXS;
+
+    return PM_MAXS;
+}
+
+void PM_TraceHull(vector start, vector mins, vector maxs, vector end)
+{
+    tracebox(start, mins, maxs, end, MOVE_NOMONSTERS, self);
+}
+
 void PM_Trace(vector start, vector end)
 {
-    tracebox(start, PM_MINS, PM_MAXS, end, MOVE_NOMONSTERS, self);
+    PM_TraceHull(start, PM_MINS, PM_CurrentMaxs(), end);
 }
 
 // ============================================================================
 //  9.  PM_TestPosition  –  returns true if the position is not solid
 // ============================================================================
 
+float PM_TestPositionExt(vector pos, vector mins, vector maxs)
+{
+    tracebox(pos, mins, maxs, pos, MOVE_NOMONSTERS, self);
+    return !trace_startsolid;
+}
+
 float PM_TestPosition(vector pos)
 {
-    tracebox(pos, PM_MINS, PM_MAXS, pos, MOVE_NOMONSTERS, self);
-    return !trace_startsolid;
+    return PM_TestPositionExt(pos, PM_MINS, PM_CurrentMaxs());
+}
+
+float PM_MoveScale()
+{
+    if (self.flags & FL_DUCKING)
+        return PM_DUCKING_MULTIPLIER;
+
+    return 1;
+}
+
+float PM_SplineFraction(float value, float scale)
+{
+    float value_squared;
+
+    value = value * scale;
+    value_squared = value * value;
+
+    return 3 * value_squared - 2 * value_squared * value;
+}
+
+void PM_SyncHull()
+{
+#ifdef SSQC
+    if (self.flags & FL_DUCKING)
+        setsize(self, PM_MINS, PM_DUCK_MAXS);
+    else
+        setsize(self, PM_MINS, PM_MAXS);
+#endif
+}
+
+void PM_UnDuck()
+{
+    if (!PM_TestPositionExt(pm_origin, PM_MINS, PM_MAXS))
+        return;
+
+    self.flags &= ~FL_DUCKING;
+    self.pm_in_duck = FALSE;
+    self.pm_duck_msec = 0;
+    self.view_ofs = PM_VIEW_OFS;
+
+    PM_SyncHull();
+    PM_CategorizePosition();
+}
+
+void PM_CheckDuck()
+{
+    float buttons_changed;
+    float buttons_pressed;
+    float duck_down;
+    float duck_time;
+    float duck_fraction;
+
+    duck_down = input_buttons & PM_BTN_DUCK;
+    buttons_changed = self.pm_oldbuttons ^ input_buttons;
+    buttons_pressed = buttons_changed & input_buttons;
+
+    if (duck_down)
+        self.pm_oldbuttons |= PM_BTN_DUCK;
+    else
+        self.pm_oldbuttons &= ~PM_BTN_DUCK;
+
+    if (self.pm_movetype == PM_MOVETYPE_DEAD)
+    {
+        if ((self.flags & FL_DUCKING) || self.pm_in_duck)
+            PM_UnDuck();
+        return;
+    }
+
+    if (!duck_down && !self.pm_in_duck && !(self.flags & FL_DUCKING))
+    {
+        self.view_ofs = PM_VIEW_OFS;
+        return;
+    }
+
+    if (duck_down)
+    {
+        if ((buttons_pressed & PM_BTN_DUCK) && !(self.flags & FL_DUCKING))
+        {
+            self.pm_duck_msec = 1000;
+            self.pm_in_duck = TRUE;
+        }
+
+        if (self.pm_in_duck)
+        {
+            if (self.pm_duck_msec < 0)
+                self.pm_duck_msec = 0;
+
+            duck_time = max(0, 1 - self.pm_duck_msec / 1000);
+
+            // Match GoldSrc: finish instantly once the duck timer crosses the
+            // threshold or if the player is airborne mid-transition.
+            if (self.pm_duck_msec / 1000 <= (1 - PM_DUCK_TIME) || !pm_onground)
+            {
+                self.flags |= FL_DUCKING;
+                self.pm_in_duck = FALSE;
+                self.view_ofs = PM_DUCK_VIEW_OFS;
+
+                PM_SyncHull();
+                PM_CategorizePosition();
+            }
+            else
+            {
+                duck_fraction = PM_SplineFraction(duck_time, 1 / PM_DUCK_TIME);
+                self.view_ofs = PM_VIEW_OFS * (1 - duck_fraction)
+                              + PM_DUCK_VIEW_OFS * duck_fraction;
+            }
+        }
+        else if (self.flags & FL_DUCKING)
+        {
+            self.view_ofs = PM_DUCK_VIEW_OFS;
+        }
+
+        return;
+    }
+
+    PM_UnDuck();
 }
 
 // ============================================================================
@@ -134,6 +285,7 @@ float PM_SlideMove()
 {
     local vector planes[5];
     vector       primal_velocity;
+    vector       original_velocity;
     vector       new_velocity;
     vector       dir;
     float        time_left;
@@ -141,9 +293,9 @@ float PM_SlideMove()
     float        num_planes;
     float        i, j;
     float        d;
-    float        into;
 
     primal_velocity = pm_velocity;
+    original_velocity = pm_velocity;
     blocked         = 0;
     num_planes      = 0;
     time_left       = pm_frametime;
@@ -156,7 +308,7 @@ float PM_SlideMove()
 
         PM_Trace(pm_origin, pm_origin + pm_velocity * time_left);
 
-        if (trace_allsolid)
+        if (trace_startsolid || trace_allsolid)
         {
             // stuck inside solid – zero velocity and bail
             pm_velocity = '0 0 0';
@@ -174,9 +326,9 @@ float PM_SlideMove()
             break;   // moved the whole way, no collision
 
         // hit something – classify the surface
-        if (trace_plane_normal_z > PM_MIN_STEP_NORMAL)
+        if (trace_plane_normal_z >= PM_MIN_STEP_NORMAL)
             blocked |= PM_BLOCKED_FLOOR;
-        else if (trace_plane_normal_z > 0 && trace_plane_normal_z < PM_MIN_STEP_NORMAL)
+        else if (!trace_plane_normal_z)
             blocked |= PM_BLOCKED_STEP;
         else
             blocked |= PM_BLOCKED_OTHER;
@@ -193,7 +345,7 @@ float PM_SlideMove()
         // try each stored plane in turn
         for (j = 0; j < num_planes; j++)
         {
-            new_velocity = PM_ClipVelocity(pm_velocity, planes[j], 1);
+            new_velocity = PM_ClipVelocity(original_velocity, planes[j], 1);
 
             // check if this clipped velocity re-enters any previous plane
             local float ok;
@@ -261,6 +413,7 @@ float PM_StepSlideMove(float in_air)
     vector  original_velocity;
     vector  down_origin;     // flat-slide result (saved before step attempt)
     vector  down_velocity;
+    vector  org;
     float   blocked;
     float   stepsize;
     float   dx, dy;
@@ -281,11 +434,14 @@ float PM_StepSlideMove(float in_air)
         if (!(blocked & PM_BLOCKED_STEP))
             return blocked;
 
-        PM_Trace(pm_origin, pm_origin - '0 0 1' * PM_STEPSIZE);
+        org = (original_velocity_z < 0) ? pm_origin : original_origin;
+        PM_Trace(org, org - '0 0 1' * PM_STEPSIZE);
         if (trace_fraction == 1 || trace_plane_normal_z < PM_MIN_STEP_NORMAL)
             return blocked;
 
-        stepsize = PM_STEPSIZE * trace_fraction;
+        // Match pmove.c: shrink the upward retry by how far below us the
+        // supporting floor actually is.
+        stepsize = PM_STEPSIZE - (org_z - trace_endpos_z);
         if (stepsize < 4)
             return blocked;
     }
@@ -323,7 +479,7 @@ float PM_StepSlideMove(float in_air)
         pm_velocity = down_velocity;
         return blocked;
     }
-    if (!trace_startsolid && !trace_allsolid && trace_fraction < 1)
+    if (!trace_startsolid && !trace_allsolid)
         pm_origin = trace_endpos;
 
     // reject if step landed us lower than we started (stepped into a dip)
@@ -500,10 +656,13 @@ float PM_WaterMove()
     vector wishvel;
     float  wishspeed;
     float  fmove, smove, upmove;
+    float  scale;
 
-    fmove = input_movevalues_x;
-    smove = input_movevalues_y;
-    upmove = input_movevalues_z;
+    scale = PM_MoveScale();
+
+    fmove = input_movevalues_x * scale;
+    smove = input_movevalues_y * scale;
+    upmove = input_movevalues_z * scale;
 
     wishvel = pm_forward * fmove + pm_right * smove;
 
@@ -533,10 +692,13 @@ float PM_FlyMove()
 {
     vector wishvel;
     float  wishspeed;
+    float  scale;
 
-    wishvel = pm_forward * input_movevalues_x
-            + pm_right   * input_movevalues_y
-            + v_up       * input_movevalues_z;
+    scale = PM_MoveScale();
+
+    wishvel = pm_forward * (input_movevalues_x * scale)
+            + pm_right   * (input_movevalues_y * scale)
+            + v_up       * (input_movevalues_z * scale);
 
     wishspeed = vlen(wishvel);
     if (wishspeed > mv_maxspeed)
@@ -560,9 +722,11 @@ float PM_AirMove()
     vector fwd2d, right2d;
     float  wishspeed;
     float  fmove, smove;
+    float  scale;
 
-    fmove = input_movevalues_x;
-    smove = input_movevalues_y;
+    scale = PM_MoveScale();
+    fmove = input_movevalues_x * scale;
+    smove = input_movevalues_y * scale;
 
     // flatten forward and right into the horizontal plane
     fwd2d   = pm_forward;
@@ -586,8 +750,11 @@ float PM_AirMove()
 
     if (pm_onground)
     {
-        // clamp vertical velocity so we don't launch off ramps
-        pm_velocity_z = min(pm_velocity_z, 0);
+        // Grounded movement in pmove.c zeroes z before the step-slide path
+        // unless the separate slidefix branch is being used. Keeping a
+        // residual negative z here causes forward+down traces and "sticky"
+        // wall catches on brush seams and 45-degree walls.
+        pm_velocity_z = 0;
 
         PM_Accelerate(wishdir, wishspeed, mv_accelerate);
 
@@ -618,6 +785,12 @@ float PM_AirMove()
 
 void PM_CategorizePosition()
 {
+    vector hull_maxs;
+    float  hull_height;
+
+    hull_maxs = PM_CurrentMaxs();
+    hull_height = hull_maxs_z - PM_MINS_z;
+
     // --- ground check ---
     // trace 1 unit below origin
     PM_Trace(pm_origin, pm_origin - '0 0 1');
@@ -641,10 +814,7 @@ void PM_CategorizePosition()
     }
 
     // --- water level check ---
-    // Hull is 0..56 tall with origin at feet.
-    // feet sample = origin.z + 1
-    // waist sample = origin.z + 28
-    // head sample  = origin.z + 50  (6 below the top)
+    // Sample the current hull: feet, midpoint, then eye position.
 
     pm_waterlevel = 0;
     pm_watertype  = CONTENT_EMPTY;
@@ -661,13 +831,13 @@ void PM_CategorizePosition()
         pm_watertype  = cont;
         pm_waterlevel = 1;
 
-        wpt_z = pm_origin_z + 28;
+        wpt_z = pm_origin_z + PM_MINS_z + hull_height * 0.5;
         cont  = pointcontents(wpt);
         if (cont <= CONTENT_WATER)
         {
             pm_waterlevel = 2;
 
-            wpt_z = pm_origin_z + 50;
+            wpt_z = pm_origin_z + self.view_ofs_z;
             cont  = pointcontents(wpt);
             if (cont <= CONTENT_WATER)
                 pm_waterlevel = 3;
@@ -726,8 +896,8 @@ void PM_CheckJump()
         return;
 
     // pogo prevention: button was already held from the previous landing
-    if (self.pm_jump_held && !self.pm_jump_msec)
-        return;
+//    if (self.pm_jump_held && !self.pm_jump_msec)
+//        return;
 
     // ramp fix: if we have downward momentum along the ground normal, clip it
     dp = pm_velocity * pm_groundnormal;
@@ -737,7 +907,7 @@ void PM_CheckJump()
     pm_onground       = FALSE;
     pm_velocity_z    += 270;
     self.pm_jump_held  = TRUE;
-    self.pm_jump_msec  = input_timelength * 1000;
+    self.pm_jump_msec  = pm_frametime * 1000;
 }
 
 // ============================================================================
@@ -918,10 +1088,10 @@ void PM_ReadMovevars()
 }
 
 // ============================================================================
-//  25.  PM_PlayerMove  –  main entry point
+//  25.  PM_PlayerMoveStep  –  single fixed-size simulation slice
 // ============================================================================
 
-void PM_PlayerMove()
+void PM_PlayerMoveStep()
 {
     float  blocked;
     float  dp;
@@ -961,10 +1131,6 @@ void PM_PlayerMove()
     PM_NudgePosition();
     PM_CategorizePosition();
 
-    // check for wall-launched water jump (waist-deep)
-    if (pm_waterlevel == 2 && self.pm_movetype != PM_MOVETYPE_FLY)
-        PM_CheckWaterJump();
-
     // cancel water-jump when falling hard or dead
     if (pm_velocity_z < 0 || self.pm_movetype == PM_MOVETYPE_DEAD)
         self.pm_waterjumptime = 0;
@@ -984,6 +1150,19 @@ void PM_PlayerMove()
         if (self.pm_jump_msec > 50)
             self.pm_jump_msec = 0;
     }
+
+    if (self.pm_duck_msec > 0)
+    {
+        self.pm_duck_msec -= pm_frametime * 1000;
+        if (self.pm_duck_msec < 0)
+            self.pm_duck_msec = 0;
+    }
+
+    PM_CheckDuck();
+
+    // check for wall-launched water jump (waist-deep)
+    if (pm_waterlevel == 2 && self.pm_movetype != PM_MOVETYPE_FLY)
+        PM_CheckWaterJump();
 
     PM_CheckJump();
 
@@ -1011,9 +1190,39 @@ done:
     // --- write results back to entity ---
     setorigin(self, pm_origin);
     self.velocity = pm_velocity;
+    PM_SyncHull();
 
     if (pm_onground)
         self.flags = self.flags | FL_ONGROUND;
     else
         self.flags = self.flags & ~FL_ONGROUND;
+}
+
+// ============================================================================
+//  26.  PM_PlayerMove  –  fixed-step wrapper around PM_PlayerMoveStep
+// ============================================================================
+
+void PM_PlayerMove()
+{
+    float remaining;
+    float saved_timelength;
+
+    saved_timelength = input_timelength;
+    remaining = max(self.pm_timecarry + input_timelength, 0);
+
+    while (remaining + PM_FIXEDSTEP_EPSILON >= PM_FIXEDSTEP)
+    {
+        input_timelength = PM_FIXEDSTEP;
+        PM_PlayerMoveStep();
+
+        remaining -= PM_FIXEDSTEP;
+        if (remaining < PM_FIXEDSTEP_EPSILON)
+        {
+            remaining = 0;
+            break;
+        }
+    }
+
+    self.pm_timecarry = remaining;
+    input_timelength = saved_timelength;
 }
