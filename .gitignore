@@ -1,0 +1,5 @@
+/NewQuake/
+/cs16/
+pm_shared_cs16.c
+pm_shared_goldsrc.c
+settings.local.json

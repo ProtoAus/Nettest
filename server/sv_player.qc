@@ -93,6 +93,9 @@ float(entity playerent, float changedflags) PM_PredictionProxy_SendEntity =
 	WriteFloat(MSG_ENTITY, self.pm_duck_msec);
 	WriteFloat(MSG_ENTITY, self.pm_oldbuttons);
 	WriteFloat(MSG_ENTITY, self.pm_timecarry);
+	WriteFloat(MSG_ENTITY, self.pm_teleport_time);
+	WriteFloat(MSG_ENTITY, self.pm_ladder_detach_time);
+	WriteFloat(MSG_ENTITY, self.pm_fuser2);
 
 	return TRUE;
 };
@@ -117,8 +120,11 @@ void(entity player) PM_SyncPredictionProxy =
 	proxy.pm_waterjumptime = player.pm_waterjumptime;
 	proxy.pm_in_duck = player.pm_in_duck;
 	proxy.pm_duck_msec = player.pm_duck_msec;
-	proxy.pm_oldbuttons = player.pm_oldbuttons;
-	proxy.pm_timecarry = player.pm_timecarry;
+	proxy.pm_oldbuttons    = player.pm_oldbuttons;
+	proxy.pm_timecarry     = player.pm_timecarry;
+	proxy.pm_teleport_time        = player.pm_teleport_time;
+	proxy.pm_ladder_detach_time   = player.pm_ladder_detach_time;
+	proxy.pm_fuser2               = player.pm_fuser2;
 	proxy.SendFlags = proxy.SendFlags | PM_CSQC_PROXY_SEND_STATE;
 };
 
@@ -145,6 +151,7 @@ void(entity player) PM_EnsurePredictionProxy =
 
 void() PlayerSpawn =
 {
+	PM_ReadMovevars();  // ensure hull constants reflect pm_hull_height before setsize
 	self.classname = "player";
 	self.solid = SOLID_SLIDEBOX;
 	setmodel(self, "models/testplayer.iqm");

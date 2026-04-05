@@ -12,6 +12,10 @@ void() CSQC_Ent_Remove =
 		csqc_dbg_seed_source = 0;
 	}
 
+	push_list_remove_csqc(self);
+	tele_list_remove_csqc(self);
+	ladder_list_remove_csqc(self);
+
 	remove(self);
 };
 
@@ -55,7 +59,14 @@ void(float width, float height, float menushown) CSQC_UpdateView =
 			campos = csqc_present_origin + csqc_present_view_ofs;
 		else
 			campos = predicted_player.origin + predicted_player.view_ofs;
-		camang = view_angles;
+		// consume teleport angle snap if prediction fired one this frame
+		if (predicted_player.pm_angle_snap)
+		{
+			camang = predicted_player.pm_snap_angles;
+			predicted_player.pm_angle_snap = FALSE;
+		}
+		else
+			camang = view_angles;
 		setproperty(VF_ORIGIN, campos);
 		setproperty(VF_ANGLES, camang);
 	}

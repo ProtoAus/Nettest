@@ -17,11 +17,12 @@ Eye : view_ofs.z = 48
 //  Hull / physics constants
 // ============================================================================
 
-vector PM_MINS             = '-16 -16 0';
-vector PM_MAXS             = '16 16 56';
-vector PM_DUCK_MAXS        = '16 16 28';
-vector PM_VIEW_OFS         = '0 0 48';
-vector PM_DUCK_VIEW_OFS    = '0 0 24';
+vector PM_MINS             = '-16 -16 0';   // standing hull bottom — never changes
+vector PM_MAXS;             // standing hull top          — set by PM_ReadMovevars
+vector PM_DUCK_MINS;        // duck hull bottom           — set by PM_ReadMovevars
+vector PM_DUCK_MAXS;        // duck hull top              — set by PM_ReadMovevars
+vector PM_VIEW_OFS;         // standing eye offset        — set by PM_ReadMovevars
+vector PM_DUCK_VIEW_OFS;    // ducked eye offset          — set by PM_ReadMovevars
 
 float  PM_STEPSIZE         = 18;
 float  PM_FLYFRICTION      = 4;
@@ -33,7 +34,6 @@ float  PM_BTN_JUMP         = 2;     // bit in input_buttons
 float  PM_BTN_DUCK         = 32;    // +button6 via DP_INPUTBUTTONS
 float  PM_DUCK_TIME        = 0.4;
 float  PM_DUCKING_MULTIPLIER = 0.333;
-float  PM_FIXEDSTEP        = 0.01;
 float  PM_FIXEDSTEP_EPSILON = 0.000001;
 
 // ============================================================================
@@ -81,6 +81,8 @@ vector pm_groundnormal;
 float  pm_frametime;
 vector pm_forward;
 vector pm_right;
+float  pm_on_ladder;      // TRUE if player overlaps a ladder trigger this step
+vector pm_ladder_normal;  // outward-facing normal of the active ladder surface
 
 // ============================================================================
 //  Movevars  (populated from cvars each call via PM_ReadMovevars)
@@ -96,10 +98,13 @@ float  mv_airaccelerate;    // separate air-strafe accel (GoldSrc-style)
 float  mv_wateraccelerate;
 float  mv_entgravity;
 float  mv_spectatormaxspeed;
+float  mv_stamina;              // 1 = CS 1.6 landing-fatigue enabled, 0 = disabled
+float  mv_autohop;              // 1 = jump re-fires every landing while held, 0 = require release
 
 void() PM_CategorizePosition;
 void() PM_PlayerMove;
 void() PM_PlayerMoveStep;
+void() PM_CheckLadder;
 
 // ============================================================================
 //  8.  PM_Trace  –  tracebox wrapper using the shared hull
@@ -113,6 +118,14 @@ vector PM_CurrentMaxs()
     return PM_MAXS;
 }
 
+vector PM_CurrentMins()
+{
+    if (self.flags & FL_DUCKING)
+        return PM_DUCK_MINS;
+
+    return PM_MINS;
+}
+
 void PM_TraceHull(vector start, vector mins, vector maxs, vector end)
 {
     tracebox(start, mins, maxs, end, MOVE_NOMONSTERS, self);
@@ -120,7 +133,7 @@ void PM_TraceHull(vector start, vector mins, vector maxs, vector end)
 
 void PM_Trace(vector start, vector end)
 {
-    PM_TraceHull(start, PM_MINS, PM_CurrentMaxs(), end);
+    PM_TraceHull(start, PM_CurrentMins(), PM_CurrentMaxs(), end);
 }
 
 // ============================================================================
@@ -135,7 +148,7 @@ float PM_TestPositionExt(vector pos, vector mins, vector maxs)
 
 float PM_TestPosition(vector pos)
 {
-    return PM_TestPositionExt(pos, PM_MINS, PM_CurrentMaxs());
+    return PM_TestPositionExt(pos, PM_CurrentMins(), PM_CurrentMaxs());
 }
 
 float PM_MoveScale()
@@ -160,7 +173,7 @@ void PM_SyncHull()
 {
 #ifdef SSQC
     if (self.flags & FL_DUCKING)
-        setsize(self, PM_MINS, PM_DUCK_MAXS);
+        setsize(self, PM_DUCK_MINS, PM_DUCK_MAXS);
     else
         setsize(self, PM_MINS, PM_MAXS);
 #endif
@@ -168,9 +181,18 @@ void PM_SyncHull()
 
 void PM_UnDuck()
 {
-    if (!PM_TestPositionExt(pm_origin, PM_MINS, PM_MAXS))
+    vector new_origin;
+
+    new_origin = pm_origin;
+    // Undo the ground duck origin shift: restore feet to world floor level.
+    // In air there was no shift, so don't compensate.
+    if (pm_onground)
+        new_origin_z += PM_DUCK_MINS_z;
+
+    if (!PM_TestPositionExt(new_origin, PM_MINS, PM_MAXS))
         return;
 
+    pm_origin = new_origin;
     self.flags &= ~FL_DUCKING;
     self.pm_in_duck = FALSE;
     self.pm_duck_msec = 0;
@@ -233,14 +255,36 @@ void PM_CheckDuck()
                 self.pm_in_duck = FALSE;
                 self.view_ofs = PM_DUCK_VIEW_OFS;
 
+                // On ground: shift origin down so feet stay planted at the same
+                // world position (mirrors GoldSrc origin -= duck_mins - stand_mins).
+                // In air: no shift — hull bottom rises, enabling crouch-jump.
+                if (pm_onground)
+                {
+                    pm_origin_z -= PM_DUCK_MINS_z;
+                    // Unstick if the shift pushed us into geometry
+                    if (!PM_TestPosition(pm_origin))
+                    {
+                        local float nudge;
+                        for (nudge = 0; nudge < 36; nudge = nudge + 1)
+                        {
+                            pm_origin_z = pm_origin_z + 1;
+                            if (PM_TestPosition(pm_origin))
+                                break;
+                        }
+                    }
+                }
+
                 PM_SyncHull();
                 PM_CategorizePosition();
             }
             else
             {
+                // Animate view toward (PM_DUCK_VIEW_OFS_z - PM_DUCK_MINS_z) so that
+                // when the duck finalises on ground and origin shifts down by
+                // PM_DUCK_MINS_z, the eye world-position is continuous (no pop).
                 duck_fraction = PM_SplineFraction(duck_time, 1 / PM_DUCK_TIME);
-                self.view_ofs = PM_VIEW_OFS * (1 - duck_fraction)
-                              + PM_DUCK_VIEW_OFS * duck_fraction;
+                self.view_ofs_z = PM_VIEW_OFS_z * (1 - duck_fraction)
+                                + (PM_DUCK_VIEW_OFS_z - PM_DUCK_MINS_z) * duck_fraction;
             }
         }
         else if (self.flags & FL_DUCKING)
@@ -756,6 +800,19 @@ float PM_AirMove()
         // wall catches on brush seams and 45-degree walls.
         pm_velocity_z = 0;
 
+        // CS 1.6 stamina: landing fatigue bleeds horizontal speed for ~1.3s
+        // after each jump (fuser2 decays from 1315 to 0 over that window).
+        // factor_ref is the per-tick multiplier CS uses at 100 Hz (dt=0.01).
+        // Raising it to (pm_frametime/0.01) makes the effect framerate-independent:
+        // same net slowdown regardless of tickrate.
+        if (mv_stamina && self.pm_fuser2 > 0)
+        {
+            float factor_ref = (100 - self.pm_fuser2 * 0.001 * 19) * 0.01;
+            float factor = pow(factor_ref, pm_frametime * 100);
+            pm_velocity_x *= factor;
+            pm_velocity_y *= factor;
+        }
+
         PM_Accelerate(wishdir, wishspeed, mv_accelerate);
 
         // if we ended up with no horizontal movement, stop cleanly
@@ -765,7 +822,20 @@ float PM_AirMove()
             return 0;
         }
 
-        return PM_StepSlideMove(FALSE);
+        float ground_blocked = PM_StepSlideMove(FALSE);
+
+        // Slope-glue: after zeroing pm_velocity_z we have no downward component
+        // to clip along the slope, so the player walks off slope edges.
+        // GoldSrc's PM_WalkMove fixes this by tracing down STEPSIZE after the
+        // slide and snapping to any floor surface found.
+        PM_Trace(pm_origin, pm_origin - '0 0 1' * PM_STEPSIZE);
+        if (trace_fraction < 1 && !trace_startsolid && !trace_allsolid
+            && trace_plane_normal_z >= PM_MIN_STEP_NORMAL)
+        {
+            pm_origin = trace_endpos;
+        }
+
+        return ground_blocked;
     }
     else
     {
@@ -789,7 +859,8 @@ void PM_CategorizePosition()
     float  hull_height;
 
     hull_maxs = PM_CurrentMaxs();
-    hull_height = hull_maxs_z - PM_MINS_z;
+    vector hull_mins = PM_CurrentMins();
+    hull_height = hull_maxs_z - hull_mins_z;
 
     // --- ground check ---
     // trace 1 unit below origin
@@ -824,14 +895,14 @@ void PM_CategorizePosition()
     wpt_x = pm_origin_x;
     wpt_y = pm_origin_y;
 
-    wpt_z = pm_origin_z + 1;
+    wpt_z = pm_origin_z + hull_mins_z + 1;
     cont  = pointcontents(wpt);
     if (cont <= CONTENT_WATER)
     {
         pm_watertype  = cont;
         pm_waterlevel = 1;
 
-        wpt_z = pm_origin_z + PM_MINS_z + hull_height * 0.5;
+        wpt_z = pm_origin_z + hull_mins_z + hull_height * 0.5;
         cont  = pointcontents(wpt);
         if (cont <= CONTENT_WATER)
         {
@@ -871,6 +942,21 @@ void PM_CheckJump()
         return;
     }
 
+    // ladder jump: push away from wall + upward
+    if (pm_on_ladder)
+    {
+        if (self.pm_jump_held)
+            return;
+
+        pm_velocity               = pm_ladder_normal * 270;
+        pm_velocity_z             = 0;    // GoldSrc: purely horizontal, gravity takes over
+        pm_onground               = FALSE;
+        self.pm_jump_held         = TRUE;
+        self.pm_ladder_detach_time = 0.6;
+        pm_on_ladder              = FALSE;  // skip PM_LadderMove this step
+        return;
+    }
+
     // button is held from here onward
 
     // water-jump already in progress
@@ -895,9 +981,9 @@ void PM_CheckJump()
     if (!pm_onground)
         return;
 
-    // pogo prevention: button was already held from the previous landing
-//    if (self.pm_jump_held && !self.pm_jump_msec)
-//        return;
+    // pogo prevention: require button release between jumps unless autohop is on
+    if (self.pm_jump_held && !mv_autohop)
+        return;
 
     // ramp fix: if we have downward momentum along the ground normal, clip it
     dp = pm_velocity * pm_groundnormal;
@@ -906,6 +992,15 @@ void PM_CheckJump()
 
     pm_onground       = FALSE;
     pm_velocity_z    += 270;
+
+    // CS 1.6 stamina: penalise jump height if still fatigued, then reset timer
+    if (mv_stamina)
+    {
+        if (self.pm_fuser2 > 0)
+            pm_velocity_z *= (100 - self.pm_fuser2 * 0.001 * 19) * 0.01;
+        self.pm_fuser2 = 1315.7894;
+    }
+
     self.pm_jump_held  = TRUE;
     self.pm_jump_msec  = pm_frametime * 1000;
 }
@@ -1054,6 +1149,21 @@ void PM_SpectatorMove()
 
 void PM_ReadMovevars()
 {
+    // Hull height cvar — set to 56 (default) or 72 (GoldSrc proportions).
+    // All duck/view values are derived so crouching adjusts automatically.
+    float h;
+    h = cvar("pm_hull_height");
+    if (h < 32) h = 56;
+
+    //  standing hull:  0 → h   (feet at origin)
+    //  duck hull:    h/4 → 3h/4 (symmetric shrink — feet pull up h/4 in air)
+    //  eye heights:  h-8 standing, 3h/4-4 ducked (after ground origin shift, eyes at h/4-4 from floor)
+    PM_MAXS_x = 16;         PM_MAXS_y = 16;         PM_MAXS_z = h;
+    PM_DUCK_MINS_x = -16;   PM_DUCK_MINS_y = -16;   PM_DUCK_MINS_z = h * 0.25;
+    PM_DUCK_MAXS_x = 16;    PM_DUCK_MAXS_y = 16;    PM_DUCK_MAXS_z = h * 0.75;
+    PM_VIEW_OFS_x = 0;      PM_VIEW_OFS_y = 0;      PM_VIEW_OFS_z = h - 8;
+    PM_DUCK_VIEW_OFS_x = 0; PM_DUCK_VIEW_OFS_y = 0; PM_DUCK_VIEW_OFS_z = h * 0.75 - 4;
+
     mv_gravity           = cvar("sv_gravity");
     if (!mv_gravity)          mv_gravity           = 800;
 
@@ -1083,12 +1193,226 @@ void PM_ReadMovevars()
     mv_spectatormaxspeed = cvar("sv_spectatormaxspeed");
     if (!mv_spectatormaxspeed) mv_spectatormaxspeed = 500;
 
+    mv_stamina           = cvar("sv_stamina");   // 0 = off (default), 1 = CS 1.6 landing fatigue
+    mv_autohop           = cvar("sv_autohop");   // 0 = require jump release (default), 1 = autohop
+
     // per-entity gravity multiplier
     mv_entgravity = self.gravity ? self.gravity : 1;
 }
 
 // ============================================================================
-//  25.  PM_PlayerMoveStep  –  single fixed-size simulation slice
+//  25.  PM_CheckTriggerPushes  –  velocity impulse from overlapping push triggers
+// ============================================================================
+
+void(entity trig) PM_ApplyTriggerPush =
+{
+    vector offset;
+    float  current, delta;
+
+    if (trig.spawnflags & PUSH_SOURCE)
+    {
+        // boost along movedir only up to speed; don't reduce existing speed
+        current = pm_velocity * trig.movedir;
+        delta   = trig.speed - current;
+        if (delta > 0)
+            pm_velocity = pm_velocity + trig.movedir * delta;
+    }
+    else if (trig.spawnflags & PUSH_ADDITIVE)
+        pm_velocity = pm_velocity + trig.movedir * trig.speed;
+    else
+        pm_velocity = trig.movedir * trig.speed;
+
+    if (trig.spawnflags & PUSH_TUNNEL)
+    {
+        // pull toward the trigger's centerline while pushing
+        offset = (trig.origin + (trig.mins + trig.maxs) * 0.5) - pm_origin;
+        offset = offset - trig.movedir * (offset * trig.movedir);
+        pm_velocity = pm_velocity + offset * trig.speed * 0.1;
+    }
+};
+
+void() PM_CheckTriggerPushes =
+{
+    entity trig;
+    vector player_absmin, player_absmax;
+    vector trig_absmin,   trig_absmax;
+
+    player_absmin = pm_origin + PM_CurrentMins();
+    player_absmax = pm_origin + PM_CurrentMaxs();
+
+    for (trig = push_trigger_list; trig; trig = trig.push_next)
+    {
+        trig_absmin = trig.origin + trig.mins;
+        trig_absmax = trig.origin + trig.maxs;
+
+        if (player_absmin_x >= trig_absmax_x) continue;
+        if (player_absmax_x <= trig_absmin_x) continue;
+        if (player_absmin_y >= trig_absmax_y) continue;
+        if (player_absmax_y <= trig_absmin_y) continue;
+        if (player_absmin_z >= trig_absmax_z) continue;
+        if (player_absmax_z <= trig_absmin_z) continue;
+
+        PM_ApplyTriggerPush(trig);
+    }
+};
+
+// ============================================================================
+//  26.  PM_CheckTeleportTriggers  –  instant position snap through teleporters
+// ============================================================================
+
+void() PM_CheckTeleportTriggers =
+{
+    entity trig;
+    vector player_absmin, player_absmax;
+    vector trig_absmin,   trig_absmax;
+
+    // guard: player recently teleported, don't re-fire
+    if (self.pm_teleport_time > 0)
+        return;
+
+    player_absmin = pm_origin + PM_CurrentMins();
+    player_absmax = pm_origin + PM_CurrentMaxs();
+
+    for (trig = teleport_trigger_list; trig; trig = trig.tele_next)
+    {
+        if (!trig.tele_resolved) continue;
+
+        trig_absmin = trig.origin + trig.mins;
+        trig_absmax = trig.origin + trig.maxs;
+
+        if (player_absmin_x >= trig_absmax_x) continue;
+        if (player_absmax_x <= trig_absmin_x) continue;
+        if (player_absmin_y >= trig_absmax_y) continue;
+        if (player_absmax_y <= trig_absmin_y) continue;
+        if (player_absmin_z >= trig_absmax_z) continue;
+        if (player_absmax_z <= trig_absmin_z) continue;
+
+        // snap to destination
+        pm_origin   = trig.tele_dest_origin;
+        pm_onground = FALSE;
+
+        if (!(trig.spawnflags & TELEPORT_KEEP_VELOCITY))
+            pm_velocity = '0 0 0';
+
+        self.pm_teleport_time = 0.2;
+
+        // view angle snap (consumed by CSQC_UpdateView this frame; not replayed)
+        if (trig.tele_dest_angles != '0 0 0')
+        {
+            self.pm_snap_angles = trig.tele_dest_angles;
+            self.pm_angle_snap  = TRUE;
+        }
+
+        // only one teleport per step
+        return;
+    }
+};
+
+// ============================================================================
+//  27.  PM_CheckLadder + PM_LadderMove  –  GoldSrc-style ladder movement
+// ============================================================================
+
+void() PM_CheckLadder =
+{
+    entity trig;
+    vector player_absmin, player_absmax;
+    vector trig_absmin,   trig_absmax;
+    vector flat_fwd;
+
+    pm_on_ladder     = FALSE;
+    pm_ladder_normal = '0 0 0';
+
+    // recently jumped off — don't re-grab
+    if (self.pm_ladder_detach_time > 0)
+        return;
+
+    player_absmin = pm_origin + PM_CurrentMins();
+    player_absmax = pm_origin + PM_CurrentMaxs();
+
+    for (trig = ladder_trigger_list; trig; trig = trig.ladder_next)
+    {
+        trig_absmin = trig.origin + trig.mins;
+        trig_absmax = trig.origin + trig.maxs;
+
+        if (player_absmin_x >= trig_absmax_x) continue;
+        if (player_absmax_x <= trig_absmin_x) continue;
+        if (player_absmin_y >= trig_absmax_y) continue;
+        if (player_absmax_y <= trig_absmin_y) continue;
+        if (player_absmin_z >= trig_absmax_z) continue;
+        if (player_absmax_z <= trig_absmin_z) continue;
+
+        pm_on_ladder = TRUE;
+
+        if (trig.movedir != '0 0 0')
+        {
+            pm_ladder_normal = trig.movedir;
+        }
+        else
+        {
+            // No explicit normal: derive from horizontal view direction.
+            // pm_forward is already set from input_angles, so this is
+            // deterministic and identical on server and client.
+            flat_fwd   = pm_forward;
+
+            flat_fwd_z = 0;
+            if (vlen(flat_fwd) > 0)
+                pm_ladder_normal = normalize(flat_fwd);
+            else
+                pm_ladder_normal = '1 0 0';
+        }
+        return;
+    }
+};
+
+// GoldSrc-style ladder movement.
+//
+// Wish velocity uses the full 3D forward vector (pitch included) so looking
+// up while pressing forward is already faster than looking horizontal.
+// On top of that, GoldSrc redirects the component pressing INTO the wall as
+// extra upward movement, and pressing AWAY from the wall as downward movement.
+// This gives the signature HL feel:
+//   - look horizontal + W  → climb up
+//   - look up + W          → climb up fast
+//   - S (or back)          → slide down
+//   - look up + W + facing wall → maximum upward speed
+void() PM_LadderMove =
+{
+    vector wishvel, climb;
+    float  along_normal, wishspeed;
+    float  scale;
+
+    scale = PM_MoveScale();
+
+    // Full 3D forward: looking up contributes positive wishvel.z already
+    wishvel = pm_forward * (input_movevalues_x * scale)
+            + pm_right   * (input_movevalues_y * scale);
+    wishvel_z += input_movevalues_z * scale;
+
+    wishspeed = vlen(wishvel);
+    if (wishspeed > mv_maxspeed)
+    {
+        wishvel   = wishvel * (mv_maxspeed / wishspeed);
+        wishspeed = mv_maxspeed;
+    }
+
+    // Decompose into tangential component (along the ladder surface)
+    along_normal = wishvel * pm_ladder_normal;
+    climb        = wishvel - pm_ladder_normal * along_normal;
+
+    // GoldSrc: the into-wall component drives vertical movement.
+    // Our pm_ladder_normal is outward (toward player), so:
+    //   along_normal < 0 = pressing INTO wall  → downward (climb_z decreases)
+    //   along_normal > 0 = pressing AWAY wall  → upward   (climb_z increases)
+    // Derived from PM_LadderMove: final.z = lateral.z - dot(velocity, N_inward)
+    //                                     = lateral.z + dot(velocity, N_outward)
+    climb_z += along_normal;
+
+    pm_velocity = climb;
+    PM_StepSlideMove(FALSE);
+};
+
+// ============================================================================
+//  28.  PM_PlayerMoveStep  –  single fixed-size simulation slice
 // ============================================================================
 
 void PM_PlayerMoveStep()
@@ -1158,7 +1482,29 @@ void PM_PlayerMoveStep()
             self.pm_duck_msec = 0;
     }
 
+    if (self.pm_teleport_time > 0)
+    {
+        self.pm_teleport_time -= pm_frametime;
+        if (self.pm_teleport_time < 0)
+            self.pm_teleport_time = 0;
+    }
+
+    if (self.pm_ladder_detach_time > 0)
+    {
+        self.pm_ladder_detach_time -= pm_frametime;
+        if (self.pm_ladder_detach_time < 0)
+            self.pm_ladder_detach_time = 0;
+    }
+
+    if (self.pm_fuser2 > 0)
+    {
+        self.pm_fuser2 -= pm_frametime * 1000;
+        if (self.pm_fuser2 < 0)
+            self.pm_fuser2 = 0;
+    }
+
     PM_CheckDuck();
+    PM_CheckLadder();
 
     // check for wall-launched water jump (waist-deep)
     if (pm_waterlevel == 2 && self.pm_movetype != PM_MOVETYPE_FLY)
@@ -1168,7 +1514,9 @@ void PM_PlayerMoveStep()
 
     PM_Friction();
 
-    if (pm_waterlevel >= 2)
+    if (pm_on_ladder && pm_waterlevel < 2)
+        PM_LadderMove();
+    else if (pm_waterlevel >= 2)
         blocked = PM_WaterMove();
     else if (self.pm_movetype == PM_MOVETYPE_FLY)
         blocked = PM_FlyMove();
@@ -1185,6 +1533,12 @@ void PM_PlayerMoveStep()
         if (dp < PM_MAX_JUMPFIX_DP)
             pm_velocity = PM_ClipVelocity(pm_velocity, pm_groundnormal, 1);
     }
+
+    // apply any push triggers the player is standing inside
+    PM_CheckTriggerPushes();
+
+    // teleport if inside a trigger_teleport volume
+    PM_CheckTeleportTriggers();
 
 done:
     // --- write results back to entity ---
@@ -1204,18 +1558,25 @@ done:
 
 void PM_PlayerMove()
 {
+    float fixedstep;
     float remaining;
     float saved_timelength;
+
+    // Use sv_mintic as the physics step size so one cvar controls both
+    // FTE's server tick rate and our internal simulation rate.
+    // 0.015 = 66.67 Hz (standard CS 1.6), 0.01 = 100 Hz (competitive CS 1.6).
+    fixedstep = cvar("sv_mintic");
+    if (fixedstep < 0.001) fixedstep = 0.01;
 
     saved_timelength = input_timelength;
     remaining = max(self.pm_timecarry + input_timelength, 0);
 
-    while (remaining + PM_FIXEDSTEP_EPSILON >= PM_FIXEDSTEP)
+    while (remaining + PM_FIXEDSTEP_EPSILON >= fixedstep)
     {
-        input_timelength = PM_FIXEDSTEP;
+        input_timelength = fixedstep;
         PM_PlayerMoveStep();
 
-        remaining -= PM_FIXEDSTEP;
+        remaining -= fixedstep;
         if (remaining < PM_FIXEDSTEP_EPSILON)
         {
             remaining = 0;

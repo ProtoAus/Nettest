@@ -33,6 +33,9 @@ float  sv_confirmed_in_duck;
 float  sv_confirmed_duck_msec;
 float  sv_confirmed_oldbuttons;
 float  sv_confirmed_timecarry;
+float  sv_confirmed_teleport_time;
+float  sv_confirmed_ladder_detach_time;
+float  sv_confirmed_fuser2;
 float  sv_confirmed_cmdframe;    // last acknowledged command for baseline
 
 float  csqc_prediction_valid;    // TRUE once predicted_player can drive view
@@ -326,6 +329,7 @@ void(entity src, entity dst) CSQC_CopyMoveState =
 	dst.pm_duck_msec     = src.pm_duck_msec;
 	dst.pm_oldbuttons    = src.pm_oldbuttons;
 	dst.pm_timecarry     = src.pm_timecarry;
+	dst.pm_fuser2        = src.pm_fuser2;
 };
 
 void(entity src) CSQC_StoreConfirmedStateFromEntity =
@@ -342,6 +346,9 @@ void(entity src) CSQC_StoreConfirmedStateFromEntity =
 	sv_confirmed_duck_msec     = src.pm_duck_msec;
 	sv_confirmed_oldbuttons    = src.pm_oldbuttons;
 	sv_confirmed_timecarry     = src.pm_timecarry;
+	sv_confirmed_teleport_time        = src.pm_teleport_time;
+	sv_confirmed_ladder_detach_time   = src.pm_ladder_detach_time;
+	sv_confirmed_fuser2               = src.pm_fuser2;
 };
 
 void() CSQC_ResetToConfirmedState =
@@ -356,8 +363,11 @@ void() CSQC_ResetToConfirmedState =
 	self.pm_waterjumptime = sv_confirmed_waterjumptime;
 	self.pm_in_duck       = sv_confirmed_in_duck;
 	self.pm_duck_msec     = sv_confirmed_duck_msec;
-	self.pm_oldbuttons    = sv_confirmed_oldbuttons;
-	self.pm_timecarry     = sv_confirmed_timecarry;
+	self.pm_oldbuttons     = sv_confirmed_oldbuttons;
+	self.pm_timecarry      = sv_confirmed_timecarry;
+	self.pm_teleport_time        = sv_confirmed_teleport_time;
+	self.pm_ladder_detach_time   = sv_confirmed_ladder_detach_time;
+	self.pm_fuser2               = sv_confirmed_fuser2;
 };
 
 void() CSQC_ResetPresentationView =
@@ -829,9 +839,12 @@ void() CSQC_BuildPresentationView =
 	input_buttons = csqc_live_buttons;
 	CSQC_ClampMoveInputs();
 
+	float fixedstep = cvar("sv_mintic");
+	if (fixedstep < 0.001) fixedstep = 0.01;
+
 	while (preview_time > PM_FIXEDSTEP_EPSILON)
 	{
-		input_timelength = min(preview_time, PM_FIXEDSTEP);
+		input_timelength = min(preview_time, fixedstep);
 		PM_PlayerMoveStep();
 		preview_time -= input_timelength;
 	}
@@ -887,14 +900,41 @@ noref void(float netentnum) CSQC_Ent_Spawn =
 {
 	self = spawn();
 	self.entnum = netentnum;
-	self.pm_movetype = PM_MOVETYPE_NORMAL;
-	self.view_ofs = PM_VIEW_OFS;
-	self.pm_timecarry = 0;
 };
+
+// ---------------------------------------------------------------------------
+//  CSQC_Ent_Update  –  dispatches on entity type byte
+//  (trigger handlers live in cl_push.qc and cl_teleport.qc)
+// ---------------------------------------------------------------------------
 
 noref void(float isnew) CSQC_Ent_Update =
 {
-	float version;
+	float ent_type;
+
+	ent_type = readbyte();
+
+	if (ent_type == CSQC_ENT_PUSH_TRIGGER)
+	{
+		CSQC_PushTrigger_Update();
+		return;
+	}
+
+	if (ent_type == CSQC_ENT_TELEPORT_TRIGGER)
+	{
+		CSQC_TeleportTrigger_Update();
+		return;
+	}
+
+	if (ent_type == CSQC_ENT_LADDER_TRIGGER)
+	{
+		CSQC_LadderTrigger_Update();
+		return;
+	}
+
+	// --- prediction proxy ---
+
+	if (ent_type != PM_CSQC_PROXY_VERSION)
+		print(sprintf("CSQC_Ent_Update: unknown type %g\n", ent_type));
 
 	localplayer = CSQC_GetEngineLocalPlayer();
 	csqc_authority_proxy = self;
@@ -904,33 +944,31 @@ noref void(float isnew) CSQC_Ent_Update =
 	if (isnew)
 	{
 		self.pm_movetype = PM_MOVETYPE_NORMAL;
-		self.view_ofs = PM_VIEW_OFS;
+		self.view_ofs    = PM_VIEW_OFS;
 		self.pm_timecarry = 0;
 	}
 
-	version = readbyte();
-	if (version != PM_CSQC_PROXY_VERSION)
-		print(sprintf("prediction proxy version mismatch: got %g expected %g\n",
-			version, PM_CSQC_PROXY_VERSION));
-
 	setorigin(self, readvector());
-	self.velocity = readvector();
-	self.view_ofs = readvector();
-	self.flags = readfloat();
-	self.pm_movetype = readfloat();
-	self.pm_jump_held = readfloat();
-	self.pm_jump_msec = readfloat();
+	self.velocity      = readvector();
+	self.view_ofs      = readvector();
+	self.flags         = readfloat();
+	self.pm_movetype   = readfloat();
+	self.pm_jump_held  = readfloat();
+	self.pm_jump_msec  = readfloat();
 	self.pm_waterjumptime = readfloat();
-	self.pm_in_duck = readfloat();
-	self.pm_duck_msec = readfloat();
-	self.pm_oldbuttons = readfloat();
-	self.pm_timecarry = readfloat();
+	self.pm_in_duck    = readfloat();
+	self.pm_duck_msec  = readfloat();
+	self.pm_oldbuttons    = readfloat();
+	self.pm_timecarry     = readfloat();
+	self.pm_teleport_time        = readfloat();
+	self.pm_ladder_detach_time   = readfloat();
+	self.pm_fuser2               = readfloat();
 
 	CSQC_StoreConfirmedStateFromEntity(self);
-	sv_confirmed_cmdframe = servercommandframe;
-	csqc_dbg_last_snapshot_time = cltime;
-	csqc_baseline_valid = TRUE;
-	csqc_prediction_valid = TRUE;
-	csqc_dbg_seed_source = 2;
+	sv_confirmed_cmdframe        = servercommandframe;
+	csqc_dbg_last_snapshot_time  = cltime;
+	csqc_baseline_valid          = TRUE;
+	csqc_prediction_valid        = TRUE;
+	csqc_dbg_seed_source         = 2;
 	CSQC_ReconcilePrediction();
 };

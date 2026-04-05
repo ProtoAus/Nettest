@@ -1,4 +1,5 @@
 // put custom server-only globals and fields here
+#pragma target fte_5768
 
 const float FL_JUMPRELEASED = 4096;
 

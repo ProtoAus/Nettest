@@ -1,8 +1,11 @@
 //Various globals that are used in this FTEQW example are defined here, they are not used by the engine itself
 
-#pragma warning disable Q302
+//#pragma warning disable Q302
+#pragma target fte_5768
 
-.vector view_ofs; /* eye position relative to entity origin */
+.vector view_ofs;    /* eye position relative to entity origin */
+.vector movedir;     /* push direction for trigger_push */
+.float  spawnflags;  /* trigger/entity spawn flags (not in CSQC defs) */
 
 vector cursor_pos; /* Current mouse cursor position, updated in csqc_inputevent */
 float g_width, g_height; /* Globals for screen width and height */
