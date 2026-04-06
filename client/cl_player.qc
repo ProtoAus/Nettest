@@ -36,6 +36,7 @@ float  sv_confirmed_timecarry;
 float  sv_confirmed_teleport_time;
 float  sv_confirmed_ladder_detach_time;
 float  sv_confirmed_fuser2;
+float  sv_confirmed_step_time;
 float  sv_confirmed_cmdframe;    // last acknowledged command for baseline
 
 float  csqc_prediction_valid;    // TRUE once predicted_player can drive view
@@ -188,6 +189,20 @@ void(float scan, float down) CSQC_UpdateLiveInputFromBind =
 		CSQC_SetLiveButton(PM_BTN_JUMP, down);
 	else if (cmd == "+button6")
 		CSQC_SetLiveButton(PM_BTN_DUCK, down);
+	else if (cmd == "+button7" || cmd == "+sprint")
+		CSQC_SetLiveButton(PM_BTN_SPRINT, down);
+	else if (cmd == "+speed" || cmd == "+button9")
+		CSQC_SetLiveButton(PM_BTN_WALK, down);
+	else if (cmd == "+use")
+	{
+		// Only fire sound + impulse on the initial press, not on OS key-repeat.
+		if (down && !(csqc_live_buttons & PM_BTN_USE))
+		{
+			localsound("sounds/player/use.wav");
+			localcmd("impulse 11\n");
+		}
+		CSQC_SetLiveButton(PM_BTN_USE, down);
+	}
 
 	if (down && (cmd == "+forward" || cmd == "+back" || cmd == "+moveleft"
 		|| cmd == "+moveright" || cmd == "+jump" || cmd == "+button6"))
@@ -255,7 +270,11 @@ void() CSQC_LatchLiveInputFromCommand =
 		csqc_live_down = FALSE;
 	}
 
-	csqc_live_buttons = input_buttons;
+	// Take engine-reported bits as the base, then re-apply any custom bits that
+	// CSQC_UpdateLiveInputFromBind set via CSQC_SetLiveButton.  Without this,
+	// the engine's overwrite every input frame clears PM_BTN_SPRINT / PM_BTN_USE.
+	float custom_bits = PM_BTN_USE | PM_BTN_WALK;
+	csqc_live_buttons = input_buttons | (csqc_live_buttons & custom_bits);
 };
 
 float(float seq) CSQC_CommandSequence =
@@ -330,6 +349,9 @@ void(entity src, entity dst) CSQC_CopyMoveState =
 	dst.pm_oldbuttons    = src.pm_oldbuttons;
 	dst.pm_timecarry     = src.pm_timecarry;
 	dst.pm_fuser2        = src.pm_fuser2;
+	dst.pm_teleport_time      = src.pm_teleport_time;
+	dst.pm_ladder_detach_time = src.pm_ladder_detach_time;
+	dst.pm_step_time          = src.pm_step_time;
 };
 
 void(entity src) CSQC_StoreConfirmedStateFromEntity =
@@ -349,6 +371,7 @@ void(entity src) CSQC_StoreConfirmedStateFromEntity =
 	sv_confirmed_teleport_time        = src.pm_teleport_time;
 	sv_confirmed_ladder_detach_time   = src.pm_ladder_detach_time;
 	sv_confirmed_fuser2               = src.pm_fuser2;
+	sv_confirmed_step_time            = src.pm_step_time;
 };
 
 void() CSQC_ResetToConfirmedState =
@@ -368,6 +391,7 @@ void() CSQC_ResetToConfirmedState =
 	self.pm_teleport_time        = sv_confirmed_teleport_time;
 	self.pm_ladder_detach_time   = sv_confirmed_ladder_detach_time;
 	self.pm_fuser2               = sv_confirmed_fuser2;
+	self.pm_step_time            = sv_confirmed_step_time;
 };
 
 void() CSQC_ResetPresentationView =
@@ -383,6 +407,7 @@ void() CSQC_EnsurePredictedPlayer =
 		return;
 
 	predicted_player = spawn();
+	predicted_player.hitcontentsmaski = CONTENTBITS_BOXSOLID;
 	predicted_player.pm_movetype = PM_MOVETYPE_NORMAL;
 	predicted_player.view_ofs = PM_VIEW_OFS;
 	predicted_player.pm_jump_held = FALSE;
@@ -392,6 +417,10 @@ void() CSQC_EnsurePredictedPlayer =
 	predicted_player.pm_duck_msec = 0;
 	predicted_player.pm_oldbuttons = 0;
 	predicted_player.pm_timecarry = 0;
+	predicted_player.pm_teleport_time = 0;
+	predicted_player.pm_ladder_detach_time = 0;
+	predicted_player.pm_fuser2 = 0;
+	predicted_player.pm_step_time = 0;
 };
 
 string() CSQC_DebugSeedSource =
@@ -426,7 +455,10 @@ float() CSQC_SeedPredictedPlayerFromEngine =
 	predicted_player.pm_duck_msec = 0;
 	predicted_player.pm_oldbuttons = input_buttons;
 	predicted_player.pm_timecarry = 0;
-
+	predicted_player.pm_teleport_time = 0;
+	predicted_player.pm_ladder_detach_time = 0;
+	predicted_player.pm_fuser2 = 0;
+	predicted_player.pm_step_time = 0;
 	if (!predicted_player.view_ofs_x && !predicted_player.view_ofs_y && !predicted_player.view_ofs_z)
 		predicted_player.view_ofs = PM_VIEW_OFS;
 
@@ -736,7 +768,9 @@ void() CSQC_ReconcilePrediction =
 		replay_from = max(replay_from, first_buffered);
 
 	csqc_dbg_last_replay_from = replay_from;
+	pm_suppress_sounds = TRUE;   // don't re-fire step sounds for already-heard frames
 	csqc_dbg_last_replay_count = CSQC_ReplayBufferedCommands(replay_from);
+	pm_suppress_sounds = FALSE;
 	csqc_dbg_last_reconcile_time = cltime;
 	csqc_dbg_seed_source = 2;
 
@@ -784,6 +818,9 @@ void() CSQC_BuildPresentationView =
 	float saved_duck_msec;
 	float saved_oldbuttons;
 	float saved_timecarry;
+	float saved_teleport_time;
+	float saved_ladder_detach_time;
+	float saved_fuser2;
 	vector saved_origin;
 	vector saved_velocity;
 	vector saved_view_ofs;
@@ -828,6 +865,9 @@ void() CSQC_BuildPresentationView =
 	saved_duck_msec = self.pm_duck_msec;
 	saved_oldbuttons = self.pm_oldbuttons;
 	saved_timecarry = self.pm_timecarry;
+	saved_teleport_time = self.pm_teleport_time;
+	saved_ladder_detach_time = self.pm_ladder_detach_time;
+	saved_fuser2 = self.pm_fuser2;
 
 	saved_timelength = input_timelength;
 	saved_angles = input_angles;
@@ -842,12 +882,14 @@ void() CSQC_BuildPresentationView =
 	float fixedstep = cvar("sv_mintic");
 	if (fixedstep < 0.001) fixedstep = 0.01;
 
+	pm_suppress_sounds = TRUE;   // preview steps are speculative — no sounds
 	while (preview_time > PM_FIXEDSTEP_EPSILON)
 	{
 		input_timelength = min(preview_time, fixedstep);
 		PM_PlayerMoveStep();
 		preview_time -= input_timelength;
 	}
+	pm_suppress_sounds = FALSE;
 
 	csqc_present_origin = self.origin;
 	csqc_present_view_ofs = self.view_ofs;
@@ -867,6 +909,9 @@ void() CSQC_BuildPresentationView =
 	self.pm_duck_msec = saved_duck_msec;
 	self.pm_oldbuttons = saved_oldbuttons;
 	self.pm_timecarry = saved_timecarry;
+	self.pm_teleport_time = saved_teleport_time;
+	self.pm_ladder_detach_time = saved_ladder_detach_time;
+	self.pm_fuser2 = saved_fuser2;
 
 	input_timelength = saved_timelength;
 	input_angles = saved_angles;
@@ -876,6 +921,107 @@ void() CSQC_BuildPresentationView =
 	self = saved;
 };
 
+// ---------------------------------------------------------------------------
+//  Remote player dead-reckoning
+//
+//  The engine already lerps other players between the two most recently
+//  received server frames.  After the lerp reaches the latest snapshot,
+//  however, the entity sits frozen until the next packet arrives.  This
+//  function extrapolates each remote player's position forward by
+//  (cltime - time) — the elapsed time since the last server snapshot —
+//  using their velocity and gravity, so they travel smoothly in the air
+//  between network updates.
+//
+//  Called in CSQC_UpdateView before addentities(MASK_ENGINE).  Writing to
+//  ent.origin here affects this frame's render position only; the engine
+//  overwrites it with fresh lerp data at the start of the next frame.
+// ---------------------------------------------------------------------------
+
+void() CSQC_ExtrapolateRemotePlayers =
+{
+	float n;
+	float dt;
+	float gravity;
+	vector base_origin;
+	vector extrap_origin;
+	entity ent;
+
+	gravity = cvar("sv_gravity");
+	if (!gravity) gravity = 800;
+
+	// cltime = local wall clock  |  time = server game time at last packet
+	dt = cltime - time;
+	dt = bound(0, dt, 0.1);
+	if (dt <= 0)
+		return;
+
+	for (n = 1; n <= maxclients; n++)
+	{
+		if (n == player_localentnum)
+			continue;
+
+		if (!(float)getentity(n, GE_ACTIVE))
+			continue;
+
+		// engine's interpolated position for this slot
+		base_origin = getentity(n, GE_ORIGIN);
+
+		ent = edict_num(n);
+
+		// velocity-based extrapolation
+		extrap_origin = base_origin + ent.velocity * dt;
+
+		// gravity correction when airborne
+		if (!(ent.flags & FL_ONGROUND))
+			extrap_origin_z -= 0.5 * gravity * dt * dt;
+
+		ent.origin = extrap_origin;
+	}
+};
+
+// ---------------------------------------------------------------------------
+//  CSQC_SetupRemotePlayerSolids
+//  Called before each prediction tick so that other players are solid
+//  obstacles in PM_TraceHull (MOVE_NORMAL).  Uses the engine-interpolated
+//  position for each active remote player slot, with the correct standing or
+//  ducking hull.  Must run before PM_PlayerMoveStep, not just at render time.
+// ---------------------------------------------------------------------------
+
+void() CSQC_SetupRemotePlayerSolids =
+{
+	float  n;
+	entity ent;
+	vector emins, emaxs;
+
+	PM_ReadMovevars();
+
+	for (n = 1; n <= maxclients; n++)
+	{
+		if (n == player_localentnum)
+			continue;
+
+		if (!(float)getentity(n, GE_ACTIVE))
+			continue;
+
+		ent = edict_num(n);
+
+		// Use duck hull if the remote player is crouching
+		if (ent.flags & FL_DUCKING)
+		{
+			emins = PM_DUCK_MINS;
+			emaxs = PM_DUCK_MAXS;
+		}
+		else
+		{
+			emins = PM_MINS;
+			emaxs = PM_MAXS;
+		}
+
+		setorigin(ent, getentity(n, GE_ORIGIN));
+		setsize(ent, emins, emaxs);
+		ent.solid = SOLID_SLIDEBOX;
+	}
+};
 
 // ---------------------------------------------------------------------------
 //  CSQC_Input_Frame  -  called each input frame, inputs already set
@@ -884,9 +1030,12 @@ void() CSQC_BuildPresentationView =
 void() CSQC_Input_Frame =
 {
 	localplayer = CSQC_GetEngineLocalPlayer();
+	CSQC_SetupRemotePlayerSolids();
 	CSQC_ClampMoveInputs();
 	csqc_dbg_last_inputframe_time = cltime;
 	CSQC_LatchLiveInputFromCommand();
+	input_buttons = csqc_live_buttons;   // write custom bits before buffer captures them
+
 	CSQC_BufferInputCommand(clientcommandframe);
 	CSQC_PredictCurrentCommand();
 };
@@ -931,6 +1080,12 @@ noref void(float isnew) CSQC_Ent_Update =
 		return;
 	}
 
+	if (ent_type == CSQC_ENT_SOLID_BRUSH)
+	{
+		CSQC_SolidBrush_Update();
+		return;
+	}
+
 	// --- prediction proxy ---
 
 	if (ent_type != PM_CSQC_PROXY_VERSION)
@@ -963,6 +1118,7 @@ noref void(float isnew) CSQC_Ent_Update =
 	self.pm_teleport_time        = readfloat();
 	self.pm_ladder_detach_time   = readfloat();
 	self.pm_fuser2               = readfloat();
+	self.pm_step_time            = readfloat();
 
 	CSQC_StoreConfirmedStateFromEntity(self);
 	sv_confirmed_cmdframe        = servercommandframe;

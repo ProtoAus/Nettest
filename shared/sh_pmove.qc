@@ -28,10 +28,13 @@ float  PM_STEPSIZE         = 18;
 float  PM_FLYFRICTION      = 4;
 float  PM_STOP_EPSILON     = 0.1;
 float  PM_MIN_STEP_NORMAL  = 0.7;   // floor normal.z must be >= this
-float  PM_MAX_CLIP_PLANES  = 5;
+float  PM_MAX_CLIP_PLANES  = 8;   // raised from 5 to match ramp-fix bump count
 float  PM_MAX_JUMPFIX_DP   = -0.1;  // ramp-fix dot-product threshold
 float  PM_BTN_JUMP         = 2;     // bit in input_buttons
 float  PM_BTN_DUCK         = 32;    // +button6 via DP_INPUTBUTTONS
+float  PM_BTN_SPRINT       = 64;    // +button7 / +sprint  — run faster (sv_sprintspeed)
+float  PM_BTN_USE          = 128;   // +button8 / +use     — high friction
+float  PM_BTN_WALK         = 256;   // +speed   / +button9 — walk slower (sv_walkspeed)
 float  PM_DUCK_TIME        = 0.4;
 float  PM_DUCKING_MULTIPLIER = 0.333;
 float  PM_FIXEDSTEP_EPSILON = 0.000001;
@@ -53,6 +56,7 @@ float  PM_MOVETYPE_DEAD      = 1;
 float  PM_MOVETYPE_FLY       = 2;
 float  PM_MOVETYPE_SPECTATOR = 3;
 float  PM_MOVETYPE_NONE      = 4;
+float  PM_MOVETYPE_NOCLIP    = 5;
 
 // ============================================================================
 //  Custom entity fields
@@ -90,6 +94,8 @@ vector pm_ladder_normal;  // outward-facing normal of the active ladder surface
 
 float  mv_gravity;
 float  mv_maxspeed;
+float  mv_sprintspeed;    // effective max speed when PM_BTN_SPRINT is held (0 = disabled)
+float  mv_walkspeed;      // effective max speed when PM_BTN_WALK is held  (0 = disabled)
 float  mv_stopspeed;
 float  mv_friction;
 float  mv_waterfriction;
@@ -105,6 +111,7 @@ void() PM_CategorizePosition;
 void() PM_PlayerMove;
 void() PM_PlayerMoveStep;
 void() PM_CheckLadder;
+void(string snd, float vol) PM_EmitStepSound;
 
 // ============================================================================
 //  8.  PM_Trace  –  tracebox wrapper using the shared hull
@@ -128,7 +135,7 @@ vector PM_CurrentMins()
 
 void PM_TraceHull(vector start, vector mins, vector maxs, vector end)
 {
-    tracebox(start, mins, maxs, end, MOVE_NOMONSTERS, self);
+    tracebox(start, mins, maxs, end, MOVE_NORMAL, self);
 }
 
 void PM_Trace(vector start, vector end)
@@ -322,54 +329,128 @@ vector PM_ClipVelocity(vector in, vector normal, float overbounce)
 }
 
 // ============================================================================
-//  11.  PM_SlideMove  –  multi-plane clipped slide, up to 4 bumps
+//  11.  PM_SlideMove  –  multi-plane clipped slide with ramp-seam fix
+//
+//  Changes from vanilla pmove:
+//    · bump count raised from 4 to pm_ramp_bumpcount (default 8)
+//    · stuck_on_ramp: when zero progress is made against a surface while
+//      airborne, find a valid escape plane and retrace from fixed_origin
+//      nudged off the seam, instead of clipping to a degenerate normal
+//    · primal_velocity reversal: don't zero velocity, just break — lets the
+//      player keep momentum through ramp seams (ramp_slope_fix "OppositeDirection")
+//    · allFraction == 0: same — don't zero velocity at the end
 // ============================================================================
 
 float PM_SlideMove()
 {
-    local vector planes[5];
-    vector       primal_velocity;
-    vector       original_velocity;
-    vector       new_velocity;
-    vector       dir;
-    float        time_left;
-    float        blocked;
-    float        num_planes;
-    float        i, j;
-    float        d;
+    local vector planes[8];
+    vector  primal_velocity;
+    vector  original_velocity;
+    vector  new_velocity;
+    vector  dir;
+    vector  fixed_origin;       // ramp fix: retrace start, offset off seam
+    vector  valid_plane;        // ramp fix: escape surface normal
+    float   time_left;
+    float   blocked;
+    float   num_planes;
+    float   i, j;
+    float   d;
+    float   numbumps;
+    float   stuck_on_ramp;
+    float   has_valid_plane;
+    float   all_fraction;
 
-    primal_velocity = pm_velocity;
+    numbumps = cvar("pm_ramp_bumpcount");
+    if (numbumps < 4)
+        numbumps = 8;
+
+    primal_velocity   = pm_velocity;
     original_velocity = pm_velocity;
-    blocked         = 0;
-    num_planes      = 0;
-    time_left       = pm_frametime;
+    blocked           = 0;
+    num_planes        = 0;
+    time_left         = pm_frametime;
+    fixed_origin      = pm_origin;
+    valid_plane       = '0 0 0';
+    stuck_on_ramp     = FALSE;
+    has_valid_plane   = FALSE;
+    all_fraction      = 0;
 
-    // --- up to 4 collision bumps ---
-    for (i = 0; i < 4; i++)
+    for (i = 0; i < numbumps; i++)
     {
         if (pm_velocity == '0 0 0')
             break;
 
-        PM_Trace(pm_origin, pm_origin + pm_velocity * time_left);
+        // --- Ramp-seam fix: escape when completely blocked while airborne ---
+        if (stuck_on_ramp)
+        {
+            if (!has_valid_plane)
+            {
+                // Search stored planes for a usable escape normal
+                local float k;
+                for (k = num_planes - 1; k >= 0; k--)
+                {
+                    if (planes[k] != '0 0 0' && planes[k] != valid_plane)
+                    {
+                        valid_plane     = planes[k];
+                        has_valid_plane = TRUE;
+                        break;
+                    }
+                }
+            }
+
+            if (has_valid_plane)
+            {
+                // Clip velocity to the escape plane and nudge origin off seam
+                pm_velocity       = PM_ClipVelocity(pm_velocity, valid_plane, 1);
+                original_velocity = pm_velocity;
+                fixed_origin      = fixed_origin + valid_plane * 0.2;
+            }
+            else
+            {
+                stuck_on_ramp = FALSE;
+            }
+        }
+
+        // --- Trace forward ---
+        if (stuck_on_ramp && has_valid_plane)
+            PM_TraceHull(fixed_origin, PM_CurrentMins(), PM_CurrentMaxs(),
+                         fixed_origin + pm_velocity * time_left);
+        else
+            PM_Trace(pm_origin, pm_origin + pm_velocity * time_left);
 
         if (trace_startsolid || trace_allsolid)
         {
-            // stuck inside solid – zero velocity and bail
             pm_velocity = '0 0 0';
             return PM_BLOCKED_FLOOR | PM_BLOCKED_STEP | PM_BLOCKED_OTHER;
         }
 
         if (trace_fraction > 0)
         {
-            // moved some distance
-            pm_origin    = trace_endpos;
-            num_planes   = 0;
+            pm_origin         = trace_endpos;
+            fixed_origin      = trace_endpos;
+            original_velocity = pm_velocity;
+            num_planes        = 0;
+            stuck_on_ramp     = FALSE;
+            has_valid_plane   = FALSE;
+            all_fraction     += trace_fraction;
         }
 
         if (trace_fraction == 1)
             break;   // moved the whole way, no collision
 
-        // hit something – classify the surface
+        // Ramp-seam fix: zero progress against a surface while airborne —
+        // the plane normal may be degenerate.  Store it and try the retrace.
+        if (trace_fraction == 0 && !pm_onground && i > 0)
+        {
+            if (trace_plane_normal != '0 0 0')
+            {
+                valid_plane     = trace_plane_normal;
+                has_valid_plane = TRUE;
+            }
+            stuck_on_ramp = TRUE;
+        }
+
+        // Classify the surface hit
         if (trace_plane_normal_z >= PM_MIN_STEP_NORMAL)
             blocked |= PM_BLOCKED_FLOOR;
         else if (!trace_plane_normal_z)
@@ -377,7 +458,7 @@ float PM_SlideMove()
         else
             blocked |= PM_BLOCKED_OTHER;
 
-        // store the plane
+        // Store the collision plane
         if (num_planes < PM_MAX_CLIP_PLANES)
         {
             planes[num_planes] = trace_plane_normal;
@@ -386,20 +467,19 @@ float PM_SlideMove()
 
         time_left -= time_left * trace_fraction;
 
-        // try each stored plane in turn
+        // Try each stored plane to find a compatible clip velocity
         for (j = 0; j < num_planes; j++)
         {
             new_velocity = PM_ClipVelocity(original_velocity, planes[j], 1);
 
-            // check if this clipped velocity re-enters any previous plane
             local float ok;
             ok = TRUE;
-            local float k;
-            for (k = 0; k < num_planes; k++)
+            local float kk;
+            for (kk = 0; kk < num_planes; kk++)
             {
-                if (k == j)
+                if (kk == j)
                     continue;
-                if ((new_velocity * planes[k]) < 0)
+                if ((new_velocity * planes[kk]) < 0)
                 {
                     ok = FALSE;
                     break;
@@ -421,18 +501,19 @@ float PM_SlideMove()
                 pm_velocity = '0 0 0';
                 break;
             }
-            dir = crossproduct(planes[0], planes[1]);
+            dir = normalize(crossproduct(planes[0], planes[1]));
             d   = dir * pm_velocity;
             pm_velocity = dir * d;
         }
 
-        // if we are now moving into the original velocity, don't reverse
+        // if velocity reversed against primal, just stop without zeroing —
+        // keeping momentum avoids sticking in ramp seams (ramp_slope_fix patch)
         if ((pm_velocity * primal_velocity) <= 0)
-        {
-            pm_velocity = '0 0 0';
             break;
-        }
     }
+
+    // if we made no progress at all, preserve velocity (ramp_slope_fix patch)
+    // — the original code zeroed it here, which caused sticking on seams
 
     // during a water-jump the horizontal speed is locked to primal
     if (self.pm_waterjumptime)
@@ -580,60 +661,76 @@ void PM_Friction()
     if (self.pm_waterjumptime)
         return;
 
-    speed = vlen(pm_velocity);
-
-    if (speed < 1)
-    {
-        pm_velocity_x = 0;
-        pm_velocity_y = 0;
-        if (self.pm_movetype == PM_MOVETYPE_FLY)
-            pm_velocity_z = 0;
-        return;
-    }
-
-    drop = 0;
-
     if (pm_waterlevel >= 2)
     {
+        speed = vlen(pm_velocity);
+        if (speed < 1)
+        {
+            pm_velocity = '0 0 0';
+            return;
+        }
+
         // water friction
+        drop = 0;
         drop += speed * mv_waterfriction * pm_waterlevel * pm_frametime;
+
+        newspeed = max(speed - drop, 0) / speed;
+        pm_velocity = pm_velocity * newspeed;
+        return;
     }
     else if (self.pm_movetype == PM_MOVETYPE_FLY)
     {
+        speed = vlen(pm_velocity);
+        if (speed < 1)
+        {
+            pm_velocity = '0 0 0';
+            return;
+        }
+
         // fly friction
+        drop = 0;
         drop += speed * PM_FLYFRICTION * pm_frametime;
+
+        newspeed = max(speed - drop, 0) / speed;
+        pm_velocity = pm_velocity * newspeed;
+        return;
     }
     else if (pm_onground)
     {
-        // ground friction – check for ledge (slow down at edge)
-        friction = mv_friction;
-
+        // Ground friction is based on horizontal speed only. Slope-clipped
+        // vertical velocity is not player input and should not add extra drag
+        // while walking up clip ramps or other sloped floors.
         vel2d   = pm_velocity;
         vel2d_z = 0;
-        if (vel2d != '0 0 0')
+        speed = vlen(vel2d);
+        if (speed < 1)
         {
-            vel2d = normalize(vel2d);
-
-            // trace 16 units ahead then 34 units down to detect a drop-off
-            PM_Trace(
-                pm_origin + vel2d * 16 + '0 0 1',
-                pm_origin + vel2d * 16 + '0 0 1' - '0 0 34'
-            );
-            if (trace_fraction == 1)
-                friction = friction * 2;   // double friction at ledge
+            pm_velocity_x = 0;
+            pm_velocity_y = 0;
+            return;
         }
 
+        friction = mv_friction;
+
+        // Holding +use on the ground doubles friction so the player slows
+        // down noticeably when leaning against a wall or object.
+        if (input_buttons & PM_BTN_USE)
+            friction = friction * 4;
+
+        drop = 0;
         control = max(speed, mv_stopspeed);
         drop += control * friction * pm_frametime;
+
+        newspeed = max(speed - drop, 0) / speed;
+        pm_velocity_x *= newspeed;
+        pm_velocity_y *= newspeed;
+        return;
     }
     else
     {
         // airborne – no friction
         return;
     }
-
-    newspeed = max(speed - drop, 0) / speed;
-    pm_velocity = pm_velocity * newspeed;
 }
 
 // ============================================================================
@@ -711,7 +808,10 @@ float PM_WaterMove()
     wishvel = pm_forward * fmove + pm_right * smove;
 
     if (self.pm_movetype != PM_MOVETYPE_FLY && fmove == 0 && smove == 0 && upmove == 0)
-        wishvel_z -= 60;   // sink slowly when stationary
+    {
+        if (!pm_onground)
+            wishvel_z -= 60;   // sink slowly when stationary and airborne
+    }
     else
         wishvel_z += upmove;
 
@@ -756,6 +856,24 @@ float PM_FlyMove()
     return PM_StepSlideMove(FALSE);
 }
 
+void PM_FollowGroundPlane()
+{
+    // Feet-origin adaptation: keep the horizontal speed the player earned,
+    // then solve the Z component needed to stay tangent to the current floor.
+    // This prevents ramp collision from shaving X/Y speed while walking uphill.
+    if (!pm_onground)
+        return;
+    if (pm_groundnormal_z < PM_MIN_STEP_NORMAL)
+        return;
+    if (pm_groundnormal_z <= PM_FIXEDSTEP_EPSILON)
+        return;
+
+    pm_velocity_z = -(
+        pm_velocity_x * pm_groundnormal_x +
+        pm_velocity_y * pm_groundnormal_y
+    ) / pm_groundnormal_z;
+}
+
 // ============================================================================
 //  18.  PM_AirMove
 // ============================================================================
@@ -764,6 +882,8 @@ float PM_AirMove()
 {
     vector wishvel, wishdir;
     vector fwd2d, right2d;
+    vector walk_dest;
+    vector walk_delta;
     float  wishspeed;
     float  fmove, smove;
     float  scale;
@@ -818,21 +938,49 @@ float PM_AirMove()
         // if we ended up with no horizontal movement, stop cleanly
         if (pm_velocity_x == 0 && pm_velocity_y == 0)
         {
-            pm_velocity_z = 0;
+            pm_velocity = '0 0 0';
             return 0;
         }
 
-        float ground_blocked = PM_StepSlideMove(FALSE);
+        // Feet-origin adaptation of GoldSrc's initial horizontal walk trace:
+        // try to move straight along the current floor plane first. On ramps
+        // this avoids feeding every frame through clip/step logic, which can
+        // shave horizontal speed noticeably at lower sv_accelerate values.
+        walk_delta = [pm_velocity_x * pm_frametime, pm_velocity_y * pm_frametime, 0];
+        walk_dest = pm_origin + walk_delta;
+        if (pm_groundnormal_z >= PM_MIN_STEP_NORMAL
+            && pm_groundnormal_z > PM_FIXEDSTEP_EPSILON)
+        {
+            walk_dest_z += -(
+                walk_delta_x * pm_groundnormal_x +
+                walk_delta_y * pm_groundnormal_y
+            ) / pm_groundnormal_z;
+        }
 
-        // Slope-glue: after zeroing pm_velocity_z we have no downward component
-        // to clip along the slope, so the player walks off slope edges.
-        // GoldSrc's PM_WalkMove fixes this by tracing down STEPSIZE after the
-        // slide and snapping to any floor surface found.
-        PM_Trace(pm_origin, pm_origin - '0 0 1' * PM_STEPSIZE);
-        if (trace_fraction < 1 && !trace_startsolid && !trace_allsolid
-            && trace_plane_normal_z >= PM_MIN_STEP_NORMAL)
+        PM_Trace(pm_origin, walk_dest);
+        if (trace_fraction == 1 && !trace_startsolid && !trace_allsolid)
         {
             pm_origin = trace_endpos;
+            return 0;
+        }
+
+        PM_FollowGroundPlane();
+
+        float ground_blocked = PM_StepSlideMove(FALSE);
+
+        // Slope-glue: pull the player down onto downward slopes after zeroing z.
+        // Only needed when we moved freely or hit a floor/angled surface — skip
+        // when we blocked against a vertical wall (PM_BLOCKED_STEP).  Running
+        // the snap at a wall-floor junction causes the hull to clip into the wall
+        // by floating-point epsilon, producing a 1-frame sink + NudgePosition pop.
+        if (!(ground_blocked & PM_BLOCKED_STEP))
+        {
+            PM_Trace(pm_origin, pm_origin - '0 0 1' * PM_STEPSIZE);
+            if (trace_fraction < 1 && !trace_startsolid && !trace_allsolid
+                && trace_plane_normal_z >= PM_MIN_STEP_NORMAL)
+            {
+                pm_origin = trace_endpos;
+            }
         }
 
         return ground_blocked;
@@ -862,30 +1010,8 @@ void PM_CategorizePosition()
     vector hull_mins = PM_CurrentMins();
     hull_height = hull_maxs_z - hull_mins_z;
 
-    // --- ground check ---
-    // trace 1 unit below origin
-    PM_Trace(pm_origin, pm_origin - '0 0 1');
-
-    if (pm_velocity_z > 180)
-    {
-        pm_onground    = FALSE;
-        pm_groundnormal = '0 0 1';
-    }
-    else if (trace_fraction < 1 && trace_plane_normal_z >= PM_MIN_STEP_NORMAL)
-    {
-        pm_onground     = TRUE;
-        pm_groundnormal = trace_plane_normal;
-        pm_origin       = trace_endpos;   // snap to ground surface
-        self.pm_waterjumptime = 0;        // cancel water-jump on landing
-    }
-    else
-    {
-        pm_onground     = FALSE;
-        pm_groundnormal = trace_plane_normal;
-    }
-
     // --- water level check ---
-    // Sample the current hull: feet, midpoint, then eye position.
+    // Done first so the ground snap below can be skipped while swimming.
 
     pm_waterlevel = 0;
     pm_watertype  = CONTENT_EMPTY;
@@ -914,6 +1040,30 @@ void PM_CategorizePosition()
                 pm_waterlevel = 3;
         }
     }
+
+    // --- ground check ---
+    // trace 1 unit below origin
+    PM_Trace(pm_origin, pm_origin - '0 0 1');
+
+    if (pm_velocity_z > 180)
+    {
+        pm_onground    = FALSE;
+        pm_groundnormal = '0 0 1';
+    }
+    else if (trace_fraction < 1 && trace_plane_normal_z >= PM_MIN_STEP_NORMAL)
+    {
+        pm_onground     = TRUE;
+        pm_groundnormal = trace_plane_normal;
+        // Skip the floor snap while swimming — it would kill upward velocity each frame.
+        if (pm_waterlevel < 2)
+            pm_origin   = trace_endpos;
+        self.pm_waterjumptime = 0;        // cancel water-jump on landing
+    }
+    else
+    {
+        pm_onground     = FALSE;
+        pm_groundnormal = trace_plane_normal;
+    }
 }
 
 // ============================================================================
@@ -923,6 +1073,9 @@ void PM_CategorizePosition()
 void PM_CheckJump()
 {
     float dp;
+    float jump_down;
+
+    jump_down = input_buttons & PM_BTN_JUMP;
 
     // flying players jump via PM_FlyMove
     if (self.pm_movetype == PM_MOVETYPE_FLY)
@@ -936,23 +1089,34 @@ void PM_CheckJump()
     }
 
     // button released – clear the held latch
-    if (!(input_buttons & PM_BTN_JUMP))
+    if (!jump_down)
     {
         self.pm_jump_held = FALSE;
         return;
     }
 
     // ladder jump: push away from wall + upward
+    // GoldSrc: holding jump when you touch a ladder ejects you immediately —
+    // the pm_jump_held guard is intentionally skipped here.
     if (pm_on_ladder)
     {
-        if (self.pm_jump_held)
-            return;
+        // pm_ladder_normal may point toward OR away from the wall.
+        // When no explicit movedir is set on the trigger, the normal is
+        // derived from the player's view direction — which points INTO the
+        // wall when the player is facing it (the common case).  Probe the
+        // direction to find which side has open space.
+        vector eject_dir;
+        PM_Trace(pm_origin, pm_origin + pm_ladder_normal * 4);
+        if (!trace_startsolid && trace_fraction == 1)
+            eject_dir = pm_ladder_normal;   // open space ahead – kick this way
+        else
+            eject_dir = -pm_ladder_normal;  // wall ahead – reverse
 
-        pm_velocity               = pm_ladder_normal * 270;
+        pm_velocity               = eject_dir * 270;
         pm_velocity_z             = 0;    // GoldSrc: purely horizontal, gravity takes over
         pm_onground               = FALSE;
         self.pm_jump_held         = TRUE;
-        self.pm_ladder_detach_time = 0.6;
+        self.pm_ladder_detach_time = 0.1;
         pm_on_ladder              = FALSE;  // skip PM_LadderMove this step
         return;
     }
@@ -961,7 +1125,11 @@ void PM_CheckJump()
 
     // water-jump already in progress
     if (self.pm_waterjumptime)
+    {
+        if (!mv_autohop)
+            self.pm_jump_held = TRUE;
         return;
+    }
 
     // in water – do a water-jump
     if (pm_waterlevel >= 2)
@@ -979,7 +1147,13 @@ void PM_CheckJump()
 
     // not on the ground – can't jump
     if (!pm_onground)
+    {
+        // GoldSrc-style jump gating: if jump is pressed in the air while
+        // autohop is off, consume that press so it does not queue for landing.
+        if (!mv_autohop)
+            self.pm_jump_held = TRUE;
         return;
+    }
 
     // pogo prevention: require button release between jumps unless autohop is on
     if (self.pm_jump_held && !mv_autohop)
@@ -989,6 +1163,12 @@ void PM_CheckJump()
     dp = pm_velocity * pm_groundnormal;
     if (pm_velocity_z < 0 && dp < PM_MAX_JUMPFIX_DP)
         pm_velocity = PM_ClipVelocity(pm_velocity, pm_groundnormal, 1);
+
+    // jump sound: step at full volume (water sound if feet are wet)
+    if (pm_waterlevel >= 1)
+        PM_EmitStepSound(strcat("sounds/player/waterstep", itos(floor(random() * 10) + 1), ".wav"), 1.0);
+    else
+        PM_EmitStepSound(strcat("sounds/player/step", itos(floor(random() * 4) + 1), ".wav"), 1.0);
 
     pm_onground       = FALSE;
     pm_velocity_z    += 270;
@@ -1144,6 +1324,57 @@ void PM_SpectatorMove()
 }
 
 // ============================================================================
+//  23b. PM_NoclipMove  –  free fly through walls (noclip)
+//
+//  Identical structure to PM_SpectatorMove but uses pm_noclipspeed (default
+//  3 × sv_maxspeed) so the player moves notably faster than spectators.
+//  Origin is moved directly with no collision traces.
+// ============================================================================
+
+void PM_NoclipMove()
+{
+    vector wishvel, wishdir;
+    float  wishspeed, maxspeed, speed, newspeed, drop;
+
+    maxspeed = cvar("pm_noclipspeed");
+    if (maxspeed <= 0)
+        maxspeed = mv_maxspeed * 3;
+
+    // friction applied to all axes
+    speed = vlen(pm_velocity);
+    if (speed > 0)
+    {
+        drop     = speed * mv_friction * 1.5 * pm_frametime;
+        newspeed = max(speed - drop, 0) / speed;
+        pm_velocity = pm_velocity * newspeed;
+    }
+
+    // wish velocity from full 3-D view (forward + right + up)
+    wishvel = pm_forward * input_movevalues_x
+            + pm_right   * input_movevalues_y
+            + v_up       * input_movevalues_z;
+
+    wishspeed = vlen(wishvel);
+    if (wishspeed > maxspeed)
+    {
+        wishvel   = wishvel * (maxspeed / wishspeed);
+        wishspeed = maxspeed;
+    }
+
+    if (wishspeed > 0)
+    {
+        wishdir = normalize(wishvel);
+        PM_Accelerate(wishdir, wishspeed, mv_accelerate);
+        speed = vlen(pm_velocity);
+        if (speed > maxspeed)
+            pm_velocity = pm_velocity * (maxspeed / speed);
+    }
+
+    // move directly — no collision
+    pm_origin += pm_velocity * pm_frametime;
+}
+
+// ============================================================================
 //  24.  PM_ReadMovevars  –  populate movevars from engine cvars
 // ============================================================================
 
@@ -1169,6 +1400,12 @@ void PM_ReadMovevars()
 
     mv_maxspeed          = cvar("sv_maxspeed");
     if (!mv_maxspeed)         mv_maxspeed          = 320;
+
+    mv_sprintspeed       = cvar("sv_sprintspeed");
+    if (!mv_sprintspeed)      mv_sprintspeed       = 450;
+
+    mv_walkspeed         = cvar("sv_walkspeed");
+    if (!mv_walkspeed)        mv_walkspeed         = 135;
 
     mv_stopspeed         = cvar("sv_stopspeed");
     if (!mv_stopspeed)        mv_stopspeed         = 100;
@@ -1291,17 +1528,10 @@ void() PM_CheckTeleportTriggers =
         pm_origin   = trig.tele_dest_origin;
         pm_onground = FALSE;
 
-        if (!(trig.spawnflags & TELEPORT_KEEP_VELOCITY))
+        if (!(trig.spawnflags & TELEPORT_KEEPVEL))
             pm_velocity = '0 0 0';
 
         self.pm_teleport_time = 0.2;
-
-        // view angle snap (consumed by CSQC_UpdateView this frame; not replayed)
-        if (trig.tele_dest_angles != '0 0 0')
-        {
-            self.pm_snap_angles = trig.tele_dest_angles;
-            self.pm_angle_snap  = TRUE;
-        }
 
         // only one teleport per step
         return;
@@ -1312,12 +1542,124 @@ void() PM_CheckTeleportTriggers =
 //  27.  PM_CheckLadder + PM_LadderMove  –  GoldSrc-style ladder movement
 // ============================================================================
 
+float PM_PointHasLadderContents(vector pos)
+{
+    float cont;
+
+    cont = pointcontents(pos);
+    if (cont == CONTENT_LADDER || cont == SOLID_LADDER)
+        return TRUE;
+
+    return FALSE;
+}
+
+float PM_HullHasLadderContents(vector mins, vector maxs)
+{
+    vector probe_origin;
+
+    tracebox(pm_origin, mins, maxs, pm_origin, MOVE_NOMONSTERS, self);
+    if ((trace_endcontents & CONTENTBIT_FTELADDER)
+        || (trace_endcontents & CONTENTBIT_Q2LADDER))
+        return TRUE;
+
+    probe_origin = pm_origin + (mins + maxs) * 0.5;
+    return PM_PointHasLadderContents(probe_origin);
+}
+
+vector PM_DefaultLadderNormal()
+{
+    vector flat_fwd;
+
+    flat_fwd   = pm_forward;
+    flat_fwd_z = 0;
+
+    if (vlen(flat_fwd) > 0)
+        return normalize(flat_fwd);
+
+    return '1 0 0';
+}
+
+float PM_LadderWallProbe(vector start, vector dir, float dist)
+{
+    if (dir == '0 0 0')
+        return 2;
+
+    tracebox(start, '0 0 0', '0 0 0', start + dir * dist, MOVE_NOMONSTERS, self);
+    if (trace_startsolid || trace_allsolid)
+        return 2;
+
+    if (trace_fraction < 1 && trace_plane_normal != '0 0 0')
+        return trace_fraction;
+
+    return 2;
+}
+
+vector PM_FindLadderNormal(vector probe_origin, float probe_dist)
+{
+    vector flat_fwd;
+    vector flat_right;
+    vector best_normal;
+    float best_fraction;
+    float frac;
+
+    flat_fwd = PM_DefaultLadderNormal();
+
+    flat_right   = pm_right;
+    flat_right_z = 0;
+    if (vlen(flat_right) > 0)
+        flat_right = normalize(flat_right);
+    else
+    {
+        flat_right_x = -flat_fwd_y;
+        flat_right_y = flat_fwd_x;
+        flat_right_z = 0;
+    }
+
+    best_normal = '0 0 0';
+    best_fraction = 2;
+
+    frac = PM_LadderWallProbe(probe_origin, flat_fwd, probe_dist);
+    if (frac < best_fraction)
+    {
+        best_fraction = frac;
+        best_normal = trace_plane_normal;
+    }
+
+    frac = PM_LadderWallProbe(probe_origin, flat_fwd * -1, probe_dist);
+    if (frac < best_fraction)
+    {
+        best_fraction = frac;
+        best_normal = trace_plane_normal;
+    }
+
+    frac = PM_LadderWallProbe(probe_origin, flat_right, probe_dist);
+    if (frac < best_fraction)
+    {
+        best_fraction = frac;
+        best_normal = trace_plane_normal;
+    }
+
+    frac = PM_LadderWallProbe(probe_origin, flat_right * -1, probe_dist);
+    if (frac < best_fraction)
+    {
+        best_fraction = frac;
+        best_normal = trace_plane_normal;
+    }
+
+    if (best_normal != '0 0 0')
+        return best_normal;
+
+    return flat_fwd;
+}
+
 void() PM_CheckLadder =
 {
     entity trig;
+    vector player_mins, player_maxs;
     vector player_absmin, player_absmax;
     vector trig_absmin,   trig_absmax;
-    vector flat_fwd;
+    vector probe_origin;
+    float probe_dist;
 
     pm_on_ladder     = FALSE;
     pm_ladder_normal = '0 0 0';
@@ -1326,8 +1668,22 @@ void() PM_CheckLadder =
     if (self.pm_ladder_detach_time > 0)
         return;
 
-    player_absmin = pm_origin + PM_CurrentMins();
-    player_absmax = pm_origin + PM_CurrentMaxs();
+    player_mins = PM_CurrentMins();
+    player_maxs = PM_CurrentMaxs();
+
+    if (PM_HullHasLadderContents(player_mins, player_maxs))
+    {
+        probe_origin = pm_origin + (player_mins + player_maxs) * 0.5;
+        probe_dist = max(max(fabs(player_mins_x), fabs(player_maxs_x)),
+                         max(fabs(player_mins_y), fabs(player_maxs_y))) + 8;
+
+        pm_on_ladder = TRUE;
+        pm_ladder_normal = PM_FindLadderNormal(probe_origin, probe_dist);
+        return;
+    }
+
+    player_absmin = pm_origin + player_mins;
+    player_absmax = pm_origin + player_maxs;
 
     for (trig = ladder_trigger_list; trig; trig = trig.ladder_next)
     {
@@ -1349,16 +1705,7 @@ void() PM_CheckLadder =
         }
         else
         {
-            // No explicit normal: derive from horizontal view direction.
-            // pm_forward is already set from input_angles, so this is
-            // deterministic and identical on server and client.
-            flat_fwd   = pm_forward;
-
-            flat_fwd_z = 0;
-            if (vlen(flat_fwd) > 0)
-                pm_ladder_normal = normalize(flat_fwd);
-            else
-                pm_ladder_normal = '1 0 0';
+            pm_ladder_normal = PM_DefaultLadderNormal();
         }
         return;
     }
@@ -1412,6 +1759,103 @@ void() PM_LadderMove =
 };
 
 // ============================================================================
+//  28.  PM_StepSounds  –  GoldSrc-accurate footstep / ladder / water audio
+//
+//  Only SSQC emits sound() calls so there are no double-plays during CSQC
+//  prediction replay.  The step timer (pm_step_time) is part of shared state
+//  so both sides tick it identically for clean reconciliation.
+// ============================================================================
+
+// Set TRUE during CSQC prediction replay and the presentation preview so that
+// step sounds fire only on the single live prediction pass per input frame.
+#ifdef CSQC
+float pm_suppress_sounds;
+// cltime of the most recent localsound played by this client.
+// Used by CSQC_Event_Sound to gate echo suppression on actual local playback.
+float pm_last_local_step_time;
+#endif
+
+// Step sounds are server-side only: the SSQC sound() call is heard by all
+// clients including the local player via the normal network sound path.
+// CSQC prediction does NOT play a local duplicate — that caused double steps.
+void(string snd, float vol) PM_EmitStepSound =
+{
+#ifdef SSQC
+    sound(self, CHAN_BODY, snd, vol, ATTN_NORM);
+#endif
+};
+
+// Called once per simulation step from PM_PlayerMoveStep.
+// Advances pm_step_time and plays a sound when the interval expires.
+void() PM_UpdateStepSound =
+{
+    float speed;
+    float interval;
+    float vol;
+    string snd;
+
+    // advance the countdown
+    if (self.pm_step_time > 0)
+    {
+        self.pm_step_time -= pm_frametime;
+        if (self.pm_step_time < 0)
+            self.pm_step_time = 0;
+        return;
+    }
+
+    // timer expired — decide whether to play a step
+    // Ladder movement is primarily vertical, so measure full 3D speed there.
+    // Ground/water movement is horizontal, so strip z for those checks.
+    speed = vlen([pm_velocity_x, pm_velocity_y, 0]);
+
+    if (pm_on_ladder && pm_waterlevel < 2)
+    {
+        // ladder — use total 3D speed so climbing up/down registers
+        if (vlen(pm_velocity) < 50) return;
+        interval = 0.35;
+        vol      = 0.65;
+        snd = strcat("sounds/player/ladder", itos(floor(random() * 4) + 1), ".wav");
+    }
+    else if (pm_waterlevel >= 1)
+    {
+        // water
+        if (speed < 80) return;
+        interval = 0.35;
+        vol      = 0.50;
+        snd = strcat("sounds/player/waterstep", itos(floor(random() * 10) + 1), ".wav");
+    }
+    else if (pm_onground)
+    {
+        // ground
+        if (self.flags & FL_DUCKING)
+        {
+            if (speed < 50) return;
+            interval = 0.60;
+            vol      = 0.40;
+        }
+        else if (speed >= 220)
+        {
+            interval = 0.30;
+            vol      = 1.00;
+        }
+        else
+        {
+            if (speed < 100) return;
+            interval = 0.40;
+            vol      = 0.50;
+        }
+        snd = strcat("sounds/player/step", itos(floor(random() * 4) + 1), ".wav");
+    }
+    else
+    {
+        return;  // airborne — no step
+    }
+
+    self.pm_step_time = interval;
+    PM_EmitStepSound(snd, vol);
+};
+
+// ============================================================================
 //  28.  PM_PlayerMoveStep  –  single fixed-size simulation slice
 // ============================================================================
 
@@ -1432,6 +1876,10 @@ void PM_PlayerMoveStep()
     // --- read cvars ---
     PM_ReadMovevars();
 
+    // Walk modifier (+speed / shift): reduces mv_maxspeed to sv_walkspeed.
+    if ((input_buttons & PM_BTN_WALK) && !(self.flags & FL_DUCKING) && mv_walkspeed > 0)
+        mv_maxspeed = mv_walkspeed;
+
     // --- build movement axes ---
     makevectors(input_angles);
     pm_forward = v_forward;
@@ -1447,6 +1895,13 @@ void PM_PlayerMoveStep()
     if (self.pm_movetype == PM_MOVETYPE_SPECTATOR)
     {
         PM_SpectatorMove();
+        pm_onground = FALSE;
+        goto done;
+    }
+
+    if (self.pm_movetype == PM_MOVETYPE_NOCLIP)
+    {
+        PM_NoclipMove();
         pm_onground = FALSE;
         goto done;
     }
@@ -1539,6 +1994,9 @@ void PM_PlayerMoveStep()
 
     // teleport if inside a trigger_teleport volume
     PM_CheckTeleportTriggers();
+
+    // footstep / ladder / water step sounds
+    PM_UpdateStepSound();
 
 done:
     // --- write results back to entity ---

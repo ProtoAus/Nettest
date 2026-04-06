@@ -24,15 +24,108 @@ void() CSQC_Shutdown =
 	CSQC_ResetPredictionState();
 };
 
+void() CSQC_EnsureWorldSolid =
+{
+	world.solid = SOLID_BSP;
+};
+
+void(float use_world_ignoreent) CSQC_DebugPredTrace =
+{
+	entity probe_ent;
+	entity ignore_ent;
+	entity saved;
+	vector start;
+	vector mins;
+	vector maxs;
+	vector dest;
+	string ignore_name;
+	float hit_entnum;
+	string hit_classname;
+	string hit_model;
+	string line;
+
+	probe_ent = predicted_player;
+	if (!probe_ent)
+		probe_ent = CSQC_GetEngineLocalPlayer();
+
+	if (!probe_ent)
+	{
+		print("pred_trace: no player entity available\n");
+		return;
+	}
+
+	saved = self;
+	self = probe_ent;
+
+	PM_ReadMovevars();
+	mins = PM_CurrentMins();
+	maxs = PM_CurrentMaxs();
+	start = probe_ent.origin;
+
+	if (use_world_ignoreent)
+	{
+		ignore_ent = world;
+		ignore_name = "world";
+	}
+	else
+	{
+		ignore_ent = probe_ent;
+		ignore_name = "self";
+	}
+
+	tracebox(start, mins, maxs, start, MOVE_NOMONSTERS, ignore_ent);
+	hit_entnum = trace_ent ? trace_ent.entnum : 0;
+	hit_classname = trace_ent ? trace_ent.classname : "";
+	hit_model = trace_ent ? trace_ent.model : "";
+	line = strcat(
+		sprintf("pred_trace [%s] point: startsolid=%.0f allsolid=%.0f fraction=%.3f ",
+			ignore_name, trace_startsolid, trace_allsolid, trace_fraction),
+		sprintf("hitent=%.0f classname=%s model=%s\n",
+			hit_entnum, hit_classname, hit_model)
+	);
+	print(line);
+
+	dest = start - '0 0 64';
+	tracebox(start, mins, maxs, dest, MOVE_NOMONSTERS, ignore_ent);
+	hit_entnum = trace_ent ? trace_ent.entnum : 0;
+	hit_classname = trace_ent ? trace_ent.classname : "";
+	hit_model = trace_ent ? trace_ent.model : "";
+	line = strcat(
+		sprintf("pred_trace [%s] down64: startsolid=%.0f allsolid=%.0f fraction=%.3f ",
+			ignore_name, trace_startsolid, trace_allsolid, trace_fraction),
+		sprintf("end=(%.1f %.1f %.1f) ",
+			trace_endpos_x, trace_endpos_y, trace_endpos_z),
+		sprintf("hitent=%.0f classname=%s model=%s\n",
+			hit_entnum, hit_classname, hit_model)
+	);
+	print(line);
+
+	line = strcat(
+		sprintf("pred_trace [%s] probe: entnum=%.0f solid=%.0f flags=%.0f ",
+			ignore_name, probe_ent.entnum, probe_ent.solid, probe_ent.flags),
+		sprintf("hitmaski=%s dphitmask=%.0f dim_hit=%.0f dim_solid=%.0f ",
+			itos(probe_ent.hitcontentsmaski), probe_ent.dphitcontentsmask,
+			probe_ent.dimension_hit, probe_ent.dimension_solid),
+		sprintf("mins=(%.1f %.1f %.1f) maxs=(%.1f %.1f %.1f)\n",
+			mins_x, mins_y, mins_z, maxs_x, maxs_y, maxs_z)
+	);
+	print(line);
+
+	self = saved;
+};
+
 noref void(float apiver, string enginename, float enginever) CSQC_Init =
 {
+	CSQC_EnsureWorldSolid();
 	drawfont = loadfont("", "Courier Prime Code", "12,16,24,32,64,72,128,256,512", -1, 0, 0);
 	precache_everything();
 	registercommand("pred_debug");
+	registercommand("pred_trace");
 };
 
 noref void() CSQC_WorldLoaded =
 {
+	CSQC_EnsureWorldSolid();
 	CSQC_ResetPredictionState();
 };
 
@@ -60,13 +153,7 @@ void(float width, float height, float menushown) CSQC_UpdateView =
 		else
 			campos = predicted_player.origin + predicted_player.view_ofs;
 		// consume teleport angle snap if prediction fired one this frame
-		if (predicted_player.pm_angle_snap)
-		{
-			camang = predicted_player.pm_snap_angles;
-			predicted_player.pm_angle_snap = FALSE;
-		}
-		else
-			camang = view_angles;
+		camang = view_angles;
 		setproperty(VF_ORIGIN, campos);
 		setproperty(VF_ANGLES, camang);
 	}
@@ -75,6 +162,9 @@ void(float width, float height, float menushown) CSQC_UpdateView =
 		campos = getproperty(VF_ORIGIN);
 		camang = getproperty(VF_ANGLES);
 	}
+
+	// extrapolate remote players beyond the last received server snapshot
+	CSQC_ExtrapolateRemotePlayers();
 
 	//autoadd entities received from servers for drawing
 	addentities(MASK_ENGINE);
@@ -95,6 +185,40 @@ void(float width, float height, float menushown) CSQC_UpdateView =
 	*/
 };
 
+// Suppress the server echo of the local player's footstep sounds when CSQC
+// already played them locally.  Suppression is gated on pm_last_local_step_time
+// so that prediction divergence (CSQC missed a step) lets the server sound
+// through instead of silencing it.
+//
+// "sounds/player/" is the full path used in this mod.  FTE's QW protocol may
+// strip the "sounds/" prefix on the wire, so both forms are accepted.
+noref float(float entnum, float channel, string soundname, float vol,
+            float attenuation, vector pos, float pitchmod, float flags)
+CSQC_Event_Sound =
+{
+    float ping_est;
+    float age;
+
+    if (channel != CHAN_BODY)
+        return FALSE;
+    if (entnum != player_localentnum || player_localentnum <= 0)
+        return FALSE;
+    if (substring(soundname, 0, 14) != "sounds/player/"
+        && substring(soundname, 0, 7) != "player/")
+        return FALSE;
+
+    // Only suppress if CSQC actually played this sound recently.
+    // Window = estimated round-trip ping + 100 ms of jitter margin.
+    // If CSQC didn't predict the step (pm_last_local_step_time is stale),
+    // age will be large and the server echo passes through unchanged.
+    ping_est = bound(0, cltime - time, 0.3);
+    age      = cltime - pm_last_local_step_time;
+    if (age < ping_est + 0.1)
+        return TRUE;   // echo of a sound we already played — suppress
+
+    return FALSE;      // CSQC missed this step — let the server sound play
+};
+
 float(string cmd) CSQC_ConsoleCommand =
 {
 	tokenize(cmd);
@@ -106,6 +230,9 @@ float(string cmd) CSQC_ConsoleCommand =
 			else
 				csqc_pred_debug = !csqc_pred_debug;
 			print(sprintf("pred_debug %g\n", csqc_pred_debug));
+			return TRUE;
+		case "pred_trace":
+			CSQC_DebugPredTrace(argv(1) == "world");
 			return TRUE;
 		default:
 			return FALSE;

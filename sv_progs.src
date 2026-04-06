@@ -5,6 +5,9 @@ server/sv_customdefs.qc
 server/sv_combat.qc
 server/sv_enemies.qc
 server/sv_triggers.qc
+server/sv_brushsync.qc
+server/sv_doors.qc
+server/sv_use.qc
 server/sv_push.qc
 server/sv_teleport.qc
 server/sv_ladder.qc

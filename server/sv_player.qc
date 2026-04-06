@@ -20,6 +20,23 @@ void() CheckImpulses =
 {
 	switch (self.impulse)
 	{
+	case 11:   // use key
+		SV_PlayerTryUse();
+		break;
+	case 10:   // noclip toggle
+		if (self.pm_movetype == PM_MOVETYPE_NOCLIP)
+		{
+			self.pm_movetype = PM_MOVETYPE_NORMAL;
+			self.solid       = SOLID_SLIDEBOX;
+			sprint(self, PRINT_HIGH, "noclip OFF\n");
+		}
+		else
+		{
+			self.pm_movetype = PM_MOVETYPE_NOCLIP;
+			self.solid       = SOLID_NOT;
+			sprint(self, PRINT_HIGH, "noclip ON\n");
+		}
+		break;
 	default: break;
 	}
 	self.impulse = 0;
@@ -96,6 +113,7 @@ float(entity playerent, float changedflags) PM_PredictionProxy_SendEntity =
 	WriteFloat(MSG_ENTITY, self.pm_teleport_time);
 	WriteFloat(MSG_ENTITY, self.pm_ladder_detach_time);
 	WriteFloat(MSG_ENTITY, self.pm_fuser2);
+	WriteFloat(MSG_ENTITY, self.pm_step_time);
 
 	return TRUE;
 };
@@ -125,6 +143,7 @@ void(entity player) PM_SyncPredictionProxy =
 	proxy.pm_teleport_time        = player.pm_teleport_time;
 	proxy.pm_ladder_detach_time   = player.pm_ladder_detach_time;
 	proxy.pm_fuser2               = player.pm_fuser2;
+	proxy.pm_step_time            = player.pm_step_time;
 	proxy.SendFlags = proxy.SendFlags | PM_CSQC_PROXY_SEND_STATE;
 };
 
@@ -171,6 +190,7 @@ void() PlayerSpawn =
 	self.pm_duck_msec    = 0;
 	self.pm_oldbuttons   = 0;
 	self.pm_timecarry    = 0;
+	self.pm_step_time    = 0;
 	self.flags           = self.flags & ~FL_DUCKING;
 
 	PM_EnsurePredictionProxy(self);
@@ -228,5 +248,9 @@ void(string command_string) SV_ParseClientCommand =
 void() SV_RunClientCommand =
 {
 	PM_PlayerMove();
+	SV_CheckTouchTriggers();
+
+	// If a teleport angle snap fired this command, send an engine-level
+	// fixangle so the client's view accumulator is updated persistently.
 	PM_SyncPredictionProxy(self);
 };

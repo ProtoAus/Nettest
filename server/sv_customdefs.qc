@@ -3,6 +3,23 @@
 
 const float FL_JUMPRELEASED = 4096;
 
+// ---- mover / door / button fields ----
+.vector pos1;           // closed/bottom position
+.vector pos2;           // open/top position
+.float  wait;           // seconds to wait at top before returning (-1 = stay)
+.float  lip;            // units of lip remaining at end of move
+.float  distance;       // explicit move distance (overrides lip calc)
+.float  attack_finished;// debounce timestamp
+.vector mangle;         // alternative angle spec for door direction
+.string groupname;      // door group name for linked doors
+.vector cmins;          // combined world-space bounding box (door group)
+.vector cmaxs;
+.float  button_state;   // BUTTON_STATE_*
+.float  door_state;     // DOOR_STATE_*
+.float  door_mark;      // flood-fill serial for door group activation
+
+entity activator;       // entity that triggered the current use/touch
+
 void() sub_remove =
 {
 	remove(self);

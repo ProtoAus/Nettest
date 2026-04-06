@@ -99,10 +99,11 @@ void() info_teleport_destination =
 {
 };
 
-/*QUAKED trigger_teleport (.5 .5 .5) ? KEEP_VELOCITY
+/*QUAKED trigger_teleport (.5 .5 .5) ? x x KEEPVEL KEEPANGLE
 Teleports players that enter this brush to the matching info_teleport_destination.
 
-KEEP_VELOCITY – preserve the player's velocity after teleporting.
+KEEPVEL   (4) – preserve the player's velocity after teleporting.
+KEEPANGLE (8) – keep the player's current view angle; ignore destination angles.
 */
 void() trigger_teleport =
 {

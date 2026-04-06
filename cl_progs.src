@@ -5,6 +5,7 @@ client/cl_customdefs.qc
 sui_sys.qc
 client/cl_menu.qc
 shared/sh_pmove.qc
+client/cl_brushsync.qc
 client/cl_push.qc
 client/cl_teleport.qc
 client/cl_ladder.qc
