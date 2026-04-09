@@ -20,12 +20,12 @@ const float AWP_DRAW_START            = 1;
 const float AWP_DRAW_END              = 21;
 const float AWP_DRAW_DEPLOY_FRAME     = 2;
 
-const float fire_START            = 22;
-const float fire_END              = 49;
-const float fire_DELAY            = 1.2;
-const float fire_BOLTUP_FRAME     = 33;
-const float fire_BOLTPULL_FRAME   = 37;
-const float fire_BOLTDOWN_FRAME   = 41;
+const float AWP_FIRE_START            = 22;
+const float AWP_FIRE_END              = 49;
+const float AWP_FIRE_DELAY            = 1.2;
+const float AWP_FIRE_BOLTUP_FRAME     = 33;
+const float AWP_FIRE_BOLTPULL_FRAME   = 37;
+const float AWP_FIRE_BOLTDOWN_FRAME   = 41;
 
 const float AWP_RELOAD_START          = 110;
 const float AWP_RELOAD_END            = 163;
@@ -48,9 +48,14 @@ const float AWP_DRYFIRE_DELAY         = 0.2;
 
 // --- Pre-computed state durations ---
 const float AWP_DRAW_DURATION         = (AWP_DRAW_END - AWP_DRAW_START) * AWP_FRAME_INTERVAL;
-const float fire_DURATION         = (fire_END - fire_START) * AWP_FRAME_INTERVAL;
+const float AWP_FIRE_DURATION         = (AWP_FIRE_END - AWP_FIRE_START) * AWP_FRAME_INTERVAL;
 const float AWP_RELOAD_DURATION       = (AWP_RELOAD_END - AWP_RELOAD_START) * AWP_FRAME_INTERVAL;
 const float AWP_RELOAD_APPLY_TIME     = (AWP_RELOAD_CLIPIN_FRAME - AWP_RELOAD_START) * AWP_FRAME_INTERVAL;
+
+const string AWP_VIEWMODEL    = "models/weapons/wpn_csawp/v_awp.mdl";
+const string AWP_WORLDMODEL   = "models/weapons/wpn_csawp/w_awp.mdl";
+const string AWP_DEPLOY_SOUND = "sounds/weapons/wpn_csawp/deploy.wav";
+const string AWP_DISPLAY_NAME = "AWP";
 
 // ============================================================
 //  SHARED — state machine
@@ -58,81 +63,24 @@ const float AWP_RELOAD_APPLY_TIME     = (AWP_RELOAD_CLIPIN_FRAME - AWP_RELOAD_ST
 
 float(float now) SH_AWPTickState =
 {
-    float elapsed, result, needed;
-
-    if (self.weaponstate == WS_IDLE)
-        return 0;
-
-    elapsed = (self.wep_anim_start > 0) ? (now - self.wep_anim_start) : 0;
-    result = 0;
-
-    if (self.weaponstate == WS_DRAW)
-    {
-        if (elapsed >= AWP_DRAW_DURATION)
-        { SH_WeaponEnterIdle(); result = result | 1; }
-        return result;
-    }
-
-    if (self.weaponstate == WS_FIRE)
-    {
-        if (elapsed >= fire_DURATION)
-        { SH_WeaponEnterIdle(); result = result | 1; }
-        return result;
-    }
-
-    if (self.weaponstate == WS_RELOAD)
-    {
-        if (elapsed >= AWP_RELOAD_APPLY_TIME)
-        {
-            needed = MAX_MAG_AWP - self.mag_awp;
-            if (needed > 0)
-            {
-                if (self.ammo_awp >= needed)
-                { self.mag_awp += needed; self.ammo_awp -= needed; }
-                else
-                { self.mag_awp += self.ammo_awp; self.ammo_awp = 0; }
-                result = result | 2;
-            }
-        }
-        if (elapsed >= AWP_RELOAD_DURATION)
-        { SH_WeaponEnterIdle(); result = result | 1; }
-        return result;
-    }
-
-    return 0;
+    return SH_StandardTickState(now, mag_awp, ammo_awp, MAX_MAG_AWP,
+        AWP_DRAW_DURATION, AWP_FIRE_DURATION,
+        AWP_RELOAD_DURATION, AWP_RELOAD_APPLY_TIME);
 };
 
 float(float now) SH_AWPTryFire =
 {
-    if (self.weaponstate == WS_RELOAD || self.weaponstate == WS_DRAW)
-        return 0;
-    if (now < self.attack_finished)
-        return 0;
-
-    if (self.mag_awp <= 0)
-    { self.attack_finished = now + AWP_DRYFIRE_DELAY; return -1; }
-
-    self.mag_awp         -= 1;
-    self.weaponstate      = WS_FIRE;
-    self.wep_action_id   += 1;
-    self.wep_anim_start   = now;
-    self.attack_finished  = now + fire_DELAY;
-    self.zoomstage        = 0;
-    return 1;
+    // Don't clear zoomstage here — Shoot needs it for spread calculation.
+    // Zoomstage is cleared in W_AWPFire / CSQC prediction AFTER the shot.
+    return SH_StandardTryFire(now, mag_awp, AWP_FIRE_DELAY, AWP_DRYFIRE_DELAY);
 };
 
 float(float now) SH_AWPTryReload =
 {
-    if (self.weaponstate == WS_RELOAD || self.weaponstate == WS_DRAW)
-        return 0;
-    if (self.mag_awp >= MAX_MAG_AWP || self.ammo_awp <= 0)
-        return 0;
-
-    self.weaponstate     = WS_RELOAD;
-    self.wep_action_id  += 1;
-    self.wep_anim_start  = now;
-    self.zoomstage       = 0;
-    return 1;
+    float r = SH_StandardTryReload(now, mag_awp, ammo_awp, MAX_MAG_AWP);
+    if (r == 1)
+        self.zoomstage = 0;
+    return r;
 };
 
 float(float now) SH_AWPTryAltFire =
@@ -165,41 +113,12 @@ void(entity player) W_AWPPickupCopy =
 
 void() W_AWPShoot =
 {
-    vector src, dir, end, flat_vel;
-    float spread, sx, sy, move_speed, dist, damage;
-
-    makevectors(self.v_angle);
-    src = self.origin + self.view_ofs;
-
-    flat_vel = self.velocity; flat_vel_z = 0;
-    move_speed = vlen(flat_vel);
-
     if (self.zoomstage > 0)
-        spread = 0;
+        W_StandardHitscanShoot(0, AWP_MOVE_SPREAD, AWP_FULL_SPREAD_SPEED,
+            AWP_CLOSE_DAMAGE, AWP_MIN_DAMAGE, AWP_DAMAGE_FALLOFF_RANGE);
     else
-    {
-        spread = AWP_BASE_SPREAD + (move_speed / AWP_FULL_SPREAD_SPEED) * AWP_MOVE_SPREAD;
-        spread = min(spread, AWP_BASE_SPREAD + AWP_MOVE_SPREAD);
-    }
-
-    sx = (random() * 2 - 1) * spread;
-    sy = (random() * 2 - 1) * spread;
-    dir = normalize(v_forward + v_right * sx + v_up * sy);
-    end = src + dir * 8192;
-
-    W_WeaponTraceLine(src, end);
-
-    if (trace_fraction < 1.0)
-    {
-        dist = vlen(trace_endpos - src);
-        if (W_CanDamageTarget(trace_ent))
-        {
-            damage = W_LinearDamageFalloff(dist, AWP_CLOSE_DAMAGE, AWP_MIN_DAMAGE, AWP_DAMAGE_FALLOFF_RANGE);
-            W_ApplyDamage(self, trace_ent, damage);
-        }
-        else
-            W_ImpactEffect(trace_endpos);
-    }
+        W_StandardHitscanShoot(AWP_BASE_SPREAD, AWP_MOVE_SPREAD, AWP_FULL_SPREAD_SPEED,
+            AWP_CLOSE_DAMAGE, AWP_MIN_DAMAGE, AWP_DAMAGE_FALLOFF_RANGE);
 };
 
 void() W_AWPFire =
@@ -207,9 +126,10 @@ void() W_AWPFire =
     float r = SH_AWPTryFire(time);
     if (r == 1)
     {
-        self.weaponframe = fire_START;
+        self.weaponframe = AWP_FIRE_START;
         self.wep_nextframe = time + AWP_FRAME_INTERVAL;
         W_AWPShoot();
+        self.zoomstage = 0;
         self.sv_zoomstage = 0;
         sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csawp/fire.wav", 1, ATTN_NORM);
         W_ShellEffect(SHELL_RIFLE_BIG, '8 6 -4', '6 46 36', '240 720 120');
@@ -245,11 +165,11 @@ void() W_AWPFrame =
 
     if (self.weaponstate == WS_FIRE)
     {
-        if (self.weaponframe == fire_BOLTUP_FRAME)
+        if (self.weaponframe == AWP_FIRE_BOLTUP_FRAME)
             sound(self, CHAN_AUTO, "sounds/weapons/wpn_csawp/boltup.wav", 1, ATTN_NORM);
-        if (self.weaponframe == fire_BOLTPULL_FRAME)
+        if (self.weaponframe == AWP_FIRE_BOLTPULL_FRAME)
             sound(self, CHAN_AUTO, "sounds/weapons/wpn_csawp/boltpull.wav", 1, ATTN_NORM);
-        if (self.weaponframe == fire_BOLTDOWN_FRAME)
+        if (self.weaponframe == AWP_FIRE_BOLTDOWN_FRAME)
             sound(self, CHAN_AUTO, "sounds/weapons/wpn_csawp/boltdown.wav", 1, ATTN_NORM);
     }
 
@@ -271,22 +191,13 @@ void() W_AWPFrame =
 
 void() W_AWPEquip =
 {
-    self.weaponmodel = SH_WeaponViewModel(WEP_CSAWP);
-    self.weapon_name = "AWP";
-    self.weapon_draw_start_frame = AWP_DRAW_START;
-    self.weapon_player_attack_anim = PLAYER_ATTACKANIM_SHOT;
-    self.fire = W_AWPFire;
-    self.reload = W_AWPReload;
+    W_StandardEquipSetup(AWP_VIEWMODEL, AWP_DISPLAY_NAME, AWP_DRAW_START,
+        AWP_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
+    self.fire     = W_AWPFire;
+    self.reload   = W_AWPReload;
     self.wepframe = W_AWPFrame;
-    self.altfire = W_AWPAltFire;
-    self.altrelease = __NULL__;
-    self.shoot = W_AWPShoot;
-    self.special = __NULL__;
-    self.weaponstate = WS_DRAW;
-    self.wep_action_id += 1;
-    self.wep_anim_start = time;
-    self.weaponframe = AWP_DRAW_START;
-    self.wep_nextframe = time + AWP_FRAME_INTERVAL;
+    self.altfire  = W_AWPAltFire;
+    self.shoot    = W_AWPShoot;
     W_ClearZoom();
     W_SetCrosshairProfile(AWP_BASE_SPREAD, AWP_MOVE_SPREAD, AWP_FULL_SPREAD_SPEED, 1.5, FALSE);
 };
@@ -325,9 +236,9 @@ void() weapon_csawp =
 
 #ifdef CSQC
 
-const float AWP_FIRE_BOLTUP_TIME = (fire_BOLTUP_FRAME - fire_START) * AWP_FRAME_INTERVAL;
-const float AWP_FIRE_BOLTPULL_TIME = (fire_BOLTPULL_FRAME - fire_START) * AWP_FRAME_INTERVAL;
-const float AWP_FIRE_BOLTDOWN_TIME = (fire_BOLTDOWN_FRAME - fire_START) * AWP_FRAME_INTERVAL;
+const float AWP_FIRE_BOLTUP_TIME = (AWP_FIRE_BOLTUP_FRAME - AWP_FIRE_START) * AWP_FRAME_INTERVAL;
+const float AWP_FIRE_BOLTPULL_TIME = (AWP_FIRE_BOLTPULL_FRAME - AWP_FIRE_START) * AWP_FRAME_INTERVAL;
+const float AWP_FIRE_BOLTDOWN_TIME = (AWP_FIRE_BOLTDOWN_FRAME - AWP_FIRE_START) * AWP_FRAME_INTERVAL;
 const float AWP_RELOAD_CLIPOUT_TIME = (AWP_RELOAD_CLIPOUT_FRAME - AWP_RELOAD_START) * AWP_FRAME_INTERVAL;
 const float AWP_RELOAD_CLIPIN_TIME = (AWP_RELOAD_CLIPIN_FRAME - AWP_RELOAD_START) * AWP_FRAME_INTERVAL;
 
@@ -359,10 +270,11 @@ void() CSQC_PredictAWPCommand =
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csawp/fire.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(AWP_BASE_SPREAD, AWP_MOVE_SPREAD, AWP_FULL_SPREAD_SPEED);
+                CSQC_PredictedImpact(self.zoomstage > 0 ? 0 : AWP_BASE_SPREAD, AWP_MOVE_SPREAD, AWP_FULL_SPREAD_SPEED);
                 CSQC_SpawnCasing("models/weapons/riflecasingbig.mdl",
                     '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }
+            self.zoomstage = 0;
         }
         else if (r == -1)
         {
@@ -409,14 +321,30 @@ void() CSQC_PredictAWPReload =
 
 float(float elapsed) CSQC_AWPDisplayFrame =
 {
-    float frame;
-    if (predicted_player.weaponstate == WS_DRAW)
-    { frame = AWP_DRAW_START + elapsed / AWP_FRAME_INTERVAL; return bound(AWP_DRAW_START, frame, AWP_DRAW_END - 1); }
-    if (predicted_player.weaponstate == WS_FIRE)
-    { frame = fire_START + elapsed / AWP_FRAME_INTERVAL; return bound(fire_START, frame, fire_END - 1); }
-    if (predicted_player.weaponstate == WS_RELOAD)
-    { frame = AWP_RELOAD_START + elapsed / AWP_FRAME_INTERVAL; return bound(AWP_RELOAD_START, frame, AWP_RELOAD_END - 1); }
-    return AWP_IDLE_FRAME;
+    return CSQC_StandardDisplayFrame(elapsed, AWP_FRAME_INTERVAL,
+        AWP_DRAW_START, AWP_DRAW_END,
+        AWP_FIRE_START, AWP_FIRE_END,
+        AWP_RELOAD_START, AWP_RELOAD_END,
+        AWP_IDLE_FRAME);
+};
+
+void() CSQC_AWPDropClear =
+{
+	self.mag_awp = 0;
+	self.ammo_awp = 0;
+	self.zoomstage = 0;
+};
+
+void() CSQC_AWPEquip =
+{
+	self.weapon_name         = AWP_DISPLAY_NAME;
+	self.weapon_viewmodel    = AWP_VIEWMODEL;
+	self.weapon_worldmodel   = AWP_WORLDMODEL;
+	self.weapon_deploy_sound = AWP_DEPLOY_SOUND;
+	self.csqc_predict_cmd    = CSQC_PredictAWPCommand;
+	self.csqc_predict_reload = CSQC_PredictAWPReload;
+	self.csqc_display_frame  = CSQC_AWPDisplayFrame;
+	self.csqc_drop_clear     = CSQC_AWPDropClear;
 };
 
 #endif // CSQC

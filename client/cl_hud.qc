@@ -62,6 +62,8 @@ string(float wep_id) HUD_WeaponName =
     case WEP_CSMP5:       return "MP5";
     case WEP_REBAR:       return "REBAR";
     case WEP_CSAWP:       return "AWP";
+    case WEP_GLOCK:       return "GLOCK";
+    case WEP_G3SG1:       return "G3SG1";
     default:              return "";
     }
 };
@@ -344,6 +346,10 @@ void() CSQC_DrawWeaponHUD =
         mag_str = sprintf("%g", predicted_player.mag_rebar);
     else if (predicted_player.weapon == WEP_GAUSS)
         mag_str = sprintf("%g", predicted_player.ammo_gauss);
+    else if (predicted_player.weapon == WEP_GLOCK)
+        mag_str = sprintf("%g / %g", predicted_player.mag_glock, predicted_player.ammo_glock);
+    else if (predicted_player.weapon == WEP_G3SG1)
+        mag_str = sprintf("%g / %g", predicted_player.mag_g3sg1, predicted_player.ammo_g3sg1);
     else
         return;
 

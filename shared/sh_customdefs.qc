@@ -3,7 +3,7 @@
 #define printf(x, ...) print(sprintf(x, __VA_ARGS__))
 
 const float FL_DUCKING = 8192;
-const float PM_CSQC_PROXY_VERSION = 7;
+const float PM_CSQC_PROXY_VERSION = 10;
 const float PM_CSQC_PROXY_SEND_STATE = 1;
 const string PM_CSQC_PROXY_CLASSNAME = "pm_csqc_proxy";
 
@@ -27,6 +27,14 @@ const float PUSH_SOURCE   = 16; // boost along movedir up to speed, don't overwr
 // Generic movement/entity fields not declared in the engine-generated defs
 .float speed;
 .float waterlevel;   // synced from pm_waterlevel: 0=dry, 1=feet, 2=waist, 3=eyes
+.float spread_penalty;       // decaying spread penalty from jump/landing (0 = none)
+.float fire_spread_penalty;  // decaying spread penalty from sustained fire (0 = none)
+.float fire_spread_pending;  // pending penalty to apply AFTER current shot resolves
+
+// --- Fire spread penalty tuning ---
+const float FIRE_SPREAD_PENALTY_PER_SHOT = 3.0;  // penalty added per bullet fired
+const float FIRE_SPREAD_PENALTY_DECAY    = 30.0;   // decay rate per second
+const float FIRE_SPREAD_PENALTY_MAX      = 10;   // maximum penalty cap
 
 // Trigger linked list heads (populated on server by spawn, on client by CSQC_Ent_Update)
 entity push_trigger_list;
@@ -148,6 +156,23 @@ void() precache_everything =
 	precache_sound("sounds/weapons/ric3.wav");
 	precache_sound("sounds/weapons/ric4.wav");
 	precache_sound("sounds/weapons/ric5.wav");
+
+	// CS Glock
+    precache_model("models/weapons/wpn_csglock/w_glock.mdl");
+    precache_model("models/weapons/wpn_csglock/v_glock.mdl");
+    precache_sound("sounds/weapons/wpn_csglock/reload.wav");
+    precache_sound("sounds/weapons/wpn_csglock/fire.wav");
+    precache_sound("sounds/weapons/wpn_csglock/fireburst.wav");
+    precache_sound("sounds/weapons/wpn_csglock/sliderelease.wav");
+    precache_sound("sounds/weapons/wpn_csglock/slideback.wav");
+
+	// CS g3sg1
+    precache_model("models/weapons/wpn_csg3sg1/w_g3sg1.mdl");
+    precache_model("models/weapons/wpn_csg3sg1/v_g3sg1.mdl");
+    precache_sound("sounds/weapons/wpn_csg3sg1/clipin.wav");
+    precache_sound("sounds/weapons/wpn_csg3sg1/clipout.wav");
+    precache_sound("sounds/weapons/wpn_csg3sg1/fire.wav");
+    precache_sound("sounds/weapons/wpn_csg3sg1/slide.wav");
 
 	// HL Gauss
     precache_model("models/weapons/wpn_hlgauss/w_gauss.mdl");

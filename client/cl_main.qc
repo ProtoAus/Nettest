@@ -121,6 +121,7 @@ noref void(float apiver, string enginename, float enginever) CSQC_Init =
 	hud_font = loadfont("hud", "gfx/RobotoEB", "8 12 16 18 24 32 36 48 60 72", -1, 0, 0);
 	precache_everything();
 	CSQC_PrecacheShells();
+	CSQC_BulletHolesInit();
 	precache_pic("gfx/scope.png");
 	registercommand("pred_debug");
 	registercommand("pred_trace");
@@ -145,6 +146,7 @@ void(float width, float height, float menushown) CSQC_UpdateView =
 	clearscene();
 	g_width = width;
 	g_height = height;
+	CSQC_BulletHolesStartFrame();
 
 	//disable quake status bar and quake crosshair
 	setproperty(VF_DRAWENGINESBAR, 0);
@@ -238,6 +240,7 @@ void(float width, float height, float menushown) CSQC_UpdateView =
 	CSQC_CheckFakeDropRemoval();
 	CSQC_DrawMuzzleFlash();
 	CSQC_DrawImpactLights();
+	CSQC_DrawDebugImpacts();
 
 	//does what you think it does
 	renderscene();
@@ -400,6 +403,29 @@ void() CSQC_Parse_Event =
 			vector mg_vel = readvector();
 			string mg_mdl = CSQC_MagModelForType(mg_type);
 			CSQC_SpawnRemoteMag(mg_mdl, mg_org, mg_vel, '0 180 0');
+			break;
+		}
+		case CSQC_EVENT_POINTSOUND:
+		{
+			vector snd_pos;
+			snd_pos_x = readcoord();
+			snd_pos_y = readcoord();
+			snd_pos_z = readcoord();
+			string snd_path = readstring();
+			pointsound(snd_pos, snd_path, 1, ATTN_NORM);
+			break;
+		}
+		case CSQC_EVENT_DEBUG_IMPACT:
+		{
+			vector dbg_pos;
+			dbg_pos_x = readcoord();
+			dbg_pos_y = readcoord();
+			dbg_pos_z = readcoord();
+			if (cvar("cl_debug_impacts"))
+			{
+				vector dbg_eye = predicted_player ? (predicted_player.origin + predicted_player.view_ofs) : '0 0 0';
+				CSQC_AddDebugImpact(dbg_pos, dbg_eye, '0.6 0 1');
+			}
 			break;
 		}
 		default:

@@ -9,8 +9,11 @@ menu/m_teamselect.qc
 menu/m_scoreboard.qc
 shared/sh_pmove.qc
 shared/sh_weapon_logic.qc
+shared/sh_weapon_standard.qc
 client/cl_muzzleflash.qc
 client/cl_bulletimpact.qc
+client/cl_bulletholes.qc
+client/cl_debuginfo.qc
 client/cl_shells.qc
 client/cl_brushsync.qc
 client/cl_push.qc
@@ -36,9 +39,11 @@ shared/weapons/sh_wpn_crossbow.qc
 shared/weapons/sh_wpn_grenadelauncher.qc
 shared/weapons/sh_wpn_rebar.qc
 shared/weapons/sh_wpn_gauss.qc
+shared/weapons/sh_wpn_csglock.qc
+shared/weapons/sh_wpn_csg3sg1.qc
 client/cl_weapons.qc
 client/cl_player.qc
 client/cl_spectate.qc
-crosshair.qc
+client/cl_crosshair.qc
 client/cl_hud.qc
 client/cl_main.qc

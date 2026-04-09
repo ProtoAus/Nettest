@@ -52,6 +52,11 @@ const float HLSG_PELLET_MIN_DAMAGE    = 3;
 const float HLSG_PELLET_FALLOFF_RANGE = 1024;
 const float HLSG_DRYFIRE_DELAY        = 0.2;
 
+const string HLSG_VIEWMODEL    = "models/weapons/wpn_hlshotgun/v_shotgun.mdl";
+const string HLSG_WORLDMODEL   = "models/weapons/wpn_hlshotgun/w_shotgun.mdl";
+const string HLSG_DEPLOY_SOUND = "";
+const string HLSG_DISPLAY_NAME = "SHOTGUN";
+
 // --- Pre-computed durations ---
 const float HLSG_DRAW_DURATION        = (HLSG_DRAW_END - HLSG_DRAW_START) * HLSG_FRAME_INTERVAL;
 const float HLSG_FIRE_DURATION        = (HLSG_FIRE_END - HLSG_FIRE_START) * HLSG_FRAME_INTERVAL;
@@ -154,8 +159,8 @@ void(float pellets, float spread_val) W_ShotgunFirePellets =
 
     for (i = 0; i < pellets; i++)
     {
-        sx = (random() * 2 - 1) * spread_val;
-        sy = (random() * 2 - 1) * spread_val;
+        sx = SH_SpreadJitter(self.wep_action_id + i, 0) * spread_val;
+        sy = SH_SpreadJitter(self.wep_action_id + i, 1) * spread_val;
         dir = normalize(v_forward + v_right * sx + v_up * sy);
         end = src + dir * 8192;
 
@@ -171,6 +176,19 @@ void(float pellets, float spread_val) W_ShotgunFirePellets =
             }
             else
                 W_ImpactEffect(trace_endpos);
+
+            // Debug: send server hit position to shooter only
+            {
+                float saved_dim = dimension_send;
+                dimension_send = self.dimension_seen;
+                WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
+                WriteByte(MSG_MULTICAST, CSQC_EVENT_DEBUG_IMPACT);
+                WriteCoord(MSG_MULTICAST, trace_endpos_x);
+                WriteCoord(MSG_MULTICAST, trace_endpos_y);
+                WriteCoord(MSG_MULTICAST, trace_endpos_z);
+                multicast(trace_endpos, MULTICAST_PVS);
+                dimension_send = saved_dim;
+            }
         }
     }
 };
@@ -319,8 +337,8 @@ void() W_ShotgunFrame =
 
 void() W_ShotgunEquip =
 {
-    self.weaponmodel = SH_WeaponViewModel(WEP_HLSHOTGUN);
-    self.weapon_name = "SHOTGUN";
+    self.weaponmodel = HLSG_VIEWMODEL;
+    self.weapon_name = HLSG_DISPLAY_NAME;
     self.weapon_draw_start_frame = HLSG_DRAW_START;
     self.weapon_player_attack_anim = PLAYER_ATTACKANIM_SHOT;
     self.fire = W_ShotgunFire; self.reload = W_ShotgunReload; self.wepframe = W_ShotgunFrame;
@@ -329,7 +347,7 @@ void() W_ShotgunEquip =
     self.weaponstate = WS_DRAW; self.wep_action_id += 1;
     self.wep_anim_start = time; self.weaponframe = HLSG_DRAW_START;
     self.wep_nextframe = time + HLSG_FRAME_INTERVAL;
-    W_SetCrosshairProfile(HLSG_SPREAD, 0, 320, 2.0, TRUE);
+    W_SetCrosshairProfile(HLSG_SPREAD, 0, 320, 6, TRUE);
 };
 
 void() W_ShotgunDrop =
@@ -545,6 +563,24 @@ float(float elapsed) CSQC_ShotgunDisplayFrame =
         return bound(HLSG_RELOAD_LOOP_END, frame, HLSG_RELOAD_END - 1);
     }
     return HLSG_IDLE_FRAME;
+};
+
+void() CSQC_ShotgunDropClear =
+{
+	self.mag_shotgun  = 0;
+	self.ammo_shotgun = 0;
+};
+
+void() CSQC_ShotgunEquip =
+{
+	self.weapon_name         = HLSG_DISPLAY_NAME;
+	self.weapon_viewmodel    = HLSG_VIEWMODEL;
+	self.weapon_worldmodel   = HLSG_WORLDMODEL;
+	self.weapon_deploy_sound = HLSG_DEPLOY_SOUND;
+	self.csqc_predict_cmd    = CSQC_PredictShotgunCommand;
+	self.csqc_predict_reload = CSQC_PredictShotgunReload;
+	self.csqc_display_frame  = CSQC_ShotgunDisplayFrame;
+	self.csqc_drop_clear     = CSQC_ShotgunDropClear;
 };
 
 #endif // CSQC

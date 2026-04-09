@@ -3,6 +3,7 @@ sv_defs.qc
 shared/sh_customdefs.qc
 shared/sh_weapons.qc
 shared/sh_weapon_logic.qc
+shared/sh_weapon_standard.qc
 server/sv_customdefs.qc
 server/sv_weapons.qc
 shared/weapons/sh_wpn_csdeagle.qc
@@ -25,6 +26,8 @@ shared/weapons/sh_wpn_crossbow.qc
 shared/weapons/sh_wpn_grenadelauncher.qc
 shared/weapons/sh_wpn_rebar.qc
 shared/weapons/sh_wpn_gauss.qc
+shared/weapons/sh_wpn_csglock.qc
+shared/weapons/sh_wpn_csg3sg1.qc
 server/sv_combat.qc
 server/sv_enemies.qc
 server/sv_triggers.qc

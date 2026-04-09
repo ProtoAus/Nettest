@@ -36,6 +36,8 @@ float  sv_confirmed_timecarry;
 float  sv_confirmed_teleport_time;
 float  sv_confirmed_ladder_detach_time;
 float  sv_confirmed_fuser2;
+float  sv_confirmed_spread_penalty;
+float  sv_confirmed_fire_spread_penalty;
 float  sv_confirmed_step_time;
 float  sv_confirmed_cmdframe;    // last acknowledged command for baseline
 
@@ -81,6 +83,10 @@ float  sv_confirmed_ammo_crossbow;
 float  sv_confirmed_mag_grenadelauncher;
 float  sv_confirmed_mag_rebar;
 float  sv_confirmed_ammo_gauss;
+float  sv_confirmed_mag_glock;
+float  sv_confirmed_ammo_glock;
+float  sv_confirmed_mag_g3sg1;
+float  sv_confirmed_ammo_g3sg1;
 
 float  csqc_prediction_valid;    // TRUE once predicted_player can drive view
 float  csqc_baseline_valid;      // TRUE once an authoritative proxy snapshot arrived
@@ -394,6 +400,7 @@ void(entity src, entity dst) CSQC_CopyMoveState =
 	dst.pm_oldbuttons    = src.pm_oldbuttons;
 	dst.pm_timecarry     = src.pm_timecarry;
 	dst.pm_fuser2        = src.pm_fuser2;
+	dst.spread_penalty   = src.spread_penalty;
 	dst.pm_teleport_time      = src.pm_teleport_time;
 	dst.pm_ladder_detach_time = src.pm_ladder_detach_time;
 	dst.pm_step_time          = src.pm_step_time;
@@ -416,6 +423,8 @@ void(entity src) CSQC_StoreConfirmedStateFromEntity =
 	sv_confirmed_teleport_time        = src.pm_teleport_time;
 	sv_confirmed_ladder_detach_time   = src.pm_ladder_detach_time;
 	sv_confirmed_fuser2               = src.pm_fuser2;
+	sv_confirmed_spread_penalty       = src.spread_penalty;
+	sv_confirmed_fire_spread_penalty  = src.fire_spread_penalty;
 	sv_confirmed_step_time            = src.pm_step_time;
 
 	sv_confirmed_slot_primary      = src.slot_primary;
@@ -459,6 +468,10 @@ void(entity src) CSQC_StoreConfirmedStateFromEntity =
 	sv_confirmed_mag_grenadelauncher = src.mag_grenadelauncher;
 	sv_confirmed_mag_rebar        = src.mag_rebar;
 	sv_confirmed_ammo_gauss       = src.ammo_gauss;
+	sv_confirmed_mag_glock        = src.mag_glock;
+	sv_confirmed_ammo_glock       = src.ammo_glock;
+	sv_confirmed_mag_g3sg1        = src.mag_g3sg1;
+	sv_confirmed_ammo_g3sg1       = src.ammo_g3sg1;
 };
 
 void() CSQC_ResetToConfirmedMoveState =
@@ -478,6 +491,8 @@ void() CSQC_ResetToConfirmedMoveState =
 	self.pm_teleport_time        = sv_confirmed_teleport_time;
 	self.pm_ladder_detach_time   = sv_confirmed_ladder_detach_time;
 	self.pm_fuser2               = sv_confirmed_fuser2;
+	self.spread_penalty          = sv_confirmed_spread_penalty;
+	self.fire_spread_penalty     = sv_confirmed_fire_spread_penalty;
 	self.pm_step_time            = sv_confirmed_step_time;
 };
 
@@ -520,6 +535,10 @@ void() CSQC_ResetToConfirmedState =
 	float old_mag_grenadelauncher;
 	float old_mag_rebar;
 	float old_ammo_gauss;
+	float old_mag_glock;
+	float old_ammo_glock;
+	float old_mag_g3sg1;
+	float old_ammo_g3sg1;
 
 	old_weapon = self.weapon;
 	old_weaponstate = self.weaponstate;
@@ -558,6 +577,10 @@ void() CSQC_ResetToConfirmedState =
 	old_mag_grenadelauncher = self.mag_grenadelauncher;
 	old_mag_rebar = self.mag_rebar;
 	old_ammo_gauss = self.ammo_gauss;
+	old_mag_glock = self.mag_glock;
+	old_ammo_glock = self.ammo_glock;
+	old_mag_g3sg1 = self.mag_g3sg1;
+	old_ammo_g3sg1 = self.ammo_g3sg1;
 
 	CSQC_ResetToConfirmedMoveState();
 
@@ -570,13 +593,15 @@ void() CSQC_ResetToConfirmedState =
 	self.wep_action_id   = sv_confirmed_wep_action_id;
 	self.attack_finished = sv_confirmed_attack_finished;
 	self.wep_anim_start  = sv_confirmed_wep_anim_start;
+	CSQC_WeaponEquip(self.weapon);
 	self.mag_deagle      = sv_confirmed_mag_deagle;
 	self.ammo_deagle     = sv_confirmed_ammo_deagle;
 	self.mag_ak47        = sv_confirmed_mag_ak47;
 	self.ammo_ak47       = sv_confirmed_ammo_ak47;
 	self.mag_m4a1        = sv_confirmed_mag_m4a1;
 	self.ammo_m4a1       = sv_confirmed_ammo_m4a1;
-	self.m4a1_silenced   = sv_confirmed_m4a1_silenced;
+	// m4a1_silenced is NOT reset from server — client prediction is authoritative
+	// for this toggle. Resetting it causes sound desyncs at high ping.
 	self.mag_flakshotgun = sv_confirmed_mag_flakshotgun;
 	self.mag_pistol      = sv_confirmed_mag_pistol;
 	self.ammo_pistol     = sv_confirmed_ammo_pistol;
@@ -602,6 +627,10 @@ void() CSQC_ResetToConfirmedState =
 	self.mag_grenadelauncher = sv_confirmed_mag_grenadelauncher;
 	self.mag_rebar       = sv_confirmed_mag_rebar;
 	self.ammo_gauss      = sv_confirmed_ammo_gauss;
+	self.mag_glock       = sv_confirmed_mag_glock;
+	self.ammo_glock      = sv_confirmed_ammo_glock;
+	self.mag_g3sg1       = sv_confirmed_mag_g3sg1;
+	self.ammo_g3sg1      = sv_confirmed_ammo_g3sg1;
 
 	// Keep a single weapon action monotonic. Once local prediction is already
 	// further through that same action, don't let a delayed server snapshot pull
@@ -695,6 +724,16 @@ void() CSQC_ResetToConfirmedState =
 		{
 			self.ammo_gauss = min(self.ammo_gauss, old_ammo_gauss);
 		}
+		else if (self.weapon == WEP_GLOCK)
+		{
+			self.mag_glock = max(self.mag_glock, old_mag_glock);
+			self.ammo_glock = min(self.ammo_glock, old_ammo_glock);
+		}
+		else if (self.weapon == WEP_G3SG1)
+		{
+			self.mag_g3sg1 = max(self.mag_g3sg1, old_mag_g3sg1);
+			self.ammo_g3sg1 = min(self.ammo_g3sg1, old_ammo_g3sg1);
+		}
 
 		if (old_weaponstate == WS_IDLE && self.weaponstate != WS_IDLE)
 		{
@@ -737,6 +776,8 @@ void() CSQC_EnsurePredictedPlayer =
 	predicted_player.pm_teleport_time = 0;
 	predicted_player.pm_ladder_detach_time = 0;
 	predicted_player.pm_fuser2 = 0;
+	predicted_player.spread_penalty = 0;
+	predicted_player.fire_spread_penalty = 0;
 	predicted_player.pm_step_time = 0;
 
 	predicted_player.slot_primary     = WEP_NONE;
@@ -754,7 +795,7 @@ void() CSQC_EnsurePredictedPlayer =
 	predicted_player.ammo_ak47       = 0;
 	predicted_player.mag_m4a1        = 0;
 	predicted_player.ammo_m4a1       = 0;
-	predicted_player.m4a1_silenced   = 0;
+	predicted_player.m4a1_silenced   = sv_confirmed_m4a1_silenced;
 	predicted_player.mag_flakshotgun = 0;
 	predicted_player.mag_pistol      = 0;
 	predicted_player.ammo_pistol     = 0;
@@ -780,6 +821,10 @@ void() CSQC_EnsurePredictedPlayer =
 	predicted_player.mag_grenadelauncher = 0;
 	predicted_player.mag_rebar       = 0;
 	predicted_player.ammo_gauss      = 0;
+	predicted_player.mag_glock       = 0;
+	predicted_player.ammo_glock      = 0;
+	predicted_player.mag_g3sg1       = 0;
+	predicted_player.ammo_g3sg1      = 0;
 };
 
 string() CSQC_DebugSeedSource =
@@ -817,6 +862,8 @@ float() CSQC_SeedPredictedPlayerFromEngine =
 	predicted_player.pm_teleport_time = 0;
 	predicted_player.pm_ladder_detach_time = 0;
 	predicted_player.pm_fuser2 = 0;
+	predicted_player.spread_penalty = 0;
+	predicted_player.fire_spread_penalty = 0;
 	predicted_player.pm_step_time = 0;
 	if (!predicted_player.view_ofs_x && !predicted_player.view_ofs_y && !predicted_player.view_ofs_z)
 		predicted_player.view_ofs = PM_VIEW_OFS;
@@ -830,6 +877,12 @@ float() CSQC_SeedPredictedPlayerFromEngine =
 	predicted_player.wep_action_id   = 0;
 	predicted_player.wep_anim_start  = 0;
 	predicted_player.attack_finished = 0;
+	{
+		entity old_self = self;
+		self = predicted_player;
+		CSQC_WeaponEquip(self.weapon);
+		self = old_self;
+	}
 	predicted_player.mag_deagle      = 0;
 	predicted_player.ammo_deagle     = 0;
 
@@ -1242,6 +1295,8 @@ void() CSQC_BuildPresentationView =
 	float saved_teleport_time;
 	float saved_ladder_detach_time;
 	float saved_fuser2;
+	float saved_spread_penalty;
+	float saved_fire_spread_penalty;
 	float saved_impulse;
 	vector saved_origin;
 	vector saved_velocity;
@@ -1290,6 +1345,8 @@ void() CSQC_BuildPresentationView =
 	saved_teleport_time = self.pm_teleport_time;
 	saved_ladder_detach_time = self.pm_ladder_detach_time;
 	saved_fuser2 = self.pm_fuser2;
+	saved_spread_penalty = self.spread_penalty;
+	saved_fire_spread_penalty = self.fire_spread_penalty;
 
 	saved_timelength = input_timelength;
 	saved_angles = input_angles;
@@ -1336,6 +1393,8 @@ void() CSQC_BuildPresentationView =
 	self.pm_teleport_time = saved_teleport_time;
 	self.pm_ladder_detach_time = saved_ladder_detach_time;
 	self.pm_fuser2 = saved_fuser2;
+	self.spread_penalty = saved_spread_penalty;
+	self.fire_spread_penalty = saved_fire_spread_penalty;
 
 	input_timelength = saved_timelength;
 	input_angles = saved_angles;
@@ -1463,11 +1522,12 @@ void() CSQC_Input_Frame =
 	CSQC_LatchLiveInputFromCommand();
 	input_buttons = csqc_live_buttons;   // write custom bits before buffer captures them
 
-	// Freeze time: block WASD and attack, keep jump/duck/sprint/use physics
+	// Freeze time: block WASD movement and primary attack
 	if (getstatf(STAT_ROUND_PHASE) == ROUND_PHASE_FREEZE)
 	{
-		input_movevalues = '0 0 0';
-		input_buttons = input_buttons & ~(1 | 4);  // mask out +attack and +attack2
+		input_movevalues_x = 0;
+		input_movevalues_y = 0;
+		input_buttons = input_buttons & ~1;
 	}
 
 	// Dead: capture freecam input before zeroing, then block
@@ -1561,6 +1621,8 @@ noref void(float isnew) CSQC_Ent_Update =
 	self.pm_teleport_time        = readfloat();
 	self.pm_ladder_detach_time   = readfloat();
 	self.pm_fuser2               = readfloat();
+	self.spread_penalty          = readfloat();
+	self.fire_spread_penalty     = readfloat();
 	self.pm_step_time            = readfloat();
 
 	// Weapon prediction state
@@ -1613,6 +1675,10 @@ noref void(float isnew) CSQC_Ent_Update =
 	self.mag_grenadelauncher = readfloat();
 	self.mag_rebar       = readfloat();
 	self.ammo_gauss      = readfloat();
+	self.mag_glock       = readfloat();
+	self.ammo_glock      = readfloat();
+	self.mag_g3sg1       = readfloat();
+	self.ammo_g3sg1      = readfloat();
 
 	CSQC_StoreConfirmedStateFromEntity(self);
 	sv_confirmed_cmdframe        = servercommandframe;

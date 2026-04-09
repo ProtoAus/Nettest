@@ -68,6 +68,10 @@ void(vector surface_normal) CSQC_ShellSettle =
     self.avelocity = '0 0 0';
     self.touch = __NULL__;
 
+    // Raise off the ground so shells don't clip into the floor
+    self.origin_z += 1;
+    setorigin(self, self.origin);
+
     // Lay flat on surface: pitch=0, roll=0, random yaw spin
     // For a flat floor (normal = 0 0 1) this gives angles = '0 yaw 0'
     // For slopes, tilt pitch/roll to match the surface
@@ -201,11 +205,18 @@ void(string mdl, vector origin_offset, vector base_velocity, vector velocity_jit
 
 void(string mdl, vector ofs, vector vel, vector vel_jitter, vector avel, vector avel_jitter) CSQC_SpawnCasing =
 {
+    // Global shell adjustments: push forward, raise, adjust ejection velocity
+    ofs_x += 4;
+    ofs_z += 1;
+    vel_y += 20;
+    vel_z += 10;
     CSQC_SpawnAccessory(mdl, ofs, vel, vel_jitter, avel, avel_jitter, MOVETYPE_BOUNCE, 20, 2);
 };
 
 void(string mdl, vector ofs, vector vel, vector vel_jitter, vector avel, vector avel_jitter) CSQC_SpawnMag =
 {
+    // Lower mag drop origin on player
+    ofs_z -= 4;
     CSQC_SpawnAccessory(mdl, ofs, vel, vel_jitter, avel, avel_jitter, MOVETYPE_TOSS, 20, 0);
 };
 

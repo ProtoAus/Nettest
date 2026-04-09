@@ -60,85 +60,48 @@ const float K98_RELOAD_DURATION       = (K98_RELOAD_END - K98_RELOAD_START) * K9
 const float K98_RELOAD_APPLY_TIME     = (K98_RELOAD_APPLY - K98_RELOAD_START) * K98_FRAME_INTERVAL;
 const float K98_STAB_DURATION         = (K98_STAB_END - K98_STAB_START) * K98_FRAME_INTERVAL;
 
+const string K98_VIEWMODEL    = "models/weapons/wpn_dod98k/v_98k.mdl";
+const string K98_WORLDMODEL   = "models/weapons/wpn_dod98k/w_98k.mdl";
+const string K98_DEPLOY_SOUND = "";
+const string K98_DISPLAY_NAME = "98K";
+
 // ============================================================
 //  SHARED — state machine
 // ============================================================
 
 float(float now) SH_98KTickState =
 {
-    float elapsed, result, needed;
+    float elapsed;
 
-    if (self.weaponstate == WS_IDLE) return 0;
-
-    elapsed = (self.wep_anim_start > 0) ? (now - self.wep_anim_start) : 0;
-    result = 0;
-
-    if (self.weaponstate == WS_DRAW)
-    {
-        if (elapsed >= K98_DRAW_DURATION)
-        { SH_WeaponEnterIdle(); result = result | 1; }
-        return result;
-    }
-    if (self.weaponstate == WS_FIRE)
-    {
-        if (elapsed >= K98_FIRE_DURATION)
-        { SH_WeaponEnterIdle(); result = result | 1; }
-        return result;
-    }
+    // WS_SPECIAL (bayonet stab) is handled here, not by the standard function
     if (self.weaponstate == WS_SPECIAL)
     {
+        elapsed = (self.wep_anim_start > 0) ? (now - self.wep_anim_start) : 0;
         if (elapsed >= K98_STAB_DURATION)
-        { SH_WeaponEnterIdle(); result = result | 1; }
-        return result;
-    }
-    if (self.weaponstate == WS_RELOAD)
-    {
-        if (elapsed >= K98_RELOAD_APPLY_TIME)
         {
-            needed = MAX_MAG_98K - self.mag_98k;
-            if (needed > 0)
-            {
-                if (self.ammo_98k >= needed)
-                { self.mag_98k += needed; self.ammo_98k -= needed; }
-                else
-                { self.mag_98k += self.ammo_98k; self.ammo_98k = 0; }
-                result = result | 2;
-            }
+            SH_WeaponEnterIdle();
+            return 1;
         }
-        if (elapsed >= K98_RELOAD_DURATION)
-        { SH_WeaponEnterIdle(); result = result | 1; }
-        return result;
+        return 0;
     }
-    return 0;
+
+    return SH_StandardTickState(now, mag_98k, ammo_98k, MAX_MAG_98K,
+        K98_DRAW_DURATION, K98_FIRE_DURATION,
+        K98_RELOAD_DURATION, K98_RELOAD_APPLY_TIME);
 };
 
 float(float now) SH_98KTryFire =
 {
-    if (self.weaponstate == WS_RELOAD || self.weaponstate == WS_DRAW || self.weaponstate == WS_SPECIAL)
+    if (self.weaponstate == WS_SPECIAL)
         return 0;
-    if (now < self.attack_finished) return 0;
-
-    if (self.mag_98k <= 0)
-    { self.attack_finished = now + K98_DRYFIRE_DELAY; return -1; }
-
-    self.mag_98k         -= 1;
-    self.weaponstate      = WS_FIRE;
-    self.wep_action_id   += 1;
-    self.wep_anim_start   = now;
-    self.attack_finished  = now + K98_FIRE_DELAY;
-    return 1;
+    return SH_StandardTryFire(now, mag_98k, K98_FIRE_DELAY, K98_DRYFIRE_DELAY);
 };
 
 float(float now) SH_98KTryReload =
 {
-    if (self.weaponstate == WS_RELOAD || self.weaponstate == WS_DRAW || self.weaponstate == WS_SPECIAL)
+    if (self.weaponstate == WS_SPECIAL)
         return 0;
-    if (self.mag_98k >= MAX_MAG_98K || self.ammo_98k <= 0) return 0;
-
-    self.weaponstate     = WS_RELOAD;
-    self.wep_action_id  += 1;
-    self.wep_anim_start  = now;
-    return 1;
+    return SH_StandardTryReload(now, mag_98k, ammo_98k, MAX_MAG_98K);
 };
 
 float(float now) SH_98KTryStab =
@@ -165,32 +128,8 @@ void(entity player) W_98KPickupCopy =
 
 void() W_98KShoot =
 {
-    vector src, dir, end, flat_vel;
-    float spread, sx, sy, move_speed, dist, damage;
-
-    makevectors(self.v_angle);
-    src = self.origin + self.view_ofs;
-    flat_vel = self.velocity; flat_vel_z = 0;
-    move_speed = vlen(flat_vel);
-
-    spread = K98_BASE_SPREAD + (move_speed / K98_FULL_SPREAD_SPEED) * K98_MOVE_SPREAD;
-    spread = min(spread, K98_BASE_SPREAD + K98_MOVE_SPREAD);
-
-    sx = (random() * 2 - 1) * spread;
-    sy = (random() * 2 - 1) * spread;
-    dir = normalize(v_forward + v_right * sx + v_up * sy);
-    end = src + dir * 8192;
-
-    W_WeaponTraceLine(src, end);
-
-    if (trace_fraction < 1.0)
-    {
-        dist = vlen(trace_endpos - src);
-        if (W_CanDamageTarget(trace_ent))
-        { damage = W_LinearDamageFalloff(dist, K98_CLOSE_DAMAGE, K98_MIN_DAMAGE, K98_DAMAGE_FALLOFF_RANGE); W_ApplyDamage(self, trace_ent, damage); }
-        else
-            W_ImpactEffect(trace_endpos);
-    }
+    W_StandardHitscanShoot(K98_BASE_SPREAD, K98_MOVE_SPREAD, K98_FULL_SPREAD_SPEED,
+        K98_CLOSE_DAMAGE, K98_MIN_DAMAGE, K98_DAMAGE_FALLOFF_RANGE);
 };
 
 void() W_98KStab =
@@ -278,16 +217,13 @@ void() W_98KFrame =
 
 void() W_98KEquip =
 {
-    self.weaponmodel = SH_WeaponViewModel(WEP_DOD98K);
-    self.weapon_name = "98K";
-    self.weapon_draw_start_frame = K98_DRAW_START;
-    self.weapon_player_attack_anim = PLAYER_ATTACKANIM_SHOT;
-    self.fire = W_98KFire; self.reload = W_98KReload; self.wepframe = W_98KFrame;
-    self.altfire = W_98KAltFire; self.altrelease = __NULL__;
-    self.shoot = W_98KShoot; self.special = __NULL__;
-    self.weaponstate = WS_DRAW; self.wep_action_id += 1;
-    self.wep_anim_start = time; self.weaponframe = K98_DRAW_START;
-    self.wep_nextframe = time + K98_FRAME_INTERVAL;
+    W_StandardEquipSetup(K98_VIEWMODEL, K98_DISPLAY_NAME, K98_DRAW_START,
+        K98_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
+    self.fire     = W_98KFire;
+    self.reload   = W_98KReload;
+    self.wepframe = W_98KFrame;
+    self.altfire  = W_98KAltFire;
+    self.shoot    = W_98KShoot;
     W_SetCrosshairProfile(K98_BASE_SPREAD, K98_MOVE_SPREAD, K98_FULL_SPREAD_SPEED, 1.6, TRUE);
 };
 
@@ -409,15 +345,34 @@ void() CSQC_Predict98KReload =
 float(float elapsed) CSQC_98KDisplayFrame =
 {
     float frame;
-    if (predicted_player.weaponstate == WS_DRAW)
-    { frame = K98_DRAW_START + elapsed / K98_FRAME_INTERVAL; return bound(K98_DRAW_START, frame, K98_DRAW_END - 1); }
-    if (predicted_player.weaponstate == WS_FIRE)
-    { frame = K98_FIRE_START + elapsed / K98_FRAME_INTERVAL; return bound(K98_FIRE_START, frame, K98_FIRE_END - 1); }
     if (predicted_player.weaponstate == WS_SPECIAL)
-    { frame = K98_STAB_START + elapsed / K98_FRAME_INTERVAL; return bound(K98_STAB_START, frame, K98_STAB_END - 1); }
-    if (predicted_player.weaponstate == WS_RELOAD)
-    { frame = K98_RELOAD_START + elapsed / K98_FRAME_INTERVAL; return bound(K98_RELOAD_START, frame, K98_RELOAD_END - 1); }
-    return K98_IDLE_FRAME;
+    {
+        frame = K98_STAB_START + elapsed / K98_FRAME_INTERVAL;
+        return bound(K98_STAB_START, frame, K98_STAB_END - 1);
+    }
+    return CSQC_StandardDisplayFrame(elapsed, K98_FRAME_INTERVAL,
+        K98_DRAW_START, K98_DRAW_END,
+        K98_FIRE_START, K98_FIRE_END,
+        K98_RELOAD_START, K98_RELOAD_END,
+        K98_IDLE_FRAME);
+};
+
+void() CSQC_98KDropClear =
+{
+	self.mag_98k = 0;
+	self.ammo_98k = 0;
+};
+
+void() CSQC_98KEquip =
+{
+	self.weapon_name         = K98_DISPLAY_NAME;
+	self.weapon_viewmodel    = K98_VIEWMODEL;
+	self.weapon_worldmodel   = K98_WORLDMODEL;
+	self.weapon_deploy_sound = K98_DEPLOY_SOUND;
+	self.csqc_predict_cmd    = CSQC_Predict98KCommand;
+	self.csqc_predict_reload = CSQC_Predict98KReload;
+	self.csqc_display_frame  = CSQC_98KDisplayFrame;
+	self.csqc_drop_clear     = CSQC_98KDropClear;
 };
 
 #endif // CSQC

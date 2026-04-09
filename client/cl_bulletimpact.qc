@@ -7,6 +7,9 @@
 //  excludes the shooter via dimension masking).
 // ============================================================
 
+// Forward declarations (defined in cl_bulletholes.qc)
+void(vector hit_pos, vector hit_normal, entity hit_target) CSQC_SpawnBulletHole;
+
 // Remove a client-side fake projectile entity
 void() CSQC_FakeProjectileExpire =
 {
@@ -91,6 +94,7 @@ void(vector pos, vector normal) CSQC_BulletImpact =
 
     te_gunshot(offset_pos);
     CSQC_AddImpactLight(offset_pos);
+    CSQC_SpawnBulletHole(pos, normal, trace_ent);
 
     // Random ricochet sound (ric1-5) at impact location
     r = floor(random() * 5) + 1;
@@ -109,6 +113,7 @@ void(vector pos, vector normal) CSQC_BulletImpactSilent =
 
     te_gunshot(offset_pos);
     CSQC_AddImpactLight(offset_pos);
+    CSQC_SpawnBulletHole(pos, normal, trace_ent);
 };
 
 // Full impact for other players receiving server events
@@ -122,6 +127,7 @@ void(vector pos, vector normal) CSQC_BulletImpactRemote =
 
     te_gunshot(offset_pos);
     CSQC_AddImpactLight(offset_pos);
+    CSQC_SpawnBulletHole(pos, normal, world);
 
     // Positional ricochet sound for other players
     r = floor(random() * 5) + 1;

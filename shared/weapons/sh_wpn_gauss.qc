@@ -46,10 +46,17 @@ const float GAUSS_CHARGE_AMMO_INTERVAL = 0.3;
 const float GAUSS_MIN_CHARGE_DAMAGE   = 40;
 const float GAUSS_MAX_CHARGE_DAMAGE   = 200;
 const float GAUSS_DRYFIRE_DELAY       = 0.2;
+const float GAUSS_OVERCHARGE_TIME     = 10.0;   // hold charge this long = self-damage
+const float GAUSS_OVERCHARGE_DAMAGE   = 50;     // damage dealt to self on overcharge
 
 // --- Pre-computed durations ---
 const float GAUSS_DRAW_DURATION       = (GAUSS_DRAW_END - GAUSS_DRAW_START) * GAUSS_FRAME_INTERVAL;
 const float GAUSS_FIRE_DURATION       = (GAUSS_FIRE_END - GAUSS_FIRE_START) * GAUSS_FRAME_INTERVAL;
+
+const string GAUSS_VIEWMODEL    = "models/weapons/wpn_hlgauss/v_gauss.mdl";
+const string GAUSS_WORLDMODEL   = "models/weapons/wpn_hlgauss/w_gauss.mdl";
+const string GAUSS_DEPLOY_SOUND = "";
+const string GAUSS_DISPLAY_NAME = "GAUSS";
 
 // ============================================================
 //  SHARED — state machine
@@ -175,6 +182,19 @@ void(float damage, float is_primary) W_GaussBeamFire =
             W_ApplyDamage(self, trace_ent, damage);
         else
             W_ImpactEffect(trace_endpos);
+
+        // Debug: send server hit position to shooter only
+        {
+            float saved_dim = dimension_send;
+            dimension_send = self.dimension_seen;
+            WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
+            WriteByte(MSG_MULTICAST, CSQC_EVENT_DEBUG_IMPACT);
+            WriteCoord(MSG_MULTICAST, trace_endpos_x);
+            WriteCoord(MSG_MULTICAST, trace_endpos_y);
+            WriteCoord(MSG_MULTICAST, trace_endpos_z);
+            multicast(trace_endpos, MULTICAST_PVS);
+            dimension_send = saved_dim;
+        }
     }
 
     // Pushback is now handled in SH_GaussCalcChargeDamage (shared code)
@@ -260,6 +280,16 @@ void() W_GaussFrame =
         else if (self.gauss_charge_state >= 2 && self.weaponframe > GAUSS_CHARGE_LOOP_END)
             self.weaponframe = GAUSS_CHARGE_LOOP_START;
 
+        // Overcharge: held too long — hurts self, plays fire animation
+        if ((time - self.gauss_charge_started) >= GAUSS_OVERCHARGE_TIME)
+        {
+            SH_GaussCalcChargeDamage(time);   // clears charge state, sets WS_FIRE
+            self.weaponframe = GAUSS_FIRE_START;
+            W_ApplyDamage(self, self, GAUSS_OVERCHARGE_DAMAGE);
+            sound(self, CHAN_WEAPON, "sounds/weapons/wpn_hlgauss/fire.wav", 1, ATTN_NORM);
+            return;
+        }
+
         // Auto-fire if ammo depleted during charge
         if (self.ammo_gauss <= 0)
         {
@@ -295,8 +325,8 @@ void() W_GaussFrame =
 
 void() W_GaussEquip =
 {
-    self.weaponmodel = SH_WeaponViewModel(WEP_GAUSS);
-    self.weapon_name = "GAUSS";
+    self.weaponmodel = GAUSS_VIEWMODEL;
+    self.weapon_name = GAUSS_DISPLAY_NAME;
     self.weapon_draw_start_frame = GAUSS_DRAW_START;
     self.weapon_player_attack_anim = PLAYER_ATTACKANIM_SHOT;
     self.fire = W_GaussPrimaryFire; self.reload = __NULL__; self.wepframe = W_GaussFrame;
@@ -385,6 +415,19 @@ void() CSQC_PredictGaussCommand =
         }
     }
 
+    // Overcharge: held too long — hurts self, play fire animation
+    if (self.weaponstate == WS_SPECIAL && self.gauss_charge_state > 0
+        && (csqc_pred_time - self.gauss_charge_started) >= GAUSS_OVERCHARGE_TIME)
+    {
+        SH_GaussCalcChargeDamage(csqc_pred_time);
+        CSQC_MarkPendingWeaponAck();
+        if (!pm_suppress_sounds)
+        {
+            sound(self, CHAN_WEAPON, "sounds/weapons/wpn_hlgauss/fire.wav", 1, ATTN_NONE);
+            CSQC_RecordPredictedWeaponSound();
+        }
+    }
+
     // Alt-fire release: fire charged shot — runs during replay for velocity push
     if (self.weaponstate == WS_SPECIAL
         && self.gauss_charge_state > 0 && !(input_buttons & 4))
@@ -430,6 +473,23 @@ float(float elapsed) CSQC_GaussDisplayFrame =
         return bound(GAUSS_CHARGE_LOOP_START, frame, GAUSS_CHARGE_LOOP_END - 1);
     }
     return GAUSS_IDLE_FRAME;
+};
+
+void() CSQC_GaussDropClear =
+{
+	self.ammo_gauss = 0;
+};
+
+void() CSQC_GaussEquip =
+{
+	self.weapon_name         = GAUSS_DISPLAY_NAME;
+	self.weapon_viewmodel    = GAUSS_VIEWMODEL;
+	self.weapon_worldmodel   = GAUSS_WORLDMODEL;
+	self.weapon_deploy_sound = GAUSS_DEPLOY_SOUND;
+	self.csqc_predict_cmd    = CSQC_PredictGaussCommand;
+	self.csqc_predict_reload = __NULL__;
+	self.csqc_display_frame  = CSQC_GaussDisplayFrame;
+	self.csqc_drop_clear     = CSQC_GaussDropClear;
 };
 
 #endif // CSQC

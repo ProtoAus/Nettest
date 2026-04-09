@@ -24,10 +24,10 @@ float(float weapon_id) CSQC_PlayerHasWeapon =
     return FALSE;
 };
 
+void(float weapon_id) CSQC_WeaponEquip;  // forward declaration
+
 void(float new_weapon) CSQC_PredictSelectWeapon =
 {
-    string snd;
-
     if (new_weapon == WEP_NONE || new_weapon == self.weapon)
         return;
     if (!CSQC_PlayerHasWeapon(new_weapon))
@@ -40,13 +40,13 @@ void(float new_weapon) CSQC_PredictSelectWeapon =
     self.weaponstate    = WS_DRAW;
     self.wep_action_id += 1;
     self.wep_anim_start = csqc_pred_time;
+    CSQC_WeaponEquip(new_weapon);
     CSQC_MarkPendingWeaponAck();
 
     if (!pm_suppress_sounds)
     {
-        snd = SH_WeaponDeploySound(new_weapon);
-        if (snd != "")
-            localsound(snd);
+        if (self.weapon_deploy_sound != "")
+            localsound(self.weapon_deploy_sound);
         CSQC_RecordPredictedWeaponSound();
     }
 };
@@ -140,7 +140,7 @@ void(float weapon_id) CSQC_SpawnFakeDrop =
     if (pm_suppress_sounds)
         return;
 
-    wmodel = SH_WeaponWorldModel(weapon_id);
+    wmodel = self.weapon_worldmodel;
     if (wmodel == "")
         return;
 
@@ -193,36 +193,16 @@ void() CSQC_PredictDropWeapon =
     // Spawn visual toss entity instantly
     CSQC_SpawnFakeDrop(cur);
 
-    // Clear the vacated slot and zero its ammo
+    // Clear the vacated slot and zero its ammo via per-weapon drop clear
     if (cur == self.slot_primary)
-    {
         self.slot_primary = WEP_NONE;
-        if (cur == WEP_AK47)         { self.mag_ak47 = 0; self.ammo_ak47 = 0; }
-        else if (cur == WEP_M4A1)    { self.mag_m4a1 = 0; self.ammo_m4a1 = 0; self.m4a1_silenced = 0; }
-        else if (cur == WEP_FLAKSHOTGUN) { self.mag_flakshotgun = 0; }
-        else if (cur == WEP_SCOUT)   { self.mag_scout = 0; self.ammo_scout = 0; self.zoomstage = 0; }
-        else if (cur == WEP_M249)    { self.mag_m249 = 0; self.ammo_m249 = 0; }
-        else if (cur == WEP_CSAWP)   { self.mag_awp = 0; self.ammo_awp = 0; self.zoomstage = 0; }
-        else if (cur == WEP_DOD98K)  { self.mag_98k = 0; self.ammo_98k = 0; }
-        else if (cur == WEP_HLSHOTGUN) { self.mag_shotgun = 0; self.ammo_shotgun = 0; }
-        else if (cur == WEP_CSM3)    { self.mag_m3 = 0; self.ammo_m3 = 0; }
-        else if (cur == WEP_CSMP5)   { self.mag_mp5 = 0; self.ammo_mp5 = 0; }
-        else if (cur == WEP_CROSSBOW) { self.mag_crossbow = 0; self.ammo_crossbow = 0; self.zoomstage = 0; }
-        else if (cur == WEP_GRENADELAUNCHER) { self.mag_grenadelauncher = 0; }
-        else if (cur == WEP_REBAR)   { self.mag_rebar = 0; }
-        else if (cur == WEP_GAUSS)   { self.ammo_gauss = 0; }
-    }
     else if (cur == self.slot_secondary)
-    {
         self.slot_secondary = WEP_NONE;
-        if (cur == WEP_DEAGLE)       { self.mag_deagle = 0; self.ammo_deagle = 0; }
-        else if (cur == WEP_PISTOL)  { self.mag_pistol = 0; self.ammo_pistol = 0; }
-        else if (cur == WEP_357)     { self.mag_357 = 0; self.ammo_357 = 0; }
-    }
     else if (cur == self.slot_melee)
-    {
         self.slot_melee = WEP_NONE;
-    }
+
+    if (self.csqc_drop_clear)
+        self.csqc_drop_clear();
 
     self.weapon         = WEP_NONE;
     self.weaponstate    = WS_IDLE;
@@ -236,19 +216,8 @@ void() CSQC_PredictDropWeapon =
 
 void() CSQC_PredictReload =
 {
-    if (self.weapon == WEP_DEAGLE)       { CSQC_PredictDeagleReload();       return; }
-    if (self.weapon == WEP_AK47)         { CSQC_PredictAK47Reload();         return; }
-    if (self.weapon == WEP_M4A1)         { CSQC_PredictM4A1Reload();         return; }
-    if (self.weapon == WEP_PISTOL)       { CSQC_PredictPistolReload();       return; }
-    if (self.weapon == WEP_SCOUT)        { CSQC_PredictScoutReload();        return; }
-    if (self.weapon == WEP_357)          { CSQC_Predict357Reload();          return; }
-    if (self.weapon == WEP_M249)         { CSQC_PredictM249Reload();         return; }
-    if (self.weapon == WEP_CSAWP)        { CSQC_PredictAWPReload();          return; }
-    if (self.weapon == WEP_DOD98K)       { CSQC_Predict98KReload();          return; }
-    if (self.weapon == WEP_HLSHOTGUN)    { CSQC_PredictShotgunReload();      return; }
-    if (self.weapon == WEP_CSM3)         { CSQC_PredictM3Reload();           return; }
-    if (self.weapon == WEP_CSMP5)        { CSQC_PredictMP5Reload();          return; }
-    if (self.weapon == WEP_CROSSBOW)     { CSQC_PredictCrossbowReload();     return; }
+    if (self.csqc_predict_reload)
+        self.csqc_predict_reload();
 };
 
 // --- Impulse handling ---
@@ -310,26 +279,8 @@ void() CSQC_PredictWeaponCommand =
 
     CSQC_PredictWeaponImpulse();
 
-    if (self.weapon == WEP_DEAGLE) { CSQC_PredictDeagleCommand(); return; }
-    if (self.weapon == WEP_KNIFE)  { CSQC_PredictKnifeCommand();  return; }
-    if (self.weapon == WEP_AK47)         { CSQC_PredictAK47Command();         return; }
-    if (self.weapon == WEP_M4A1)         { CSQC_PredictM4A1Command();         return; }
-    if (self.weapon == WEP_FLAKSHOTGUN)  { CSQC_PredictFlakShotgunCommand();  return; }
-    if (self.weapon == WEP_PISTOL)       { CSQC_PredictPistolCommand();       return; }
-    if (self.weapon == WEP_SCOUT)        { CSQC_PredictScoutCommand();        return; }
-    if (self.weapon == WEP_357)          { CSQC_Predict357Command();          return; }
-    if (self.weapon == WEP_WRENCH)       { CSQC_PredictWrenchCommand();       return; }
-    if (self.weapon == WEP_M249)         { CSQC_PredictM249Command();         return; }
-    if (self.weapon == WEP_CSAWP)        { CSQC_PredictAWPCommand();          return; }
-    if (self.weapon == WEP_DOD98K)       { CSQC_Predict98KCommand();          return; }
-    if (self.weapon == WEP_HLCROWBAR)    { CSQC_PredictCrowbarCommand();      return; }
-    if (self.weapon == WEP_HLSHOTGUN)    { CSQC_PredictShotgunCommand();      return; }
-    if (self.weapon == WEP_CSM3)         { CSQC_PredictM3Command();           return; }
-    if (self.weapon == WEP_CSMP5)        { CSQC_PredictMP5Command();          return; }
-    if (self.weapon == WEP_CROSSBOW)     { CSQC_PredictCrossbowCommand();     return; }
-    if (self.weapon == WEP_GRENADELAUNCHER) { CSQC_PredictGLCommand();        return; }
-    if (self.weapon == WEP_REBAR)        { CSQC_PredictRebarCommand();        return; }
-    if (self.weapon == WEP_GAUSS)        { CSQC_PredictGaussCommand();        return; }
+    if (self.csqc_predict_cmd)
+        self.csqc_predict_cmd();
 };
 
 // ============================================================
@@ -349,26 +300,8 @@ float() CSQC_GetWeaponDisplayFrame =
               ? max(0, cltime - predicted_player.wep_anim_start)
               : 0;
 
-    if (predicted_player.weapon == WEP_DEAGLE) return CSQC_DeagleDisplayFrame(elapsed);
-    if (predicted_player.weapon == WEP_KNIFE)  return CSQC_KnifeDisplayFrame(elapsed);
-    if (predicted_player.weapon == WEP_AK47)         return CSQC_AK47DisplayFrame(elapsed);
-    if (predicted_player.weapon == WEP_M4A1)         return CSQC_M4A1DisplayFrame(elapsed);
-    if (predicted_player.weapon == WEP_FLAKSHOTGUN)  return CSQC_FlakShotgunDisplayFrame(elapsed);
-    if (predicted_player.weapon == WEP_PISTOL)       return CSQC_PistolDisplayFrame(elapsed);
-    if (predicted_player.weapon == WEP_SCOUT)        return CSQC_ScoutDisplayFrame(elapsed);
-    if (predicted_player.weapon == WEP_357)          return CSQC_357DisplayFrame(elapsed);
-    if (predicted_player.weapon == WEP_WRENCH)       return CSQC_WrenchDisplayFrame(elapsed);
-    if (predicted_player.weapon == WEP_M249)         return CSQC_M249DisplayFrame(elapsed);
-    if (predicted_player.weapon == WEP_CSAWP)        return CSQC_AWPDisplayFrame(elapsed);
-    if (predicted_player.weapon == WEP_DOD98K)       return CSQC_98KDisplayFrame(elapsed);
-    if (predicted_player.weapon == WEP_HLCROWBAR)    return CSQC_CrowbarDisplayFrame(elapsed);
-    if (predicted_player.weapon == WEP_HLSHOTGUN)    return CSQC_ShotgunDisplayFrame(elapsed);
-    if (predicted_player.weapon == WEP_CSM3)         return CSQC_M3DisplayFrame(elapsed);
-    if (predicted_player.weapon == WEP_CSMP5)        return CSQC_MP5DisplayFrame(elapsed);
-    if (predicted_player.weapon == WEP_CROSSBOW)     return CSQC_CrossbowDisplayFrame(elapsed);
-    if (predicted_player.weapon == WEP_GRENADELAUNCHER) return CSQC_GLDisplayFrame(elapsed);
-    if (predicted_player.weapon == WEP_REBAR)        return CSQC_RebarDisplayFrame(elapsed);
-    if (predicted_player.weapon == WEP_GAUSS)        return CSQC_GaussDisplayFrame(elapsed);
+    if (predicted_player.csqc_display_frame)
+        return predicted_player.csqc_display_frame(elapsed);
 
     return 0;
 };
@@ -387,16 +320,7 @@ void() CSQC_AddPredictedViewmodel =
     if (getstatf(STAT_IS_DEAD))
         return;
 
-    // M4A1 viewmodel depends on silencer state
-    if (predicted_player.weapon == WEP_M4A1)
-    {
-        entity old_self = self;
-        self = predicted_player;
-        mdl = SH_M4A1ViewModel();
-        self = old_self;
-    }
-    else
-        mdl = SH_WeaponViewModel(predicted_player.weapon);
+    mdl = predicted_player.weapon_viewmodel;
     if (mdl == "")
         return;
 
@@ -415,4 +339,46 @@ void() CSQC_AddPredictedViewmodel =
 
     csqc_viewmodel_ent.renderflags  = RF_VIEWMODEL | RF_DEPTHHACK;
     addentity(csqc_viewmodel_ent);
+};
+
+// ============================================================
+//  CSQC_WeaponEquip — single dispatch
+//  Maps weapon ID to per-weapon CSQC equip function.
+//  Sets all client-side function pointers and weapon data fields.
+//  Called from CSQC_PredictSelectWeapon and proxy weapon sync.
+// ============================================================
+
+void(float weapon_id) CSQC_WeaponEquip =
+{
+    // Clear previous weapon's pointers
+    self.csqc_predict_cmd    = __NULL__;
+    self.csqc_predict_reload = __NULL__;
+    self.csqc_display_frame  = __NULL__;
+    self.csqc_drop_clear     = __NULL__;
+    self.weapon_viewmodel    = "";
+    self.weapon_worldmodel   = "";
+    self.weapon_deploy_sound = "";
+
+    if (weapon_id == WEP_DEAGLE)            CSQC_DeagleEquip();
+    else if (weapon_id == WEP_KNIFE)        CSQC_KnifeEquip();
+    else if (weapon_id == WEP_AK47)         CSQC_AK47Equip();
+    else if (weapon_id == WEP_M4A1)         CSQC_M4A1Equip();
+    else if (weapon_id == WEP_FLAKSHOTGUN)  CSQC_FlakShotgunEquip();
+    else if (weapon_id == WEP_PISTOL)       CSQC_PistolEquip();
+    else if (weapon_id == WEP_GAUSS)        CSQC_GaussEquip();
+    else if (weapon_id == WEP_CROSSBOW)     CSQC_CrossbowEquip();
+    else if (weapon_id == WEP_357)          CSQC_357Equip();
+    else if (weapon_id == WEP_DOD98K)       CSQC_98KEquip();
+    else if (weapon_id == WEP_SCOUT)        CSQC_ScoutEquip();
+    else if (weapon_id == WEP_GRENADELAUNCHER) CSQC_GLEquip();
+    else if (weapon_id == WEP_M249)         CSQC_M249Equip();
+    else if (weapon_id == WEP_HLCROWBAR)    CSQC_CrowbarEquip();
+    else if (weapon_id == WEP_HLSHOTGUN)    CSQC_ShotgunEquip();
+    else if (weapon_id == WEP_CSM3)         CSQC_M3Equip();
+    else if (weapon_id == WEP_CSMP5)        CSQC_MP5Equip();
+    else if (weapon_id == WEP_REBAR)        CSQC_RebarEquip();
+    else if (weapon_id == WEP_CSAWP)        CSQC_AWPEquip();
+    else if (weapon_id == WEP_WRENCH)       CSQC_WrenchEquip();
+    else if (weapon_id == WEP_GLOCK)        CSQC_GlockEquip();
+    else if (weapon_id == WEP_G3SG1)        CSQC_G3SG1Equip();
 };

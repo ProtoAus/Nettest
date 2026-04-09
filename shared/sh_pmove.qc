@@ -1295,6 +1295,7 @@ void PM_CheckJump()
 
     pm_onground       = FALSE;
     pm_velocity_z    += 270;
+    self.spread_penalty = 4.0;   // jump spread penalty
 
     // CS 1.6 stamina: penalise jump height if still fatigued, then reset timer
     if (mv_stamina)
@@ -1976,11 +1977,13 @@ void PM_PlayerMoveStep()
 {
     float  blocked;
     float  dp;
+    float  was_onground;
 
     // --- load working state from entity ---
     pm_origin   = self.origin;
     pm_velocity = self.velocity;
     pm_onground = (self.flags & FL_ONGROUND) ? TRUE : FALSE;
+    was_onground = pm_onground;
 
     pm_frametime = input_timelength;
     if (pm_frametime <= 0)
@@ -2093,6 +2096,31 @@ void PM_PlayerMoveStep()
 
     // second categorize for landing detection
     PM_CategorizePosition();
+
+    // Landing spread penalty: just transitioned from airborne to grounded
+    if (pm_onground && !was_onground)
+        self.spread_penalty = 4.0;
+
+    // Decay spread penalty over time, quantized to 0.05 steps
+    // so client and server converge to the same discrete values
+    if (self.spread_penalty > 0)
+    {
+        self.spread_penalty -= pm_frametime * 2.0;
+        if (self.spread_penalty > 0)
+            self.spread_penalty = floor(self.spread_penalty * 20) / 20;
+        else
+            self.spread_penalty = 0;
+    }
+
+    // Decay fire spread penalty (sustained fire inaccuracy)
+    if (self.fire_spread_penalty > 0)
+    {
+        self.fire_spread_penalty -= pm_frametime * FIRE_SPREAD_PENALTY_DECAY;
+        if (self.fire_spread_penalty > 0)
+            self.fire_spread_penalty = floor(self.fire_spread_penalty * 20) / 20;
+        else
+            self.fire_spread_penalty = 0;
+    }
 
     // ramp landing fix: if we just landed and had significant downward speed
     if (pm_onground && pm_velocity_z < -300)

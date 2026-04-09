@@ -50,108 +50,35 @@ const float SCOUT_FIRE_DURATION      = (SCOUT_FIRE_END - SCOUT_FIRE_START) * SCO
 const float SCOUT_RELOAD_DURATION    = (SCOUT_RELOAD_END - SCOUT_RELOAD_START) * SCOUT_FRAME_INTERVAL;
 const float SCOUT_RELOAD_APPLY_TIME  = (SCOUT_RELOAD_APPLY - SCOUT_RELOAD_START) * SCOUT_FRAME_INTERVAL;
 
+const string SCOUT_VIEWMODEL    = "models/weapons/wpn_csscout/v_scout.mdl";
+const string SCOUT_WORLDMODEL   = "models/weapons/wpn_csscout/w_scout.mdl";
+const string SCOUT_DEPLOY_SOUND = "";
+const string SCOUT_DISPLAY_NAME = "SCOUT";
+
 // ============================================================
 //  SHARED — state machine
 // ============================================================
 
 float(float now) SH_ScoutTickState =
 {
-    float elapsed;
-    float result;
-    float needed;
-
-    if (self.weaponstate == WS_IDLE)
-        return 0;
-
-    elapsed = (self.wep_anim_start > 0) ? (now - self.wep_anim_start) : 0;
-    result = 0;
-
-    if (self.weaponstate == WS_DRAW)
-    {
-        if (elapsed >= SCOUT_DRAW_DURATION)
-        {
-            SH_WeaponEnterIdle();
-            result = result | 1;
-        }
-        return result;
-    }
-
-    if (self.weaponstate == WS_FIRE)
-    {
-        if (elapsed >= SCOUT_FIRE_DURATION)
-        {
-            SH_WeaponEnterIdle();
-            result = result | 1;
-        }
-        return result;
-    }
-
-    if (self.weaponstate == WS_RELOAD)
-    {
-        if (elapsed >= SCOUT_RELOAD_APPLY_TIME)
-        {
-            needed = MAX_MAG_SCOUT - self.mag_scout;
-            if (needed > 0)
-            {
-                if (self.ammo_scout >= needed)
-                {
-                    self.mag_scout  += needed;
-                    self.ammo_scout -= needed;
-                }
-                else
-                {
-                    self.mag_scout  += self.ammo_scout;
-                    self.ammo_scout  = 0;
-                }
-                result = result | 2;
-            }
-        }
-
-        if (elapsed >= SCOUT_RELOAD_DURATION)
-        {
-            SH_WeaponEnterIdle();
-            result = result | 1;
-        }
-        return result;
-    }
-
-    return 0;
+    return SH_StandardTickState(now, mag_scout, ammo_scout, MAX_MAG_SCOUT,
+        SCOUT_DRAW_DURATION, SCOUT_FIRE_DURATION,
+        SCOUT_RELOAD_DURATION, SCOUT_RELOAD_APPLY_TIME);
 };
 
 float(float now) SH_ScoutTryFire =
 {
-    if (self.weaponstate == WS_RELOAD || self.weaponstate == WS_DRAW)
-        return 0;
-    if (now < self.attack_finished)
-        return 0;
-
-    if (self.mag_scout <= 0)
-    {
-        self.attack_finished = now + SCOUT_DRYFIRE_DELAY;
-        return -1;
-    }
-
-    self.mag_scout       -= 1;
-    self.weaponstate      = WS_FIRE;
-    self.wep_action_id   += 1;
-    self.wep_anim_start   = now;
-    self.attack_finished  = now + SCOUT_FIRE_DELAY;
-    self.zoomstage        = 0;   // unscope on fire
-    return 1;
+    // Don't clear zoomstage here — Shoot needs it for spread calculation.
+    // Zoomstage is cleared in W_ScoutFire / CSQC prediction AFTER the shot.
+    return SH_StandardTryFire(now, mag_scout, SCOUT_FIRE_DELAY, SCOUT_DRYFIRE_DELAY);
 };
 
 float(float now) SH_ScoutTryReload =
 {
-    if (self.weaponstate == WS_RELOAD || self.weaponstate == WS_DRAW)
-        return 0;
-    if (self.mag_scout >= MAX_MAG_SCOUT || self.ammo_scout <= 0)
-        return 0;
-
-    self.weaponstate     = WS_RELOAD;
-    self.wep_action_id  += 1;
-    self.wep_anim_start  = now;
-    self.zoomstage       = 0;   // unscope on reload
-    return 1;
+    float r = SH_StandardTryReload(now, mag_scout, ammo_scout, MAX_MAG_SCOUT);
+    if (r == 1)
+        self.zoomstage = 0;   // unscope on reload
+    return r;
 };
 
 float(float now) SH_ScoutTryAltFire =
@@ -197,16 +124,26 @@ void() W_ScoutShoot =
     move_speed = vlen(flat_vel);
 
     if (self.zoomstage > 0)
-        spread = 0;
+    {
+        // Scoped: no base spread, but movement/penalties still apply
+        spread = (move_speed / SCOUT_FULL_SPREAD_SPEED) * SCOUT_MOVE_SPREAD;
+        spread = min(spread, SCOUT_MOVE_SPREAD);
+    }
     else
     {
         spread = SCOUT_BASE_SPREAD + (move_speed / SCOUT_FULL_SPREAD_SPEED) * SCOUT_MOVE_SPREAD;
         spread = min(spread, SCOUT_BASE_SPREAD + SCOUT_MOVE_SPREAD);
     }
+    spread = spread * SH_GetSpreadScale() + sh_spread_flat;
 
-    sx  = (random() * 2 - 1) * spread;
-    sy  = (random() * 2 - 1) * spread;
-    dir = normalize(v_forward + v_right * sx + v_up * sy);
+    if (spread > 0)
+    {
+        sx  = SH_SpreadJitter(self.wep_action_id, 0) * spread;
+        sy  = SH_SpreadJitter(self.wep_action_id, 1) * spread;
+        dir = normalize(v_forward + v_right * sx + v_up * sy);
+    }
+    else
+        dir = v_forward;
     end = src + dir * 8192;
 
     W_WeaponTraceLine(src, end);
@@ -225,6 +162,19 @@ void() W_ScoutShoot =
         {
             W_ImpactEffect(trace_endpos);
         }
+
+        // Debug: send server hit position to shooter only
+        {
+            float saved_dim = dimension_send;
+            dimension_send = self.dimension_seen;
+            WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
+            WriteByte(MSG_MULTICAST, CSQC_EVENT_DEBUG_IMPACT);
+            WriteCoord(MSG_MULTICAST, trace_endpos_x);
+            WriteCoord(MSG_MULTICAST, trace_endpos_y);
+            WriteCoord(MSG_MULTICAST, trace_endpos_z);
+            multicast(trace_endpos, MULTICAST_PVS);
+            dimension_send = saved_dim;
+        }
     }
 };
 
@@ -238,10 +188,11 @@ void() W_ScoutFire =
         self.wep_nextframe = time + SCOUT_FRAME_INTERVAL;
 
         W_ScoutShoot();
+        self.zoomstage = 0;
         self.sv_zoomstage = 0;
 
         sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csscout/fire.wav", 1, ATTN_NORM);
-        W_ShellEffect(SHELL_RIFLE_BIG, '8 6 -4', '6 46 36', '240 720 120');
+        W_ShellEffect(SHELL_RIFLE_BIG, '8 -6 -4', '6 46 36', '240 720 120');
     }
     else if (r == -1)
     {
@@ -299,22 +250,13 @@ void() W_ScoutFrame =
 
 void() W_ScoutEquip =
 {
-    self.weaponmodel    = SH_WeaponViewModel(WEP_SCOUT);
-    self.weapon_name    = "SCOUT";
-    self.weapon_draw_start_frame = SCOUT_DRAW_START;
-    self.weapon_player_attack_anim = PLAYER_ATTACKANIM_SHOT;
-    self.fire           = W_ScoutFire;
-    self.reload         = W_ScoutReload;
-    self.wepframe       = W_ScoutFrame;
-    self.altfire         = W_ScoutAltFire;
-    self.altrelease      = __NULL__;
-    self.shoot           = W_ScoutShoot;
-    self.special         = __NULL__;
-    self.weaponstate    = WS_DRAW;
-    self.wep_action_id += 1;
-    self.wep_anim_start = time;
-    self.weaponframe    = SCOUT_DRAW_START;
-    self.wep_nextframe  = time + SCOUT_FRAME_INTERVAL;
+    W_StandardEquipSetup(SCOUT_VIEWMODEL, SCOUT_DISPLAY_NAME, SCOUT_DRAW_START,
+        SCOUT_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
+    self.fire     = W_ScoutFire;
+    self.reload   = W_ScoutReload;
+    self.wepframe = W_ScoutFrame;
+    self.altfire  = W_ScoutAltFire;
+    self.shoot    = W_ScoutShoot;
     W_ClearZoom();
     W_SetCrosshairProfile(SCOUT_BASE_SPREAD, SCOUT_MOVE_SPREAD, SCOUT_FULL_SPREAD_SPEED, 1.45, FALSE);
 };
@@ -406,10 +348,11 @@ void() CSQC_PredictScoutCommand =
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csscout/fire.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(SCOUT_BASE_SPREAD, SCOUT_MOVE_SPREAD, SCOUT_FULL_SPREAD_SPEED);
+                CSQC_PredictedImpact(self.zoomstage > 0 ? 0 : SCOUT_BASE_SPREAD, SCOUT_MOVE_SPREAD, SCOUT_FULL_SPREAD_SPEED);
                 CSQC_SpawnCasing("models/weapons/riflecasingbig.mdl",
-                    '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
+                    '8 -6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }
+            self.zoomstage = 0;
         }
         else if (r == -1)
         {
@@ -463,24 +406,30 @@ void() CSQC_PredictScoutReload =
 
 float(float elapsed) CSQC_ScoutDisplayFrame =
 {
-    float frame;
+    return CSQC_StandardDisplayFrame(elapsed, SCOUT_FRAME_INTERVAL,
+        SCOUT_DRAW_START, SCOUT_DRAW_END,
+        SCOUT_FIRE_START, SCOUT_FIRE_END,
+        SCOUT_RELOAD_START, SCOUT_RELOAD_END,
+        SCOUT_IDLE_FRAME);
+};
 
-    if (predicted_player.weaponstate == WS_DRAW)
-    {
-        frame = SCOUT_DRAW_START + elapsed / SCOUT_FRAME_INTERVAL;
-        return bound(SCOUT_DRAW_START, frame, SCOUT_DRAW_END - 1);
-    }
-    if (predicted_player.weaponstate == WS_FIRE)
-    {
-        frame = SCOUT_FIRE_START + elapsed / SCOUT_FRAME_INTERVAL;
-        return bound(SCOUT_FIRE_START, frame, SCOUT_FIRE_END - 1);
-    }
-    if (predicted_player.weaponstate == WS_RELOAD)
-    {
-        frame = SCOUT_RELOAD_START + elapsed / SCOUT_FRAME_INTERVAL;
-        return bound(SCOUT_RELOAD_START, frame, SCOUT_RELOAD_END - 1);
-    }
-    return SCOUT_IDLE_FRAME;
+void() CSQC_ScoutDropClear =
+{
+	self.mag_scout = 0;
+	self.ammo_scout = 0;
+	self.zoomstage = 0;
+};
+
+void() CSQC_ScoutEquip =
+{
+	self.weapon_name         = SCOUT_DISPLAY_NAME;
+	self.weapon_viewmodel    = SCOUT_VIEWMODEL;
+	self.weapon_worldmodel   = SCOUT_WORLDMODEL;
+	self.weapon_deploy_sound = SCOUT_DEPLOY_SOUND;
+	self.csqc_predict_cmd    = CSQC_PredictScoutCommand;
+	self.csqc_predict_reload = CSQC_PredictScoutReload;
+	self.csqc_display_frame  = CSQC_ScoutDisplayFrame;
+	self.csqc_drop_clear     = CSQC_ScoutDropClear;
 };
 
 #endif // CSQC

@@ -45,6 +45,12 @@ void() W_RebarEquip;
 void() W_RebarDrop;
 void() W_GaussEquip;
 void() W_GaussDrop;
+void() W_GlockEquip;
+void() W_GlockDrop;
+void() W_G3SG1Equip;
+void() W_G3SG1Drop;
+void() weapon_deagle;
+void() weapon_m4a1;
 void() weapon_ak47;
 void() weapon_pistol;
 void() weapon_flakshotgun;
@@ -62,6 +68,8 @@ void() weapon_crossbow;
 void() weapon_grenadelauncher;
 void() weapon_rebar;
 void() weapon_gauss;
+void() weapon_glock;
+void() weapon_g3sg1;
 void() PlayerSpawn;           // defined in sv_player.qc
 void(float) W_SelectWeapon;   // defined later in this file
 void() weapon_become_solid;   // defined later in this file
@@ -138,12 +146,31 @@ void(vector pos) W_ImpactEffect =
     dimension_send = saved_dim;
 };
 
+// Send a positioned sound via multicast. Respects dimension_send,
+// unlike sound() which bypasses dimension masking.
+void(vector pos, string snd) W_MulticastSound =
+{
+    WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
+    WriteByte(MSG_MULTICAST, CSQC_EVENT_POINTSOUND);
+    WriteCoord(MSG_MULTICAST, pos_x);
+    WriteCoord(MSG_MULTICAST, pos_y);
+    WriteCoord(MSG_MULTICAST, pos_z);
+    WriteString(MSG_MULTICAST, snd);
+    multicast(pos, MULTICAST_PHS);
+};
+
 // Send shell casing eject to all players EXCEPT the shooter.
 // The shooter sees it instantly via client-side prediction.
 void(float shell_type, vector origin_offset, vector base_vel, vector base_avel) W_ShellEffect =
 {
     float saved_dim = dimension_send;
     dimension_send = dimension_send & ~self.dimension_seen;
+
+    // Global shell adjustments: push forward, raise, adjust ejection velocity
+    origin_offset_x += 4;
+    origin_offset_z += 1;
+    base_vel_y += 20;
+    base_vel_z += 10;
 
     makevectors(self.v_angle);
 
@@ -179,6 +206,9 @@ void(float mag_type, vector origin_offset, vector base_vel) W_MagDropEffect =
 {
     float saved_dim = dimension_send;
     dimension_send = dimension_send & ~self.dimension_seen;
+
+    // Lower mag drop origin on player
+    origin_offset_z -= 4;
 
     makevectors(self.v_angle);
 
@@ -431,6 +461,7 @@ void() W_ClearWeaponBindings =
     self.fire           = __NULL__;
     self.reload         = __NULL__;
     self.wepframe       = __NULL__;
+    W_ClearZoom();
 };
 
 // Equip the weapon that matches self.weapon, using the supplied function.

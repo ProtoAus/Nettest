@@ -49,106 +49,30 @@ const float AK47_FIRE_DURATION      = (AK47_FIRE_END - AK47_FIRE_START) * AK47_F
 const float AK47_RELOAD_DURATION    = (AK47_RELOAD_END - AK47_RELOAD_START) * AK47_FRAME_INTERVAL;
 const float AK47_RELOAD_APPLY_TIME  = (AK47_RELOAD_APPLY - AK47_RELOAD_START) * AK47_FRAME_INTERVAL;
 
+const string AK47_VIEWMODEL    = "models/weapons/wpn_csak47/v_ak47.mdl";
+const string AK47_WORLDMODEL   = "models/weapons/wpn_csak47/w_ak47.mdl";
+const string AK47_DEPLOY_SOUND = "";
+const string AK47_DISPLAY_NAME = "AK47";
+
 // ============================================================
 //  SHARED — state machine
 // ============================================================
 
 float(float now) SH_AK47TickState =
 {
-    float elapsed;
-    float result;
-    float needed;
-
-    if (self.weaponstate == WS_IDLE)
-        return 0;
-
-    elapsed = (self.wep_anim_start > 0) ? (now - self.wep_anim_start) : 0;
-    result = 0;
-
-    if (self.weaponstate == WS_DRAW)
-    {
-        if (elapsed >= AK47_DRAW_DURATION)
-        {
-            SH_WeaponEnterIdle();
-            result = result | 1;
-        }
-        return result;
-    }
-
-    if (self.weaponstate == WS_FIRE)
-    {
-        if (elapsed >= AK47_FIRE_DURATION)
-        {
-            SH_WeaponEnterIdle();
-            result = result | 1;
-        }
-        return result;
-    }
-
-    if (self.weaponstate == WS_RELOAD)
-    {
-        if (elapsed >= AK47_RELOAD_APPLY_TIME)
-        {
-            needed = MAX_MAG_AK47 - self.mag_ak47;
-            if (needed > 0)
-            {
-                if (self.ammo_ak47 >= needed)
-                {
-                    self.mag_ak47  += needed;
-                    self.ammo_ak47 -= needed;
-                }
-                else
-                {
-                    self.mag_ak47  += self.ammo_ak47;
-                    self.ammo_ak47  = 0;
-                }
-                result = result | 2;
-            }
-        }
-
-        if (elapsed >= AK47_RELOAD_DURATION)
-        {
-            SH_WeaponEnterIdle();
-            result = result | 1;
-        }
-        return result;
-    }
-
-    return 0;
+    return SH_StandardTickState(now, mag_ak47, ammo_ak47, MAX_MAG_AK47,
+        AK47_DRAW_DURATION, AK47_FIRE_DURATION,
+        AK47_RELOAD_DURATION, AK47_RELOAD_APPLY_TIME);
 };
 
 float(float now) SH_AK47TryFire =
 {
-    if (self.weaponstate == WS_RELOAD || self.weaponstate == WS_DRAW)
-        return 0;
-    if (now < self.attack_finished)
-        return 0;
-
-    if (self.mag_ak47 <= 0)
-    {
-        self.attack_finished = now + AK47_DRYFIRE_DELAY;
-        return -1;
-    }
-
-    self.mag_ak47        -= 1;
-    self.weaponstate      = WS_FIRE;
-    self.wep_action_id   += 1;
-    self.wep_anim_start   = now;
-    self.attack_finished  = now + AK47_FIRE_DELAY;
-    return 1;
+    return SH_StandardTryFire(now, mag_ak47, AK47_FIRE_DELAY, AK47_DRYFIRE_DELAY);
 };
 
 float(float now) SH_AK47TryReload =
 {
-    if (self.weaponstate == WS_RELOAD || self.weaponstate == WS_DRAW)
-        return 0;
-    if (self.mag_ak47 >= MAX_MAG_AK47 || self.ammo_ak47 <= 0)
-        return 0;
-
-    self.weaponstate     = WS_RELOAD;
-    self.wep_action_id  += 1;
-    self.wep_anim_start  = now;
-    return 1;
+    return SH_StandardTryReload(now, mag_ak47, ammo_ak47, MAX_MAG_AK47);
 };
 
 // ============================================================
@@ -165,43 +89,8 @@ void(entity player) W_AK47PickupCopy =
 
 void() W_AK47Shoot =
 {
-    vector src, dir, end;
-    vector flat_vel;
-    float  spread, sx, sy;
-    float  move_speed, dist, damage;
-
-    makevectors(self.v_angle);
-    src = self.origin + self.view_ofs;
-
-    flat_vel   = self.velocity;
-    flat_vel_z = 0;
-    move_speed = vlen(flat_vel);
-
-    spread = AK47_BASE_SPREAD + (move_speed / AK47_FULL_SPREAD_SPEED) * AK47_MOVE_SPREAD;
-    spread = min(spread, AK47_BASE_SPREAD + AK47_MOVE_SPREAD);
-
-    sx  = (random() * 2 - 1) * spread;
-    sy  = (random() * 2 - 1) * spread;
-    dir = normalize(v_forward + v_right * sx + v_up * sy);
-    end = src + dir * 8192;
-
-    traceline(src, end, MOVE_NORMAL | MOVE_LAGGED, self);
-
-    if (trace_fraction < 1.0)
-    {
-        dist = vlen(trace_endpos - src);
-
-        if (W_CanDamageTarget(trace_ent))
-        {
-            damage = W_LinearDamageFalloff(dist,
-                AK47_CLOSE_DAMAGE, AK47_MIN_DAMAGE, AK47_DAMAGE_FALLOFF_RANGE);
-            W_ApplyDamage(self, trace_ent, damage);
-        }
-        else
-        {
-            W_ImpactEffect(trace_endpos);
-        }
-    }
+    W_StandardHitscanShoot(AK47_BASE_SPREAD, AK47_MOVE_SPREAD, AK47_FULL_SPREAD_SPEED,
+        AK47_CLOSE_DAMAGE, AK47_MIN_DAMAGE, AK47_DAMAGE_FALLOFF_RANGE);
 };
 
 void() W_AK47Fire =
@@ -220,7 +109,7 @@ void() W_AK47Fire =
         else
             sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csak47/fire2.wav", 1, ATTN_NORM);
 
-        W_ShellEffect(SHELL_RIFLE, '8 6 -4', '6 46 36', '240 720 120');
+        W_ShellEffect(SHELL_RIFLE, '8 -6 -4', '6 46 36', '240 720 120');
     }
     else if (r == -1)
     {
@@ -268,22 +157,12 @@ void() W_AK47Frame =
 
 void() W_AK47Equip =
 {
-    self.weaponmodel    = SH_WeaponViewModel(WEP_AK47);
-    self.weapon_name    = "AK47";
-    self.weapon_draw_start_frame = AK47_DRAW_START;
-    self.weapon_player_attack_anim = PLAYER_ATTACKANIM_SHOT;
-    self.fire           = W_AK47Fire;
-    self.reload         = W_AK47Reload;
-    self.wepframe       = W_AK47Frame;
-    self.altfire         = __NULL__;
-    self.altrelease      = __NULL__;
-    self.shoot           = W_AK47Shoot;
-    self.special         = __NULL__;
-    self.weaponstate    = WS_DRAW;
-    self.wep_action_id += 1;
-    self.wep_anim_start = time;
-    self.weaponframe    = AK47_DRAW_START;
-    self.wep_nextframe  = time + AK47_FRAME_INTERVAL;
+    W_StandardEquipSetup(AK47_VIEWMODEL, AK47_DISPLAY_NAME, AK47_DRAW_START,
+        AK47_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
+    self.fire     = W_AK47Fire;
+    self.reload   = W_AK47Reload;
+    self.wepframe = W_AK47Frame;
+    self.shoot    = W_AK47Shoot;
     W_SetCrosshairProfile(AK47_BASE_SPREAD, AK47_MOVE_SPREAD, AK47_FULL_SPREAD_SPEED, 1.85, TRUE);
 };
 
@@ -381,7 +260,7 @@ void() CSQC_PredictAK47Command =
                 CSQC_RecordPredictedWeaponSound();
                 CSQC_PredictedImpact(AK47_BASE_SPREAD, AK47_MOVE_SPREAD, AK47_FULL_SPREAD_SPEED);
                 CSQC_SpawnCasing("models/weapons/riflecasing.mdl",
-                    '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
+                    '8 -6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }
         }
         else if (r == -1)
@@ -420,24 +299,29 @@ void() CSQC_PredictAK47Reload =
 
 float(float elapsed) CSQC_AK47DisplayFrame =
 {
-    float frame;
+    return CSQC_StandardDisplayFrame(elapsed, AK47_FRAME_INTERVAL,
+        AK47_DRAW_START, AK47_DRAW_END,
+        AK47_FIRE_START, AK47_FIRE_END,
+        AK47_RELOAD_START, AK47_RELOAD_END,
+        AK47_IDLE_FRAME);
+};
 
-    if (predicted_player.weaponstate == WS_DRAW)
-    {
-        frame = AK47_DRAW_START + elapsed / AK47_FRAME_INTERVAL;
-        return bound(AK47_DRAW_START, frame, AK47_DRAW_END - 1);
-    }
-    if (predicted_player.weaponstate == WS_FIRE)
-    {
-        frame = AK47_FIRE_START + elapsed / AK47_FRAME_INTERVAL;
-        return bound(AK47_FIRE_START, frame, AK47_FIRE_END - 1);
-    }
-    if (predicted_player.weaponstate == WS_RELOAD)
-    {
-        frame = AK47_RELOAD_START + elapsed / AK47_FRAME_INTERVAL;
-        return bound(AK47_RELOAD_START, frame, AK47_RELOAD_END - 1);
-    }
-    return AK47_IDLE_FRAME;
+void() CSQC_AK47DropClear =
+{
+	self.mag_ak47 = 0;
+	self.ammo_ak47 = 0;
+};
+
+void() CSQC_AK47Equip =
+{
+	self.weapon_name         = AK47_DISPLAY_NAME;
+	self.weapon_viewmodel    = AK47_VIEWMODEL;
+	self.weapon_worldmodel   = AK47_WORLDMODEL;
+	self.weapon_deploy_sound = AK47_DEPLOY_SOUND;
+	self.csqc_predict_cmd    = CSQC_PredictAK47Command;
+	self.csqc_predict_reload = CSQC_PredictAK47Reload;
+	self.csqc_display_frame  = CSQC_AK47DisplayFrame;
+	self.csqc_drop_clear     = CSQC_AK47DropClear;
 };
 
 #endif // CSQC

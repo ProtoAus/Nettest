@@ -47,108 +47,33 @@ const float W357_FIRE_DURATION      = (W357_FIRE_END - W357_FIRE_START) * W357_F
 const float W357_RELOAD_DURATION    = (W357_RELOAD_END - W357_RELOAD_START) * W357_FRAME_INTERVAL;
 const float W357_RELOAD_APPLY_TIME  = (W357_RELOAD_APPLY - W357_RELOAD_START) * W357_FRAME_INTERVAL;
 
+const string W357_VIEWMODEL    = "models/weapons/wpn_hl357/v_357.mdl";
+const string W357_WORLDMODEL   = "models/weapons/wpn_hl357/w_357.mdl";
+const string W357_DEPLOY_SOUND = "";
+const string W357_DISPLAY_NAME = ".357";
+
 // ============================================================
 //  SHARED — state machine
 // ============================================================
 
 float(float now) SH_357TickState =
 {
-    float elapsed;
-    float result;
-    float needed;
-
-    if (self.weaponstate == WS_IDLE)
-        return 0;
-
-    elapsed = (self.wep_anim_start > 0) ? (now - self.wep_anim_start) : 0;
-    result = 0;
-
-    if (self.weaponstate == WS_DRAW)
-    {
-        if (elapsed >= W357_DRAW_DURATION)
-        {
-            SH_WeaponEnterIdle();
-            result = result | 1;
-        }
-        return result;
-    }
-
-    if (self.weaponstate == WS_FIRE)
-    {
-        if (elapsed >= W357_FIRE_DURATION)
-        {
-            SH_WeaponEnterIdle();
-            result = result | 1;
-        }
-        return result;
-    }
-
-    if (self.weaponstate == WS_RELOAD)
-    {
-        if (elapsed >= W357_RELOAD_APPLY_TIME)
-        {
-            needed = MAX_MAG_357 - self.mag_357;
-            if (needed > 0)
-            {
-                if (self.ammo_357 >= needed)
-                {
-                    self.mag_357  += needed;
-                    self.ammo_357 -= needed;
-                }
-                else
-                {
-                    self.mag_357  += self.ammo_357;
-                    self.ammo_357  = 0;
-                }
-                result = result | 2;
-            }
-        }
-
-        if (elapsed >= W357_RELOAD_DURATION)
-        {
-            SH_WeaponEnterIdle();
-            result = result | 1;
-        }
-        return result;
-    }
-
-    return 0;
+    return SH_StandardTickState(now, mag_357, ammo_357, MAX_MAG_357,
+        W357_DRAW_DURATION, W357_FIRE_DURATION,
+        W357_RELOAD_DURATION, W357_RELOAD_APPLY_TIME);
 };
 
 float(float now) SH_357TryFire =
 {
-    if (self.weaponstate == WS_RELOAD || self.weaponstate == WS_DRAW)
-        return 0;
-    if (now < self.attack_finished)
-        return 0;
-
-    if (self.mag_357 <= 0)
-    {
-        self.attack_finished = now + W357_DRYFIRE_DELAY;
-        return -1;
-    }
-
-    self.mag_357         -= 1;
-    self.weaponstate      = WS_FIRE;
-    self.wep_action_id   += 1;
-    self.wep_anim_start   = now;
-    self.attack_finished  = now + W357_FIRE_DELAY;
-    return 1;
+    return SH_StandardTryFire(now, mag_357, W357_FIRE_DELAY, W357_DRYFIRE_DELAY);
 };
 
 float(float now) SH_357TryReload =
 {
-    if (self.weaponstate == WS_RELOAD || self.weaponstate == WS_DRAW)
-        return 0;
+    // 357 blocks reload during attack cooldown (unique to this weapon)
     if (now < self.attack_finished)
         return 0;
-    if (self.mag_357 >= MAX_MAG_357 || self.ammo_357 <= 0)
-        return 0;
-
-    self.weaponstate     = WS_RELOAD;
-    self.wep_action_id  += 1;
-    self.wep_anim_start  = now;
-    return 1;
+    return SH_StandardTryReload(now, mag_357, ammo_357, MAX_MAG_357);
 };
 
 // ============================================================
@@ -165,43 +90,8 @@ void(entity player) W_357PickupCopy =
 
 void() W_357Shoot =
 {
-    vector src, dir, end;
-    vector flat_vel;
-    float  spread, sx, sy;
-    float  move_speed, dist, damage;
-
-    makevectors(self.v_angle);
-    src = self.origin + self.view_ofs;
-
-    flat_vel   = self.velocity;
-    flat_vel_z = 0;
-    move_speed = vlen(flat_vel);
-
-    spread = W357_BASE_SPREAD + (move_speed / W357_FULL_SPREAD_SPEED) * W357_MOVE_SPREAD;
-    spread = min(spread, W357_BASE_SPREAD + W357_MOVE_SPREAD);
-
-    sx  = (random() * 2 - 1) * spread;
-    sy  = (random() * 2 - 1) * spread;
-    dir = normalize(v_forward + v_right * sx + v_up * sy);
-    end = src + dir * 8192;
-
-    W_WeaponTraceLine(src, end);
-
-    if (trace_fraction < 1.0)
-    {
-        dist = vlen(trace_endpos - src);
-
-        if (W_CanDamageTarget(trace_ent))
-        {
-            damage = W_LinearDamageFalloff(dist,
-                W357_CLOSE_DAMAGE, W357_MIN_DAMAGE, W357_DAMAGE_FALLOFF_RANGE);
-            W_ApplyDamage(self, trace_ent, damage);
-        }
-        else
-        {
-            W_ImpactEffect(trace_endpos);
-        }
-    }
+    W_StandardHitscanShoot(W357_BASE_SPREAD, W357_MOVE_SPREAD, W357_FULL_SPREAD_SPEED,
+        W357_CLOSE_DAMAGE, W357_MIN_DAMAGE, W357_DAMAGE_FALLOFF_RANGE);
 };
 
 void() W_357Fire =
@@ -219,8 +109,6 @@ void() W_357Fire =
             sound(self, CHAN_WEAPON, "sounds/weapons/wpn_hl357/fire1.wav", 1, ATTN_NORM);
         else
             sound(self, CHAN_WEAPON, "sounds/weapons/wpn_hl357/fire2.wav", 1, ATTN_NORM);
-
-        W_ShellEffect(SHELL_RIFLE_BIG, '8 6 -4', '6 46 36', '240 720 120');
     }
     else if (r == -1)
     {
@@ -260,22 +148,12 @@ void() W_357Frame =
 
 void() W_357Equip =
 {
-    self.weaponmodel    = SH_WeaponViewModel(WEP_357);
-    self.weapon_name    = ".357";
-    self.weapon_draw_start_frame = W357_DRAW_START;
-    self.weapon_player_attack_anim = PLAYER_ATTACKANIM_SHOT;
-    self.fire           = W_357Fire;
-    self.reload         = W_357Reload;
-    self.wepframe       = W_357Frame;
-    self.altfire         = __NULL__;
-    self.altrelease      = __NULL__;
-    self.shoot           = W_357Shoot;
-    self.special         = __NULL__;
-    self.weaponstate    = WS_DRAW;
-    self.wep_action_id += 1;
-    self.wep_anim_start = time;
-    self.weaponframe    = W357_DRAW_START;
-    self.wep_nextframe  = time + W357_FRAME_INTERVAL;
+    W_StandardEquipSetup(W357_VIEWMODEL, W357_DISPLAY_NAME, W357_DRAW_START,
+        W357_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
+    self.fire     = W_357Fire;
+    self.reload   = W_357Reload;
+    self.wepframe = W_357Frame;
+    self.shoot    = W_357Shoot;
     W_SetCrosshairProfile(W357_BASE_SPREAD, W357_MOVE_SPREAD, W357_FULL_SPREAD_SPEED, 1.4, TRUE);
 };
 
@@ -350,8 +228,6 @@ void() CSQC_Predict357Command =
                     sound(self, CHAN_WEAPON, "sounds/weapons/wpn_hl357/fire2.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
                 CSQC_PredictedImpact(W357_BASE_SPREAD, W357_MOVE_SPREAD, W357_FULL_SPREAD_SPEED);
-                CSQC_SpawnCasing("models/weapons/riflecasingbig.mdl",
-                    '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }
         }
         else if (r == -1)
@@ -384,24 +260,29 @@ void() CSQC_Predict357Reload =
 
 float(float elapsed) CSQC_357DisplayFrame =
 {
-    float frame;
+    return CSQC_StandardDisplayFrame(elapsed, W357_FRAME_INTERVAL,
+        W357_DRAW_START, W357_DRAW_END,
+        W357_FIRE_START, W357_FIRE_END,
+        W357_RELOAD_START, W357_RELOAD_END,
+        W357_IDLE_FRAME);
+};
 
-    if (predicted_player.weaponstate == WS_DRAW)
-    {
-        frame = W357_DRAW_START + elapsed / W357_FRAME_INTERVAL;
-        return bound(W357_DRAW_START, frame, W357_DRAW_END - 1);
-    }
-    if (predicted_player.weaponstate == WS_FIRE)
-    {
-        frame = W357_FIRE_START + elapsed / W357_FRAME_INTERVAL;
-        return bound(W357_FIRE_START, frame, W357_FIRE_END - 1);
-    }
-    if (predicted_player.weaponstate == WS_RELOAD)
-    {
-        frame = W357_RELOAD_START + elapsed / W357_FRAME_INTERVAL;
-        return bound(W357_RELOAD_START, frame, W357_RELOAD_END - 1);
-    }
-    return W357_IDLE_FRAME;
+void() CSQC_357DropClear =
+{
+	self.mag_357 = 0;
+	self.ammo_357 = 0;
+};
+
+void() CSQC_357Equip =
+{
+	self.weapon_name         = W357_DISPLAY_NAME;
+	self.weapon_viewmodel    = W357_VIEWMODEL;
+	self.weapon_worldmodel   = W357_WORLDMODEL;
+	self.weapon_deploy_sound = W357_DEPLOY_SOUND;
+	self.csqc_predict_cmd    = CSQC_Predict357Command;
+	self.csqc_predict_reload = CSQC_Predict357Reload;
+	self.csqc_display_frame  = CSQC_357DisplayFrame;
+	self.csqc_drop_clear     = CSQC_357DropClear;
 };
 
 #endif // CSQC

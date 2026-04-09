@@ -39,61 +39,23 @@ const float FLAKSHOTGUN_DAMAGE_FALLOFF_RANGE = 1024;
 const float FLAKSHOTGUN_DRAW_DURATION  = (FLAKSHOTGUN_DRAW_END - FLAKSHOTGUN_DRAW_START) * FLAKSHOTGUN_FRAME_INTERVAL;
 const float FLAKSHOTGUN_FIRE_DURATION  = (FLAKSHOTGUN_FIRE_END - FLAKSHOTGUN_FIRE_START) * FLAKSHOTGUN_FRAME_INTERVAL;
 
+const string FLAKSHOTGUN_VIEWMODEL    = "models/weapons/wpn_flakshotgun/v_flakshotgun.mdl";
+const string FLAKSHOTGUN_WORLDMODEL   = "models/weapons/wpn_flakshotgun/w_flakshotgun.mdl";
+const string FLAKSHOTGUN_DEPLOY_SOUND = "";
+const string FLAKSHOTGUN_DISPLAY_NAME = "FLAK SHOTGUN";
+
 // ============================================================
 //  SHARED — state machine
 // ============================================================
 
 float(float now) SH_FlakShotgunTickState =
 {
-    float elapsed;
-
-    if (self.weaponstate == WS_IDLE)
-        return 0;
-
-    elapsed = (self.wep_anim_start > 0) ? (now - self.wep_anim_start) : 0;
-
-    if (self.weaponstate == WS_DRAW)
-    {
-        if (elapsed >= FLAKSHOTGUN_DRAW_DURATION)
-        {
-            SH_WeaponEnterIdle();
-            return 1;
-        }
-        return 0;
-    }
-
-    if (self.weaponstate == WS_FIRE)
-    {
-        if (elapsed >= FLAKSHOTGUN_FIRE_DURATION)
-        {
-            SH_WeaponEnterIdle();
-            return 1;
-        }
-        return 0;
-    }
-
-    return 0;
+    return SH_SimpleTickState(now, FLAKSHOTGUN_DRAW_DURATION, FLAKSHOTGUN_FIRE_DURATION);
 };
 
 float(float now) SH_FlakShotgunTryFire =
 {
-    if (self.weaponstate == WS_DRAW)
-        return 0;
-    if (now < self.attack_finished)
-        return 0;
-
-    if (self.mag_flakshotgun <= 0)
-    {
-        self.attack_finished = now + FLAKSHOTGUN_DRYFIRE_DELAY;
-        return -1;
-    }
-
-    self.mag_flakshotgun -= 1;
-    self.weaponstate      = WS_FIRE;
-    self.wep_action_id   += 1;
-    self.wep_anim_start   = now;
-    self.attack_finished  = now + FLAKSHOTGUN_FIRE_DELAY;
-    return 1;
+    return SH_StandardTryFire(now, mag_flakshotgun, FLAKSHOTGUN_FIRE_DELAY, FLAKSHOTGUN_DRYFIRE_DELAY);
 };
 
 // ============================================================
@@ -118,8 +80,8 @@ void() W_FlakShotgunShoot =
     pellet = 0;
     while (pellet < FLAKSHOTGUN_PELLETS)
     {
-        sx  = (random() * 2 - 1) * FLAKSHOTGUN_SPREAD;
-        sy  = (random() * 2 - 1) * FLAKSHOTGUN_SPREAD;
+        sx  = SH_SpreadJitter(self.wep_action_id + pellet, 0) * FLAKSHOTGUN_SPREAD;
+        sy  = SH_SpreadJitter(self.wep_action_id + pellet, 1) * FLAKSHOTGUN_SPREAD;
         dir = normalize(v_forward + v_right * sx + v_up * sy);
         end = src + dir * 8192;
 
@@ -139,6 +101,19 @@ void() W_FlakShotgunShoot =
             else
             {
                 W_ImpactEffect(trace_endpos);
+            }
+
+            // Debug: send server hit position to shooter only
+            {
+                float saved_dim = dimension_send;
+                dimension_send = self.dimension_seen;
+                WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
+                WriteByte(MSG_MULTICAST, CSQC_EVENT_DEBUG_IMPACT);
+                WriteCoord(MSG_MULTICAST, trace_endpos_x);
+                WriteCoord(MSG_MULTICAST, trace_endpos_y);
+                WriteCoord(MSG_MULTICAST, trace_endpos_z);
+                multicast(trace_endpos, MULTICAST_PVS);
+                dimension_send = saved_dim;
             }
         }
 
@@ -198,23 +173,12 @@ void() W_FlakShotgunFrame =
 
 void() W_FlakShotgunEquip =
 {
-    self.weaponmodel    = SH_WeaponViewModel(WEP_FLAKSHOTGUN);
-    self.weapon_name    = "FLAK SHOTGUN";
-    self.weapon_draw_start_frame = FLAKSHOTGUN_DRAW_START;
-    self.weapon_player_attack_anim = PLAYER_ATTACKANIM_SHOT;
-    self.fire           = W_FlakShotgunFire;
-    self.reload         = __NULL__;
-    self.wepframe       = W_FlakShotgunFrame;
-    self.altfire         = __NULL__;
-    self.altrelease      = __NULL__;
-    self.shoot           = W_FlakShotgunShoot;
-    self.special         = __NULL__;
-    self.weaponstate    = WS_DRAW;
-    self.wep_action_id += 1;
-    self.wep_anim_start = time;
-    self.weaponframe    = FLAKSHOTGUN_DRAW_START;
-    self.wep_nextframe  = time + FLAKSHOTGUN_FRAME_INTERVAL;
-    W_SetCrosshairProfile(FLAKSHOTGUN_SPREAD, 0, 0, 7, TRUE);
+    W_StandardEquipSetup(FLAKSHOTGUN_VIEWMODEL, FLAKSHOTGUN_DISPLAY_NAME, FLAKSHOTGUN_DRAW_START, FLAKSHOTGUN_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
+    self.fire     = W_FlakShotgunFire;
+    self.reload   = __NULL__;
+    self.wepframe = W_FlakShotgunFrame;
+    self.shoot    = W_FlakShotgunShoot;
+    W_SetCrosshairProfile(FLAKSHOTGUN_SPREAD, 0, 0, 3, TRUE);
 };
 
 void() W_FlakShotgunDrop =
@@ -324,19 +288,28 @@ void() CSQC_PredictFlakShotgunCommand =
 
 float(float elapsed) CSQC_FlakShotgunDisplayFrame =
 {
-    float frame;
+    return CSQC_StandardDisplayFrame(elapsed, FLAKSHOTGUN_FRAME_INTERVAL,
+        FLAKSHOTGUN_DRAW_START, FLAKSHOTGUN_DRAW_END,
+        FLAKSHOTGUN_FIRE_START, FLAKSHOTGUN_FIRE_END,
+        0, 0,
+        FLAKSHOTGUN_IDLE_FRAME);
+};
 
-    if (predicted_player.weaponstate == WS_DRAW)
-    {
-        frame = FLAKSHOTGUN_DRAW_START + elapsed / FLAKSHOTGUN_FRAME_INTERVAL;
-        return bound(FLAKSHOTGUN_DRAW_START, frame, FLAKSHOTGUN_DRAW_END - 1);
-    }
-    if (predicted_player.weaponstate == WS_FIRE)
-    {
-        frame = FLAKSHOTGUN_FIRE_START + elapsed / FLAKSHOTGUN_FRAME_INTERVAL;
-        return bound(FLAKSHOTGUN_FIRE_START, frame, FLAKSHOTGUN_FIRE_END - 1);
-    }
-    return FLAKSHOTGUN_IDLE_FRAME;
+void() CSQC_FlakShotgunDropClear =
+{
+	self.mag_flakshotgun = 0;
+};
+
+void() CSQC_FlakShotgunEquip =
+{
+	self.weapon_name         = FLAKSHOTGUN_DISPLAY_NAME;
+	self.weapon_viewmodel    = FLAKSHOTGUN_VIEWMODEL;
+	self.weapon_worldmodel   = FLAKSHOTGUN_WORLDMODEL;
+	self.weapon_deploy_sound = FLAKSHOTGUN_DEPLOY_SOUND;
+	self.csqc_predict_cmd    = CSQC_PredictFlakShotgunCommand;
+	self.csqc_predict_reload = __NULL__;
+	self.csqc_display_frame  = CSQC_FlakShotgunDisplayFrame;
+	self.csqc_drop_clear     = CSQC_FlakShotgunDropClear;
 };
 
 #endif // CSQC

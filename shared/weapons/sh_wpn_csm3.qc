@@ -50,6 +50,11 @@ const float M3_PELLET_MIN_DAMAGE      = 3;
 const float M3_PELLET_FALLOFF_RANGE   = 1024;
 const float M3_DRYFIRE_DELAY          = 0.2;
 
+const string M3_VIEWMODEL    = "models/weapons/wpn_csm3/v_m3.mdl";
+const string M3_WORLDMODEL   = "models/weapons/wpn_csm3/w_m3.mdl";
+const string M3_DEPLOY_SOUND = "";
+const string M3_DISPLAY_NAME = "M3";
+
 // --- Pre-computed durations ---
 const float M3_DRAW_DURATION          = (M3_DRAW_END - M3_DRAW_START) * M3_FRAME_INTERVAL;
 const float M3_FIRE_DURATION          = (M3_FIRE_END - M3_FIRE_START) * M3_FRAME_INTERVAL;
@@ -130,8 +135,8 @@ void() W_M3FirePellets =
 
     for (i = 0; i < M3_PELLETS; i++)
     {
-        sx = (random() * 2 - 1) * M3_SPREAD;
-        sy = (random() * 2 - 1) * M3_SPREAD;
+        sx = SH_SpreadJitter(self.wep_action_id + i, 0) * M3_SPREAD;
+        sy = SH_SpreadJitter(self.wep_action_id + i, 1) * M3_SPREAD;
         dir = normalize(v_forward + v_right * sx + v_up * sy);
         end = src + dir * 8192;
 
@@ -144,6 +149,19 @@ void() W_M3FirePellets =
             { damage = W_LinearDamageFalloff(dist, M3_PELLET_CLOSE_DAMAGE, M3_PELLET_MIN_DAMAGE, M3_PELLET_FALLOFF_RANGE); W_ApplyDamage(self, trace_ent, damage); }
             else
                 W_ImpactEffect(trace_endpos);
+
+            // Debug: send server hit position to shooter only
+            {
+                float saved_dim = dimension_send;
+                dimension_send = self.dimension_seen;
+                WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
+                WriteByte(MSG_MULTICAST, CSQC_EVENT_DEBUG_IMPACT);
+                WriteCoord(MSG_MULTICAST, trace_endpos_x);
+                WriteCoord(MSG_MULTICAST, trace_endpos_y);
+                WriteCoord(MSG_MULTICAST, trace_endpos_z);
+                multicast(trace_endpos, MULTICAST_PVS);
+                dimension_send = saved_dim;
+            }
         }
     }
 };
@@ -275,8 +293,8 @@ void() W_M3Frame =
 
 void() W_M3Equip =
 {
-    self.weaponmodel = SH_WeaponViewModel(WEP_CSM3);
-    self.weapon_name = "M3";
+    self.weaponmodel = M3_VIEWMODEL;
+    self.weapon_name = M3_DISPLAY_NAME;
     self.weapon_draw_start_frame = M3_DRAW_START;
     self.weapon_player_attack_anim = PLAYER_ATTACKANIM_SHOT;
     self.fire = W_M3Fire; self.reload = W_M3Reload; self.wepframe = W_M3Frame;
@@ -285,7 +303,7 @@ void() W_M3Equip =
     self.weaponstate = WS_DRAW; self.wep_action_id += 1;
     self.wep_anim_start = time; self.weaponframe = M3_DRAW_START;
     self.wep_nextframe = time + M3_FRAME_INTERVAL;
-    W_SetCrosshairProfile(M3_SPREAD, 0, 320, 2.0, TRUE);
+    W_SetCrosshairProfile(M3_SPREAD, 0, 320, 3, TRUE);
 };
 
 void() W_M3Drop =
@@ -466,6 +484,24 @@ float(float elapsed) CSQC_M3DisplayFrame =
         return bound(M3_RELOAD_LOOP_END, frame, M3_RELOAD_END - 1);
     }
     return M3_IDLE_FRAME;
+};
+
+void() CSQC_M3DropClear =
+{
+	self.mag_m3  = 0;
+	self.ammo_m3 = 0;
+};
+
+void() CSQC_M3Equip =
+{
+	self.weapon_name         = M3_DISPLAY_NAME;
+	self.weapon_viewmodel    = M3_VIEWMODEL;
+	self.weapon_worldmodel   = M3_WORLDMODEL;
+	self.weapon_deploy_sound = M3_DEPLOY_SOUND;
+	self.csqc_predict_cmd    = CSQC_PredictM3Command;
+	self.csqc_predict_reload = CSQC_PredictM3Reload;
+	self.csqc_display_frame  = CSQC_M3DisplayFrame;
+	self.csqc_drop_clear     = CSQC_M3DropClear;
 };
 
 #endif // CSQC

@@ -4,8 +4,8 @@ float hud_crosshair_gap_bonus_smoothed;
 float HUD_CROSSHAIR_DEFAULT_LENGTH = 6;
 float HUD_CROSSHAIR_DEFAULT_THICKNESS = 1;
 float HUD_CROSSHAIR_DEFAULT_GAP = 3;
-float HUD_CROSSHAIR_BASE_SPREAD_TO_GAP_SCALE = 50;
-float HUD_CROSSHAIR_MOVE_SPREAD_TO_GAP_SCALE = 180;
+float HUD_CROSSHAIR_BASE_SPREAD_TO_GAP_SCALE = 120;
+float HUD_CROSSHAIR_MOVE_SPREAD_TO_GAP_SCALE = 360;
 float HUD_CROSSHAIR_GAP_LERP_SPEED = 14;
 
 void() HUD_EnsureCrosshairCVars =
@@ -73,11 +73,28 @@ float() CSQC_GetPredictedCrosshairMoveSpeed =
     return vlen(flat_vel);
 };
 
-// Returns a multiplier on all spread values.
-// 1.0 normally; extend here for zoom, stamina penalty, etc.
+// Returns a multiplier on all spread values based on player stance.
+// Matches SH_GetSpreadScale() so the crosshair reflects actual accuracy.
 float() CSQC_GetPredictedCrosshairSpreadScale =
 {
-    return 1;
+    entity old_self;
+    float s;
+
+    if (!predicted_player)
+        return 1;
+
+    // Fixed-spread weapons (shotguns) have move_spread = 0 — no stance modifiers
+    if (getstatf(STAT_CROSSHAIR_MOVESPREAD) == 0)
+    {
+        sh_spread_flat = 0;
+        return 1;
+    }
+
+    old_self = self;
+    self = predicted_player;
+    s = SH_GetSpreadScale();
+    self = old_self;
+    return s;
 };
 
 float() HUD_GetCrosshairGapBonus =
@@ -115,6 +132,9 @@ float() HUD_GetCrosshairGapBonus =
         move_ratio = bound(0, move_ratio, 1);
         gap_bonus = gap_bonus + (move_spread * move_ratio * HUD_CROSSHAIR_MOVE_SPREAD_TO_GAP_SCALE);
     }
+
+    // Flat spread bonus from jump/landing — convert to gap pixels
+    gap_bonus += sh_spread_flat * HUD_CROSSHAIR_BASE_SPREAD_TO_GAP_SCALE;
 
     return gap_bonus * gap_scale;
 };

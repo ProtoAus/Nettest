@@ -52,6 +52,11 @@ const float KNIFE_DRAW_DURATION       = (KNIFE_DRAW_END - KNIFE_DRAW_START) * KN
 const float KNIFE_FIRE_DURATION       = KNIFE_SLASH_DELAY;
 const float KNIFE_SPECIAL_DURATION    = KNIFE_STAB_DELAY;
 
+const string KNIFE_VIEWMODEL    = "models/weapons/wpn_csknife/v_knife.mdl";
+const string KNIFE_WORLDMODEL   = "models/weapons/wpn_csknife/w_knife.mdl";
+const string KNIFE_DEPLOY_SOUND = "sounds/weapons/wpn_csknife/deploy.wav";
+const string KNIFE_DISPLAY_NAME = "KNIFE";
+
 // ============================================================
 //  SHARED — state machine (server & client identical)
 // ============================================================
@@ -167,8 +172,8 @@ void() W_KnifeEnterIdle =
 // Equip — called by W_ChangeWeapon (self = player)
 void() W_KnifeEquip =
 {
-    self.weaponmodel             = SH_WeaponViewModel(WEP_KNIFE);
-    self.weapon_name             = "KNIFE";
+    self.weaponmodel             = KNIFE_VIEWMODEL;
+    self.weapon_name             = KNIFE_DISPLAY_NAME;
     self.weapon_draw_start_frame = KNIFE_DRAW_START;
     self.weapon_player_attack_anim = PLAYER_ATTACKANIM_MELEE;
     self.altfire                 = W_KnifeAltFire;
@@ -211,6 +216,19 @@ float(float attack_range, float damage) W_KnifeTraceAttack =
 
     if (trace_fraction >= 1.0)
         return FALSE;
+
+    // Debug: send server hit position to shooter only
+    {
+        float saved_dim = dimension_send;
+        dimension_send = self.dimension_seen;
+        WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
+        WriteByte(MSG_MULTICAST, CSQC_EVENT_DEBUG_IMPACT);
+        WriteCoord(MSG_MULTICAST, trace_endpos_x);
+        WriteCoord(MSG_MULTICAST, trace_endpos_y);
+        WriteCoord(MSG_MULTICAST, trace_endpos_z);
+        multicast(trace_endpos, MULTICAST_PVS);
+        dimension_send = saved_dim;
+    }
 
     if (W_CanDamageTarget(trace_ent))
     {
@@ -388,6 +406,22 @@ float(float elapsed) CSQC_KnifeDisplayFrame =
         return bound(KNIFE_STAB_HIT_START, frame, KNIFE_STAB_MISS_END - 1);
     }
     return 0;
+};
+
+void() CSQC_KnifeDropClear =
+{
+};
+
+void() CSQC_KnifeEquip =
+{
+	self.weapon_name         = KNIFE_DISPLAY_NAME;
+	self.weapon_viewmodel    = KNIFE_VIEWMODEL;
+	self.weapon_worldmodel   = KNIFE_WORLDMODEL;
+	self.weapon_deploy_sound = KNIFE_DEPLOY_SOUND;
+	self.csqc_predict_cmd    = CSQC_PredictKnifeCommand;
+	self.csqc_predict_reload = __NULL__;
+	self.csqc_display_frame  = CSQC_KnifeDisplayFrame;
+	self.csqc_drop_clear     = CSQC_KnifeDropClear;
 };
 
 #endif // CSQC

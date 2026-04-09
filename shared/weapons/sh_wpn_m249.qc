@@ -56,106 +56,30 @@ const float M249_FIRE_DURATION       = (M249_FIRE_END - M249_FIRE_START) * M249_
 const float M249_RELOAD_DURATION     = (M249_RELOAD_END - M249_RELOAD_START) * M249_FRAME_INTERVAL;
 const float M249_RELOAD_APPLY_TIME   = (M249_RELOAD_APPLY - M249_RELOAD_START) * M249_FRAME_INTERVAL;
 
+const string M249_VIEWMODEL    = "models/weapons/wpn_csm249/v_m249.mdl";
+const string M249_WORLDMODEL   = "models/weapons/wpn_csm249/w_m249.mdl";
+const string M249_DEPLOY_SOUND = "";
+const string M249_DISPLAY_NAME = "M249";
+
 // ============================================================
 //  SHARED — state machine
 // ============================================================
 
 float(float now) SH_M249TickState =
 {
-    float elapsed;
-    float result;
-    float needed;
-
-    if (self.weaponstate == WS_IDLE)
-        return 0;
-
-    elapsed = (self.wep_anim_start > 0) ? (now - self.wep_anim_start) : 0;
-    result = 0;
-
-    if (self.weaponstate == WS_DRAW)
-    {
-        if (elapsed >= M249_DRAW_DURATION)
-        {
-            SH_WeaponEnterIdle();
-            result = result | 1;
-        }
-        return result;
-    }
-
-    if (self.weaponstate == WS_FIRE)
-    {
-        if (elapsed >= M249_FIRE_DURATION)
-        {
-            SH_WeaponEnterIdle();
-            result = result | 1;
-        }
-        return result;
-    }
-
-    if (self.weaponstate == WS_RELOAD)
-    {
-        if (elapsed >= M249_RELOAD_APPLY_TIME)
-        {
-            needed = MAX_MAG_M249 - self.mag_m249;
-            if (needed > 0)
-            {
-                if (self.ammo_m249 >= needed)
-                {
-                    self.mag_m249  += needed;
-                    self.ammo_m249 -= needed;
-                }
-                else
-                {
-                    self.mag_m249  += self.ammo_m249;
-                    self.ammo_m249  = 0;
-                }
-                result = result | 2;
-            }
-        }
-
-        if (elapsed >= M249_RELOAD_DURATION)
-        {
-            SH_WeaponEnterIdle();
-            result = result | 1;
-        }
-        return result;
-    }
-
-    return 0;
+    return SH_StandardTickState(now, mag_m249, ammo_m249, MAX_MAG_M249,
+        M249_DRAW_DURATION, M249_FIRE_DURATION,
+        M249_RELOAD_DURATION, M249_RELOAD_APPLY_TIME);
 };
 
 float(float now) SH_M249TryFire =
 {
-    if (self.weaponstate == WS_RELOAD || self.weaponstate == WS_DRAW)
-        return 0;
-    if (now < self.attack_finished)
-        return 0;
-
-    if (self.mag_m249 <= 0)
-    {
-        self.attack_finished = now + M249_DRYFIRE_DELAY;
-        return -1;
-    }
-
-    self.mag_m249        -= 1;
-    self.weaponstate      = WS_FIRE;
-    self.wep_action_id   += 1;
-    self.wep_anim_start   = now;
-    self.attack_finished  = now + M249_FIRE_DELAY;
-    return 1;
+    return SH_StandardTryFire(now, mag_m249, M249_FIRE_DELAY, M249_DRYFIRE_DELAY);
 };
 
 float(float now) SH_M249TryReload =
 {
-    if (self.weaponstate == WS_RELOAD || self.weaponstate == WS_DRAW)
-        return 0;
-    if (self.mag_m249 >= MAX_MAG_M249 || self.ammo_m249 <= 0)
-        return 0;
-
-    self.weaponstate     = WS_RELOAD;
-    self.wep_action_id  += 1;
-    self.wep_anim_start  = now;
-    return 1;
+    return SH_StandardTryReload(now, mag_m249, ammo_m249, MAX_MAG_M249);
 };
 
 // ============================================================
@@ -172,43 +96,8 @@ void(entity player) W_M249PickupCopy =
 
 void() W_M249Shoot =
 {
-    vector src, dir, end;
-    vector flat_vel;
-    float  spread, sx, sy;
-    float  move_speed, dist, damage;
-
-    makevectors(self.v_angle);
-    src = self.origin + self.view_ofs;
-
-    flat_vel   = self.velocity;
-    flat_vel_z = 0;
-    move_speed = vlen(flat_vel);
-
-    spread = M249_BASE_SPREAD + (move_speed / M249_FULL_SPREAD_SPEED) * M249_MOVE_SPREAD;
-    spread = min(spread, M249_BASE_SPREAD + M249_MOVE_SPREAD);
-
-    sx  = (random() * 2 - 1) * spread;
-    sy  = (random() * 2 - 1) * spread;
-    dir = normalize(v_forward + v_right * sx + v_up * sy);
-    end = src + dir * 8192;
-
-    W_WeaponTraceLine(src, end);
-
-    if (trace_fraction < 1.0)
-    {
-        dist = vlen(trace_endpos - src);
-
-        if (W_CanDamageTarget(trace_ent))
-        {
-            damage = W_LinearDamageFalloff(dist,
-                M249_CLOSE_DAMAGE, M249_MIN_DAMAGE, M249_DAMAGE_FALLOFF_RANGE);
-            W_ApplyDamage(self, trace_ent, damage);
-        }
-        else
-        {
-            W_ImpactEffect(trace_endpos);
-        }
-    }
+    W_StandardHitscanShoot(M249_BASE_SPREAD, M249_MOVE_SPREAD, M249_FULL_SPREAD_SPEED,
+        M249_CLOSE_DAMAGE, M249_MIN_DAMAGE, M249_DAMAGE_FALLOFF_RANGE);
 };
 
 void() W_M249Fire =
@@ -261,10 +150,7 @@ void() W_M249Frame =
         if (self.weaponframe == M249_SND_COVERUP)
             sound(self, CHAN_AUTO, "sounds/weapons/wpn_csm249/coverup.wav", 1, ATTN_NORM);
         if (self.weaponframe == M249_SND_BOXOUT)
-        {
             sound(self, CHAN_AUTO, "sounds/weapons/wpn_csm249/boxout.wav", 1, ATTN_NORM);
-            W_MagDropEffect(MAG_RIFLE, '4 -4 -6', '0 -30 -20');
-        }
         if (self.weaponframe == M249_SND_BOXIN)
             sound(self, CHAN_AUTO, "sounds/weapons/wpn_csm249/boxin.wav", 1, ATTN_NORM);
         if (self.weaponframe == M249_SND_CHAIN)
@@ -286,22 +172,12 @@ void() W_M249Frame =
 
 void() W_M249Equip =
 {
-    self.weaponmodel    = SH_WeaponViewModel(WEP_M249);
-    self.weapon_name    = "M249";
-    self.weapon_draw_start_frame = M249_DRAW_START;
-    self.weapon_player_attack_anim = PLAYER_ATTACKANIM_SHOT;
-    self.fire           = W_M249Fire;
-    self.reload         = W_M249Reload;
-    self.wepframe       = W_M249Frame;
-    self.altfire         = __NULL__;
-    self.altrelease      = __NULL__;
-    self.shoot           = W_M249Shoot;
-    self.special         = __NULL__;
-    self.weaponstate    = WS_DRAW;
-    self.wep_action_id += 1;
-    self.wep_anim_start = time;
-    self.weaponframe    = M249_DRAW_START;
-    self.wep_nextframe  = time + M249_FRAME_INTERVAL;
+    W_StandardEquipSetup(M249_VIEWMODEL, M249_DISPLAY_NAME, M249_DRAW_START,
+        M249_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
+    self.fire     = W_M249Fire;
+    self.reload   = W_M249Reload;
+    self.wepframe = W_M249Frame;
+    self.shoot    = W_M249Shoot;
     W_SetCrosshairProfile(M249_BASE_SPREAD, M249_MOVE_SPREAD, M249_FULL_SPREAD_SPEED, 5, TRUE);
 };
 
@@ -403,11 +279,7 @@ void() CSQC_PredictM249Command =
         if (csqc_m249_reload_snd_stage < 1 && reload_elapsed >= coverup_t)
         { localsound("sounds/weapons/wpn_csm249/coverup.wav"); CSQC_RecordPredictedAutoSound(); csqc_m249_reload_snd_stage = 1; }
         if (csqc_m249_reload_snd_stage < 2 && reload_elapsed >= boxout_t)
-        {
-            localsound("sounds/weapons/wpn_csm249/boxout.wav"); CSQC_RecordPredictedAutoSound();
-            CSQC_SpawnMag("models/weapons/riflemag.mdl", '4 -4 -6', '0 -30 -20', '4 8 8', '0 180 0', '0 90 90');
-            csqc_m249_reload_snd_stage = 2;
-        }
+        { localsound("sounds/weapons/wpn_csm249/boxout.wav"); CSQC_RecordPredictedAutoSound(); csqc_m249_reload_snd_stage = 2; }
         if (csqc_m249_reload_snd_stage < 3 && reload_elapsed >= boxin_t)
         { localsound("sounds/weapons/wpn_csm249/boxin.wav"); CSQC_RecordPredictedAutoSound(); csqc_m249_reload_snd_stage = 3; }
         if (csqc_m249_reload_snd_stage < 4 && reload_elapsed >= chain_t)
@@ -453,6 +325,24 @@ float(float elapsed) CSQC_M249DisplayFrame =
         return M249_EMPTY_IDLE_FRAME;
 
     return M249_IDLE_FRAME;
+};
+
+void() CSQC_M249DropClear =
+{
+	self.mag_m249 = 0;
+	self.ammo_m249 = 0;
+};
+
+void() CSQC_M249Equip =
+{
+	self.weapon_name         = M249_DISPLAY_NAME;
+	self.weapon_viewmodel    = M249_VIEWMODEL;
+	self.weapon_worldmodel   = M249_WORLDMODEL;
+	self.weapon_deploy_sound = M249_DEPLOY_SOUND;
+	self.csqc_predict_cmd    = CSQC_PredictM249Command;
+	self.csqc_predict_reload = CSQC_PredictM249Reload;
+	self.csqc_display_frame  = CSQC_M249DisplayFrame;
+	self.csqc_drop_clear     = CSQC_M249DropClear;
 };
 
 #endif // CSQC

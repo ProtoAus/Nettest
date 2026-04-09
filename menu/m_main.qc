@@ -5,7 +5,7 @@ float splash_time;
 
 void() m_init =
 {
-	splash_time = time + 2.5;
+	splash_time = 0;
 	registercommand("togglemenu2");
 	setcursormode(TRUE,"gfx/xhair", [16, 16], cvar("vid_conautoscale"));
 	menu_font = loadfont("hud", "gfx/RobotoEB", "8 12 16 18 24 36 48 60 72", -1, 0, 0);

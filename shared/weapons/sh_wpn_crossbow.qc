@@ -53,82 +53,37 @@ const float XBOW_FIRE_EMPTY_DURATION  = (XBOW_FIRE_EMPTY_END - XBOW_FIRE_START) 
 const float XBOW_RELOAD_DURATION      = (XBOW_RELOAD_END - XBOW_RELOAD_START) * XBOW_FRAME_INTERVAL;
 const float XBOW_RELOAD_APPLY_TIME    = (XBOW_RELOAD_APPLY - XBOW_RELOAD_START) * XBOW_FRAME_INTERVAL;
 
+const string CROSSBOW_VIEWMODEL    = "models/weapons/wpn_hlcrossbow/v_crossbow.mdl";
+const string CROSSBOW_WORLDMODEL   = "models/weapons/wpn_hlcrossbow/w_crossbow.mdl";
+const string CROSSBOW_DEPLOY_SOUND = "";
+const string CROSSBOW_DISPLAY_NAME = "CROSSBOW";
+
 // ============================================================
 //  SHARED — state machine
 // ============================================================
 
 float(float now) SH_CrossbowTickState =
 {
-    float elapsed, result, needed;
-
-    if (self.weaponstate == WS_IDLE) return 0;
-
-    elapsed = (self.wep_anim_start > 0) ? (now - self.wep_anim_start) : 0;
-    result = 0;
-
-    if (self.weaponstate == WS_DRAW)
-    {
-        if (elapsed >= XBOW_DRAW_DURATION)
-        { SH_WeaponEnterIdle(); result = result | 1; }
-        return result;
-    }
-    if (self.weaponstate == WS_FIRE)
-    {
-        // Use longer empty duration if mag is now 0
-        float fire_dur = (self.mag_crossbow <= 0) ? XBOW_FIRE_EMPTY_DURATION : XBOW_FIRE_DURATION;
-        if (elapsed >= fire_dur)
-        { SH_WeaponEnterIdle(); result = result | 1; }
-        return result;
-    }
-    if (self.weaponstate == WS_RELOAD)
-    {
-        if (elapsed >= XBOW_RELOAD_APPLY_TIME)
-        {
-            needed = MAX_MAG_CROSSBOW - self.mag_crossbow;
-            if (needed > 0)
-            {
-                if (self.ammo_crossbow >= needed)
-                { self.mag_crossbow += needed; self.ammo_crossbow -= needed; }
-                else
-                { self.mag_crossbow += self.ammo_crossbow; self.ammo_crossbow = 0; }
-                result = result | 2;
-            }
-        }
-        if (elapsed >= XBOW_RELOAD_DURATION)
-        { SH_WeaponEnterIdle(); result = result | 1; }
-        return result;
-    }
-    return 0;
+    // Use longer empty fire duration when mag is empty
+    float fire_dur = (self.mag_crossbow <= 0) ? XBOW_FIRE_EMPTY_DURATION : XBOW_FIRE_DURATION;
+    return SH_StandardTickState(now, mag_crossbow, ammo_crossbow, MAX_MAG_CROSSBOW,
+        XBOW_DRAW_DURATION, fire_dur,
+        XBOW_RELOAD_DURATION, XBOW_RELOAD_APPLY_TIME);
 };
 
 float(float now) SH_CrossbowTryFire =
 {
-    if (self.weaponstate == WS_RELOAD || self.weaponstate == WS_DRAW) return 0;
-    if (now < self.attack_finished) return 0;
-    if (self.weaponstate != WS_IDLE) return 0;
-
-    if (self.mag_crossbow <= 0)
-    { self.attack_finished = now + XBOW_DRYFIRE_DELAY; return -1; }
-
-    self.mag_crossbow    -= 1;
-    self.weaponstate      = WS_FIRE;
-    self.wep_action_id   += 1;
-    self.wep_anim_start   = now;
-    self.attack_finished  = now + XBOW_FIRE_DELAY;
-    self.zoomstage        = 0;
-    return 1;
+    // Don't clear zoomstage here — Fire needs it to decide hitscan vs projectile.
+    // Cleared in W_CrossbowFire / CSQC prediction AFTER the shot.
+    return SH_StandardTryFire(now, mag_crossbow, XBOW_FIRE_DELAY, XBOW_DRYFIRE_DELAY);
 };
 
 float(float now) SH_CrossbowTryReload =
 {
-    if (self.weaponstate == WS_RELOAD || self.weaponstate == WS_DRAW) return 0;
-    if (self.mag_crossbow >= MAX_MAG_CROSSBOW || self.ammo_crossbow <= 0) return 0;
-
-    self.weaponstate     = WS_RELOAD;
-    self.wep_action_id  += 1;
-    self.wep_anim_start  = now;
-    self.zoomstage       = 0;
-    return 1;
+    float r = SH_StandardTryReload(now, mag_crossbow, ammo_crossbow, MAX_MAG_CROSSBOW);
+    if (r == 1)
+        self.zoomstage = 0;   // unscope on reload
+    return r;
 };
 
 float(float now) SH_CrossbowTryAltFire =
@@ -173,16 +128,16 @@ void() W_CrossbowBoltTouch =
         damage = self.proj_damage;
         W_ApplyDamage(self.owner, other, damage);
         if (random() < 0.5)
-            sound(self, CHAN_AUTO, "sounds/weapons/wpn_hlcrossbow/hitbody1.wav", 1, ATTN_NORM);
+            W_MulticastSound(self.origin, "sounds/weapons/wpn_hlcrossbow/hitbody1.wav");
         else
-            sound(self, CHAN_AUTO, "sounds/weapons/wpn_hlcrossbow/hitbody2.wav", 1, ATTN_NORM);
+            W_MulticastSound(self.origin, "sounds/weapons/wpn_hlcrossbow/hitbody2.wav");
     }
     else
     {
         if (random() < 0.5)
-            sound(self, CHAN_AUTO, "sounds/weapons/wpn_hlcrossbow/hit1.wav", 1, ATTN_NORM);
+            W_MulticastSound(self.origin, "sounds/weapons/wpn_hlcrossbow/hit1.wav");
         else
-            sound(self, CHAN_AUTO, "sounds/weapons/wpn_hlcrossbow/hit2.wav", 1, ATTN_NORM);
+            W_MulticastSound(self.origin, "sounds/weapons/wpn_hlcrossbow/hit2.wav");
 
         // Spawn stuck bolt visual
         entity stuck = spawn();
@@ -214,26 +169,79 @@ void() W_CrossbowFire =
     {
         self.weaponframe = XBOW_FIRE_START;
         self.wep_nextframe = time + XBOW_FRAME_INTERVAL;
-        self.sv_zoomstage = 0;
 
-        // Spawn bolt projectile
         makevectors(self.v_angle);
-        bolt = spawn();
-        bolt.owner = self;
-        bolt.classname = "proj_crossbow_bolt";
-        bolt.movetype = MOVETYPE_FLYMISSILE;
-        bolt.solid = SOLID_BBOX;
-        setmodel(bolt, "models/weapons/wpn_rebar/rebar.mdl");
-        setsize(bolt, '-1 -1 -1', '1 1 1');
-        setorigin(bolt, self.origin + self.view_ofs + v_forward * 16);
-        bolt.velocity = v_forward * XBOW_PROJECTILE_SPEED;
-        bolt.angles = vectoangles(bolt.velocity);
-        bolt.proj_damage = (self.zoomstage > 0) ? XBOW_SCOPED_DAMAGE : XBOW_PROJECTILE_DAMAGE;
-        bolt.touch = W_CrossbowBoltTouch;
-        bolt.think = W_CrossbowBoltThink;
-        bolt.nextthink = time + 5;
-        bolt.nodrawtoclient = self;   // shooter sees client-predicted bolt instead
 
+        if (self.zoomstage > 0)
+        {
+            // Scoped: instant hitscan + stick rebar in wall
+            vector src = self.origin + self.view_ofs;
+            vector dir = v_forward;
+            W_WeaponTraceLine(src, src + dir * 8192);
+
+            if (trace_fraction < 1.0)
+            {
+                if (W_CanDamageTarget(trace_ent))
+                    W_ApplyDamage(self, trace_ent, XBOW_SCOPED_DAMAGE);
+                else
+                {
+                    W_ImpactEffect(trace_endpos);
+
+                    entity stuck = spawn();
+                    setmodel(stuck, "models/weapons/wpn_rebar/rebar.mdl");
+                    setorigin(stuck, trace_endpos + trace_plane_normal * 2);
+                    stuck.angles = vectoangles(dir);
+                    stuck.solid = SOLID_NOT;
+                    stuck.movetype = MOVETYPE_NONE;
+                    stuck.nodrawtoclient = self;
+                    stuck.think = sub_remove;
+                    stuck.nextthink = time + 20;
+                }
+
+                // Impact sound — exclude shooter
+                {
+                    float saved_dim = dimension_send;
+                    dimension_send = dimension_send & ~self.dimension_seen;
+                    if (random() < 0.5)
+                        W_MulticastSound(trace_endpos, "sounds/weapons/wpn_hlcrossbow/hit1.wav");
+                    else
+                        W_MulticastSound(trace_endpos, "sounds/weapons/wpn_hlcrossbow/hit2.wav");
+
+                    // Debug: send server hit to shooter only
+                    dimension_send = self.dimension_seen;
+                    WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
+                    WriteByte(MSG_MULTICAST, CSQC_EVENT_DEBUG_IMPACT);
+                    WriteCoord(MSG_MULTICAST, trace_endpos_x);
+                    WriteCoord(MSG_MULTICAST, trace_endpos_y);
+                    WriteCoord(MSG_MULTICAST, trace_endpos_z);
+                    multicast(trace_endpos, MULTICAST_PVS);
+
+                    dimension_send = saved_dim;
+                }
+            }
+        }
+        else
+        {
+            // Unscoped: projectile bolt
+            bolt = spawn();
+            bolt.owner = self;
+            bolt.classname = "proj_crossbow_bolt";
+            bolt.movetype = MOVETYPE_FLYMISSILE;
+            bolt.solid = SOLID_BBOX;
+            setmodel(bolt, "models/weapons/wpn_rebar/rebar.mdl");
+            setsize(bolt, '-1 -1 -1', '1 1 1');
+            setorigin(bolt, self.origin + self.view_ofs + v_forward * 16);
+            bolt.velocity = v_forward * XBOW_PROJECTILE_SPEED;
+            bolt.angles = vectoangles(bolt.velocity);
+            bolt.proj_damage = XBOW_PROJECTILE_DAMAGE;
+            bolt.touch = W_CrossbowBoltTouch;
+            bolt.think = W_CrossbowBoltThink;
+            bolt.nextthink = time + 5;
+            bolt.nodrawtoclient = self;
+        }
+
+        self.zoomstage = 0;
+        self.sv_zoomstage = 0;
         sound(self, CHAN_WEAPON, "sounds/weapons/wpn_hlcrossbow/fire.wav", 1, ATTN_NORM);
     }
     else if (r == -1)
@@ -281,20 +289,13 @@ void() W_CrossbowFrame =
 
 void() W_CrossbowEquip =
 {
-    self.weaponmodel = SH_WeaponViewModel(WEP_CROSSBOW);
-    self.weapon_name = "CROSSBOW";
-    if (self.mag_crossbow > 0)
-        self.weapon_draw_start_frame = XBOW_DRAW_LOADED_START;
-    else
-        self.weapon_draw_start_frame = XBOW_DRAW_EMPTY_START;
-    self.weapon_player_attack_anim = PLAYER_ATTACKANIM_SHOT;
-    self.fire = W_CrossbowFire; self.reload = W_CrossbowReload; self.wepframe = W_CrossbowFrame;
-    self.altfire = W_CrossbowAltFire; self.altrelease = __NULL__;
-    self.shoot = __NULL__; self.special = __NULL__;
-    self.weaponstate = WS_DRAW; self.wep_action_id += 1;
-    self.wep_anim_start = time;
-    self.weaponframe = self.weapon_draw_start_frame;
-    self.wep_nextframe = time + XBOW_FRAME_INTERVAL;
+    float draw_start = (self.mag_crossbow > 0) ? XBOW_DRAW_LOADED_START : XBOW_DRAW_EMPTY_START;
+    W_StandardEquipSetup(CROSSBOW_VIEWMODEL, CROSSBOW_DISPLAY_NAME, draw_start,
+        XBOW_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
+    self.fire     = W_CrossbowFire;
+    self.reload   = W_CrossbowReload;
+    self.wepframe = W_CrossbowFrame;
+    self.altfire  = W_CrossbowAltFire;
     W_ClearZoom();
     W_SetCrosshairProfile(0, 0, 320, 1, FALSE);
 };
@@ -363,15 +364,43 @@ void() CSQC_PredictCrossbowCommand =
                 CSQC_RecordPredictedWeaponSound();
                 CSQC_MuzzleFlash();
 
-                // Spawn fake bolt projectile for instant visual
-                {
-                    entity bolt = spawn();
-                    vector fire_org, fire_dir;
-                    float hit_dist, travel_time;
+                makevectors(input_angles);
+                vector fire_org = self.origin + self.view_ofs + v_forward * 16;
+                vector fire_dir = v_forward;
 
-                    makevectors(input_angles);
-                    fire_org = self.origin + self.view_ofs + v_forward * 16;
-                    fire_dir = v_forward;
+                if (self.zoomstage > 0)
+                {
+                    // Scoped: instant hitscan trace + stuck rebar
+                    traceline(fire_org, fire_org + fire_dir * 8192, MOVE_NORMAL, self);
+                    if (trace_fraction < 1.0)
+                    {
+                        vector hit_pos = trace_endpos;
+                        vector hit_normal = trace_plane_normal;
+
+                        CSQC_BulletImpact(hit_pos, hit_normal);
+                        if (cvar("cl_debug_impacts"))
+                            CSQC_AddDebugImpact(hit_pos, fire_org, '0 1 0');
+                        if (random() < 0.5)
+                            localsound("sounds/weapons/wpn_hlcrossbow/hit1.wav");
+                        else
+                            localsound("sounds/weapons/wpn_hlcrossbow/hit2.wav");
+
+                        entity stuck = spawn();
+                        setmodel(stuck, "models/weapons/wpn_rebar/rebar.mdl");
+                        setorigin(stuck, hit_pos + hit_normal * 2);
+                        stuck.angles = vectoangles(fire_dir);
+                        stuck.movetype = MOVETYPE_NONE;
+                        stuck.solid = SOLID_NOT;
+                        stuck.drawmask = MASK_ENGINE;
+                        stuck.think = CSQC_FakeProjectileExpire;
+                        stuck.nextthink = time + 20;
+                    }
+                }
+                else
+                {
+                    // Unscoped: fake flying bolt
+                    entity bolt = spawn();
+                    float hit_dist, travel_time;
 
                     setmodel(bolt, "models/weapons/wpn_rebar/rebar.mdl");
                     setorigin(bolt, fire_org);
@@ -381,7 +410,6 @@ void() CSQC_PredictCrossbowCommand =
                     bolt.solid = SOLID_NOT;
                     bolt.drawmask = MASK_ENGINE;
 
-                    // Trace ahead to find where it'll hit, stop there after travel time
                     traceline(fire_org, fire_org + fire_dir * 8192, MOVE_NORMAL, self);
                     if (trace_fraction < 1.0)
                     {
@@ -399,6 +427,7 @@ void() CSQC_PredictCrossbowCommand =
                     }
                 }
             }
+            self.zoomstage = 0;
         }
         else if (r == -1)
         {
@@ -427,26 +456,35 @@ void() CSQC_PredictCrossbowReload =
 
 float(float elapsed) CSQC_CrossbowDisplayFrame =
 {
-    float frame;
-    if (predicted_player.weaponstate == WS_DRAW)
-    {
-        float draw_start = (predicted_player.mag_crossbow > 0) ? XBOW_DRAW_LOADED_START : XBOW_DRAW_EMPTY_START;
-        float draw_end = (predicted_player.mag_crossbow > 0) ? XBOW_DRAW_LOADED_END : XBOW_DRAW_EMPTY_END;
-        frame = draw_start + elapsed / XBOW_FRAME_INTERVAL;
-        return bound(draw_start, frame, draw_end - 1);
-    }
-    if (predicted_player.weaponstate == WS_FIRE)
-    {
-        float fire_end = (predicted_player.mag_crossbow <= 0) ? XBOW_FIRE_EMPTY_END : XBOW_FIRE_END;
-        frame = XBOW_FIRE_START + elapsed / XBOW_FRAME_INTERVAL;
-        return bound(XBOW_FIRE_START, frame, fire_end - 1);
-    }
-    if (predicted_player.weaponstate == WS_RELOAD)
-    { frame = XBOW_RELOAD_START + elapsed / XBOW_FRAME_INTERVAL; return bound(XBOW_RELOAD_START, frame, XBOW_RELOAD_END - 1); }
+    float draw_start = (predicted_player.mag_crossbow > 0) ? XBOW_DRAW_LOADED_START : XBOW_DRAW_EMPTY_START;
+    float draw_end   = (predicted_player.mag_crossbow > 0) ? XBOW_DRAW_LOADED_END : XBOW_DRAW_EMPTY_END;
+    float fire_end   = (predicted_player.mag_crossbow <= 0) ? XBOW_FIRE_EMPTY_END : XBOW_FIRE_END;
+    float idle_frame = (predicted_player.mag_crossbow <= 0) ? XBOW_EMPTY_IDLE_FRAME : XBOW_LOADED_IDLE_FRAME;
 
-    if (predicted_player.mag_crossbow <= 0)
-        return XBOW_EMPTY_IDLE_FRAME;
-    return XBOW_LOADED_IDLE_FRAME;
+    return CSQC_StandardDisplayFrame(elapsed, XBOW_FRAME_INTERVAL,
+        draw_start, draw_end,
+        XBOW_FIRE_START, fire_end,
+        XBOW_RELOAD_START, XBOW_RELOAD_END,
+        idle_frame);
+};
+
+void() CSQC_CrossbowDropClear =
+{
+	self.mag_crossbow = 0;
+	self.ammo_crossbow = 0;
+	self.zoomstage = 0;
+};
+
+void() CSQC_CrossbowEquip =
+{
+	self.weapon_name         = CROSSBOW_DISPLAY_NAME;
+	self.weapon_viewmodel    = CROSSBOW_VIEWMODEL;
+	self.weapon_worldmodel   = CROSSBOW_WORLDMODEL;
+	self.weapon_deploy_sound = CROSSBOW_DEPLOY_SOUND;
+	self.csqc_predict_cmd    = CSQC_PredictCrossbowCommand;
+	self.csqc_predict_reload = CSQC_PredictCrossbowReload;
+	self.csqc_display_frame  = CSQC_CrossbowDisplayFrame;
+	self.csqc_drop_clear     = CSQC_CrossbowDropClear;
 };
 
 #endif // CSQC

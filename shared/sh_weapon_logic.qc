@@ -8,146 +8,73 @@
 
 // --- Shared utilities ---
 
+// Flat spread bonus set by SH_GetSpreadScale — add to spread after multiplying by scale.
+float sh_spread_flat;
+
+// Deterministic spread random — produces the same value on client and server
+// for the same seed (wep_action_id). Use different offsets for sx vs sy.
+float(float seed) SH_SpreadHash =
+{
+    float val;
+    val = sin(seed * 12.9898 + 78.233) * 43758.5453;
+    return val - floor(val);   // fractional part, range [0, 1)
+};
+
+// Returns a spread jitter value in [-1, 1] for the given shot and axis.
+// shot_id = self.wep_action_id, axis = 0 for X, 1 for Y, etc.
+float(float shot_id, float axis) SH_SpreadJitter =
+{
+    return SH_SpreadHash(shot_id + axis * 0.7193) * 2 - 1;
+};
+
+// Returns a spread multiplier based on player stance (crouch, airborne, landing).
+// Also sets sh_spread_flat for a flat additive bonus (ensures low-spread guns still feel penalties).
+// Called by both server hitscan and client prediction to keep spread in sync.
+float() SH_GetSpreadScale =
+{
+    float scale = 1.0;
+    sh_spread_flat = 0;
+
+    // Crouching: 60% accuracy improvement (only on ground)
+    if ((self.flags & FL_DUCKING) && (self.flags & FL_ONGROUND))
+        scale *= 0.4;
+
+    // Jump/landing penalty: percentage + flat bonus, both decay together
+    if (self.spread_penalty > 0)
+    {
+        scale *= 1.0 + self.spread_penalty;
+        sh_spread_flat = self.spread_penalty * 0.04;
+    }
+
+    // Sustained fire penalty: builds up when spamming, decays when resting
+    if (self.fire_spread_penalty > 0)
+    {
+        scale *= 1.0 + self.fire_spread_penalty;
+        sh_spread_flat += self.fire_spread_penalty * 0.02;
+    }
+
+    // Flush pending fire penalty AFTER using the current value for this shot.
+    // This ensures the bullet being fired right now isn't penalized by its own shot.
+    if (self.fire_spread_pending > 0)
+    {
+        self.fire_spread_penalty = min(self.fire_spread_penalty + self.fire_spread_pending,
+                                       FIRE_SPREAD_PENALTY_MAX);
+        self.fire_spread_pending = 0;
+    }
+
+    return scale;
+};
+
 void() SH_WeaponEnterIdle =
 {
     self.weaponstate    = WS_IDLE;
     self.wep_anim_start = 0;
 };
 
-string(float weapon_id) SH_WeaponViewModel =
-{
-    if (weapon_id == WEP_DEAGLE)
-        return "models/weapons/wpn_csdeagle/v_deagle.mdl";
-    if (weapon_id == WEP_KNIFE)
-        return "models/weapons/wpn_csknife/v_knife.mdl";
-    if (weapon_id == WEP_AK47)
-        return "models/weapons/wpn_csak47/v_ak47.mdl";
-    if (weapon_id == WEP_M4A1)
-        return "models/weapons/wpn_csm4a1/v_m4a1.mdl";   // default silenced; overridden by M4A1 code
-    if (weapon_id == WEP_FLAKSHOTGUN)
-        return "models/weapons/wpn_flakshotgun/v_flakshotgun.mdl";
-    if (weapon_id == WEP_PISTOL)
-        return "models/weapons/wpn_pistol/v_pistol.mdl";
-    if (weapon_id == WEP_GAUSS)
-        return "models/weapons/wpn_hlgauss/v_gauss.mdl";
-    if (weapon_id == WEP_CROSSBOW)
-        return "models/weapons/wpn_hlcrossbow/v_crossbow.mdl";
-    if (weapon_id == WEP_357)
-        return "models/weapons/wpn_hl357/v_357.mdl";
-    if (weapon_id == WEP_DOD98K)
-        return "models/weapons/wpn_dod98k/v_98k.mdl";
-    if (weapon_id == WEP_SCOUT)
-        return "models/weapons/wpn_csscout/v_scout.mdl";
-    if (weapon_id == WEP_GRENADELAUNCHER)
-        return "models/weapons/wpn_grenadelauncher/v_grenlauncher.mdl";
-    if (weapon_id == WEP_M249)
-        return "models/weapons/wpn_csm249/v_m249.mdl";
-    if (weapon_id == WEP_HLCROWBAR)
-        return "models/weapons/wpn_hlcrowbar/v_crowbar.mdl";
-    if (weapon_id == WEP_HLSHOTGUN)
-        return "models/weapons/wpn_hlshotgun/v_shotgun.mdl";
-    if (weapon_id == WEP_CSM3)
-        return "models/weapons/wpn_csm3/v_m3.mdl";
-    if (weapon_id == WEP_CSMP5)
-        return "models/weapons/wpn_csmp5/v_mp5.mdl";
-    if (weapon_id == WEP_REBAR)
-        return "models/weapons/wpn_rebar/v_rebar.mdl";
-    if (weapon_id == WEP_CSAWP)
-        return "models/weapons/wpn_csawp/v_awp.mdl";
-    if (weapon_id == WEP_WRENCH)
-        return "models/weapons/wpn_wrench/v_wrench.mdl";
-    return "";
-};
-
-string(float weapon_id) SH_WeaponWorldModel =
-{
-    if (weapon_id == WEP_DEAGLE)
-        return "models/weapons/wpn_csdeagle/w_deagle.mdl";
-    if (weapon_id == WEP_KNIFE)
-        return "models/weapons/wpn_csknife/w_knife.mdl";
-    if (weapon_id == WEP_AK47)
-        return "models/weapons/wpn_csak47/w_ak47.mdl";
-    if (weapon_id == WEP_M4A1)
-        return "models/weapons/wpn_csm4a1/w_m4a1.mdl";
-    if (weapon_id == WEP_FLAKSHOTGUN)
-        return "models/weapons/wpn_flakshotgun/w_flakshotgun.mdl";
-    if (weapon_id == WEP_PISTOL)
-        return "models/weapons/wpn_pistol/w_pistol.mdl";
-    if (weapon_id == WEP_GAUSS)
-        return "models/weapons/wpn_hlgauss/w_gauss.mdl";
-    if (weapon_id == WEP_CROSSBOW)
-        return "models/weapons/wpn_hlcrossbow/w_crossbow.mdl";
-    if (weapon_id == WEP_357)
-        return "models/weapons/wpn_hl357/w_357.mdl";
-    if (weapon_id == WEP_DOD98K)
-        return "models/weapons/wpn_dod98k/w_98k.mdl";
-    if (weapon_id == WEP_SCOUT)
-        return "models/weapons/wpn_csscout/w_scout.mdl";
-    if (weapon_id == WEP_GRENADELAUNCHER)
-        return "models/weapons/wpn_grenadelauncher/w_grenlauncher.mdl";
-    if (weapon_id == WEP_M249)
-        return "models/weapons/wpn_csm249/w_m249.mdl";
-    if (weapon_id == WEP_HLCROWBAR)
-        return "models/weapons/wpn_hlcrowbar/w_crowbar.mdl";
-    if (weapon_id == WEP_HLSHOTGUN)
-        return "models/weapons/wpn_hlshotgun/w_shotgun.mdl";
-    if (weapon_id == WEP_CSM3)
-        return "models/weapons/wpn_csm3/w_m3.mdl";
-    if (weapon_id == WEP_CSMP5)
-        return "models/weapons/wpn_csmp5/w_mp5.mdl";
-    if (weapon_id == WEP_REBAR)
-        return "models/weapons/wpn_rebar/w_rebar.mdl";
-    if (weapon_id == WEP_CSAWP)
-        return "models/weapons/wpn_csawp/w_awp.mdl";
-    if (weapon_id == WEP_WRENCH)
-        return "models/weapons/wpn_wrench/g_wrench.mdl";
-    return "";
-};
-
-string(float weapon_id) SH_WeaponDeploySound =
-{
-    if (weapon_id == WEP_DEAGLE)
-        return "sounds/weapons/wpn_csdeagle/deploy.wav";
-    if (weapon_id == WEP_KNIFE)
-        return "sounds/weapons/wpn_csknife/deploy.wav";
-    if (weapon_id == WEP_AK47)
-        return "";   // boltpull plays at specific frame during draw animation
-    if (weapon_id == WEP_M4A1)
-        return "sounds/weapons/wpn_csm4a1/deploy.wav";
-    if (weapon_id == WEP_FLAKSHOTGUN)
-        return "";   // no deploy sound
-    if (weapon_id == WEP_PISTOL)
-        return "";
-    if (weapon_id == WEP_GAUSS)
-        return "";
-    if (weapon_id == WEP_CROSSBOW)
-        return "";
-    if (weapon_id == WEP_357)
-        return "";
-    if (weapon_id == WEP_DOD98K)
-        return "";
-    if (weapon_id == WEP_SCOUT)
-        return "";
-    if (weapon_id == WEP_GRENADELAUNCHER)
-        return "";
-    if (weapon_id == WEP_M249)
-        return "";
-    if (weapon_id == WEP_HLCROWBAR)
-        return "";
-    if (weapon_id == WEP_HLSHOTGUN)
-        return "";
-    if (weapon_id == WEP_CSM3)
-        return "";
-    if (weapon_id == WEP_CSMP5)
-        return "";
-    if (weapon_id == WEP_REBAR)
-        return "";
-    if (weapon_id == WEP_CSAWP)
-        return "sounds/weapons/wpn_csawp/deploy.wav";
-    if (weapon_id == WEP_WRENCH)
-        return "";
-    return "";
-};
+// SH_WeaponViewModel, SH_WeaponWorldModel, and SH_WeaponDeploySound
+// have been removed — each weapon file now defines its own string
+// constants (e.g. AK47_VIEWMODEL, AK47_WORLDMODEL, AK47_DEPLOY_SOUND)
+// and the per-weapon equip functions set them on the player entity.
 
 // --- CSQC-only prediction bookkeeping ---
 // On cl_progs.src this file is placed after sh_pmove.qc so
@@ -155,6 +82,7 @@ string(float weapon_id) SH_WeaponDeploySound =
 
 #ifdef CSQC
 void() CSQC_MuzzleFlash;
+void(vector pos, vector eye_pos, vector colour) CSQC_AddDebugImpact;
 void(vector pos, vector normal) CSQC_BulletImpact;
 void(vector pos, vector normal) CSQC_BulletImpactSilent;
 
@@ -168,6 +96,9 @@ void(float spread_base, float spread_move, float spread_fullspeed) CSQC_Predicte
     CSQC_MuzzleFlash();
 
     makevectors(input_angles);
+    vector fwd = v_forward;
+    vector rt  = v_right;
+    vector up  = v_up;
     src = self.origin + self.view_ofs;
 
     flat_vel   = self.velocity;
@@ -176,40 +107,58 @@ void(float spread_base, float spread_move, float spread_fullspeed) CSQC_Predicte
 
     spread = spread_base + (move_speed / spread_fullspeed) * spread_move;
     spread = min(spread, spread_base + spread_move);
+    spread = spread * SH_GetSpreadScale() + sh_spread_flat;
 
-    sx  = (random() * 2 - 1) * spread;
-    sy  = (random() * 2 - 1) * spread;
-    dir = normalize(v_forward + v_right * sx + v_up * sy);
+    if (spread > 0)
+    {
+        sx  = SH_SpreadJitter(self.wep_action_id, 0) * spread;
+        sy  = SH_SpreadJitter(self.wep_action_id, 1) * spread;
+        dir = normalize(fwd + rt * sx + up * sy);
+    }
+    else
+        dir = fwd;
     end = src + dir * 8192;
 
     traceline(src, end, MOVE_NORMAL, self);
 
     if (trace_fraction < 1.0)
+    {
         CSQC_BulletImpact(trace_endpos, trace_plane_normal);
+        if (cvar("cl_debug_impacts"))
+            CSQC_AddDebugImpact(trace_endpos, src, '0 1 0');
+    }
 };
 
 // Fire N predicted pellets (shotgun).
 void(float pellets, float spread_val) CSQC_PredictedShotgunImpact =
 {
     vector src, dir, end;
+    vector fwd, rt, up;
     float sx, sy, i;
 
     CSQC_MuzzleFlash();
 
     makevectors(input_angles);
+    fwd = v_forward;
+    rt  = v_right;
+    up  = v_up;
     src = self.origin + self.view_ofs;
 
     for (i = 0; i < pellets; i++)
     {
-        sx  = (random() * 2 - 1) * spread_val;
-        sy  = (random() * 2 - 1) * spread_val;
-        dir = normalize(v_forward + v_right * sx + v_up * sy);
+        sx  = SH_SpreadJitter(self.wep_action_id + i, 0) * spread_val;
+        sy  = SH_SpreadJitter(self.wep_action_id + i, 1) * spread_val;
+        dir = normalize(fwd + rt * sx + up * sy);
         end = src + dir * 8192;
 
         traceline(src, end, MOVE_NORMAL, self);
 
         if (trace_fraction < 1.0)
+        {
             CSQC_BulletImpact(trace_endpos, trace_plane_normal);
+            if (cvar("cl_debug_impacts"))
+                CSQC_AddDebugImpact(trace_endpos, src, '0 1 0');
+        }
     }
 };
 
@@ -228,6 +177,8 @@ float(float range, string hit_snd1, string hit_snd2, string miss_snd) CSQC_Predi
     if (trace_fraction < 1.0)
     {
         CSQC_BulletImpactSilent(trace_endpos, trace_plane_normal);
+        if (cvar("cl_debug_impacts"))
+            CSQC_AddDebugImpact(trace_endpos, src, '0 1 0');
         if (hit_snd2 != "" && random() < 0.5)
             localsound(hit_snd2);
         else if (hit_snd1 != "")

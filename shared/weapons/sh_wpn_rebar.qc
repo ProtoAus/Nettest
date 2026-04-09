@@ -33,10 +33,16 @@ const float REBAR_CLOSE_DAMAGE        = 75;
 const float REBAR_MIN_DAMAGE          = 60;
 const float REBAR_DAMAGE_FALLOFF_RANGE = 4096;
 const float REBAR_DRYFIRE_DELAY       = 0.2;
+const float REBAR_VISUAL_SPEED        = 3000;   // visual projectile speed (hitscan is instant, this is cosmetic)
 
 // --- Pre-computed durations ---
 const float REBAR_DRAW_DURATION       = (REBAR_DRAW_END - REBAR_DRAW_START) * REBAR_FRAME_INTERVAL;
 const float REBAR_FIRE_DURATION       = (REBAR_FIRE_END - REBAR_FIRE_START) * REBAR_FRAME_INTERVAL;
+
+const string REBAR_VIEWMODEL    = "models/weapons/wpn_rebar/v_rebar.mdl";
+const string REBAR_WORLDMODEL   = "models/weapons/wpn_rebar/w_rebar.mdl";
+const string REBAR_DEPLOY_SOUND = "";
+const string REBAR_DISPLAY_NAME = "REBAR";
 
 // ============================================================
 //  SHARED — state machine
@@ -44,40 +50,16 @@ const float REBAR_FIRE_DURATION       = (REBAR_FIRE_END - REBAR_FIRE_START) * RE
 
 float(float now) SH_RebarTickState =
 {
-    float elapsed;
-    if (self.weaponstate == WS_IDLE) return 0;
-    elapsed = (self.wep_anim_start > 0) ? (now - self.wep_anim_start) : 0;
-
-    if (self.weaponstate == WS_DRAW)
-    {
-        if (elapsed >= REBAR_DRAW_DURATION)
-        { SH_WeaponEnterIdle(); return 1; }
-        return 0;
-    }
-    if (self.weaponstate == WS_FIRE)
-    {
-        if (elapsed >= REBAR_FIRE_DURATION)
-        { SH_WeaponEnterIdle(); return 1; }
-        return 0;
-    }
-    return 0;
+    return SH_SimpleTickState(now, REBAR_DRAW_DURATION, REBAR_FIRE_DURATION);
 };
 
+// REBAR_FIRE_DELAY (0.6) < REBAR_FIRE_DURATION (1.0), so we must block
+// re-fire during WS_FIRE.  SH_StandardTryFire only blocks RELOAD/DRAW,
+// so add an explicit idle gate before delegating.
 float(float now) SH_RebarTryFire =
 {
-    if (self.weaponstate == WS_DRAW) return 0;
-    if (now < self.attack_finished) return 0;
     if (self.weaponstate != WS_IDLE) return 0;
-
-    if (self.mag_rebar <= 0)
-    { self.attack_finished = now + REBAR_DRYFIRE_DELAY; return -1; }
-
-    self.mag_rebar       -= 1;
-    self.weaponstate      = WS_FIRE;
-    self.wep_action_id   += 1;
-    self.wep_anim_start   = now;
-    self.attack_finished  = now + REBAR_FIRE_DELAY;
-    return 1;
+    return SH_StandardTryFire(now, mag_rebar, REBAR_FIRE_DELAY, REBAR_DRYFIRE_DELAY);
 };
 
 // ============================================================
@@ -94,8 +76,8 @@ void() W_RebarStuckThink =
 
 void() W_RebarShoot =
 {
-    vector src, dir, end, flat_vel;
-    float spread, sx, sy, move_speed, dist, damage;
+    vector src, dir, end;
+    float dist, damage, saved_dim;
     entity stuck;
 
     makevectors(self.v_angle);
@@ -125,11 +107,29 @@ void() W_RebarShoot =
             stuck.angles = vectoangles(dir);
             stuck.solid = SOLID_NOT;
             stuck.movetype = MOVETYPE_NONE;
+            stuck.nodrawtoclient = self;   // shooter sees client-predicted one
             stuck.think = W_RebarStuckThink;
             stuck.nextthink = time + 30;
         }
 
-        sound(self, CHAN_AUTO, "sounds/weapons/wpn_rebar/stick.wav", 1, ATTN_NORM);
+        // Debug: send server hit position to shooter only
+        {
+            float dbg_saved_dim = dimension_send;
+            dimension_send = self.dimension_seen;
+            WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
+            WriteByte(MSG_MULTICAST, CSQC_EVENT_DEBUG_IMPACT);
+            WriteCoord(MSG_MULTICAST, trace_endpos_x);
+            WriteCoord(MSG_MULTICAST, trace_endpos_y);
+            WriteCoord(MSG_MULTICAST, trace_endpos_z);
+            multicast(trace_endpos, MULTICAST_PVS);
+            dimension_send = dbg_saved_dim;
+        }
+
+        // Exclude shooter from stick sound — they hear it from client prediction
+        saved_dim = dimension_send;
+        dimension_send = dimension_send & ~self.dimension_seen;
+        W_MulticastSound(trace_endpos, "sounds/weapons/wpn_rebar/stick.wav");
+        dimension_send = saved_dim;
     }
 };
 
@@ -166,16 +166,11 @@ void() W_RebarFrame =
 
 void() W_RebarEquip =
 {
-    self.weaponmodel = SH_WeaponViewModel(WEP_REBAR);
-    self.weapon_name = "REBAR";
-    self.weapon_draw_start_frame = REBAR_DRAW_START;
-    self.weapon_player_attack_anim = PLAYER_ATTACKANIM_SHOT;
-    self.fire = W_RebarFire; self.reload = __NULL__; self.wepframe = W_RebarFrame;
-    self.altfire = __NULL__; self.altrelease = __NULL__;
-    self.shoot = W_RebarShoot; self.special = __NULL__;
-    self.weaponstate = WS_DRAW; self.wep_action_id += 1;
-    self.wep_anim_start = time; self.weaponframe = REBAR_DRAW_START;
-    self.wep_nextframe = time + REBAR_FRAME_INTERVAL;
+    W_StandardEquipSetup(REBAR_VIEWMODEL, REBAR_DISPLAY_NAME, REBAR_DRAW_START, REBAR_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
+    self.fire     = W_RebarFire;
+    self.reload   = __NULL__;
+    self.wepframe = W_RebarFrame;
+    self.shoot    = W_RebarShoot;
     W_SetCrosshairProfile(0, 0, 320, 1, TRUE);
 };
 
@@ -225,7 +220,35 @@ void() CSQC_PredictRebarCommand =
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_rebar/fire.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(0, 0, 320);
+                CSQC_MuzzleFlash();
+
+                // Instant hitscan trace — spawn stuck rebar + impact at hit point
+                {
+                    makevectors(input_angles);
+                    vector fire_dir = v_forward;
+                    vector fire_org = self.origin + self.view_ofs + fire_dir * 16;
+                    traceline(fire_org, fire_org + fire_dir * 8192, MOVE_NORMAL, self);
+                    if (trace_fraction < 1.0)
+                    {
+                        vector hit_pos = trace_endpos;
+                        vector hit_normal = trace_plane_normal;
+
+                        CSQC_BulletImpact(hit_pos, hit_normal);
+                        if (cvar("cl_debug_impacts"))
+                            CSQC_AddDebugImpact(hit_pos, fire_org, '0 1 0');
+                        localsound("sounds/weapons/wpn_rebar/stick.wav");
+
+                        entity stuck = spawn();
+                        setmodel(stuck, "models/weapons/wpn_rebar/rebar.mdl");
+                        setorigin(stuck, hit_pos + hit_normal * 2);
+                        stuck.angles = vectoangles(fire_dir);
+                        stuck.movetype = MOVETYPE_NONE;
+                        stuck.solid = SOLID_NOT;
+                        stuck.drawmask = MASK_ENGINE;
+                        stuck.think = CSQC_FakeProjectileExpire;
+                        stuck.nextthink = time + 30;
+                    }
+                }
             }
         }
         else if (r == -1)
@@ -240,14 +263,34 @@ void() CSQC_PredictRebarCommand =
 
 float(float elapsed) CSQC_RebarDisplayFrame =
 {
-    float frame;
-    if (predicted_player.weaponstate == WS_DRAW)
-    { frame = REBAR_DRAW_START + elapsed / REBAR_FRAME_INTERVAL; return bound(REBAR_DRAW_START, frame, REBAR_DRAW_END - 1); }
-    if (predicted_player.weaponstate == WS_FIRE)
-    { frame = REBAR_FIRE_START + elapsed / REBAR_FRAME_INTERVAL; return bound(REBAR_FIRE_START, frame, REBAR_FIRE_END - 1); }
-    if (predicted_player.mag_rebar <= 0)
+    float frame = CSQC_StandardDisplayFrame(elapsed, REBAR_FRAME_INTERVAL,
+        REBAR_DRAW_START, REBAR_DRAW_END,
+        REBAR_FIRE_START, REBAR_FIRE_END,
+        0, 0,
+        REBAR_IDLE_FRAME);
+
+    // Empty-mag idle uses a different frame
+    if (predicted_player.weaponstate == WS_IDLE && predicted_player.mag_rebar <= 0)
         return REBAR_EMPTY_IDLE_FRAME;
-    return REBAR_IDLE_FRAME;
+
+    return frame;
+};
+
+void() CSQC_RebarDropClear =
+{
+	self.mag_rebar = 0;
+};
+
+void() CSQC_RebarEquip =
+{
+	self.weapon_name         = REBAR_DISPLAY_NAME;
+	self.weapon_viewmodel    = REBAR_VIEWMODEL;
+	self.weapon_worldmodel   = REBAR_WORLDMODEL;
+	self.weapon_deploy_sound = REBAR_DEPLOY_SOUND;
+	self.csqc_predict_cmd    = CSQC_PredictRebarCommand;
+	self.csqc_predict_reload = __NULL__;
+	self.csqc_display_frame  = CSQC_RebarDisplayFrame;
+	self.csqc_drop_clear     = CSQC_RebarDropClear;
 };
 
 #endif // CSQC

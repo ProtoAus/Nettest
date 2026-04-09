@@ -41,6 +41,11 @@ const float CROWBAR_DRAW_DURATION     = (CROWBAR_DRAW_END - CROWBAR_DRAW_START) 
 // Fire duration is variable (depends on which anim plays), use longest
 const float CROWBAR_FIRE_MAX_DURATION = (CROWBAR_HIT2_END - CROWBAR_HIT2_START) * CROWBAR_FRAME_INTERVAL;
 
+const string CROWBAR_VIEWMODEL    = "models/weapons/wpn_hlcrowbar/v_crowbar.mdl";
+const string CROWBAR_WORLDMODEL   = "models/weapons/wpn_hlcrowbar/w_crowbar.mdl";
+const string CROWBAR_DEPLOY_SOUND = "";
+const string CROWBAR_DISPLAY_NAME = "CROWBAR";
+
 // ============================================================
 //  SHARED — state machine
 // ============================================================
@@ -116,6 +121,19 @@ void() W_CrowbarSwing =
 
     if (trace_fraction < 1.0)
     {
+        // Debug: send server hit position to shooter only
+        {
+            float saved_dim = dimension_send;
+            dimension_send = self.dimension_seen;
+            WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
+            WriteByte(MSG_MULTICAST, CSQC_EVENT_DEBUG_IMPACT);
+            WriteCoord(MSG_MULTICAST, trace_endpos_x);
+            WriteCoord(MSG_MULTICAST, trace_endpos_y);
+            WriteCoord(MSG_MULTICAST, trace_endpos_z);
+            multicast(trace_endpos, MULTICAST_PVS);
+            dimension_send = saved_dim;
+        }
+
         // Pick a hit animation
         if (random() < 0.5)
             self.weaponframe = CROWBAR_HIT1_START;
@@ -201,8 +219,8 @@ void() W_CrowbarFrame =
 
 void() W_CrowbarEquip =
 {
-    self.weaponmodel = SH_WeaponViewModel(WEP_HLCROWBAR);
-    self.weapon_name = "CROWBAR";
+    self.weaponmodel = CROWBAR_VIEWMODEL;
+    self.weapon_name = CROWBAR_DISPLAY_NAME;
     self.weapon_draw_start_frame = CROWBAR_DRAW_START;
     self.weapon_player_attack_anim = PLAYER_ATTACKANIM_MELEE;
     self.fire = W_CrowbarFire;
@@ -304,6 +322,22 @@ float(float elapsed) CSQC_CrowbarDisplayFrame =
         return bound(csqc_crowbar_anim_start, frame, csqc_crowbar_anim_end - 1);
     }
     return CROWBAR_IDLE_START;
+};
+
+void() CSQC_CrowbarDropClear =
+{
+};
+
+void() CSQC_CrowbarEquip =
+{
+	self.weapon_name         = CROWBAR_DISPLAY_NAME;
+	self.weapon_viewmodel    = CROWBAR_VIEWMODEL;
+	self.weapon_worldmodel   = CROWBAR_WORLDMODEL;
+	self.weapon_deploy_sound = CROWBAR_DEPLOY_SOUND;
+	self.csqc_predict_cmd    = CSQC_PredictCrowbarCommand;
+	self.csqc_predict_reload = __NULL__;
+	self.csqc_display_frame  = CSQC_CrowbarDisplayFrame;
+	self.csqc_drop_clear     = CSQC_CrowbarDropClear;
 };
 
 #endif // CSQC

@@ -44,7 +44,7 @@ const float MAX_AMMO_M4A1             = 90;
 
 // --- Balance ---
 const float M4A1_BASE_SPREAD            = 0.01;
-const float M4A1_MOVE_SPREAD            = 0.09;
+const float M4A1_MOVE_SPREAD            = 0.06;
 const float M4A1_FULL_SPREAD_SPEED      = 320;
 const float M4A1_CLOSE_DAMAGE           = 18;
 const float M4A1_MIN_DAMAGE             = 10;
@@ -61,6 +61,12 @@ const float M4A1_RELOAD_APPLY_TIME    = (M4A1_RELOAD_APPLY - M4A1_RELOAD_START) 
 const float M4A1_SILENCER_DURATION    = (M4A1_SILENCER_END - M4A1_SILENCER_START) * M4A1_FRAME_INTERVAL;
 const float M4A1_SILENCER_SWAP_TIME   = (M4A1_SILENCER_SWAP_FRAME - M4A1_SILENCER_START) * M4A1_FRAME_INTERVAL;
 
+const string M4A1_VIEWMODEL       = "models/weapons/wpn_csm4a1/v_m4a1.mdl";
+const string M4A1_VIEWMODEL_UNSIL = "models/weapons/wpn_csm4a1/v_m4a1_unsil.mdl";
+const string M4A1_WORLDMODEL      = "models/weapons/wpn_csm4a1/w_m4a1.mdl";
+const string M4A1_DEPLOY_SOUND    = "sounds/weapons/wpn_csm4a1/deploy.wav";
+const string M4A1_DISPLAY_NAME    = "M4A1";
+
 // ============================================================
 //  SHARED — state machine
 // ============================================================
@@ -69,121 +75,45 @@ const float M4A1_SILENCER_SWAP_TIME   = (M4A1_SILENCER_SWAP_FRAME - M4A1_SILENCE
 string() SH_M4A1ViewModel =
 {
     if (self.m4a1_silenced)
-        return "models/weapons/wpn_csm4a1/v_m4a1.mdl";
-    return "models/weapons/wpn_csm4a1/v_m4a1_unsil.mdl";
+        return M4A1_VIEWMODEL;
+    return M4A1_VIEWMODEL_UNSIL;
 };
 
-// Returns bitmask: bit 0 = idle, bit 1 = reload ammo applied, bit 2 = silencer toggled
+// Returns bitmask: bit 0 = idle, bit 1 = reload ammo applied
 float(float now) SH_M4A1TickState =
 {
-    float elapsed;
-    float result;
-    float needed;
+    float elapsed, result;
 
-    if (self.weaponstate == WS_IDLE)
-        return 0;
-
-    elapsed = (self.wep_anim_start > 0) ? (now - self.wep_anim_start) : 0;
-    result = 0;
-
-    if (self.weaponstate == WS_DRAW)
-    {
-        if (elapsed >= M4A1_DRAW_DURATION)
-        {
-            SH_WeaponEnterIdle();
-            result = result | 1;
-        }
-        return result;
-    }
-
-    if (self.weaponstate == WS_FIRE)
-    {
-        if (elapsed >= M4A1_FIRE_DURATION)
-        {
-            SH_WeaponEnterIdle();
-            result = result | 1;
-        }
-        return result;
-    }
-
-    if (self.weaponstate == WS_RELOAD)
-    {
-        if (elapsed >= M4A1_RELOAD_APPLY_TIME)
-        {
-            needed = MAX_MAG_M4A1 - self.mag_m4a1;
-            if (needed > 0)
-            {
-                if (self.ammo_m4a1 >= needed)
-                {
-                    self.mag_m4a1  += needed;
-                    self.ammo_m4a1 -= needed;
-                }
-                else
-                {
-                    self.mag_m4a1  += self.ammo_m4a1;
-                    self.ammo_m4a1  = 0;
-                }
-                result = result | 2;
-            }
-        }
-
-        if (elapsed >= M4A1_RELOAD_DURATION)
-        {
-            SH_WeaponEnterIdle();
-            result = result | 1;
-        }
-        return result;
-    }
-
+    // WS_SPECIAL (silencer toggle) — handle locally
     if (self.weaponstate == WS_SPECIAL)
     {
+        elapsed = (self.wep_anim_start > 0) ? (now - self.wep_anim_start) : 0;
         if (elapsed >= M4A1_SILENCER_DURATION)
         {
-            // Toggle silencer when animation completes — idempotent
-            // because SH_WeaponEnterIdle sets WS_IDLE, preventing
-            // re-entry on subsequent calls.
             self.m4a1_silenced = !self.m4a1_silenced;
             SH_WeaponEnterIdle();
-            result = result | 1;
+            return 1;
         }
-        return result;
+        return 0;
     }
 
-    return 0;
+    return SH_StandardTickState(now, mag_m4a1, ammo_m4a1, MAX_MAG_M4A1,
+        M4A1_DRAW_DURATION, M4A1_FIRE_DURATION,
+        M4A1_RELOAD_DURATION, M4A1_RELOAD_APPLY_TIME);
 };
 
 float(float now) SH_M4A1TryFire =
 {
-    if (self.weaponstate == WS_RELOAD || self.weaponstate == WS_DRAW || self.weaponstate == WS_SPECIAL)
+    if (self.weaponstate == WS_SPECIAL)
         return 0;
-    if (now < self.attack_finished)
-        return 0;
-
-    if (self.mag_m4a1 <= 0)
-    {
-        self.attack_finished = now + M4A1_DRYFIRE_DELAY;
-        return -1;
-    }
-
-    self.mag_m4a1        -= 1;
-    self.weaponstate      = WS_FIRE;
-    self.wep_action_id   += 1;
-    self.wep_anim_start   = now;
-    self.attack_finished  = now + M4A1_FIRE_DELAY;
-    return 1;
+    return SH_StandardTryFire(now, mag_m4a1, M4A1_FIRE_DELAY, M4A1_DRYFIRE_DELAY);
 };
 
 float(float now) SH_M4A1TryReload =
 {
-    if (self.weaponstate == WS_RELOAD || self.weaponstate == WS_DRAW || self.weaponstate == WS_SPECIAL)
+    if (self.weaponstate == WS_SPECIAL)
         return 0;
-    if (self.mag_m4a1 >= MAX_MAG_M4A1 || self.ammo_m4a1 <= 0)
-        return 0;
-
-    self.weaponstate     = WS_RELOAD;
-    self.wep_action_id  += 1;
-    self.wep_anim_start  = now;
-    return 1;
+    return SH_StandardTryReload(now, mag_m4a1, ammo_m4a1, MAX_MAG_M4A1);
 };
 
 float(float now) SH_M4A1TryAltFire =
@@ -230,10 +160,16 @@ void() W_M4A1Shoot =
 
     spread = M4A1_BASE_SPREAD + (move_speed / M4A1_FULL_SPREAD_SPEED) * M4A1_MOVE_SPREAD;
     spread = min(spread, M4A1_BASE_SPREAD + M4A1_MOVE_SPREAD);
+    spread = spread * SH_GetSpreadScale() + sh_spread_flat;
 
-    sx  = (random() * 2 - 1) * spread;
-    sy  = (random() * 2 - 1) * spread;
-    dir = normalize(v_forward + v_right * sx + v_up * sy);
+    if (spread > 0)
+    {
+        sx  = SH_SpreadJitter(self.wep_action_id, 0) * spread;
+        sy  = SH_SpreadJitter(self.wep_action_id, 1) * spread;
+        dir = normalize(v_forward + v_right * sx + v_up * sy);
+    }
+    else
+        dir = v_forward;
     end = src + dir * 8192;
 
     traceline(src, end, MOVE_NORMAL | MOVE_LAGGED, self);
@@ -261,6 +197,19 @@ void() W_M4A1Shoot =
         else
         {
             W_ImpactEffect(trace_endpos);
+        }
+
+        // Debug: send server hit position to shooter only
+        {
+            float saved_dim = dimension_send;
+            dimension_send = self.dimension_seen;
+            WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
+            WriteByte(MSG_MULTICAST, CSQC_EVENT_DEBUG_IMPACT);
+            WriteCoord(MSG_MULTICAST, trace_endpos_x);
+            WriteCoord(MSG_MULTICAST, trace_endpos_y);
+            WriteCoord(MSG_MULTICAST, trace_endpos_z);
+            multicast(trace_endpos, MULTICAST_PVS);
+            dimension_send = saved_dim;
         }
     }
 };
@@ -359,22 +308,14 @@ void() W_M4A1Frame =
 
 void() W_M4A1Equip =
 {
-    self.weaponmodel    = SH_M4A1ViewModel();
-    self.weapon_name    = "M4A1";
-    self.weapon_draw_start_frame = M4A1_DRAW_START;
-    self.weapon_player_attack_anim = PLAYER_ATTACKANIM_SHOT;
-    self.fire           = W_M4A1Fire;
-    self.reload         = W_M4A1Reload;
-    self.wepframe       = W_M4A1Frame;
-    self.altfire         = W_M4A1AltFire;
-    self.altrelease      = __NULL__;
-    self.shoot           = W_M4A1Shoot;
-    self.special         = __NULL__;
-    self.weaponstate    = WS_DRAW;
-    self.wep_action_id += 1;
-    self.wep_anim_start = time;
-    self.weaponframe    = M4A1_DRAW_START;
-    self.wep_nextframe  = time + M4A1_FRAME_INTERVAL;
+    W_StandardEquipSetup(M4A1_VIEWMODEL, M4A1_DISPLAY_NAME, M4A1_DRAW_START,
+        M4A1_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
+    self.weaponmodel = SH_M4A1ViewModel();  // override: silencer-dependent
+    self.fire     = W_M4A1Fire;
+    self.reload   = W_M4A1Reload;
+    self.wepframe = W_M4A1Frame;
+    self.altfire  = W_M4A1AltFire;
+    self.shoot    = W_M4A1Shoot;
     W_SetCrosshairProfile(M4A1_BASE_SPREAD, M4A1_MOVE_SPREAD, M4A1_FULL_SPREAD_SPEED, 1.9, TRUE);
 };
 
@@ -530,28 +471,35 @@ void() CSQC_PredictM4A1Reload =
 float(float elapsed) CSQC_M4A1DisplayFrame =
 {
     float frame;
-
-    if (predicted_player.weaponstate == WS_DRAW)
-    {
-        frame = M4A1_DRAW_START + elapsed / M4A1_FRAME_INTERVAL;
-        return bound(M4A1_DRAW_START, frame, M4A1_DRAW_END - 1);
-    }
-    if (predicted_player.weaponstate == WS_FIRE)
-    {
-        frame = M4A1_FIRE_START + elapsed / M4A1_FRAME_INTERVAL;
-        return bound(M4A1_FIRE_START, frame, M4A1_FIRE_END - 1);
-    }
-    if (predicted_player.weaponstate == WS_RELOAD)
-    {
-        frame = M4A1_RELOAD_START + elapsed / M4A1_FRAME_INTERVAL;
-        return bound(M4A1_RELOAD_START, frame, M4A1_RELOAD_END - 1);
-    }
     if (predicted_player.weaponstate == WS_SPECIAL)
     {
         frame = M4A1_SILENCER_START + elapsed / M4A1_FRAME_INTERVAL;
         return bound(M4A1_SILENCER_START, frame, M4A1_SILENCER_END - 1);
     }
-    return M4A1_IDLE_FRAME;
+    return CSQC_StandardDisplayFrame(elapsed, M4A1_FRAME_INTERVAL,
+        M4A1_DRAW_START, M4A1_DRAW_END,
+        M4A1_FIRE_START, M4A1_FIRE_END,
+        M4A1_RELOAD_START, M4A1_RELOAD_END,
+        M4A1_IDLE_FRAME);
+};
+
+void() CSQC_M4A1DropClear =
+{
+	self.mag_m4a1 = 0;
+	self.ammo_m4a1 = 0;
+	self.m4a1_silenced = 0;
+};
+
+void() CSQC_M4A1Equip =
+{
+	self.weapon_name         = M4A1_DISPLAY_NAME;
+	self.weapon_viewmodel    = SH_M4A1ViewModel();
+	self.weapon_worldmodel   = M4A1_WORLDMODEL;
+	self.weapon_deploy_sound = M4A1_DEPLOY_SOUND;
+	self.csqc_predict_cmd    = CSQC_PredictM4A1Command;
+	self.csqc_predict_reload = CSQC_PredictM4A1Reload;
+	self.csqc_display_frame  = CSQC_M4A1DisplayFrame;
+	self.csqc_drop_clear     = CSQC_M4A1DropClear;
 };
 
 #endif // CSQC

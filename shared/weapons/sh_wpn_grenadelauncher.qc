@@ -38,46 +38,27 @@ const float GL_DRYFIRE_DELAY          = 0.2;
 const float GL_DRAW_DURATION          = (GL_DRAW_END - GL_DRAW_START) * GL_FRAME_INTERVAL;
 const float GL_FIRE_DURATION          = (GL_FIRE_END - GL_FIRE_START) * GL_FRAME_INTERVAL;
 
+const string GL_VIEWMODEL    = "models/weapons/wpn_grenadelauncher/v_grenlauncher.mdl";
+const string GL_WORLDMODEL   = "models/weapons/wpn_grenadelauncher/w_grenlauncher.mdl";
+const string GL_DEPLOY_SOUND = "";
+const string GL_DISPLAY_NAME = "GL";
+
 // ============================================================
 //  SHARED — state machine
 // ============================================================
 
 float(float now) SH_GLTickState =
 {
-    float elapsed;
-    if (self.weaponstate == WS_IDLE) return 0;
-    elapsed = (self.wep_anim_start > 0) ? (now - self.wep_anim_start) : 0;
-
-    if (self.weaponstate == WS_DRAW)
-    {
-        if (elapsed >= GL_DRAW_DURATION)
-        { SH_WeaponEnterIdle(); return 1; }
-        return 0;
-    }
-    if (self.weaponstate == WS_FIRE)
-    {
-        if (elapsed >= GL_FIRE_DURATION)
-        { SH_WeaponEnterIdle(); return 1; }
-        return 0;
-    }
-    return 0;
+    return SH_SimpleTickState(now, GL_DRAW_DURATION, GL_FIRE_DURATION);
 };
 
+// GL_FIRE_DELAY (0.8) < GL_FIRE_DURATION (1.0), so we must block
+// re-fire during WS_FIRE.  SH_StandardTryFire only blocks RELOAD/DRAW,
+// so add an explicit idle gate before delegating.
 float(float now) SH_GLTryFire =
 {
-    if (self.weaponstate == WS_DRAW) return 0;
-    if (now < self.attack_finished) return 0;
     if (self.weaponstate != WS_IDLE) return 0;
-
-    if (self.mag_grenadelauncher <= 0)
-    { self.attack_finished = now + GL_DRYFIRE_DELAY; return -1; }
-
-    self.mag_grenadelauncher -= 1;
-    self.weaponstate      = WS_FIRE;
-    self.wep_action_id   += 1;
-    self.wep_anim_start   = now;
-    self.attack_finished  = now + GL_FIRE_DELAY;
-    return 1;
+    return SH_StandardTryFire(now, mag_grenadelauncher, GL_FIRE_DELAY, GL_DRYFIRE_DELAY);
 };
 
 // ============================================================
@@ -93,13 +74,19 @@ void(entity player) W_GLPickupCopy =
 void() W_GrenadeExplode =
 {
     float dist, damage;
+    float saved_dim;
     entity e;
 
-    // Explosion sound + visual (offset 8 units up off the ground)
-    sound(self, CHAN_WEAPON, "sounds/weapons/explode1.wav", 1, ATTN_NORM);
+    // Exclude shooter from explosion effects — they see the client-predicted one
+    saved_dim = dimension_send;
+    if (self.owner)
+        dimension_send = dimension_send & ~self.owner.dimension_seen;
+
     te_explosion(self.origin + '0 0 8');
 
-    // Radius damage
+    dimension_send = saved_dim;
+
+    // Radius damage + push-back
     e = findradius(self.origin, GL_EXPLOSION_RADIUS);
     while (e)
     {
@@ -109,6 +96,17 @@ void() W_GrenadeExplode =
             damage = W_LinearDamageFalloff(dist, GL_EXPLOSION_DAMAGE, GL_EXPLOSION_MIN_DAMAGE, GL_EXPLOSION_RADIUS);
             W_ApplyDamage(self.owner, e, damage);
         }
+
+        // Push players away from explosion
+        if (e.classname == "player" && e.health > 0)
+        {
+            dist = vlen(e.origin - self.origin);
+            float push_scale = 1 - (dist / GL_EXPLOSION_RADIUS);
+            vector push_dir = normalize(e.origin - self.origin);
+            e.velocity += push_dir * 400 * push_scale;
+            e.velocity_z += 150 * push_scale;
+        }
+
         e = e.chain;
     }
 
@@ -182,16 +180,8 @@ void() W_GLFrame =
 
 void() W_GLEquip =
 {
-    self.weaponmodel = SH_WeaponViewModel(WEP_GRENADELAUNCHER);
-    self.weapon_name = "GL";
-    self.weapon_draw_start_frame = GL_DRAW_START;
-    self.weapon_player_attack_anim = PLAYER_ATTACKANIM_SHOT;
+    W_StandardEquipSetup(GL_VIEWMODEL, GL_DISPLAY_NAME, GL_DRAW_START, GL_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
     self.fire = W_GLFire; self.reload = __NULL__; self.wepframe = W_GLFrame;
-    self.altfire = __NULL__; self.altrelease = __NULL__;
-    self.shoot = __NULL__; self.special = __NULL__;
-    self.weaponstate = WS_DRAW; self.wep_action_id += 1;
-    self.wep_anim_start = time; self.weaponframe = GL_DRAW_START;
-    self.wep_nextframe = time + GL_FRAME_INTERVAL;
     W_SetCrosshairProfile(0, 0, 320, 1, TRUE);
 };
 
@@ -228,6 +218,20 @@ void() weapon_grenadelauncher =
 
 #ifdef CSQC
 
+void() CSQC_FakeGrenadeExplode =
+{
+    pointsound(self.origin, "sounds/weapons/explode1.wav", 1, ATTN_NORM);
+    te_explosion(self.origin + '0 0 8');
+    remove(self);
+};
+
+void() CSQC_FakeGrenadeTouch =
+{
+    if (other == self.owner)
+        return;
+    CSQC_FakeGrenadeExplode();
+};
+
 void() CSQC_PredictGLCommand =
 {
     float r;
@@ -254,17 +258,18 @@ void() CSQC_PredictGLCommand =
                     entity gren = spawn();
                     makevectors(input_angles);
                     setmodel(gren, "models/weapons/wpn_grenadelauncher/grenade.mdl");
+                    setsize(gren, '-2 -2 -2', '2 2 2');
                     setorigin(gren, self.origin + self.view_ofs + v_forward * 16);
+                    gren.owner = self;
                     gren.velocity = self.velocity + v_forward * GL_PROJECTILE_SPEED + v_up * GL_PROJECTILE_UPSPEED;
                     gren.avelocity = '180 360 120';
                     gren.movetype = MOVETYPE_TOSS;
-                    gren.solid = SOLID_NOT;
+                    gren.solid = SOLID_BBOX;
                     gren.gravity = 1;
                     gren.drawmask = MASK_ENGINE;
-                    gren.think = CSQC_FakeProjectileExpire;
-                    // Expire based on ping so it disappears when server grenade arrives
-                    float ping_est = getplayerkeyfloat(player_localnum, INFOKEY_P_PING, 0) * 0.001;
-                    gren.nextthink = time + bound(0.1, ping_est, 1.0) + 0.2;
+                    gren.touch = CSQC_FakeGrenadeTouch;
+                    gren.think = CSQC_FakeGrenadeExplode;
+                    gren.nextthink = time + 5;
                 }
             }
         }
@@ -280,12 +285,28 @@ void() CSQC_PredictGLCommand =
 
 float(float elapsed) CSQC_GLDisplayFrame =
 {
-    float frame;
-    if (predicted_player.weaponstate == WS_DRAW)
-    { frame = GL_DRAW_START + elapsed / GL_FRAME_INTERVAL; return bound(GL_DRAW_START, frame, GL_DRAW_END - 1); }
-    if (predicted_player.weaponstate == WS_FIRE)
-    { frame = GL_FIRE_START + elapsed / GL_FRAME_INTERVAL; return bound(GL_FIRE_START, frame, GL_FIRE_END - 1); }
-    return GL_IDLE_FRAME;
+    return CSQC_StandardDisplayFrame(elapsed, GL_FRAME_INTERVAL,
+        GL_DRAW_START, GL_DRAW_END,
+        GL_FIRE_START, GL_FIRE_END,
+        0, 0,
+        GL_IDLE_FRAME);
+};
+
+void() CSQC_GLDropClear =
+{
+	self.mag_grenadelauncher = 0;
+};
+
+void() CSQC_GLEquip =
+{
+	self.weapon_name         = GL_DISPLAY_NAME;
+	self.weapon_viewmodel    = GL_VIEWMODEL;
+	self.weapon_worldmodel   = GL_WORLDMODEL;
+	self.weapon_deploy_sound = GL_DEPLOY_SOUND;
+	self.csqc_predict_cmd    = CSQC_PredictGLCommand;
+	self.csqc_predict_reload = __NULL__;
+	self.csqc_display_frame  = CSQC_GLDisplayFrame;
+	self.csqc_drop_clear     = CSQC_GLDropClear;
 };
 
 #endif // CSQC

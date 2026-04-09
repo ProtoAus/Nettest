@@ -28,6 +28,11 @@ const float WRENCH_RANGE              = 64;
 const float WRENCH_DRAW_DURATION     = (WRENCH_DRAW_END - WRENCH_DRAW_START) * WRENCH_FRAME_INTERVAL;
 const float WRENCH_FIRE_DURATION     = (WRENCH_FIRE_END - WRENCH_FIRE_START) * WRENCH_FRAME_INTERVAL;
 
+const string WRENCH_VIEWMODEL    = "models/weapons/wpn_wrench/v_wrench.mdl";
+const string WRENCH_WORLDMODEL   = "models/weapons/wpn_wrench/g_wrench.mdl";
+const string WRENCH_DEPLOY_SOUND = "";
+const string WRENCH_DISPLAY_NAME = "WRENCH";
+
 // ============================================================
 //  SHARED — state machine
 // ============================================================
@@ -100,6 +105,19 @@ void() W_WrenchSwing =
 
     if (trace_fraction < 1.0)
     {
+        // Debug: send server hit position to shooter only
+        {
+            float saved_dim = dimension_send;
+            dimension_send = self.dimension_seen;
+            WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
+            WriteByte(MSG_MULTICAST, CSQC_EVENT_DEBUG_IMPACT);
+            WriteCoord(MSG_MULTICAST, trace_endpos_x);
+            WriteCoord(MSG_MULTICAST, trace_endpos_y);
+            WriteCoord(MSG_MULTICAST, trace_endpos_z);
+            multicast(trace_endpos, MULTICAST_PVS);
+            dimension_send = saved_dim;
+        }
+
         if (random() < 0.5)
             sound(self, CHAN_WEAPON, "sounds/weapons/wpn_wrench/wrenchclank1.wav", 1, ATTN_NORM);
         else
@@ -148,8 +166,8 @@ void() W_WrenchFrame =
 
 void() W_WrenchEquip =
 {
-    self.weaponmodel    = SH_WeaponViewModel(WEP_WRENCH);
-    self.weapon_name    = "WRENCH";
+    self.weaponmodel    = WRENCH_VIEWMODEL;
+    self.weapon_name    = WRENCH_DISPLAY_NAME;
     self.weapon_draw_start_frame = WRENCH_DRAW_START;
     self.weapon_player_attack_anim = PLAYER_ATTACKANIM_MELEE;
     self.fire           = W_WrenchFire;
@@ -243,6 +261,22 @@ float(float elapsed) CSQC_WrenchDisplayFrame =
         return bound(WRENCH_FIRE_START, frame, WRENCH_FIRE_END - 1);
     }
     return WRENCH_IDLE_FRAME;
+};
+
+void() CSQC_WrenchDropClear =
+{
+};
+
+void() CSQC_WrenchEquip =
+{
+	self.weapon_name         = WRENCH_DISPLAY_NAME;
+	self.weapon_viewmodel    = WRENCH_VIEWMODEL;
+	self.weapon_worldmodel   = WRENCH_WORLDMODEL;
+	self.weapon_deploy_sound = WRENCH_DEPLOY_SOUND;
+	self.csqc_predict_cmd    = CSQC_PredictWrenchCommand;
+	self.csqc_predict_reload = __NULL__;
+	self.csqc_display_frame  = CSQC_WrenchDisplayFrame;
+	self.csqc_drop_clear     = CSQC_WrenchDropClear;
 };
 
 #endif // CSQC

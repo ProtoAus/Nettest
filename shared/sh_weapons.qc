@@ -28,6 +28,8 @@ const float WEP_CSMP5            = 17;
 const float WEP_REBAR            = 18;
 const float WEP_CSAWP            = 19;
 const float WEP_WRENCH           = 20;
+const float WEP_GLOCK            = 21;
+const float WEP_G3SG1            = 22;
 
 // --- Slot IDs ---
 const float SLOT_NONE      = 0;
@@ -59,6 +61,8 @@ const float WS_SPECIAL = 4;   // alt-fire / stab / throw
 const float CSQC_EVENT_IMPACT  = 1;   // bullet impact effect
 const float CSQC_EVENT_SHELL   = 2;   // shell casing eject
 const float CSQC_EVENT_MAGDROP = 3;   // magazine drop
+const float CSQC_EVENT_POINTSOUND = 4; // positioned sound (respects dimension masking)
+const float CSQC_EVENT_DEBUG_IMPACT = 5; // debug: server bullet hit position
 
 // --- Shell/mag type IDs (sent in multicast events) ---
 const float SHELL_9MM       = 0;
@@ -118,6 +122,17 @@ const float PLAYER_ATTACKANIM_MELEE = 2;
 .void() altrelease;           // called when alt-fire button released
 .void() shoot;                // raw attack trace (called by frame at the hit frame)
 .void() special;              // weapon-specific action (throw, inspect, etc.)
+
+// --- CSQC prediction function pointers (set by per-weapon CSQC equip) ---
+.void() csqc_predict_cmd;             // per-frame weapon logic (fire, sounds, etc.)
+.void() csqc_predict_reload;          // reload initiation
+.void() csqc_drop_clear;              // zero this weapon's ammo fields on drop
+.float(float elapsed) csqc_display_frame;  // returns viewmodel animation frame
+
+// --- Weapon data fields (set during equip, used by HUD/viewmodel/drop) ---
+.string weapon_viewmodel;              // view model path
+.string weapon_worldmodel;             // world model path
+.string weapon_deploy_sound;           // deploy sound (empty string = none)
 
 // --- World weapon entity fields ---
 .float weapon_slot;           // SLOT_* this pickup belongs to

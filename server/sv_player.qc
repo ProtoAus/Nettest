@@ -269,13 +269,9 @@ void() PlayerPreThink =
 		return;
 	}
 
-	// Freeze time: suppress all actions (movement blocked via PM_MOVETYPE_NONE)
+	// Freeze time: suppress primary attack but allow everything else
 	if (round_phase == ROUND_PHASE_FREEZE)
-	{
-		self.velocity = '0 0 0';
-		self.impulse = 0;
-		return;
-	}
+		self.button0 = 0;
 
 	CheckImpulses();
 	W_WeaponFrame();
@@ -421,6 +417,8 @@ float(entity playerent, float changedflags) PM_PredictionProxy_SendEntity =
 	WriteFloat(MSG_ENTITY, self.pm_teleport_time);
 	WriteFloat(MSG_ENTITY, self.pm_ladder_detach_time);
 	WriteFloat(MSG_ENTITY, self.pm_fuser2);
+	WriteFloat(MSG_ENTITY, self.spread_penalty);
+	WriteFloat(MSG_ENTITY, self.fire_spread_penalty);
 	WriteFloat(MSG_ENTITY, self.pm_step_time);
 
 	// Weapon state  (for client-side fire prediction)
@@ -467,6 +465,10 @@ float(entity playerent, float changedflags) PM_PredictionProxy_SendEntity =
 	WriteFloat(MSG_ENTITY, self.mag_grenadelauncher);
 	WriteFloat(MSG_ENTITY, self.mag_rebar);
 	WriteFloat(MSG_ENTITY, self.ammo_gauss);
+	WriteFloat(MSG_ENTITY, self.mag_glock);
+	WriteFloat(MSG_ENTITY, self.ammo_glock);
+	WriteFloat(MSG_ENTITY, self.mag_g3sg1);
+	WriteFloat(MSG_ENTITY, self.ammo_g3sg1);
 
 	return TRUE;
 };
@@ -496,6 +498,8 @@ void(entity player) PM_SyncPredictionProxy =
 	proxy.pm_teleport_time        = player.pm_teleport_time;
 	proxy.pm_ladder_detach_time   = player.pm_ladder_detach_time;
 	proxy.pm_fuser2               = player.pm_fuser2;
+	proxy.spread_penalty          = player.spread_penalty;
+	proxy.fire_spread_penalty     = player.fire_spread_penalty;
 	proxy.pm_step_time            = player.pm_step_time;
 
 	// Weapon state
@@ -540,6 +544,10 @@ void(entity player) PM_SyncPredictionProxy =
 	proxy.mag_grenadelauncher = player.mag_grenadelauncher;
 	proxy.mag_rebar       = player.mag_rebar;
 	proxy.ammo_gauss      = player.ammo_gauss;
+	proxy.mag_glock       = player.mag_glock;
+	proxy.ammo_glock      = player.ammo_glock;
+	proxy.mag_g3sg1       = player.mag_g3sg1;
+	proxy.ammo_g3sg1      = player.ammo_g3sg1;
 
 	proxy.SendFlags = proxy.SendFlags | PM_CSQC_PROXY_SEND_STATE;
 };
@@ -619,73 +627,43 @@ void() PlayerSpawn =
 		entity saved_self = self;
 		makevectors(self.angles);
 
-		self = spawn();
-		setorigin(self, saved_self.origin + v_forward * 64);
-		weapon_ak47();
+		// Spawn weapons in a grid: 6 columns wide, 48 units apart
+		// Row spacing = 64 forward, Column spacing = 48 right
+		float col, row;
+		vector base = saved_self.origin;
 
-		self = spawn();
-		setorigin(self, saved_self.origin + v_forward * 96);
-		weapon_pistol();
+		// Row 1
+		col = 0; row = 0;
+		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_ak47();        col++;
+		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_m4a1();         col++;
+		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_csawp();        col++;
+		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_scout();        col++;
+		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_g3sg1();        col++;
+		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_m249();
 
-		self = spawn();
-		setorigin(self, saved_self.origin + v_forward * 128);
-		weapon_flakshotgun();
+		// Row 2
+		col = 0; row = 1;
+		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_csmp5();        col++;
+		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_dod98k();       col++;
+		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_crossbow();     col++;
+		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_grenadelauncher(); col++;
+		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_rebar();        col++;
+		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_gauss();
 
-		self = spawn();
-		setorigin(self, saved_self.origin + v_forward * 160);
-		weapon_scout();
+		// Row 3: shotguns + flak
+		col = 0; row = 2;
+		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_hlshotgun();    col++;
+		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_csm3();         col++;
+		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_flakshotgun();
 
-		self = spawn();
-		setorigin(self, saved_self.origin + v_forward * 192);
-		weapon_357();
-
-		self = spawn();
-		setorigin(self, saved_self.origin + v_forward * 224);
-		weapon_wrench();
-
-		self = spawn();
-		setorigin(self, saved_self.origin + v_forward * 256);
-		weapon_m249();
-
-		self = spawn();
-		setorigin(self, saved_self.origin + v_forward * 288);
-		weapon_csawp();
-
-		self = spawn();
-		setorigin(self, saved_self.origin + v_forward * 320);
-		weapon_dod98k();
-
-		self = spawn();
-		setorigin(self, saved_self.origin + v_forward * 352);
-		weapon_hlcrowbar();
-
-		self = spawn();
-		setorigin(self, saved_self.origin + v_forward * 384);
-		weapon_hlshotgun();
-
-		self = spawn();
-		setorigin(self, saved_self.origin + v_forward * 416);
-		weapon_csm3();
-
-		self = spawn();
-		setorigin(self, saved_self.origin + v_forward * 448);
-		weapon_csmp5();
-
-		self = spawn();
-		setorigin(self, saved_self.origin + v_forward * 480);
-		weapon_crossbow();
-
-		self = spawn();
-		setorigin(self, saved_self.origin + v_forward * 512);
-		weapon_grenadelauncher();
-
-		self = spawn();
-		setorigin(self, saved_self.origin + v_forward * 544);
-		weapon_rebar();
-
-		self = spawn();
-		setorigin(self, saved_self.origin + v_forward * 576);
-		weapon_gauss();
+		// Row 4: secondaries + melee
+		col = 0; row = 3;
+		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_pistol();       col++;
+		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_deagle();       col++;
+		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_357();          col++;
+		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_glock();        col++;
+		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_hlcrowbar();    col++;
+		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_wrench();
 
 		self = saved_self;
 	}
@@ -747,13 +725,13 @@ void() SV_RunClientCommand =
 		input_movevalues = '0 0 0';
 		input_buttons = 0;
 	}
-	// Freeze time: block WASD and attack, keep jump/duck/sprint/use physics
+	// Freeze time: block WASD movement and primary attack
 	else if (round_phase == ROUND_PHASE_FREEZE)
 	{
-		input_movevalues = '0 0 0';
-		input_buttons = input_buttons & ~(1 | 4);  // mask out +attack and +attack2
+		input_movevalues_x = 0;
+		input_movevalues_y = 0;
+		input_buttons = input_buttons & ~1;
 	}
-
 	PM_PlayerMove();
 	SV_CheckTouchTriggers();
 

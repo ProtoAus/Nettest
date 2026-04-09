@@ -49,6 +49,11 @@ const float DEAGLE_FIRE_DURATION      = (DEAGLE_FIRE_END - DEAGLE_FIRE_START) * 
 const float DEAGLE_RELOAD_DURATION    = (DEAGLE_RELOAD_END - DEAGLE_RELOAD_START) * DEAGLE_FRAME_INTERVAL;
 const float DEAGLE_RELOAD_APPLY_TIME  = (DEAGLE_RELOAD_APPLY - DEAGLE_RELOAD_START) * DEAGLE_FRAME_INTERVAL;
 
+const string DEAGLE_VIEWMODEL    = "models/weapons/wpn_csdeagle/v_deagle.mdl";
+const string DEAGLE_WORLDMODEL   = "models/weapons/wpn_csdeagle/w_deagle.mdl";
+const string DEAGLE_DEPLOY_SOUND = "sounds/weapons/wpn_csdeagle/deploy.wav";
+const string DEAGLE_DISPLAY_NAME = "DEAGLE";
+
 // ============================================================
 //  SHARED — state machine (server & client identical)
 // ============================================================
@@ -56,102 +61,21 @@ const float DEAGLE_RELOAD_APPLY_TIME  = (DEAGLE_RELOAD_APPLY - DEAGLE_RELOAD_STA
 // Returns bitmask: bit 0 = transitioned to idle, bit 1 = reload ammo applied
 float(float now) SH_DeagleTickState =
 {
-    float elapsed;
-    float result;
-    float needed;
-
-    if (self.weaponstate == WS_IDLE)
-        return 0;
-
-    elapsed = (self.wep_anim_start > 0) ? (now - self.wep_anim_start) : 0;
-    result = 0;
-
-    if (self.weaponstate == WS_DRAW)
-    {
-        if (elapsed >= DEAGLE_DRAW_DURATION)
-        {
-            SH_WeaponEnterIdle();
-            result = result | 1;
-        }
-        return result;
-    }
-
-    if (self.weaponstate == WS_FIRE)
-    {
-        if (elapsed >= DEAGLE_FIRE_DURATION)
-        {
-            SH_WeaponEnterIdle();
-            result = result | 1;
-        }
-        return result;
-    }
-
-    if (self.weaponstate == WS_RELOAD)
-    {
-        if (elapsed >= DEAGLE_RELOAD_APPLY_TIME)
-        {
-            needed = MAX_MAG_DEAGLE - self.mag_deagle;
-            if (needed > 0)
-            {
-                if (self.ammo_deagle >= needed)
-                {
-                    self.mag_deagle  += needed;
-                    self.ammo_deagle -= needed;
-                }
-                else
-                {
-                    self.mag_deagle  += self.ammo_deagle;
-                    self.ammo_deagle  = 0;
-                }
-                result = result | 2;
-            }
-        }
-
-        if (elapsed >= DEAGLE_RELOAD_DURATION)
-        {
-            SH_WeaponEnterIdle();
-            result = result | 1;
-        }
-        return result;
-    }
-
-    return 0;
+    return SH_StandardTickState(now, mag_deagle, ammo_deagle, MAX_MAG_DEAGLE,
+        DEAGLE_DRAW_DURATION, DEAGLE_FIRE_DURATION,
+        DEAGLE_RELOAD_DURATION, DEAGLE_RELOAD_APPLY_TIME);
 };
 
 // Returns: 1 = fired, -1 = dry fire, 0 = blocked
 float(float now) SH_DeagleTryFire =
 {
-    if (self.weaponstate == WS_RELOAD || self.weaponstate == WS_DRAW)
-        return 0;
-    if (now < self.attack_finished)
-        return 0;
-
-    if (self.mag_deagle <= 0)
-    {
-        self.attack_finished = now + DEAGLE_DRYFIRE_DELAY;
-        return -1;
-    }
-
-    self.mag_deagle      -= 1;
-    self.weaponstate      = WS_FIRE;
-    self.wep_action_id   += 1;
-    self.wep_anim_start   = now;
-    self.attack_finished  = now + DEAGLE_FIRE_DELAY;
-    return 1;
+    return SH_StandardTryFire(now, mag_deagle, DEAGLE_FIRE_DELAY, DEAGLE_DRYFIRE_DELAY);
 };
 
 // Returns: 1 = reload started, 0 = blocked
 float(float now) SH_DeagleTryReload =
 {
-    if (self.weaponstate == WS_RELOAD || self.weaponstate == WS_DRAW)
-        return 0;
-    if (self.mag_deagle >= MAX_MAG_DEAGLE || self.ammo_deagle <= 0)
-        return 0;
-
-    self.weaponstate     = WS_RELOAD;
-    self.wep_action_id  += 1;
-    self.wep_anim_start  = now;
-    return 1;
+    return SH_StandardTryReload(now, mag_deagle, ammo_deagle, MAX_MAG_DEAGLE);
 };
 
 // ============================================================
@@ -167,46 +91,10 @@ void(entity player) W_DeaglePickupCopy =
     player.ammo_deagle = self.ammo_deagle;
 };
 
-// Shoot — hitscan with lag compensation (self = player)
 void() W_DeagleShoot =
 {
-    vector src, dir, end;
-    vector flat_vel;
-    float  spread, sx, sy;
-    float  move_speed, dist, damage;
-
-    makevectors(self.v_angle);
-    src = self.origin + self.view_ofs;
-
-    flat_vel   = self.velocity;
-    flat_vel_z = 0;
-    move_speed = vlen(flat_vel);
-
-    spread = DEAGLE_BASE_SPREAD + (move_speed / DEAGLE_FULL_SPREAD_SPEED) * DEAGLE_MOVE_SPREAD;
-    spread = min(spread, DEAGLE_BASE_SPREAD + DEAGLE_MOVE_SPREAD);
-
-    sx  = (random() * 2 - 1) * spread;
-    sy  = (random() * 2 - 1) * spread;
-    dir = normalize(v_forward + v_right * sx + v_up * sy);
-    end = src + dir * 8192;
-
-    traceline(src, end, MOVE_NORMAL | MOVE_LAGGED, self);
-
-    if (trace_fraction < 1.0)
-    {
-        dist = vlen(trace_endpos - src);
-
-        if (W_CanDamageTarget(trace_ent))
-        {
-            damage = W_LinearDamageFalloff(dist,
-                DEAGLE_CLOSE_DAMAGE, DEAGLE_MIN_DAMAGE, DEAGLE_DAMAGE_FALLOFF_RANGE);
-            W_ApplyDamage(self, trace_ent, damage);
-        }
-        else
-        {
-            W_ImpactEffect(trace_endpos);
-        }
-    }
+    W_StandardHitscanShoot(DEAGLE_BASE_SPREAD, DEAGLE_MOVE_SPREAD, DEAGLE_FULL_SPREAD_SPEED,
+        DEAGLE_CLOSE_DAMAGE, DEAGLE_MIN_DAMAGE, DEAGLE_DAMAGE_FALLOFF_RANGE);
 };
 
 // Fire — called by W_WeaponFrame when button0 pressed (self = player)
@@ -226,7 +114,7 @@ void() W_DeagleFire =
         else
             sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csdeagle/fire2.wav", 1, ATTN_NORM);
 
-        W_ShellEffect(SHELL_9MM, '8 6 -4', '6 46 36', '240 720 120');
+        W_ShellEffect(SHELL_9MM, '8 -6 -4', '6 46 36', '240 720 120');
     }
     else if (r == -1)
     {
@@ -276,18 +164,14 @@ void() W_DeagleFrame =
     }
 };
 
-// Equip — called by W_ChangeWeapon (self = player)
 void() W_DeagleEquip =
 {
-    self.weaponmodel    = SH_WeaponViewModel(WEP_DEAGLE);
-    self.fire           = W_DeagleFire;
-    self.reload         = W_DeagleReload;
-    self.wepframe       = W_DeagleFrame;
-    self.weaponstate    = WS_DRAW;
-    self.wep_action_id += 1;
-    self.wep_anim_start = time;
-    self.weaponframe    = DEAGLE_DRAW_START;
-    self.wep_nextframe  = time + DEAGLE_FRAME_INTERVAL;
+    W_StandardEquipSetup(DEAGLE_VIEWMODEL, DEAGLE_DISPLAY_NAME, DEAGLE_DRAW_START,
+        DEAGLE_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
+    self.fire     = W_DeagleFire;
+    self.reload   = W_DeagleReload;
+    self.wepframe = W_DeagleFrame;
+    self.shoot    = W_DeagleShoot;
     W_SetCrosshairProfile(DEAGLE_BASE_SPREAD, DEAGLE_MOVE_SPREAD, DEAGLE_FULL_SPREAD_SPEED, 1, TRUE);
 };
 
@@ -366,7 +250,7 @@ void() CSQC_PredictDeagleCommand =
                 CSQC_RecordPredictedWeaponSound();
                 CSQC_PredictedImpact(DEAGLE_BASE_SPREAD, DEAGLE_MOVE_SPREAD, DEAGLE_FULL_SPREAD_SPEED);
                 CSQC_SpawnCasing("models/weapons/9mmcasing.mdl",
-                    '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
+                    '8 -6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }
         }
         else if (r == -1)
@@ -407,24 +291,29 @@ void() CSQC_PredictDeagleReload =
 // Called from CSQC_GetWeaponDisplayFrame dispatcher.
 float(float elapsed) CSQC_DeagleDisplayFrame =
 {
-    float frame;
+    return CSQC_StandardDisplayFrame(elapsed, DEAGLE_FRAME_INTERVAL,
+        DEAGLE_DRAW_START, DEAGLE_DRAW_END,
+        DEAGLE_FIRE_START, DEAGLE_FIRE_END,
+        DEAGLE_RELOAD_START, DEAGLE_RELOAD_END,
+        2);   // idle frame
+};
 
-    if (predicted_player.weaponstate == WS_DRAW)
-    {
-        frame = DEAGLE_DRAW_START + elapsed / DEAGLE_FRAME_INTERVAL;
-        return bound(DEAGLE_DRAW_START, frame, DEAGLE_DRAW_END - 1);
-    }
-    if (predicted_player.weaponstate == WS_FIRE)
-    {
-        frame = DEAGLE_FIRE_START + elapsed / DEAGLE_FRAME_INTERVAL;
-        return bound(DEAGLE_FIRE_START, frame, DEAGLE_FIRE_END - 1);
-    }
-    if (predicted_player.weaponstate == WS_RELOAD)
-    {
-        frame = DEAGLE_RELOAD_START + elapsed / DEAGLE_FRAME_INTERVAL;
-        return bound(DEAGLE_RELOAD_START, frame, DEAGLE_RELOAD_END - 1);
-    }
-    return 2;   // idle frame
+void() CSQC_DeagleDropClear =
+{
+	self.mag_deagle = 0;
+	self.ammo_deagle = 0;
+};
+
+void() CSQC_DeagleEquip =
+{
+	self.weapon_name         = DEAGLE_DISPLAY_NAME;
+	self.weapon_viewmodel    = DEAGLE_VIEWMODEL;
+	self.weapon_worldmodel   = DEAGLE_WORLDMODEL;
+	self.weapon_deploy_sound = DEAGLE_DEPLOY_SOUND;
+	self.csqc_predict_cmd    = CSQC_PredictDeagleCommand;
+	self.csqc_predict_reload = CSQC_PredictDeagleReload;
+	self.csqc_display_frame  = CSQC_DeagleDisplayFrame;
+	self.csqc_drop_clear     = CSQC_DeagleDropClear;
 };
 
 #endif // CSQC
