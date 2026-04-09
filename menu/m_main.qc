@@ -7,9 +7,10 @@ void() m_init =
 {
 	splash_time = time + 2.5;
 	registercommand("togglemenu2");
-	// drawfont = loadfont("", "Courier Prime Code", "12,16,24,32,48,64,72,128,256,512", -1, 0, 0);
 	setcursormode(TRUE,"gfx/xhair", [16, 16], cvar("vid_conautoscale"));
+	menu_font = loadfont("hud", "gfx/RobotoEB", "8 12 16 18 24 36 48 60 72", -1, 0, 0);
 	current_menu = MENU_MAIN;
+	localcmd("set _nettest_menu_active 0\n");
 };
 
 vector() randomofs = { return [random() - 0.5, random() - 0.5] * 2; };
@@ -28,6 +29,7 @@ void(vector screensize) m_draw =
 	if (target_conauto != cvar("vid_conautoscale")) localcmd(sprintf("vid_conautoscale %f\n", target_conauto));
 	
 	
+	drawfont = menu_font;
 	sui_begin(screensize_x, screensize_y);
 	if (menu_active)
 		root_menu(screensize);
@@ -64,12 +66,14 @@ void() m_close =
 {
 	setkeydest(0);
 	menu_active = FALSE;
+	localcmd("set _nettest_menu_active 0\n");
 };
 
 void() m_open =
 {
 	setkeydest(2);
 	menu_active = TRUE;
+	localcmd("set _nettest_menu_active 1\n");
 };
 
 float(float evtype, float scanx, float chary, float devid) Menu_InputEvent =
@@ -118,4 +122,5 @@ void(float wantmode) m_toggle =
 
 void() m_shutdown =
 {
+	localcmd("set _nettest_menu_active 0\n");
 };

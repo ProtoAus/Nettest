@@ -4,6 +4,12 @@
 //  Replicates brush models to CSQC so shared tracebox prediction sees the
 //  same func_wall geometry as the server.
 //
+//  Doors and buttons send additional parameters (pos1, pos2, speed, state)
+//  so the client can predict their movement instantly.
+//
+
+.float brush_type;      // BRUSH_TYPE_* — set by func_door/func_button
+.float mover_state;     // current movement state (shared with door_state/button_state)
 
 float(entity playerent, float changedflags) solid_brush_SendEntity =
 {
@@ -29,11 +35,24 @@ float(entity playerent, float changedflags) solid_brush_SendEntity =
     WriteFloat(MSG_ENTITY, self.alpha);
     WriteFloat(MSG_ENTITY, self.effects);
 
-    // velocity: lets CSQC entities (doors, buttons) move in real-time
-    // between network updates.  Static brushes always send '0 0 0'.
     WriteCoord(MSG_ENTITY, self.velocity_x);
     WriteCoord(MSG_ENTITY, self.velocity_y);
     WriteCoord(MSG_ENTITY, self.velocity_z);
+
+    // Door/button parameters for client-side prediction
+    WriteByte(MSG_ENTITY, self.brush_type);
+    if (self.brush_type == BRUSH_TYPE_DOOR || self.brush_type == BRUSH_TYPE_BUTTON)
+    {
+        WriteCoord(MSG_ENTITY, self.pos1_x);
+        WriteCoord(MSG_ENTITY, self.pos1_y);
+        WriteCoord(MSG_ENTITY, self.pos1_z);
+        WriteCoord(MSG_ENTITY, self.pos2_x);
+        WriteCoord(MSG_ENTITY, self.pos2_y);
+        WriteCoord(MSG_ENTITY, self.pos2_z);
+        WriteFloat(MSG_ENTITY, self.speed);
+        WriteByte(MSG_ENTITY, self.mover_state);
+        WriteByte(MSG_ENTITY, (self.brush_type == BRUSH_TYPE_DOOR && (self.spawnflags & 64)) ? 1 : 0);
+    }
 
     return TRUE;
 };
@@ -53,7 +72,6 @@ void() SV_InitReplicatedSolidBrush =
     if (self.alpha <= 0)
         self.alpha = 1;
 
-    // Replicate to CSQC so shared tracebox prediction sees this brush model.
     self.pvsflags = PVSF_NOREMOVE;
     self.SendEntity = solid_brush_SendEntity;
     self.SendFlags = 1;
@@ -62,11 +80,9 @@ void() SV_InitReplicatedSolidBrush =
 /*QUAKED func_wall (.5 .5 .5) ? TRIGGERSPAWN TOGGLE START_ON NOT_SOLID
 Simple solid brush entity. Replicated to CSQC so client prediction collides
 with it identically to the server.
-
-Keys:
-"alpha" "0.01" makes the brush nearly invisible while keeping full collision.
 */
 void() func_wall =
 {
     SV_InitReplicatedSolidBrush();
+    self.brush_type = BRUSH_TYPE_STATIC;
 };

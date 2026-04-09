@@ -41,9 +41,14 @@ void() SV_PlayerTryUse =
     use_start = self.origin + self.view_ofs;
     use_end   = use_start + v_forward * PLAYER_USE_TRACE_LENGTH;
 
+    sv_use_is_player_direct = TRUE;
+
     tracebox(use_start, '-8 -8 -8', '8 8 8', use_end, MOVE_NORMAL, self);
     if (SV_UseTarget(trace_ent))
+    {
+        sv_use_is_player_direct = FALSE;
         return;
+    }
 
     // Radius fallback: pick the entity within the cone that is most aligned
     // with the player's view direction.
@@ -64,6 +69,7 @@ void() SV_PlayerTryUse =
         e = e.chain;
     }
     SV_UseTarget(best);
+    sv_use_is_player_direct = FALSE;
 };
 
 // Called after PM_PlayerMove each frame.

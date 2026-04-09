@@ -39,6 +39,49 @@ float  sv_confirmed_fuser2;
 float  sv_confirmed_step_time;
 float  sv_confirmed_cmdframe;    // last acknowledged command for baseline
 
+// Weapon prediction state (extended proxy)
+float  sv_confirmed_slot_primary;
+float  sv_confirmed_slot_secondary;
+float  sv_confirmed_slot_melee;
+float  sv_confirmed_weapon;
+float  sv_confirmed_previous_weapon;
+float  sv_confirmed_weaponstate;
+float  sv_confirmed_wep_action_id;
+float  sv_confirmed_attack_finished;   // absolute cltime
+float  sv_confirmed_wep_anim_start;    // absolute cltime when animation began (0 = idle)
+float  sv_confirmed_mag_deagle;
+float  sv_confirmed_ammo_deagle;
+float  sv_confirmed_mag_ak47;
+float  sv_confirmed_ammo_ak47;
+float  sv_confirmed_mag_m4a1;
+float  sv_confirmed_ammo_m4a1;
+float  sv_confirmed_m4a1_silenced;
+float  sv_confirmed_mag_flakshotgun;
+float  sv_confirmed_mag_pistol;
+float  sv_confirmed_ammo_pistol;
+float  sv_confirmed_mag_scout;
+float  sv_confirmed_ammo_scout;
+float  sv_confirmed_mag_357;
+float  sv_confirmed_ammo_357;
+float  sv_confirmed_mag_m249;
+float  sv_confirmed_ammo_m249;
+float  sv_confirmed_zoomstage;
+float  sv_confirmed_mag_awp;
+float  sv_confirmed_ammo_awp;
+float  sv_confirmed_mag_98k;
+float  sv_confirmed_ammo_98k;
+float  sv_confirmed_mag_shotgun;
+float  sv_confirmed_ammo_shotgun;
+float  sv_confirmed_mag_m3;
+float  sv_confirmed_ammo_m3;
+float  sv_confirmed_mag_mp5;
+float  sv_confirmed_ammo_mp5;
+float  sv_confirmed_mag_crossbow;
+float  sv_confirmed_ammo_crossbow;
+float  sv_confirmed_mag_grenadelauncher;
+float  sv_confirmed_mag_rebar;
+float  sv_confirmed_ammo_gauss;
+
 float  csqc_prediction_valid;    // TRUE once predicted_player can drive view
 float  csqc_baseline_valid;      // TRUE once an authoritative proxy snapshot arrived
 float  csqc_proxy_seen;          // owner-only proxy seen this map/session
@@ -58,6 +101,7 @@ float  pred_cmd_timelength[128];
 vector pred_cmd_angles[128];
 vector pred_cmd_movevalues[128];
 float  pred_cmd_buttons[128];
+float  pred_cmd_impulse[128];
 float  pred_cmd_count;
 float  pred_cmd_latest_sequence;
 
@@ -332,6 +376,7 @@ void(float slot) CSQC_LoadBufferedCommand =
 	input_angles     = pred_cmd_angles[slot];
 	input_movevalues = pred_cmd_movevalues[slot];
 	input_buttons    = pred_cmd_buttons[slot];
+	input_impulse    = pred_cmd_impulse[slot];
 };
 
 void(entity src, entity dst) CSQC_CopyMoveState =
@@ -372,9 +417,51 @@ void(entity src) CSQC_StoreConfirmedStateFromEntity =
 	sv_confirmed_ladder_detach_time   = src.pm_ladder_detach_time;
 	sv_confirmed_fuser2               = src.pm_fuser2;
 	sv_confirmed_step_time            = src.pm_step_time;
+
+	sv_confirmed_slot_primary      = src.slot_primary;
+	sv_confirmed_slot_secondary    = src.slot_secondary;
+	sv_confirmed_slot_melee        = src.slot_melee;
+	sv_confirmed_weapon           = src.weapon;
+	sv_confirmed_previous_weapon  = src.previous_weapon;
+	sv_confirmed_weaponstate      = src.weaponstate;
+	sv_confirmed_wep_action_id    = src.wep_action_id;
+	sv_confirmed_attack_finished  = src.attack_finished;   // already absolute cltime
+	sv_confirmed_wep_anim_start   = src.wep_anim_start;   // already absolute cltime
+	sv_confirmed_mag_deagle       = src.mag_deagle;
+	sv_confirmed_ammo_deagle      = src.ammo_deagle;
+	sv_confirmed_mag_ak47         = src.mag_ak47;
+	sv_confirmed_ammo_ak47        = src.ammo_ak47;
+	sv_confirmed_mag_m4a1         = src.mag_m4a1;
+	sv_confirmed_ammo_m4a1        = src.ammo_m4a1;
+	sv_confirmed_m4a1_silenced    = src.m4a1_silenced;
+	sv_confirmed_mag_flakshotgun  = src.mag_flakshotgun;
+	sv_confirmed_mag_pistol       = src.mag_pistol;
+	sv_confirmed_ammo_pistol      = src.ammo_pistol;
+	sv_confirmed_mag_scout        = src.mag_scout;
+	sv_confirmed_ammo_scout       = src.ammo_scout;
+	sv_confirmed_mag_357          = src.mag_357;
+	sv_confirmed_ammo_357         = src.ammo_357;
+	sv_confirmed_mag_m249         = src.mag_m249;
+	sv_confirmed_ammo_m249        = src.ammo_m249;
+	sv_confirmed_zoomstage        = src.zoomstage;
+	sv_confirmed_mag_awp          = src.mag_awp;
+	sv_confirmed_ammo_awp         = src.ammo_awp;
+	sv_confirmed_mag_98k          = src.mag_98k;
+	sv_confirmed_ammo_98k         = src.ammo_98k;
+	sv_confirmed_mag_shotgun      = src.mag_shotgun;
+	sv_confirmed_ammo_shotgun     = src.ammo_shotgun;
+	sv_confirmed_mag_m3           = src.mag_m3;
+	sv_confirmed_ammo_m3          = src.ammo_m3;
+	sv_confirmed_mag_mp5          = src.mag_mp5;
+	sv_confirmed_ammo_mp5         = src.ammo_mp5;
+	sv_confirmed_mag_crossbow     = src.mag_crossbow;
+	sv_confirmed_ammo_crossbow    = src.ammo_crossbow;
+	sv_confirmed_mag_grenadelauncher = src.mag_grenadelauncher;
+	sv_confirmed_mag_rebar        = src.mag_rebar;
+	sv_confirmed_ammo_gauss       = src.ammo_gauss;
 };
 
-void() CSQC_ResetToConfirmedState =
+void() CSQC_ResetToConfirmedMoveState =
 {
 	setorigin(self, sv_confirmed_origin);
 	self.velocity         = sv_confirmed_velocity;
@@ -392,6 +479,236 @@ void() CSQC_ResetToConfirmedState =
 	self.pm_ladder_detach_time   = sv_confirmed_ladder_detach_time;
 	self.pm_fuser2               = sv_confirmed_fuser2;
 	self.pm_step_time            = sv_confirmed_step_time;
+};
+
+void() CSQC_ResetToConfirmedState =
+{
+	float old_weapon;
+	float old_weaponstate;
+	float old_wep_action_id;
+	float old_wep_anim_start;
+	float old_attack_finished;
+	float old_mag_deagle;
+	float old_ammo_deagle;
+	float old_mag_ak47;
+	float old_ammo_ak47;
+	float old_mag_m4a1;
+	float old_ammo_m4a1;
+	float old_m4a1_silenced;
+	float old_mag_flakshotgun;
+	float old_mag_pistol;
+	float old_ammo_pistol;
+	float old_mag_scout;
+	float old_ammo_scout;
+	float old_mag_357;
+	float old_ammo_357;
+	float old_mag_m249;
+	float old_ammo_m249;
+	float old_zoomstage;
+	float old_mag_awp;
+	float old_ammo_awp;
+	float old_mag_98k;
+	float old_ammo_98k;
+	float old_mag_shotgun;
+	float old_ammo_shotgun;
+	float old_mag_m3;
+	float old_ammo_m3;
+	float old_mag_mp5;
+	float old_ammo_mp5;
+	float old_mag_crossbow;
+	float old_ammo_crossbow;
+	float old_mag_grenadelauncher;
+	float old_mag_rebar;
+	float old_ammo_gauss;
+
+	old_weapon = self.weapon;
+	old_weaponstate = self.weaponstate;
+	old_wep_action_id = self.wep_action_id;
+	old_wep_anim_start = self.wep_anim_start;
+	old_attack_finished = self.attack_finished;
+	old_mag_deagle = self.mag_deagle;
+	old_ammo_deagle = self.ammo_deagle;
+	old_mag_ak47 = self.mag_ak47;
+	old_ammo_ak47 = self.ammo_ak47;
+	old_mag_m4a1 = self.mag_m4a1;
+	old_ammo_m4a1 = self.ammo_m4a1;
+	old_m4a1_silenced = self.m4a1_silenced;
+	old_mag_flakshotgun = self.mag_flakshotgun;
+	old_mag_pistol = self.mag_pistol;
+	old_ammo_pistol = self.ammo_pistol;
+	old_mag_scout = self.mag_scout;
+	old_ammo_scout = self.ammo_scout;
+	old_mag_357 = self.mag_357;
+	old_ammo_357 = self.ammo_357;
+	old_mag_m249 = self.mag_m249;
+	old_ammo_m249 = self.ammo_m249;
+	old_zoomstage = self.zoomstage;
+	old_mag_awp = self.mag_awp;
+	old_ammo_awp = self.ammo_awp;
+	old_mag_98k = self.mag_98k;
+	old_ammo_98k = self.ammo_98k;
+	old_mag_shotgun = self.mag_shotgun;
+	old_ammo_shotgun = self.ammo_shotgun;
+	old_mag_m3 = self.mag_m3;
+	old_ammo_m3 = self.ammo_m3;
+	old_mag_mp5 = self.mag_mp5;
+	old_ammo_mp5 = self.ammo_mp5;
+	old_mag_crossbow = self.mag_crossbow;
+	old_ammo_crossbow = self.ammo_crossbow;
+	old_mag_grenadelauncher = self.mag_grenadelauncher;
+	old_mag_rebar = self.mag_rebar;
+	old_ammo_gauss = self.ammo_gauss;
+
+	CSQC_ResetToConfirmedMoveState();
+
+	self.slot_primary     = sv_confirmed_slot_primary;
+	self.slot_secondary   = sv_confirmed_slot_secondary;
+	self.slot_melee       = sv_confirmed_slot_melee;
+	self.weapon          = sv_confirmed_weapon;
+	self.previous_weapon = sv_confirmed_previous_weapon;
+	self.weaponstate     = sv_confirmed_weaponstate;
+	self.wep_action_id   = sv_confirmed_wep_action_id;
+	self.attack_finished = sv_confirmed_attack_finished;
+	self.wep_anim_start  = sv_confirmed_wep_anim_start;
+	self.mag_deagle      = sv_confirmed_mag_deagle;
+	self.ammo_deagle     = sv_confirmed_ammo_deagle;
+	self.mag_ak47        = sv_confirmed_mag_ak47;
+	self.ammo_ak47       = sv_confirmed_ammo_ak47;
+	self.mag_m4a1        = sv_confirmed_mag_m4a1;
+	self.ammo_m4a1       = sv_confirmed_ammo_m4a1;
+	self.m4a1_silenced   = sv_confirmed_m4a1_silenced;
+	self.mag_flakshotgun = sv_confirmed_mag_flakshotgun;
+	self.mag_pistol      = sv_confirmed_mag_pistol;
+	self.ammo_pistol     = sv_confirmed_ammo_pistol;
+	self.mag_scout       = sv_confirmed_mag_scout;
+	self.ammo_scout      = sv_confirmed_ammo_scout;
+	self.mag_357         = sv_confirmed_mag_357;
+	self.ammo_357        = sv_confirmed_ammo_357;
+	self.mag_m249        = sv_confirmed_mag_m249;
+	self.ammo_m249       = sv_confirmed_ammo_m249;
+	self.zoomstage       = sv_confirmed_zoomstage;
+	self.mag_awp         = sv_confirmed_mag_awp;
+	self.ammo_awp        = sv_confirmed_ammo_awp;
+	self.mag_98k         = sv_confirmed_mag_98k;
+	self.ammo_98k        = sv_confirmed_ammo_98k;
+	self.mag_shotgun     = sv_confirmed_mag_shotgun;
+	self.ammo_shotgun    = sv_confirmed_ammo_shotgun;
+	self.mag_m3          = sv_confirmed_mag_m3;
+	self.ammo_m3         = sv_confirmed_ammo_m3;
+	self.mag_mp5         = sv_confirmed_mag_mp5;
+	self.ammo_mp5        = sv_confirmed_ammo_mp5;
+	self.mag_crossbow    = sv_confirmed_mag_crossbow;
+	self.ammo_crossbow   = sv_confirmed_ammo_crossbow;
+	self.mag_grenadelauncher = sv_confirmed_mag_grenadelauncher;
+	self.mag_rebar       = sv_confirmed_mag_rebar;
+	self.ammo_gauss      = sv_confirmed_ammo_gauss;
+
+	// Keep a single weapon action monotonic. Once local prediction is already
+	// further through that same action, don't let a delayed server snapshot pull
+	// it backwards and replay the tail of the animation.
+	if (self.weapon == old_weapon
+		&& self.wep_action_id == old_wep_action_id)
+	{
+		if (old_attack_finished > 0)
+			self.attack_finished = min(self.attack_finished, old_attack_finished);
+
+		// Only guard ammo for the active weapon — other weapons'
+		// ammo must take server values (pickups change them).
+		if (self.weapon == WEP_DEAGLE)
+		{
+			self.mag_deagle = max(self.mag_deagle, old_mag_deagle);
+			self.ammo_deagle = min(self.ammo_deagle, old_ammo_deagle);
+		}
+		else if (self.weapon == WEP_AK47)
+		{
+			self.mag_ak47 = max(self.mag_ak47, old_mag_ak47);
+			self.ammo_ak47 = min(self.ammo_ak47, old_ammo_ak47);
+		}
+		else if (self.weapon == WEP_M4A1)
+		{
+			self.mag_m4a1 = max(self.mag_m4a1, old_mag_m4a1);
+			self.ammo_m4a1 = min(self.ammo_m4a1, old_ammo_m4a1);
+		}
+		else if (self.weapon == WEP_FLAKSHOTGUN)
+		{
+			self.mag_flakshotgun = max(self.mag_flakshotgun, old_mag_flakshotgun);
+		}
+		else if (self.weapon == WEP_PISTOL)
+		{
+			self.mag_pistol = max(self.mag_pistol, old_mag_pistol);
+			self.ammo_pistol = min(self.ammo_pistol, old_ammo_pistol);
+		}
+		else if (self.weapon == WEP_SCOUT)
+		{
+			self.mag_scout = max(self.mag_scout, old_mag_scout);
+			self.ammo_scout = min(self.ammo_scout, old_ammo_scout);
+		}
+		else if (self.weapon == WEP_357)
+		{
+			self.mag_357 = max(self.mag_357, old_mag_357);
+			self.ammo_357 = min(self.ammo_357, old_ammo_357);
+		}
+		else if (self.weapon == WEP_M249)
+		{
+			self.mag_m249 = max(self.mag_m249, old_mag_m249);
+			self.ammo_m249 = min(self.ammo_m249, old_ammo_m249);
+		}
+		else if (self.weapon == WEP_CSAWP)
+		{
+			self.mag_awp = max(self.mag_awp, old_mag_awp);
+			self.ammo_awp = min(self.ammo_awp, old_ammo_awp);
+		}
+		else if (self.weapon == WEP_DOD98K)
+		{
+			self.mag_98k = max(self.mag_98k, old_mag_98k);
+			self.ammo_98k = min(self.ammo_98k, old_ammo_98k);
+		}
+		else if (self.weapon == WEP_HLSHOTGUN)
+		{
+			self.mag_shotgun = max(self.mag_shotgun, old_mag_shotgun);
+			self.ammo_shotgun = min(self.ammo_shotgun, old_ammo_shotgun);
+		}
+		else if (self.weapon == WEP_CSM3)
+		{
+			self.mag_m3 = max(self.mag_m3, old_mag_m3);
+			self.ammo_m3 = min(self.ammo_m3, old_ammo_m3);
+		}
+		else if (self.weapon == WEP_CSMP5)
+		{
+			self.mag_mp5 = max(self.mag_mp5, old_mag_mp5);
+			self.ammo_mp5 = min(self.ammo_mp5, old_ammo_mp5);
+		}
+		else if (self.weapon == WEP_CROSSBOW)
+		{
+			self.mag_crossbow = max(self.mag_crossbow, old_mag_crossbow);
+			self.ammo_crossbow = min(self.ammo_crossbow, old_ammo_crossbow);
+		}
+		else if (self.weapon == WEP_GRENADELAUNCHER)
+		{
+			self.mag_grenadelauncher = max(self.mag_grenadelauncher, old_mag_grenadelauncher);
+		}
+		else if (self.weapon == WEP_REBAR)
+		{
+			self.mag_rebar = max(self.mag_rebar, old_mag_rebar);
+		}
+		else if (self.weapon == WEP_GAUSS)
+		{
+			self.ammo_gauss = min(self.ammo_gauss, old_ammo_gauss);
+		}
+
+		if (old_weaponstate == WS_IDLE && self.weaponstate != WS_IDLE)
+		{
+			self.weaponstate = WS_IDLE;
+			self.wep_anim_start = 0;
+		}
+		else if (self.weaponstate != WS_IDLE
+			&& self.weaponstate == old_weaponstate
+			&& old_wep_anim_start > 0
+			&& (self.wep_anim_start <= 0 || old_wep_anim_start < self.wep_anim_start))
+		{
+			self.wep_anim_start = old_wep_anim_start;
+		}
+	}
 };
 
 void() CSQC_ResetPresentationView =
@@ -421,6 +738,48 @@ void() CSQC_EnsurePredictedPlayer =
 	predicted_player.pm_ladder_detach_time = 0;
 	predicted_player.pm_fuser2 = 0;
 	predicted_player.pm_step_time = 0;
+
+	predicted_player.slot_primary     = WEP_NONE;
+	predicted_player.slot_secondary   = WEP_NONE;
+	predicted_player.slot_melee       = WEP_NONE;
+	predicted_player.previous_weapon  = WEP_NONE;
+	predicted_player.weapon          = WEP_NONE;
+	predicted_player.weaponstate     = WS_IDLE;
+	predicted_player.wep_action_id   = 0;
+	predicted_player.wep_anim_start  = 0;
+	predicted_player.attack_finished = 0;
+	predicted_player.mag_deagle      = 0;
+	predicted_player.ammo_deagle     = 0;
+	predicted_player.mag_ak47        = 0;
+	predicted_player.ammo_ak47       = 0;
+	predicted_player.mag_m4a1        = 0;
+	predicted_player.ammo_m4a1       = 0;
+	predicted_player.m4a1_silenced   = 0;
+	predicted_player.mag_flakshotgun = 0;
+	predicted_player.mag_pistol      = 0;
+	predicted_player.ammo_pistol     = 0;
+	predicted_player.mag_scout       = 0;
+	predicted_player.ammo_scout      = 0;
+	predicted_player.mag_357         = 0;
+	predicted_player.ammo_357        = 0;
+	predicted_player.mag_m249        = 0;
+	predicted_player.ammo_m249       = 0;
+	predicted_player.zoomstage       = 0;
+	predicted_player.mag_awp         = 0;
+	predicted_player.ammo_awp        = 0;
+	predicted_player.mag_98k         = 0;
+	predicted_player.ammo_98k        = 0;
+	predicted_player.mag_shotgun     = 0;
+	predicted_player.ammo_shotgun    = 0;
+	predicted_player.mag_m3          = 0;
+	predicted_player.ammo_m3         = 0;
+	predicted_player.mag_mp5         = 0;
+	predicted_player.ammo_mp5        = 0;
+	predicted_player.mag_crossbow    = 0;
+	predicted_player.ammo_crossbow   = 0;
+	predicted_player.mag_grenadelauncher = 0;
+	predicted_player.mag_rebar       = 0;
+	predicted_player.ammo_gauss      = 0;
 };
 
 string() CSQC_DebugSeedSource =
@@ -461,6 +820,18 @@ float() CSQC_SeedPredictedPlayerFromEngine =
 	predicted_player.pm_step_time = 0;
 	if (!predicted_player.view_ofs_x && !predicted_player.view_ofs_y && !predicted_player.view_ofs_z)
 		predicted_player.view_ofs = PM_VIEW_OFS;
+
+	predicted_player.slot_primary     = WEP_NONE;
+	predicted_player.slot_secondary   = WEP_NONE;
+	predicted_player.slot_melee       = WEP_NONE;
+	predicted_player.previous_weapon  = WEP_NONE;
+	predicted_player.weapon          = engine_player.weapon;
+	predicted_player.weaponstate     = WS_IDLE;
+	predicted_player.wep_action_id   = 0;
+	predicted_player.wep_anim_start  = 0;
+	predicted_player.attack_finished = 0;
+	predicted_player.mag_deagle      = 0;
+	predicted_player.ammo_deagle     = 0;
 
 	csqc_prediction_valid = TRUE;
 	csqc_dbg_seed_source = 1;
@@ -504,6 +875,10 @@ void() CSQC_ResetPredictionState =
 	csqc_dbg_preview_responded = FALSE;
 	csqc_dbg_predict_responded = FALSE;
 	csqc_dbg_seed_source = 0;
+	csqc_last_predicted_weapon_sound_time = 0;
+	csqc_last_predicted_auto_sound_time = 0;
+	csqc_pred_sequence = 0;
+	csqc_weapon_pending_ack_sequence = 0;
 	CSQC_ClearPredictionBuffer();
 	CSQC_ResetPresentationView();
 };
@@ -691,11 +1066,12 @@ void(float seq) CSQC_BufferInputCommand =
 	pred_cmd_angles[slot]     = input_angles;
 	pred_cmd_movevalues[slot] = input_movevalues;
 	pred_cmd_buttons[slot]    = input_buttons;
+	pred_cmd_impulse[slot]    = input_impulse;
 
 	pred_cmd_latest_sequence = seq;
 };
 
-float(float first_sequence) CSQC_ReplayBufferedCommands =
+float(float first_sequence, float replay_weapons) CSQC_ReplayBufferedCommands =
 {
 	float replay_count;
 	float seq;
@@ -717,7 +1093,11 @@ float(float first_sequence) CSQC_ReplayBufferedCommands =
 
 		CSQC_LoadBufferedCommand(slot);
 		CSQC_ClampMoveInputs();
+		csqc_pred_sequence = pred_cmd_sequence[slot];
+		csqc_pred_time = pred_cmd_timestamp[slot];
 		PM_PlayerMove();
+		if (replay_weapons)
+			CSQC_PredictWeaponCommand();
 		replay_count += 1;
 	}
 
@@ -731,7 +1111,9 @@ void() CSQC_ReconcilePrediction =
 	float first_buffered;
 	float replay_from;
 	float saved_buttons;
+	float saved_impulse;
 	float saved_timelength;
+	float weapon_ack_ok;
 	vector saved_angles;
 	vector saved_movevalues;
 
@@ -747,6 +1129,7 @@ void() CSQC_ReconcilePrediction =
 	saved_angles = input_angles;
 	saved_movevalues = input_movevalues;
 	saved_buttons = input_buttons;
+	saved_impulse = input_impulse;
 
 	ack_sequence = CSQC_CommandSequence(sv_confirmed_cmdframe);
 	ack_slot = CSQC_FindBufferedCommand(ack_sequence);
@@ -762,15 +1145,49 @@ void() CSQC_ReconcilePrediction =
 			csqc_dbg_ack_fell_out = TRUE;
 	}
 
-	CSQC_ResetToConfirmedState();
+	// The proxy reconstructed attack_finished and wep_anim_start relative
+	// to cltime at receive-time, but replayed commands use their original
+	// buffered timestamps (pred_cmd_timestamp[]).  At high ping, cltime is
+	// far ahead of the ack'd command's timestamp, so replayed elapsed
+	// values come out negative and weapon-state transitions never fire.
+	// Shift both timestamps back to the ack'd command's time domain so
+	// replay produces correct positive elapsed values.
+	if (ack_slot >= 0)
+	{
+		float time_offset = cltime - pred_cmd_timestamp[ack_slot];
+		sv_confirmed_attack_finished -= time_offset;
+		if (sv_confirmed_wep_anim_start > 0)
+			sv_confirmed_wep_anim_start -= time_offset;
+	}
+
+	weapon_ack_ok = (csqc_weapon_pending_ack_sequence <= 0
+		|| ack_sequence >= csqc_weapon_pending_ack_sequence);
+
+	if (weapon_ack_ok)
+	{
+		CSQC_ResetToConfirmedState();
+		csqc_weapon_pending_ack_sequence = 0;
+	}
+	else
+	{
+		CSQC_ResetToConfirmedMoveState();
+	}
 
 	if (ack_slot < 0)
 		replay_from = max(replay_from, first_buffered);
 
 	csqc_dbg_last_replay_from = replay_from;
-	pm_suppress_sounds = TRUE;   // don't re-fire step sounds for already-heard frames
-	csqc_dbg_last_replay_count = CSQC_ReplayBufferedCommands(replay_from);
+	pm_suppress_sounds = TRUE;
+	csqc_dbg_last_replay_count = CSQC_ReplayBufferedCommands(replay_from, weapon_ack_ok);
 	pm_suppress_sounds = FALSE;
+
+	// The replay uses buffered command timestamps, so attack_finished may
+	// end up in the past relative to cltime.  Clamp it forward so the live
+	// prediction in CSQC_PredictCurrentCommand doesn't re-fire on stale
+	// timing and produce a double sound.
+	if (weapon_ack_ok && self.attack_finished < cltime)
+		self.attack_finished = cltime;
+
 	csqc_dbg_last_reconcile_time = cltime;
 	csqc_dbg_seed_source = 2;
 
@@ -778,6 +1195,7 @@ void() CSQC_ReconcilePrediction =
 	input_angles     = saved_angles;
 	input_movevalues = saved_movevalues;
 	input_buttons    = saved_buttons;
+	input_impulse    = saved_impulse;
 
 	self = saved;
 };
@@ -795,7 +1213,10 @@ void() CSQC_PredictCurrentCommand =
 	entity saved = self;
 	self = predicted_player;
 
+	csqc_pred_sequence = clientcommandframe;
+	csqc_pred_time = cltime;
 	PM_PlayerMove();
+	CSQC_PredictWeaponCommand();
 	csqc_dbg_last_predict_dt = (cltime - csqc_dbg_last_key_time) * 1000;
 	CSQC_CheckDebugPredictResponse();
 
@@ -821,6 +1242,7 @@ void() CSQC_BuildPresentationView =
 	float saved_teleport_time;
 	float saved_ladder_detach_time;
 	float saved_fuser2;
+	float saved_impulse;
 	vector saved_origin;
 	vector saved_velocity;
 	vector saved_view_ofs;
@@ -873,10 +1295,12 @@ void() CSQC_BuildPresentationView =
 	saved_angles = input_angles;
 	saved_movevalues = input_movevalues;
 	saved_buttons = input_buttons;
+	saved_impulse = input_impulse;
 
 	input_angles = view_angles;
 	input_movevalues = CSQC_BuildLiveMoveValues();
 	input_buttons = csqc_live_buttons;
+	input_impulse = 0;
 	CSQC_ClampMoveInputs();
 
 	float fixedstep = cvar("sv_mintic");
@@ -917,6 +1341,7 @@ void() CSQC_BuildPresentationView =
 	input_angles = saved_angles;
 	input_movevalues = saved_movevalues;
 	input_buttons = saved_buttons;
+	input_impulse = saved_impulse;
 
 	self = saved;
 };
@@ -1004,6 +1429,8 @@ void() CSQC_SetupRemotePlayerSolids =
 			continue;
 
 		ent = edict_num(n);
+		if (!ent || ent == world)
+			continue;
 
 		// Use duck hull if the remote player is crouching
 		if (ent.flags & FL_DUCKING)
@@ -1035,6 +1462,22 @@ void() CSQC_Input_Frame =
 	csqc_dbg_last_inputframe_time = cltime;
 	CSQC_LatchLiveInputFromCommand();
 	input_buttons = csqc_live_buttons;   // write custom bits before buffer captures them
+
+	// Freeze time: block WASD and attack, keep jump/duck/sprint/use physics
+	if (getstatf(STAT_ROUND_PHASE) == ROUND_PHASE_FREEZE)
+	{
+		input_movevalues = '0 0 0';
+		input_buttons = input_buttons & ~(1 | 4);  // mask out +attack and +attack2
+	}
+
+	// Dead: capture freecam input before zeroing, then block
+	if (getstatf(STAT_IS_DEAD))
+	{
+		spec_freecam_fwd = input_movevalues_x / 350;
+		spec_freecam_side = input_movevalues_y / 350;
+		input_movevalues = '0 0 0';
+		input_buttons = 0;
+	}
 
 	CSQC_BufferInputCommand(clientcommandframe);
 	CSQC_PredictCurrentCommand();
@@ -1119,6 +1562,57 @@ noref void(float isnew) CSQC_Ent_Update =
 	self.pm_ladder_detach_time   = readfloat();
 	self.pm_fuser2               = readfloat();
 	self.pm_step_time            = readfloat();
+
+	// Weapon prediction state
+	self.slot_primary      = readfloat();
+	self.slot_secondary    = readfloat();
+	self.slot_melee        = readfloat();
+	self.weapon          = readfloat();
+	self.previous_weapon = readfloat();
+	self.weaponstate     = readfloat();
+	self.wep_action_id   = readfloat();
+	self.attack_finished = cltime + readfloat();   // server sends remaining time
+	{
+		float _elapsed = readfloat();   // server sends time since animation began
+		if (_elapsed > 0)
+			self.wep_anim_start = cltime - _elapsed;
+		else if (self.weaponstate != WS_IDLE)
+			self.wep_anim_start = cltime;   // animation just started this server frame
+		else
+			self.wep_anim_start = 0;
+	}
+	self.mag_deagle      = readfloat();
+	self.ammo_deagle     = readfloat();
+	self.mag_ak47        = readfloat();
+	self.ammo_ak47       = readfloat();
+	self.mag_m4a1        = readfloat();
+	self.ammo_m4a1       = readfloat();
+	self.m4a1_silenced   = readfloat();
+	self.mag_flakshotgun = readfloat();
+	self.mag_pistol      = readfloat();
+	self.ammo_pistol     = readfloat();
+	self.mag_scout       = readfloat();
+	self.ammo_scout      = readfloat();
+	self.mag_357         = readfloat();
+	self.ammo_357        = readfloat();
+	self.mag_m249        = readfloat();
+	self.ammo_m249       = readfloat();
+	self.zoomstage       = readfloat();
+	self.mag_awp         = readfloat();
+	self.ammo_awp        = readfloat();
+	self.mag_98k         = readfloat();
+	self.ammo_98k        = readfloat();
+	self.mag_shotgun     = readfloat();
+	self.ammo_shotgun    = readfloat();
+	self.mag_m3          = readfloat();
+	self.ammo_m3         = readfloat();
+	self.mag_mp5         = readfloat();
+	self.ammo_mp5        = readfloat();
+	self.mag_crossbow    = readfloat();
+	self.ammo_crossbow   = readfloat();
+	self.mag_grenadelauncher = readfloat();
+	self.mag_rebar       = readfloat();
+	self.ammo_gauss      = readfloat();
 
 	CSQC_StoreConfirmedStateFromEntity(self);
 	sv_confirmed_cmdframe        = servercommandframe;

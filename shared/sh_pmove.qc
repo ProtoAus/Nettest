@@ -32,7 +32,7 @@ float  PM_MAX_CLIP_PLANES  = 8;   // raised from 5 to match ramp-fix bump count
 float  PM_MAX_JUMPFIX_DP   = -0.1;  // ramp-fix dot-product threshold
 float  PM_BTN_JUMP         = 2;     // bit in input_buttons
 float  PM_BTN_DUCK         = 32;    // +button6 via DP_INPUTBUTTONS
-float  PM_BTN_SPRINT       = 64;    // +button7 / +sprint  — run faster (sv_sprintspeed)
+float  PM_BTN_SPRINT       = 8;     // +button4  — run faster (sv_sprintspeed)
 float  PM_BTN_USE          = 128;   // +button8 / +use     — high friction
 float  PM_BTN_WALK         = 256;   // +speed   / +button9 — walk slower (sv_walkspeed)
 float  PM_DUCK_TIME        = 0.4;
@@ -94,7 +94,7 @@ vector pm_ladder_normal;  // outward-facing normal of the active ladder surface
 
 float  mv_gravity;
 float  mv_maxspeed;
-float  mv_sprintspeed;    // effective max speed when PM_BTN_SPRINT is held (0 = disabled)
+float  mv_shiftspeed;     // reduced max speed when +button4 (shift/walk) is held
 float  mv_walkspeed;      // effective max speed when PM_BTN_WALK is held  (0 = disabled)
 float  mv_stopspeed;
 float  mv_friction;
@@ -178,7 +178,7 @@ float PM_SplineFraction(float value, float scale)
 
 void PM_SyncHull()
 {
-#ifdef SSQC
+#if defined(SSQC) || defined(CSQC)
     if (self.flags & FL_DUCKING)
         setsize(self, PM_DUCK_MINS, PM_DUCK_MAXS);
     else
@@ -325,6 +325,12 @@ vector PM_ClipVelocity(vector in, vector normal, float overbounce)
     if (out_y > -PM_STOP_EPSILON && out_y < PM_STOP_EPSILON) out_y = 0;
     if (out_z > -PM_STOP_EPSILON && out_z < PM_STOP_EPSILON) out_z = 0;
 
+    // Residual penetration fix (Momentum Mod): ensure clipped velocity
+    // doesn't still move into the plane due to float precision.
+    float adjust = out * normal;
+    if (adjust < 0)
+        out = out - (normal * adjust);
+
     return out;
 }
 
@@ -436,7 +442,21 @@ float PM_SlideMove()
         }
 
         if (trace_fraction == 1)
+        {
+            // Stuck-on-arrival check (Momentum Mod): a swept trace can
+            // report fraction==1 while the endpoint is embedded in terrain.
+            // Re-test with an unswept box to catch this.
+            if (i > 0)
+            {
+                PM_Trace(pm_origin, pm_origin);
+                if (trace_startsolid || trace_fraction != 1)
+                {
+                    pm_velocity = '0 0 0';
+                    break;
+                }
+            }
             break;   // moved the whole way, no collision
+        }
 
         // Ramp-seam fix: zero progress against a surface while airborne —
         // the plane normal may be degenerate.  Store it and try the retrace.
@@ -466,6 +486,28 @@ float PM_SlideMove()
         }
 
         time_left -= time_left * trace_fraction;
+
+        // First-impact airborne differentiated clip (Momentum Mod):
+        // On the very first collision while airborne, use different
+        // overbounce for floors vs walls.  sv_bounce defaults to 0,
+        // making this a no-op unless explicitly configured for surf.
+        if (num_planes == 1 && !pm_onground)
+        {
+            vector first_plane = planes[0];
+            if (first_plane_z >= PM_MIN_STEP_NORMAL)
+            {
+                // Floor/slope: no bounce
+                pm_velocity = PM_ClipVelocity(original_velocity, first_plane, 1);
+            }
+            else
+            {
+                // Wall: slight bounce based on sv_bounce
+                float sv_bounce_val = cvar("sv_bounce");
+                pm_velocity = PM_ClipVelocity(original_velocity, first_plane, 1 + sv_bounce_val);
+            }
+            original_velocity = pm_velocity;
+            continue;
+        }
 
         // Try each stored plane to find a compatible clip velocity
         for (j = 0; j < num_planes; j++)
@@ -585,6 +627,14 @@ float PM_StepSlideMove(float in_air)
 
     // step up
     PM_Trace(pm_origin, pm_origin + '0 0 1' * stepsize);
+    if (trace_startsolid && (blocked & PM_BLOCKED_STEP))
+    {
+        // Hull is flush with a wall face (NudgePosition grid-snapped us
+        // onto the brush boundary).  Back off 0.125 units against our
+        // movement direction and retry so the trace clears the seam.
+        vector nudged = pm_origin - normalize(original_velocity) * 0.125;
+        PM_Trace(nudged, nudged + '0 0 1' * stepsize);
+    }
     if (!trace_startsolid && !trace_allsolid)
         pm_origin = trace_endpos;
 
@@ -624,9 +674,9 @@ float PM_StepSlideMove(float in_air)
     dy = pm_origin_y - original_origin_y;
     up_dist_sq = dx*dx + dy*dy;
 
-    if (down_dist_sq >= up_dist_sq)
+    if (down_dist_sq > up_dist_sq)
     {
-        // flat path covered as much or more ground – use it
+        // flat path covered strictly more ground – use it
         pm_origin   = down_origin;
         pm_velocity = down_velocity;
         return blocked;
@@ -961,6 +1011,18 @@ float PM_AirMove()
         if (trace_fraction == 1 && !trace_startsolid && !trace_allsolid)
         {
             pm_origin = trace_endpos;
+
+            // Step-down snap: keep the player grounded when walking off
+            // stairs/ledges up to PM_STEPSIZE high.  Mirrors the slope-glue
+            // snap on the PM_StepSlideMove path below, and Source's
+            // StayOnGround().
+            PM_Trace(pm_origin, pm_origin - '0 0 1' * PM_STEPSIZE);
+            if (trace_fraction < 1 && !trace_startsolid && !trace_allsolid
+                && trace_plane_normal_z >= PM_MIN_STEP_NORMAL)
+            {
+                pm_origin = trace_endpos;
+            }
+
             return 0;
         }
 
@@ -1042,8 +1104,9 @@ void PM_CategorizePosition()
     }
 
     // --- ground check ---
-    // trace 1 unit below origin
-    PM_Trace(pm_origin, pm_origin - '0 0 1');
+    // trace 2 units below origin (Momentum Mod uses 2 for more generous
+    // ground detection, reducing ground-state flicker on uneven surfaces)
+    PM_Trace(pm_origin, pm_origin - '0 0 2');
 
     if (pm_velocity_z > 180)
     {
@@ -1055,14 +1118,74 @@ void PM_CategorizePosition()
         pm_onground     = TRUE;
         pm_groundnormal = trace_plane_normal;
         // Skip the floor snap while swimming — it would kill upward velocity each frame.
-        if (pm_waterlevel < 2)
+        // Only snap if within 1 unit to avoid visible popping off small ledges
+        // (ground detection reaches 2 units but snap stays conservative).
+        if (pm_waterlevel < 2 && (pm_origin_z - trace_endpos_z) <= 1)
             pm_origin   = trace_endpos;
         self.pm_waterjumptime = 0;        // cancel water-jump on landing
     }
     else
     {
-        pm_onground     = FALSE;
-        pm_groundnormal = trace_plane_normal;
+        // Quadrant ground check (Momentum Mod): the center trace hit a
+        // steep surface — test 4 quarter-hull sub-boxes at hull corners
+        // to find walkable ground the center missed at terrain seams.
+        float found_ground = FALSE;
+        if (trace_fraction < 1)
+        {
+            vector full_mins = PM_CurrentMins();
+            vector full_maxs = PM_CurrentMaxs();
+            vector qmins, qmaxs;
+            vector gcheck_end = pm_origin - '0 0 2';
+
+            // -x, -y quadrant
+            qmins = full_mins;
+            qmaxs = [min(0, full_maxs_x), min(0, full_maxs_y), full_maxs_z];
+            PM_TraceHull(pm_origin, qmins, qmaxs, gcheck_end);
+            if (trace_fraction < 1 && trace_plane_normal_z >= PM_MIN_STEP_NORMAL)
+                found_ground = TRUE;
+
+            if (!found_ground)
+            {
+                // +x, +y quadrant
+                qmins = [max(0, full_mins_x), max(0, full_mins_y), full_mins_z];
+                qmaxs = full_maxs;
+                PM_TraceHull(pm_origin, qmins, qmaxs, gcheck_end);
+                if (trace_fraction < 1 && trace_plane_normal_z >= PM_MIN_STEP_NORMAL)
+                    found_ground = TRUE;
+            }
+
+            if (!found_ground)
+            {
+                // -x, +y quadrant
+                qmins = [full_mins_x, max(0, full_mins_y), full_mins_z];
+                qmaxs = [min(0, full_maxs_x), full_maxs_y, full_maxs_z];
+                PM_TraceHull(pm_origin, qmins, qmaxs, gcheck_end);
+                if (trace_fraction < 1 && trace_plane_normal_z >= PM_MIN_STEP_NORMAL)
+                    found_ground = TRUE;
+            }
+
+            if (!found_ground)
+            {
+                // +x, -y quadrant
+                qmins = [max(0, full_mins_x), full_mins_y, full_mins_z];
+                qmaxs = [full_maxs_x, min(0, full_maxs_y), full_maxs_z];
+                PM_TraceHull(pm_origin, qmins, qmaxs, gcheck_end);
+                if (trace_fraction < 1 && trace_plane_normal_z >= PM_MIN_STEP_NORMAL)
+                    found_ground = TRUE;
+            }
+        }
+
+        if (found_ground)
+        {
+            pm_onground     = TRUE;
+            pm_groundnormal = trace_plane_normal;
+            // Do NOT snap origin — quadrant endpos could push into wall
+        }
+        else
+        {
+            pm_onground     = FALSE;
+            pm_groundnormal = trace_plane_normal;
+        }
     }
 }
 
@@ -1334,20 +1457,11 @@ void PM_SpectatorMove()
 void PM_NoclipMove()
 {
     vector wishvel, wishdir;
-    float  wishspeed, maxspeed, speed, newspeed, drop;
+    float  wishspeed, maxspeed;
 
     maxspeed = cvar("pm_noclipspeed");
     if (maxspeed <= 0)
         maxspeed = mv_maxspeed * 3;
-
-    // friction applied to all axes
-    speed = vlen(pm_velocity);
-    if (speed > 0)
-    {
-        drop     = speed * mv_friction * 1.5 * pm_frametime;
-        newspeed = max(speed - drop, 0) / speed;
-        pm_velocity = pm_velocity * newspeed;
-    }
 
     // wish velocity from full 3-D view (forward + right + up)
     wishvel = pm_forward * input_movevalues_x
@@ -1355,19 +1469,18 @@ void PM_NoclipMove()
             + v_up       * input_movevalues_z;
 
     wishspeed = vlen(wishvel);
-    if (wishspeed > maxspeed)
-    {
-        wishvel   = wishvel * (maxspeed / wishspeed);
-        wishspeed = maxspeed;
-    }
 
+    // Scale input to noclip speed — input_movevalues are clamped to
+    // cl_forwardspeed (~400) by the engine, so we rescale them to fill
+    // the full noclip range.
     if (wishspeed > 0)
     {
         wishdir = normalize(wishvel);
-        PM_Accelerate(wishdir, wishspeed, mv_accelerate);
-        speed = vlen(pm_velocity);
-        if (speed > maxspeed)
-            pm_velocity = pm_velocity * (maxspeed / speed);
+        pm_velocity = wishdir * maxspeed;
+    }
+    else
+    {
+        pm_velocity = '0 0 0';
     }
 
     // move directly — no collision
@@ -1401,8 +1514,8 @@ void PM_ReadMovevars()
     mv_maxspeed          = cvar("sv_maxspeed");
     if (!mv_maxspeed)         mv_maxspeed          = 320;
 
-    mv_sprintspeed       = cvar("sv_sprintspeed");
-    if (!mv_sprintspeed)      mv_sprintspeed       = 450;
+    mv_shiftspeed        = cvar("sv_shiftspeed");
+    if (!mv_shiftspeed)       mv_shiftspeed        = 135;
 
     mv_walkspeed         = cvar("sv_walkspeed");
     if (!mv_walkspeed)        mv_walkspeed         = 135;
@@ -1876,9 +1989,9 @@ void PM_PlayerMoveStep()
     // --- read cvars ---
     PM_ReadMovevars();
 
-    // Walk modifier (+speed / shift): reduces mv_maxspeed to sv_walkspeed.
-    if ((input_buttons & PM_BTN_WALK) && !(self.flags & FL_DUCKING) && mv_walkspeed > 0)
-        mv_maxspeed = mv_walkspeed;
+    // Shift/walk modifier (+button4): reduces mv_maxspeed to sv_shiftspeed.
+    if ((input_buttons & PM_BTN_SPRINT) && !(self.flags & FL_DUCKING) && mv_shiftspeed > 0)
+        mv_maxspeed = mv_shiftspeed;
 
     // --- build movement axes ---
     makevectors(input_angles);
@@ -2008,6 +2121,8 @@ done:
         self.flags = self.flags | FL_ONGROUND;
     else
         self.flags = self.flags & ~FL_ONGROUND;
+
+    self.waterlevel = pm_waterlevel;
 }
 
 // ============================================================================

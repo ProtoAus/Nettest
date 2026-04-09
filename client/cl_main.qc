@@ -118,13 +118,20 @@ noref void(float apiver, string enginename, float enginever) CSQC_Init =
 {
 	CSQC_EnsureWorldSolid();
 	drawfont = loadfont("", "Courier Prime Code", "12,16,24,32,64,72,128,256,512", -1, 0, 0);
+	hud_font = loadfont("hud", "gfx/RobotoEB", "8 12 16 18 24 32 36 48 60 72", -1, 0, 0);
 	precache_everything();
+	CSQC_PrecacheShells();
+	precache_pic("gfx/scope.png");
 	registercommand("pred_debug");
 	registercommand("pred_trace");
 };
 
 noref void() CSQC_WorldLoaded =
 {
+	// Clear stale linked lists from previous map
+	ladder_trigger_list = world;
+	teleport_trigger_list = world;
+
 	CSQC_EnsureWorldSolid();
 	CSQC_ResetPredictionState();
 };
@@ -145,6 +152,44 @@ void(float width, float height, float menushown) CSQC_UpdateView =
 
 	CSQC_BuildPresentationView();
 
+	// --- Spectator / death cam ---
+	Spectate_UpdateState();
+
+	if (Spectate_IsActive())
+	{
+		Spectate_CheckTargetAlive();
+		Spectate_UpdateCamera();
+
+		CSQC_ExtrapolateRemotePlayers();
+		setproperty(VF_VIEWENTITY, 0);
+		addentities(MASK_ENGINE);
+		CSQC_DrawMuzzleFlash();
+		CSQC_DrawImpactLights();
+		renderscene();
+
+		float spec_prev_font = drawfont;
+		drawfont = hud_font;
+		Spectate_DrawHUD();
+		drawfont = spec_prev_font;
+
+		// Still allow scoreboard/team menu while spectating
+		TeamMenuUpdateCursorState();
+		if (HUD_ScoreboardVisible())
+			HUD_DrawScoreboard();
+		if (TeamMenuIsOpen())
+		{
+			float spec_team_font = drawfont;
+			drawfont = hud_font;
+			sui_begin(g_width, g_height);
+			TeamMenuDraw();
+			sui_menu_nav();
+			sui_end();
+			drawfont = spec_team_font;
+		}
+		return;
+	}
+
+	// --- Normal alive camera ---
 	// use predicted player position for the camera if prediction is active
 	if (predicted_player && csqc_prediction_valid)
 	{
@@ -166,29 +211,63 @@ void(float width, float height, float menushown) CSQC_UpdateView =
 	// extrapolate remote players beyond the last received server snapshot
 	CSQC_ExtrapolateRemotePlayers();
 
+	// CSQC submits its own predicted viewmodel, so keep the engine's
+	// authoritative weaponmodel hidden to avoid double-rendering.
+	setproperty(VF_VIEWENTITY, 0);
+
+	// Zoom FOV override + sensitivity scaling for scoped weapons
+	if (predicted_player && csqc_prediction_valid && predicted_player.zoomstage > 0)
+	{
+		float zoom_fov;
+		if (predicted_player.zoomstage == 1)
+			zoom_fov = ZOOM_FOV_STAGE1;
+		else
+			zoom_fov = ZOOM_FOV_STAGE2;
+
+		setproperty(VF_AFOV, zoom_fov);
+		setsensitivityscaler(zoom_fov / cvar("fov"));
+	}
+	else
+	{
+		setsensitivityscaler(1);
+	}
+
 	//autoadd entities received from servers for drawing
 	addentities(MASK_ENGINE);
+	CSQC_AddPredictedViewmodel();
+	CSQC_CheckFakeDropRemoval();
+	CSQC_DrawMuzzleFlash();
+	CSQC_DrawImpactLights();
 
 	//does what you think it does
 	renderscene();
+	CSQC_DrawWeaponHUD();
 	CSQC_DrawPredictionDebug();
-	
-	/*
-	sui_begin(g_width, g_height);
-	
-	// Insert your own sui code here even for CSQC
-	// Make sure to uncomment sui_input_event as well.
-	
-	sui_menu_nav();
-	
-	sui_end();
-	*/
+
+	// Update team menu cursor state every frame
+	TeamMenuUpdateCursorState();
+
+	// Draw scoreboard (raw draw calls, no SUI needed)
+	if (HUD_ScoreboardVisible())
+		HUD_DrawScoreboard();
+
+	// Draw team select (needs SUI)
+	if (TeamMenuIsOpen())
+	{
+		float team_prev_font = drawfont;
+		drawfont = hud_font;
+		sui_begin(g_width, g_height);
+		TeamMenuDraw();
+		sui_menu_nav();
+		sui_end();
+		drawfont = team_prev_font;
+	}
 };
 
-// Suppress the server echo of the local player's footstep sounds when CSQC
-// already played them locally.  Suppression is gated on pm_last_local_step_time
-// so that prediction divergence (CSQC missed a step) lets the server sound
-// through instead of silencing it.
+// Suppress the server echo of the local player's footstep and weapon sounds
+// when CSQC already played them locally.  Suppression is gated on the last
+// local playback timestamp so that prediction divergence still lets the
+// authoritative server sound through.
 //
 // "sounds/player/" is the full path used in this mod.  FTE's QW protocol may
 // strip the "sounds/" prefix on the wire, so both forms are accepted.
@@ -199,24 +278,36 @@ CSQC_Event_Sound =
     float ping_est;
     float age;
 
-    if (channel != CHAN_BODY)
-        return FALSE;
     if (entnum != player_localentnum || player_localentnum <= 0)
+        return FALSE;
+
+    // Suppress predicted weapon echoes on the local player.
+    // Use a fixed 1-second window — covers slow weapons (shotgun pump)
+    // and avoids ping-estimation edge cases that cause double sounds.
+    if (channel == CHAN_WEAPON)
+    {
+        age = cltime - csqc_last_predicted_weapon_sound_time;
+        if (csqc_last_predicted_weapon_sound_time > 0 && age < 1.0)
+            return TRUE;
+        return FALSE;
+    }
+
+    // Suppress predicted CHAN_AUTO echoes (bolt, reload, pump sounds)
+    if (channel == CHAN_AUTO)
+    {
+        age = cltime - csqc_last_predicted_auto_sound_time;
+        if (csqc_last_predicted_auto_sound_time > 0 && age < 1.0)
+            return TRUE;
+        return FALSE;
+    }
+
+    if (channel != CHAN_BODY)
         return FALSE;
     if (substring(soundname, 0, 14) != "sounds/player/"
         && substring(soundname, 0, 7) != "player/")
         return FALSE;
 
-    // Only suppress if CSQC actually played this sound recently.
-    // Window = estimated round-trip ping + 100 ms of jitter margin.
-    // If CSQC didn't predict the step (pm_last_local_step_time is stale),
-    // age will be large and the server echo passes through unchanged.
-    ping_est = bound(0, cltime - time, 0.3);
-    age      = cltime - pm_last_local_step_time;
-    if (age < ping_est + 0.1)
-        return TRUE;   // echo of a sound we already played — suppress
-
-    return FALSE;      // CSQC missed this step — let the server sound play
+    return FALSE;
 };
 
 float(string cmd) CSQC_ConsoleCommand =
@@ -242,7 +333,21 @@ float(string cmd) CSQC_ConsoleCommand =
 
 float(float evtype, float scanx, float chary, float devid) CSQC_InputEvent =
 {
-	// sui_input_event(evtype, scanx, chary, devid);
+	// Team menu takes priority when open
+	if (TeamMenuIsOpen())
+		return TeamMenuInputEvent(evtype, scanx, chary, devid);
+
+	// Spectator input (post-deathdelay only, not during death cam)
+	if (Spectate_IsActive() && !Spectate_InDeathCam())
+	{
+		if (Spectate_HandleInput(evtype, scanx, chary, devid))
+			return TRUE;
+	}
+
+	// Scoreboard intercepts TAB/+showscores
+	if (HUD_ScoreboardInputEvent(evtype, scanx, chary, devid))
+		return TRUE;
+
 	switch(evtype)
 	{
 	case IE_KEYDOWN:
@@ -266,6 +371,37 @@ void() CSQC_Parse_Event =
 {
 	float first = readbyte();
 	switch(first) {
+		case CSQC_EVENT_IMPACT:
+		{
+			vector pos, normal;
+			pos_x = readcoord();
+			pos_y = readcoord();
+			pos_z = readcoord();
+			normal_x = readcoord();
+			normal_y = readcoord();
+			normal_z = readcoord();
+			CSQC_BulletImpactRemote(pos, normal);
+			break;
+		}
+		case CSQC_EVENT_SHELL:
+		{
+			float sh_type = readbyte();
+			vector sh_org = readvector();
+			vector sh_vel = readvector();
+			vector sh_avel = readvector();
+			string sh_mdl = CSQC_ShellModelForType(sh_type);
+			CSQC_SpawnRemoteCasing(sh_mdl, sh_org, sh_vel, sh_avel);
+			break;
+		}
+		case CSQC_EVENT_MAGDROP:
+		{
+			float mg_type = readbyte();
+			vector mg_org = readvector();
+			vector mg_vel = readvector();
+			string mg_mdl = CSQC_MagModelForType(mg_type);
+			CSQC_SpawnRemoteMag(mg_mdl, mg_org, mg_vel, '0 180 0');
+			break;
+		}
 		default:
 			printf("No action for byte %f\n", first);
 			break;

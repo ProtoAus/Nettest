@@ -88,13 +88,18 @@ void() button_done =
     setorigin(self, self.pos1);
     self.velocity      = '0 0 0';
     self.button_state  = BUTTON_STATE_BOTTOM;
+    self.mover_state   = MOVER_STATE_BOTTOM;
     self.frame         = 0;
     self.SendFlags     = 1;
+
+    if (self.max_health)
+        self.health = self.max_health;
 };
 
 void() button_return =
 {
     self.button_state = BUTTON_STATE_DOWN;
+    self.mover_state  = MOVER_STATE_DOWN;
     Mover_Start(self.pos1, self.speed, button_done);
 };
 
@@ -103,6 +108,7 @@ void() button_wait =
     setorigin(self, self.pos2);
     self.velocity     = '0 0 0';
     self.button_state = BUTTON_STATE_TOP;
+    self.mover_state  = MOVER_STATE_TOP;
     self.frame        = 1;
     self.SendFlags    = 1;
     Trigger_UseTargets(self, self.enemy);
@@ -127,6 +133,7 @@ void() button_fire =
         sound(self, CHAN_VOICE, self.noise, 1, ATTN_NORM);
 
     self.button_state = BUTTON_STATE_UP;
+    self.mover_state  = MOVER_STATE_UP;
     Mover_Start(self.pos2, self.speed, button_wait);
 };
 
@@ -178,10 +185,18 @@ void() func_button =
     if (!self.lip)   self.lip   = 4;
 
     SV_InitReplicatedSolidBrush();
+    self.brush_type   = BRUSH_TYPE_BUTTON;
     self.blocked      = button_blocked;
     self.use          = button_use;
     self.touch        = button_touch;
     self.button_state = BUTTON_STATE_BOTTOM;
+    self.mover_state  = MOVER_STATE_BOTTOM;
+
+    if (self.health)
+    {
+        self.max_health = self.health;
+        self.takedamage = DAMAGE_YES;
+    }
     self.pos1         = self.origin;
 
     if (self.movedir != '0 0 0')
@@ -204,6 +219,7 @@ float DOOR_START_OPEN  = 1;
 float DOOR_CRUSHING    = 2;
 float DOOR_DONT_LINK   = 4;
 float DOOR_TOGGLE      = 32;
+float DOOR_LOCKED      = 64;
 
 float DOOR_STATE_BOTTOM = 0;
 float DOOR_STATE_UP     = 1;
@@ -223,6 +239,7 @@ void() door_hit_bottom =
     setorigin(self, self.pos1);
     self.velocity    = '0 0 0';
     self.door_state  = DOOR_STATE_BOTTOM;
+    self.mover_state = MOVER_STATE_BOTTOM;
     self.SendFlags   = 1;
     if (self.noise1)
         sound(self, CHAN_VOICE, self.noise1, 1, ATTN_NORM);
@@ -232,7 +249,8 @@ void() door_go_down =
 {
     if (self.door_state == DOOR_STATE_BOTTOM || self.door_state == DOOR_STATE_DOWN)
         return;
-    self.door_state = DOOR_STATE_DOWN;
+    self.door_state  = DOOR_STATE_DOWN;
+    self.mover_state = MOVER_STATE_DOWN;
     if (self.noise2)
         sound(self, CHAN_VOICE, self.noise2, 1, ATTN_NORM);
     Mover_Start(self.pos1, self.speed, door_hit_bottom);
@@ -241,9 +259,10 @@ void() door_go_down =
 void() door_hit_top =
 {
     setorigin(self, self.pos2);
-    self.velocity   = '0 0 0';
-    self.door_state = DOOR_STATE_TOP;
-    self.SendFlags  = 1;
+    self.velocity    = '0 0 0';
+    self.door_state  = DOOR_STATE_TOP;
+    self.mover_state = MOVER_STATE_TOP;
+    self.SendFlags   = 1;
     if (self.noise1)
         sound(self, CHAN_VOICE, self.noise1, 1, ATTN_NORM);
     if ((self.spawnflags & DOOR_TOGGLE) || self.wait < 0)
@@ -265,7 +284,8 @@ void() door_go_up =
     }
     if (self.door_state == DOOR_STATE_UP)
         return;
-    self.door_state = DOOR_STATE_UP;
+    self.door_state  = DOOR_STATE_UP;
+    self.mover_state = MOVER_STATE_UP;
     if (self.noise2)
         sound(self, CHAN_VOICE, self.noise2, 1, ATTN_NORM);
     Mover_Start(self.pos2, self.speed, door_hit_top);
@@ -327,6 +347,8 @@ void(entity seed) Door_OpenGroup =
 
 void() door_use =
 {
+    if ((self.spawnflags & DOOR_LOCKED) && sv_use_is_player_direct)
+        return;
     if (self.attack_finished > time)
         return;
     self.attack_finished = time + 0.1;
@@ -340,6 +362,8 @@ void() door_trigger_touch =
 {
     entity oldself, oldactivator;
     if (other.classname != "player")
+        return;
+    if (self.owner.spawnflags & DOOR_LOCKED)
         return;
     oldself = self; oldactivator = activator;
     activator = other;
@@ -410,6 +434,7 @@ void() func_door =
     if (!self.lip)   self.lip   = 8;
 
     SV_InitReplicatedSolidBrush();
+    self.brush_type  = BRUSH_TYPE_DOOR;
     self.blocked = door_blocked;
     self.use     = door_use;
     self.pos1    = self.origin;
@@ -455,8 +480,17 @@ void() func_door =
     if (self.pos2_y + self.maxs_y > self.cmaxs_y) self.cmaxs_y = self.pos2_y + self.maxs_y;
     if (self.pos2_z + self.maxs_z > self.cmaxs_z) self.cmaxs_z = self.pos2_z + self.maxs_z;
 
-    self.door_state = DOOR_STATE_BOTTOM;
+    self.door_state  = DOOR_STATE_BOTTOM;
+    self.mover_state = MOVER_STATE_BOTTOM;
 
     if (!self.targetname)
         door_spawn_trigger();
 };
+
+// Team spawn point entities
+void() info_player_blue = {};
+void() info_player_red = {};
+void() info_player_start_blue = { info_player_blue(); };
+void() info_player_start_red = { info_player_red(); };
+void() info_player_team1 = { info_player_blue(); };
+void() info_player_team2 = { info_player_red(); };

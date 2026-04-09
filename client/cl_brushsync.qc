@@ -1,9 +1,30 @@
 //
-//  cl_brushsync.qc  –  CSQC solid brush entity
+//  cl_brushsync.qc  –  CSQC solid brush entity + door/button prediction
 //
-//  Receives func_wall-style brush entities from the server and rebuilds them
-//  as SOLID_BSP entities so client prediction traces hit them correctly.
+//  Receives brush entities from the server and rebuilds them as SOLID_BSP
+//  for client-side prediction traces.
 //
+//  Doors and buttons receive pos1/pos2/speed/state parameters so the client
+//  can predict their movement instantly (before the server confirms).
+//
+
+// Client-side door/button fields
+.float brush_type;      // BRUSH_TYPE_*
+.float mover_state;     // MOVER_STATE_*
+.vector pos1;           // closed/bottom position
+.vector pos2;           // open/top position
+.float speed;           // movement speed
+.float door_locked;     // TRUE if door has DOOR_LOCKED spawnflag
+
+// Use impulse constant (must match server's CheckImpulses case)
+const float USE_IMPULSE = 11;
+
+// Use trace distance (must match server's PLAYER_USE_TRACE_LENGTH)
+const float CSQC_USE_TRACE_LENGTH = 96;
+
+// ============================================================
+//  Brush sync update (called by engine when server sends entity)
+// ============================================================
 
 void() CSQC_SolidBrush_Update =
 {
@@ -11,6 +32,8 @@ void() CSQC_SolidBrush_Update =
     vector org, ang, emins, emaxs, vel;
     float alpha_value;
     float effect_flags;
+    float btype;
+    float sv_state;
 
     modelname = readstring();
     org = readvector();
@@ -21,17 +44,167 @@ void() CSQC_SolidBrush_Update =
     effect_flags = readfloat();
     vel = readvector();
 
+    btype = readbyte();
+    sv_state = 0;
+    if (btype == BRUSH_TYPE_DOOR || btype == BRUSH_TYPE_BUTTON)
+    {
+        self.pos1  = readvector();
+        self.pos2  = readvector();
+        self.speed = readfloat();
+        sv_state   = readbyte();
+        self.door_locked = readbyte();
+    }
+
     if (self.model != modelname)
         setmodel(self, modelname);
 
     setsize(self, emins, emaxs);
 
-    self.movetype = MOVETYPE_NOCLIP;  // auto-advances at velocity between server packets
-    self.solid = SOLID_BSP;
-    self.drawmask = MASK_ENGINE;
-    self.angles = ang;
-    self.alpha = alpha_value;
-    self.effects = effect_flags;
-    self.velocity = vel;
-    setorigin(self, org);
+    self.movetype    = MOVETYPE_NOCLIP;
+    self.solid       = SOLID_BSP;
+    self.drawmask    = MASK_ENGINE;
+    self.angles      = ang;
+    self.alpha       = alpha_value;
+    self.effects     = effect_flags;
+
+    if (self.brush_type == btype
+        && (btype == BRUSH_TYPE_DOOR || btype == BRUSH_TYPE_BUTTON)
+        && self.mover_state == sv_state
+        && (sv_state == MOVER_STATE_UP || sv_state == MOVER_STATE_DOWN))
+    {
+        // Server and client agree on direction — keep whichever position
+        // is further along toward the destination.
+        vector dest;
+        if (sv_state == MOVER_STATE_UP)
+            dest = self.pos2;
+        else
+            dest = self.pos1;
+
+        float server_dist = vlen(dest - org);
+        float client_dist = vlen(dest - self.origin);
+
+        if (client_dist < server_dist)
+            self.velocity = vel;   // client ahead — keep position
+        else
+        {
+            self.velocity = vel;
+            setorigin(self, org);
+        }
+    }
+    else
+    {
+        // Server disagrees or static brush — accept server state fully.
+        // This corrects mispredictions where the client started a mover
+        // the server never activated.
+        self.velocity    = vel;
+        self.mover_state = sv_state;
+        setorigin(self, org);
+    }
+
+    self.brush_type = btype;
 };
+
+// ============================================================
+//  Client-side door/button prediction
+// ============================================================
+
+// Start a mover moving toward a destination (client-side equivalent of Mover_Start)
+void(entity ent, vector destination) CSQC_MoverPredict =
+{
+    vector delta;
+    float distance;
+
+    delta    = destination - ent.origin;
+    distance = vlen(delta);
+
+    if (distance <= 0 || ent.speed <= 0)
+    {
+        ent.velocity = '0 0 0';
+        setorigin(ent, destination);
+        return;
+    }
+
+    ent.velocity = delta * (ent.speed / distance);
+};
+
+// Predict a single door or button activation (client-side equivalent of
+// door_go_up / button_fire).  Does NOT handle door groups — groups are
+// corrected when the server snapshot arrives.
+void(entity hit) CSQC_PredictMoverActivate =
+{
+    // Already moving? Don't re-trigger (matches server guard)
+    if (hit.mover_state == MOVER_STATE_UP || hit.mover_state == MOVER_STATE_DOWN)
+        return;
+
+    if (hit.mover_state == MOVER_STATE_BOTTOM)
+    {
+        hit.mover_state = MOVER_STATE_UP;
+        CSQC_MoverPredict(hit, hit.pos2);
+    }
+    else if (hit.mover_state == MOVER_STATE_TOP)
+    {
+        // Buttons return on their own timer — server rejects re-activation
+        // from TOP state (button_fire guards against UP/TOP).  Only doors
+        // can be toggled back from TOP.
+        if (hit.brush_type == BRUSH_TYPE_BUTTON)
+            return;
+
+        hit.mover_state = MOVER_STATE_DOWN;
+        CSQC_MoverPredict(hit, hit.pos1);
+    }
+};
+
+// Try to predict door/button activation via +use trace.
+// Called from CSQC_PredictWeaponCommand context (self = predicted_player).
+// Matches the server's SV_PlayerTryUse: tracebox first, then cone fallback.
+void() CSQC_PredictUse =
+{
+    vector use_start, use_end;
+    entity hit, best, e;
+    float best_dot, dot;
+
+    makevectors(input_angles);
+    use_start = self.origin + self.view_ofs;
+    use_end   = use_start + v_forward * CSQC_USE_TRACE_LENGTH;
+
+    // Match server: tracebox with expanded hull, not traceline
+    tracebox(use_start, '-8 -8 -8', '8 8 8', use_end, MOVE_NORMAL, self);
+
+    hit = trace_ent;
+    if (hit && hit != world
+        && (hit.brush_type == BRUSH_TYPE_DOOR || hit.brush_type == BRUSH_TYPE_BUTTON))
+    {
+        if (hit.brush_type == BRUSH_TYPE_DOOR && hit.door_locked)
+            return;
+        CSQC_PredictMoverActivate(hit);
+        return;
+    }
+
+    // Cone fallback: pick the closest-aligned usable entity (matches server)
+    best = world;
+    best_dot = 0.7;
+    e = findradius(use_start, CSQC_USE_TRACE_LENGTH);
+    while (e)
+    {
+        if (e != self
+            && (e.brush_type == BRUSH_TYPE_DOOR || e.brush_type == BRUSH_TYPE_BUTTON)
+            && !(e.brush_type == BRUSH_TYPE_DOOR && e.door_locked))
+        {
+            dot = normalize(e.origin - use_start) * v_forward;
+            if (dot > best_dot)
+            {
+                best_dot = dot;
+                best = e;
+            }
+        }
+        e = e.chain;
+    }
+
+    if (best)
+        CSQC_PredictMoverActivate(best);
+};
+
+// Proximity door prediction removed — iterating all entities per frame
+// caused runaway loop errors. Touch-triggered doors will open with the
+// server's normal latency. Use-triggered doors (+use) are predicted
+// instantly via CSQC_PredictUse traceline above.

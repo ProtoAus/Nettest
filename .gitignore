@@ -19,3 +19,9 @@ MomSurfFix-master/*
 
 ramp_slope_fix.sp
 NewQuake
+pmove_ezquake.c
+gamemovement_momentummod.cpp
+w_ak47.qc
+w_flakshotgun.qc
+w_m4a1.qc
+w_pistol.qc

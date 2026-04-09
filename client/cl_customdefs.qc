@@ -7,6 +7,11 @@
 .vector movedir;     /* push direction for trigger_push */
 .float  spawnflags;  /* trigger/entity spawn flags (not in CSQC defs) */
 
+// Standard QW player fields not present in cl_defs.qc
+.float  weapon;
+.float  weaponframe;
+// attack_finished moved to shared/sh_weapons.qc
+
 vector cursor_pos; /* Current mouse cursor position, updated in csqc_inputevent */
 float g_width, g_height; /* Globals for screen width and height */
 
@@ -33,8 +38,30 @@ float input_cursor;
 vector campos;
 vector camang;
 
+float hud_font;
+
+// Spectator freecam input (captured in cl_player.qc, used in cl_spectate.qc)
+float spec_freecam_fwd;
+float spec_freecam_side;
+
 entity localplayer;
 entity predicted_player;
+
+// Shared CSQC weapon-prediction bookkeeping.
+float csqc_pred_sequence;
+float csqc_weapon_pending_ack_sequence;
+
+// Persistent CSQC viewmodel entity — driven by predicted_player
+entity csqc_viewmodel_ent;
+
+// Current "logical time" for weapon prediction.
+// Set to cltime for live prediction, pred_cmd_timestamp[slot] for replay.
+float csqc_pred_time;
+
+// Time the last predicted local weapon sound was played, used to suppress
+// the delayed server-side echo in CSQC_Event_Sound.
+float csqc_last_predicted_weapon_sound_time;
+float csqc_last_predicted_auto_sound_time;
 
 vector() readvector =
 {
