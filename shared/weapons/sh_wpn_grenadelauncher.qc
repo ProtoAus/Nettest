@@ -103,8 +103,8 @@ void() W_GrenadeExplode =
             dist = vlen(e.origin - self.origin);
             float push_scale = 1 - (dist / GL_EXPLOSION_RADIUS);
             vector push_dir = normalize(e.origin - self.origin);
-            e.velocity += push_dir * 400 * push_scale;
-            e.velocity_z += 150 * push_scale;
+            e.velocity += push_dir * 800 * push_scale;
+            e.velocity_z += 350 * push_scale;
         }
 
         e = e.chain;

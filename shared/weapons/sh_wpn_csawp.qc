@@ -87,7 +87,7 @@ float(float now) SH_AWPTryAltFire =
 {
     if (self.weaponstate != WS_IDLE)
         return 0;
-    if (now < self.attack_finished)
+    if (now < self.altfire_finished)
         return 0;
 
     if (self.zoomstage >= 2)
@@ -95,7 +95,7 @@ float(float now) SH_AWPTryAltFire =
     else
         self.zoomstage = self.zoomstage + 1;
 
-    self.attack_finished = now + 0.3;
+    self.altfire_finished = now + 0.3;
     return 1;
 };
 

@@ -317,8 +317,17 @@ void() PlayerCheckFallDamage =
         if (damage > 0)
         {
             self.health = self.health - damage;
-            self.dmg_take = damage;
-            self.dmg_inflictor = self;
+
+            // Send damage flash only to the victim (not all players)
+            {
+                float saved_dim = dimension_send;
+                dimension_send = self.dimension_seen;
+                WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
+                WriteByte(MSG_MULTICAST, CSQC_EVENT_DAMAGE_FLASH);
+                WriteByte(MSG_MULTICAST, damage);
+                multicast(self.origin, MULTICAST_PHS);
+                dimension_send = saved_dim;
+            }
 
             if (self.health <= 0)
             {
@@ -581,6 +590,7 @@ void() PlayerSpawn =
 	setmodel(self, "models/testplayer.iqm");
 	self.movetype = MOVETYPE_NONE;  // engine physics off; we run our own
 	self.health = 100;
+	self.velocity = '0 0 0';
 	PlayerPlaceAtSpawnPoint();
 	PlayerApplyTeamColours();
 	self.fixangle = TRUE;
@@ -599,6 +609,10 @@ void() PlayerSpawn =
 	self.pm_step_time    = 0;
 	self.flags           = self.flags & ~FL_DUCKING;
 	self.wep_action_id   = 0;
+	self.gauss_charge_state = 0;
+	self.gauss_charge_started = 0;
+	self.gauss_charge_next_ammo = 0;
+	self.glock_burst_count = 0;
 
 	// Give starting weapons
 	self.slot_primary         = WEP_M4A1;

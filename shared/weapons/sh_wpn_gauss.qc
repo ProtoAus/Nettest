@@ -388,7 +388,18 @@ void() CSQC_PredictGaussCommand =
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_hlgauss/fire.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
                 CSQC_MuzzleFlash();
-                CSQC_PredictedImpact(0, 0, 320);
+                // Gauss is perfectly accurate — direct trace, no spread system
+                {
+                    makevectors(input_angles);
+                    vector gsrc = self.origin + self.view_ofs;
+                    traceline(gsrc, gsrc + v_forward * 8192, MOVE_NORMAL, self);
+                    if (trace_fraction < 1.0)
+                    {
+                        CSQC_BulletImpact(trace_endpos, trace_plane_normal);
+                        if (cvar("cl_debug_impacts"))
+                            CSQC_AddDebugImpact(trace_endpos, gsrc, '0 1 0');
+                    }
+                }
             }
         }
         else if (r == -1)
@@ -442,7 +453,18 @@ void() CSQC_PredictGaussCommand =
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_hlgauss/fire.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
                 CSQC_MuzzleFlash();
-                CSQC_PredictedImpact(0, 0, 320);
+                // Gauss is perfectly accurate — direct trace, no spread system
+                {
+                    makevectors(input_angles);
+                    gsrc = self.origin + self.view_ofs;
+                    traceline(gsrc, gsrc + v_forward * 8192, MOVE_NORMAL, self);
+                    if (trace_fraction < 1.0)
+                    {
+                        CSQC_BulletImpact(trace_endpos, trace_plane_normal);
+                        if (cvar("cl_debug_impacts"))
+                            CSQC_AddDebugImpact(trace_endpos, gsrc, '0 1 0');
+                    }
+                }
             }
         }
     }

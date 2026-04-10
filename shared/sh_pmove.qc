@@ -1313,40 +1313,77 @@ void PM_CheckJump()
 //  21.  PM_CheckWaterJump
 // ============================================================================
 
+// GoldSrc/Momentum Mod style water jump: hull traces + landing validation
+const float WJ_HEIGHT       = 8;     // waist-height offset for wall detection
+const float WJ_FORWARD      = 24;    // forward trace distance
+const float WJ_UPVEL        = 310;   // vertical launch velocity (EzQuake/Quake value)
+const float WJ_HVEL         = 50;    // horizontal push speed (away from wall)
+const float WJ_LAND_TRACE   = 1024;  // downward trace to verify landing surface
+const float WJ_WALL_SLOPE   = 0.1;   // wall must be near-vertical (normal.z < this)
+const float WJ_LAND_SLOPE   = 0.7;   // landing surface must be walkable (normal.z >= this)
+
 void PM_CheckWaterJump()
 {
-    vector flat_fwd, spot;
-    float  cont;
+    vector flat_fwd;
+    vector trace_start, trace_end;
+    vector wall_normal;
 
     if (self.pm_waterjumptime)
         return;
     if (pm_velocity_z < -180)
         return;
 
-    // flatten forward into horizontal
+    // Flatten forward into horizontal
     flat_fwd   = pm_forward;
     flat_fwd_z = 0;
     if (flat_fwd == '0 0 0')
         return;
     flat_fwd = normalize(flat_fwd);
 
-    // 24 units forward, 8 above origin – must be solid
-    spot = pm_origin + flat_fwd * 24;
-    spot_z += 8;
-    cont = pointcontents(spot);
-    if (cont != CONTENT_SOLID)
-        return;
+    // Step 1: Trace forward at waist height — look for a near-vertical wall
+    trace_start = pm_origin;
+    trace_start_z += WJ_HEIGHT;
+    trace_end = trace_start + flat_fwd * WJ_FORWARD;
 
-    // 24 more units up from that spot – must be empty (air above the ledge)
-    spot_z += 24;
-    cont = pointcontents(spot);
-    if (cont != CONTENT_EMPTY)
-        return;
+    // Use a point-size hull for precise wall detection (like GoldSrc usehull=2)
+    tracebox(trace_start, '0 0 0', '0 0 0', trace_end, MOVE_NORMAL, self);
 
-    // conditions met – launch the water jump
-    pm_velocity_x          = flat_fwd_x * 50;
-    pm_velocity_y          = flat_fwd_y * 50;
-    pm_velocity_z          = 310;
+    if (trace_fraction >= 1.0)
+        return;   // no wall found
+    if (fabs(trace_plane_normal_z) >= WJ_WALL_SLOPE)
+        return;   // surface is too sloped (floor/ceiling, not a wall)
+
+    wall_normal = trace_plane_normal;
+
+    // Step 2: Trace forward at eye level — must be clear above the wall
+    // Always use STANDING maxs so ducking doesn't lower the check height
+    trace_start = pm_origin;
+    trace_start_z += PM_MAXS_z - WJ_HEIGHT;   // eye level (standing height)
+    trace_end = trace_start + flat_fwd * WJ_FORWARD;
+
+    tracebox(trace_start, '0 0 0', '0 0 0', trace_end, MOVE_NORMAL, self);
+
+    if (trace_fraction < 1.0)
+        return;   // blocked at eye level, can't climb over
+
+    // Step 3 (Momentum Mod): Trace downward from the eye-level endpoint
+    // to verify there's a walkable landing surface on top of the ledge
+    trace_start = trace_end;
+    trace_end = trace_start;
+    trace_end_z -= WJ_LAND_TRACE;
+
+    tracebox(trace_start, '0 0 0', '0 0 0', trace_end, MOVE_NORMAL, self);
+
+    if (trace_fraction >= 1.0)
+        return;   // no ground found — bottomless on the other side
+    if (trace_plane_normal_z < WJ_LAND_SLOPE)
+        return;   // landing surface too steep to stand on
+
+    // All checks passed — launch the water jump
+    // Horizontal velocity pushes away from the wall (GoldSrc style)
+    pm_velocity_x          = wall_normal_x * -WJ_HVEL;
+    pm_velocity_y          = wall_normal_y * -WJ_HVEL;
+    pm_velocity_z          = WJ_UPVEL;
     self.pm_waterjumptime  = 2;
     self.pm_jump_held      = TRUE;
 }

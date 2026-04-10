@@ -2,6 +2,29 @@
 //  client/cl_hud.qc  -  Heads-up display
 // ============================================================
 
+// --- Pain flash ---
+float csqc_pain_flash_time;
+float csqc_pain_flash_alpha;
+const float PAIN_FLASH_DURATION = 0.4;
+
+void() HUD_DrawPainFlash =
+{
+    float age, alpha;
+
+    if (csqc_pain_flash_time <= 0)
+        return;
+
+    age = cltime - csqc_pain_flash_time;
+    if (age >= PAIN_FLASH_DURATION)
+    {
+        csqc_pain_flash_time = 0;
+        return;
+    }
+
+    alpha = csqc_pain_flash_alpha * (1 - age / PAIN_FLASH_DURATION);
+    drawfill([0, 0], [g_width, g_height], '1 0 0', alpha, 0);
+};
+
 void() HUD_DrawScope =
 {
     float cx, cy, radius, diameter;

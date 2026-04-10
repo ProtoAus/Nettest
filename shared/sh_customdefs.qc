@@ -30,6 +30,7 @@ const float PUSH_SOURCE   = 16; // boost along movedir up to speed, don't overwr
 .float spread_penalty;       // decaying spread penalty from jump/landing (0 = none)
 .float fire_spread_penalty;  // decaying spread penalty from sustained fire (0 = none)
 .float fire_spread_pending;  // pending penalty to apply AFTER current shot resolves
+.float altfire_finished;     // separate cooldown for alt-fire (doesn't block primary)
 
 // --- Fire spread penalty tuning ---
 const float FIRE_SPREAD_PENALTY_PER_SHOT = 3.0;  // penalty added per bullet fired
@@ -108,6 +109,8 @@ const float ROUND_PHASE_MAP_END   = 4;
 
 void() precache_everything =
 {
+	precache_sound("sounds/null.wav");
+
 	// Player Models / Sounds
 	precache_model("models/testplayer.iqm");
 	precache_sound("sounds/player/use.wav");

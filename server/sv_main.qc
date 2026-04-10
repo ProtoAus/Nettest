@@ -53,6 +53,11 @@ void() RoundRestart =
 		e = next;
 	}
 
+	// Tell all clients to wipe bullet holes, shells, mags
+	WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
+	WriteByte(MSG_MULTICAST, CSQC_EVENT_ROUND_CLEANUP);
+	multicast('0 0 0', MULTICAST_ALL);
+
 	// Respawn all players who have a team
 	e = player_chain_head;
 	while (e)

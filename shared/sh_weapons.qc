@@ -63,6 +63,8 @@ const float CSQC_EVENT_SHELL   = 2;   // shell casing eject
 const float CSQC_EVENT_MAGDROP = 3;   // magazine drop
 const float CSQC_EVENT_POINTSOUND = 4; // positioned sound (respects dimension masking)
 const float CSQC_EVENT_DEBUG_IMPACT = 5; // debug: server bullet hit position
+const float CSQC_EVENT_ROUND_CLEANUP = 6; // wipe all client-side debris (bulletholes, shells, mags)
+const float CSQC_EVENT_DAMAGE_FLASH = 7; // pain flash HUD element (sent only to victim)
 
 // --- Shell/mag type IDs (sent in multicast events) ---
 const float SHELL_9MM       = 0;

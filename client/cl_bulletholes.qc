@@ -54,6 +54,22 @@ void() CSQC_BulletHolesInit =
     precache_model(BULLETHOLE_SPRITE);
 };
 
+// --- Wipe all bullet holes (round restart) ---
+void() CSQC_BulletHolesWipeAll =
+{
+    entity hole, next;
+    hole = bh_head;
+    while (hole)
+    {
+        next = hole.bh_next;
+        remove(hole);
+        hole = next;
+    }
+    bh_head = world;
+    bh_tail = world;
+    bh_count = 0;
+};
+
 // --- Per-frame: update dynamic holes, reset frame cap ---
 void() CSQC_BulletHolesStartFrame =
 {

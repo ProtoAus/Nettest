@@ -244,6 +244,7 @@ void(float width, float height, float menushown) CSQC_UpdateView =
 
 	//does what you think it does
 	renderscene();
+	HUD_DrawPainFlash();
 	CSQC_DrawWeaponHUD();
 	CSQC_DrawPredictionDebug();
 
@@ -426,6 +427,19 @@ void() CSQC_Parse_Event =
 				vector dbg_eye = predicted_player ? (predicted_player.origin + predicted_player.view_ofs) : '0 0 0';
 				CSQC_AddDebugImpact(dbg_pos, dbg_eye, '0.6 0 1');
 			}
+			break;
+		}
+		case CSQC_EVENT_ROUND_CLEANUP:
+		{
+			CSQC_BulletHolesWipeAll();
+			CSQC_ShellsWipeAll();
+			break;
+		}
+		case CSQC_EVENT_DAMAGE_FLASH:
+		{
+			float dmg = readbyte();
+			csqc_pain_flash_time = cltime;
+			csqc_pain_flash_alpha = bound(0.1, dmg * 0.01, 0.6);
 			break;
 		}
 		default:

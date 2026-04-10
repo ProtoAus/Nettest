@@ -25,3 +25,6 @@ w_ak47.qc
 w_flakshotgun.qc
 w_m4a1.qc
 w_pistol.qc
+.gitignore
+fteqcc.ini
+scintilla.cfg

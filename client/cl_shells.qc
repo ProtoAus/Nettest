@@ -169,6 +169,7 @@ void(string mdl, vector origin_offset, vector base_velocity, vector velocity_jit
 
     accessory = spawn();
     setmodel(accessory, mdl);
+    accessory.classname = "csqc_debris";
     accessory.solid = SOLID_NOT;
     accessory.movetype = move_type;
     accessory.touch = CSQC_ShellTouch;
@@ -228,6 +229,7 @@ void(string mdl, vector org, vector vel, vector avel, float move_type, float lif
 {
     entity accessory = spawn();
     setmodel(accessory, mdl);
+    accessory.classname = "csqc_debris";
     accessory.solid = SOLID_NOT;
     accessory.movetype = move_type;
     accessory.touch = CSQC_ShellTouch;
@@ -252,6 +254,23 @@ void(string mdl, vector org, vector vel, vector avel) CSQC_SpawnRemoteCasing =
 void(string mdl, vector org, vector vel, vector avel) CSQC_SpawnRemoteMag =
 {
     CSQC_SpawnRemoteAccessory(mdl, org, vel, avel, MOVETYPE_TOSS, 20, 0);
+};
+
+// ------------------------------------------------------------
+//  Wipe all shells and mags (round restart)
+// ------------------------------------------------------------
+
+void() CSQC_ShellsWipeAll =
+{
+    entity e, next;
+    e = nextent(world);
+    while (e)
+    {
+        next = nextent(e);
+        if (e.classname == "csqc_debris")
+            remove(e);
+        e = next;
+    }
 };
 
 // ------------------------------------------------------------

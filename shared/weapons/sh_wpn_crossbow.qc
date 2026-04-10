@@ -89,14 +89,14 @@ float(float now) SH_CrossbowTryReload =
 float(float now) SH_CrossbowTryAltFire =
 {
     if (self.weaponstate != WS_IDLE) return 0;
-    if (now < self.attack_finished) return 0;
+    if (now < self.altfire_finished) return 0;
 
     if (self.zoomstage > 0)
         self.zoomstage = 0;
     else
         self.zoomstage = 2;   // single zoom stage (full zoom)
 
-    self.attack_finished = now + 0.3;
+    self.altfire_finished = now + 0.3;
     return 1;
 };
 
@@ -139,13 +139,14 @@ void() W_CrossbowBoltTouch =
         else
             W_MulticastSound(self.origin, "sounds/weapons/wpn_hlcrossbow/hit2.wav");
 
-        // Spawn stuck bolt visual
+        // Spawn stuck bolt visual — hidden from shooter (they see client-predicted one)
         entity stuck = spawn();
         setmodel(stuck, "models/weapons/wpn_rebar/rebar.mdl");
         setorigin(stuck, self.origin);
         stuck.angles = self.angles;
         stuck.solid = SOLID_NOT;
         stuck.movetype = MOVETYPE_NONE;
+        stuck.nodrawtoclient = self.owner;
         stuck.think = sub_remove;
         stuck.nextthink = time + 20;
     }

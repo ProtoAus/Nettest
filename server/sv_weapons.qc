@@ -291,6 +291,10 @@ void(entity attacker, entity victim) PlayerKilled =
     victim.weapon = WEP_NONE;
     victim.weaponmodel = "";
     victim.weaponframe = 0;
+
+    // Stop any looping weapon sounds (e.g. gauss charge)
+    sound(victim, CHAN_WEAPON, "sounds/null.wav", 1, ATTN_NORM);
+    victim.weaponstate = WS_IDLE;
 };
 
 float(float dist, float close_dmg, float min_dmg, float range) W_LinearDamageFalloff =
@@ -314,8 +318,19 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
         damage = target.health;
 
     target.health       = target.health - damage;
-    target.dmg_take     = damage;
     target.dmg_inflictor = attacker;
+
+    // Send pain flash only to the victim
+    if (target.classname == "player")
+    {
+        float saved_dim = dimension_send;
+        dimension_send = target.dimension_seen;
+        WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
+        WriteByte(MSG_MULTICAST, CSQC_EVENT_DAMAGE_FLASH);
+        WriteByte(MSG_MULTICAST, bound(1, damage, 255));
+        multicast(target.origin, MULTICAST_PHS);
+        dimension_send = saved_dim;
+    }
 
     if (target.health <= 0 && target.classname == "player")
     {
