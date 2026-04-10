@@ -8,7 +8,6 @@ settings.local.json
 pmove.c
 pmove_quake.c
 LICENSE
-README.md
 .gitignore
 gamemovement.cpp
 momsurffix2.games.txt

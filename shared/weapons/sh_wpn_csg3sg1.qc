@@ -86,12 +86,15 @@ float(float now) SH_G3SG1TryAltFire =
 {
     if (self.weaponstate != WS_IDLE)
         return 0;
+    if (now < self.altfire_finished)
+        return 0;
 
     if (self.zoomstage >= 2)
         self.zoomstage = 0;
     else
         self.zoomstage = self.zoomstage + 1;
 
+    self.altfire_finished = now + 0.3;
     return 1;
 };
 
