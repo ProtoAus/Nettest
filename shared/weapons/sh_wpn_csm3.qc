@@ -45,8 +45,8 @@ const float MAX_AMMO_M3               = 24;
 // --- Balance ---
 const float M3_PELLETS                = 12;
 const float M3_SPREAD                 = 0.08;
-const float M3_PELLET_CLOSE_DAMAGE    = 6;
-const float M3_PELLET_MIN_DAMAGE      = 3;
+const float M3_PELLET_CLOSE_DAMAGE    = 15;
+const float M3_PELLET_MIN_DAMAGE      = 4;
 const float M3_PELLET_FALLOFF_RANGE   = 1024;
 const float M3_DRYFIRE_DELAY          = 0.2;
 
@@ -146,22 +146,31 @@ void() W_M3FirePellets =
         {
             dist = vlen(trace_endpos - src);
             if (W_CanDamageTarget(trace_ent))
-            { damage = W_LinearDamageFalloff(dist, M3_PELLET_CLOSE_DAMAGE, M3_PELLET_MIN_DAMAGE, M3_PELLET_FALLOFF_RANGE); W_ApplyDamage(self, trace_ent, damage); }
+            {
+                damage = W_LinearDamageFalloff(dist, M3_PELLET_CLOSE_DAMAGE, M3_PELLET_MIN_DAMAGE, M3_PELLET_FALLOFF_RANGE);
+                W_ApplyDamage(self, trace_ent, damage);
+                if (trace_ent.classname == "player")
+                {
+                    float pelletmat = IMPACT_MAT_FLESH;
+                    float pellet_hg = W_BoneToHitgroup(trace_bone_id);
+                    if (pellet_hg == HITGROUP_HEAD || trace_ent.health <= 0)
+                        pelletmat = IMPACT_MAT_FLESH_LETHAL;
+                    W_ImpactEffectAllMat(trace_endpos, trace_plane_normal, pelletmat);
+                }
+                else
+                {
+                    // Breakable — auto-classify; flesh breakables get the
+                    // lethal upgrade on the killing pellet.
+                    float bmat = W_ClassifyImpactMaterial(trace_ent);
+                    if (bmat == IMPACT_MAT_FLESH && trace_ent.health <= 0)
+                        bmat = IMPACT_MAT_FLESH_LETHAL;
+                    W_ImpactEffectAllMat(trace_endpos, trace_plane_normal, bmat);
+                }
+            }
             else
                 W_ImpactEffect(trace_endpos);
 
-            // Debug: send server hit position to shooter only
-            {
-                float saved_dim = dimension_send;
-                dimension_send = self.dimension_seen;
-                WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
-                WriteByte(MSG_MULTICAST, CSQC_EVENT_DEBUG_IMPACT);
-                WriteCoord(MSG_MULTICAST, trace_endpos_x);
-                WriteCoord(MSG_MULTICAST, trace_endpos_y);
-                WriteCoord(MSG_MULTICAST, trace_endpos_z);
-                multicast(trace_endpos, MULTICAST_PVS);
-                dimension_send = saved_dim;
-            }
+            W_DebugImpact(trace_endpos, W_LinearDamageFalloff(dist, M3_PELLET_CLOSE_DAMAGE, M3_PELLET_MIN_DAMAGE, M3_PELLET_FALLOFF_RANGE), W_BoneToHitgroup(trace_bone_id));
         }
     }
 };
@@ -317,6 +326,7 @@ void() W_M3Drop =
     tgt.weapon = WEP_CSM3; tgt.weapon_slot = SLOT_PRIMARY;
     tgt.weap_draw = W_M3Equip; tgt.weap_drop_func = W_M3Drop;
     tgt.pickupcopy = W_M3PickupCopy; tgt.touch = weapon_touch;
+    tgt.dropped_spin = 1;
     tgt.think = weapon_become_solid; tgt.nextthink = time + 0.7;
 };
 
@@ -328,7 +338,9 @@ void() weapon_csm3 =
     self.weapon = WEP_CSM3; self.weapon_slot = SLOT_PRIMARY;
     self.weap_draw = W_M3Equip; self.weap_drop_func = W_M3Drop;
     self.pickupcopy = W_M3PickupCopy; self.touch = weapon_touch;
+    self.dropped_spin = 1;
     self.mag_m3 = MAX_MAG_M3; self.ammo_m3 = MAX_AMMO_M3;
+    W_RegisterMapWeapon(weapon_csm3);
 };
 
 #endif // SSQC
@@ -362,7 +374,8 @@ void() CSQC_PredictM3Command =
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csm3/fire.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedShotgunImpact(M3_PELLETS, M3_SPREAD);
+                CSQC_PredictedShotgunImpact(M3_PELLETS, M3_SPREAD,
+                    M3_PELLET_CLOSE_DAMAGE, M3_PELLET_MIN_DAMAGE, M3_PELLET_FALLOFF_RANGE);
             }
         }
         else if (r == -1)

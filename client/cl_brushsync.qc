@@ -15,6 +15,30 @@
 .vector pos2;           // open/top position
 .float speed;           // movement speed
 .float door_locked;     // TRUE if door has DOOR_LOCKED spawnflag
+.float brush_material;  // BREAKABLE_* code (0 = default/concrete);
+                        // read by Impact_ClassifyLocal for per-surface
+                        // particle effects on the local shooter.
+.float brush_health;    // Current HP of breakable brushes, snapshotted
+                        // from server on every damaging shot. CSQC
+                        // subtracts predicted damage against this to
+                        // decide whether a shot would break the brush.
+.float brush_max_health;  // Original max HP; used by CSQC gib spawn to
+                          // scale debris-piece damage/count on predicted
+                          // breaks (matches server's BreakableSpawnDebris).
+.float brush_cnt;         // Mapper/spawn-default gib count. Mirrors
+                          // self.cnt on the server breakable.
+.float brush_broken_predicted;  // Local flag: the shooter predicted a
+                                // break on this brush. Gates duplicate
+                                // predicted break sounds until the next
+                                // server snapshot either confirms
+                                // (broken=1) or corrects (health>0).
+.float brush_broken_confirmed;  // Server-side truth: set when either
+                                // CSQC_EVENT_BRUSH_DESTROY arrives or a
+                                // solid_brush snapshot has broken=1. The
+                                // prediction-timeout in cl_bulletimpact
+                                // checks this before un-hiding a brush,
+                                // so a slow-but-real server confirmation
+                                // doesn't get clobbered.
 
 // Use impulse constant (must match server's CheckImpulses case)
 const float USE_IMPULSE = 11;
@@ -55,14 +79,52 @@ void() CSQC_SolidBrush_Update =
         self.door_locked = readbyte();
     }
 
-    if (self.model != modelname)
-        setmodel(self, modelname);
+    // Material byte (BREAKABLE_*). 0 for non-breakable brushes. Read by
+    // Impact_ClassifyLocal in cl_bulletimpact.qc.
+    self.brush_material = readbyte();
 
+    // Current HP of the breakable. Used by CSQC_BulletImpact to decide
+    // whether the attacker's predicted damage would break the brush.
+    self.brush_health     = readshort();
+    self.brush_max_health = readshort();
+    self.brush_cnt        = readbyte();
+
+    // Broken flag — func_breakable sets this when destroyed and clears
+    // it on round restart. Client flips drawmask/solid instead of
+    // remove()-ing, so the entity slot survives for the next round.
+    float broken = readbyte();
+    self.brush_broken_confirmed = broken;
+
+    // Clear the predicted-break flag ONLY when the server resets the
+    // brush to full HP — the unambiguous "round restart" / initial-spawn
+    // signal (server-side health can only monotonically decrease via
+    // damage, so any partial HP value is the server catching up to our
+    // predicted damage rather than contradicting it). Preserving the
+    // flag across catch-up snapshots prevents the brush from briefly
+    // reappearing between "server processed shot 1" and "server processed
+    // shot 2" at high ping + rapid fire — CSQC locked in the break at
+    // shot 2 and shouldn't un-hide just because an intermediate partial
+    // HP value arrives.
+    if (!broken && self.brush_max_health > 0 && self.brush_health >= self.brush_max_health)
+        self.brush_broken_predicted = 0;
+
+    // Always setmodel — the conditional "only on model change" variant
+    // left the render binding stale after a drawmask=0 → drawmask=MASK_ENGINE
+    // transition (breakable reset), so the brush stayed invisible even
+    // though the model string hadn't changed. An unconditional rebind on
+    // every snapshot is cheap (model is already precached) and reliable.
+    setmodel(self, modelname);
     setsize(self, emins, emaxs);
 
+    // Keep the brush hidden if EITHER the server confirmed broken OR we
+    // predicted a break locally that hasn't been rolled back by a full-HP
+    // reset. The brush_broken_predicted gate is what stops catch-up
+    // snapshots (broken=0, partial HP) from briefly un-hiding a brush
+    // the attacker already saw shatter.
+    float hide = (broken || self.brush_broken_predicted);
     self.movetype    = MOVETYPE_NOCLIP;
-    self.solid       = SOLID_BSP;
-    self.drawmask    = MASK_ENGINE;
+    self.solid       = hide ? SOLID_NOT : SOLID_BSP;
+    self.drawmask    = hide ? 0 : MASK_ENGINE;
     self.angles      = ang;
     self.alpha       = alpha_value;
     self.effects     = effect_flags;
@@ -102,6 +164,15 @@ void() CSQC_SolidBrush_Update =
     }
 
     self.brush_type = btype;
+
+    // Post-update diagnostic — shows final state after parsing, so we can
+    // see if the server sent a bogus origin or model for a breakable.
+    if (cvar("sv_debug_ent_types"))
+    {
+        print(sprintf("  [brush %g] model='%s' origin=%v mins=%v maxs=%v btype=%g mat=%g\n",
+                      self.entnum, self.model, self.origin, self.mins, self.maxs,
+                      self.brush_type, self.brush_material));
+    }
 };
 
 // ============================================================

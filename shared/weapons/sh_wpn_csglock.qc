@@ -103,7 +103,7 @@ float(float now) SH_GlockTryFire =
 
 float(float now) SH_GlockTryReload =
 {
-    return SH_StandardTryReload(now, mag_glock, ammo_glock, MAX_MAG_GLOCK);
+    return SH_StandardTryReload(now, mag_glock, ammo_glock, MAX_MAG_GLOCK, GLOCK_RELOAD_DURATION);
 };
 
 // Start a 3-round burst. Returns 1 if burst started, -1 dry, 0 blocked.
@@ -148,14 +148,14 @@ void(entity player) W_GlockPickupCopy =
 
 void() W_GlockShoot =
 {
-    W_StandardHitscanShoot(GLOCK_BASE_SPREAD, GLOCK_MOVE_SPREAD, GLOCK_FULL_SPREAD_SPEED,
-        GLOCK_CLOSE_DAMAGE, GLOCK_MIN_DAMAGE, GLOCK_DAMAGE_FALLOFF_RANGE);
+    W_PenetratingHitscanShoot(GLOCK_BASE_SPREAD, GLOCK_MOVE_SPREAD, GLOCK_FULL_SPREAD_SPEED,
+        GLOCK_CLOSE_DAMAGE, GLOCK_MIN_DAMAGE, GLOCK_DAMAGE_FALLOFF_RANGE, 8, 0.94);
 };
 
 void() W_GlockBurstShoot =
 {
-    W_StandardHitscanShoot(GLOCK_BURST_SPREAD, GLOCK_MOVE_SPREAD, GLOCK_FULL_SPREAD_SPEED,
-        GLOCK_BURST_DAMAGE, GLOCK_MIN_DAMAGE, GLOCK_DAMAGE_FALLOFF_RANGE);
+    W_PenetratingHitscanShoot(GLOCK_BURST_SPREAD, GLOCK_MOVE_SPREAD, GLOCK_FULL_SPREAD_SPEED,
+        GLOCK_BURST_DAMAGE, GLOCK_MIN_DAMAGE, GLOCK_DAMAGE_FALLOFF_RANGE, 8, 0.94);
 };
 
 void() W_GlockFire =
@@ -295,6 +295,7 @@ void() weapon_glock =
     self.touch         = weapon_touch;
     self.mag_glock     = MAX_MAG_GLOCK;
     self.ammo_glock    = MAX_AMMO_GLOCK;
+    W_RegisterMapWeapon(weapon_glock);
 };
 
 #endif // SSQC
@@ -326,7 +327,8 @@ void() CSQC_PredictGlockCommand =
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csglock/fire.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(GLOCK_BASE_SPREAD, GLOCK_MOVE_SPREAD, GLOCK_FULL_SPREAD_SPEED);
+                CSQC_PredictedImpact(GLOCK_BASE_SPREAD, GLOCK_MOVE_SPREAD, GLOCK_FULL_SPREAD_SPEED,
+                    GLOCK_CLOSE_DAMAGE, GLOCK_MIN_DAMAGE, GLOCK_DAMAGE_FALLOFF_RANGE);
                 CSQC_SpawnCasing("models/weapons/9mmcasing.mdl",
                     '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }
@@ -350,7 +352,8 @@ void() CSQC_PredictGlockCommand =
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csglock/fireburst.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(GLOCK_BURST_SPREAD, GLOCK_MOVE_SPREAD, GLOCK_FULL_SPREAD_SPEED);
+                CSQC_PredictedImpact(GLOCK_BURST_SPREAD, GLOCK_MOVE_SPREAD, GLOCK_FULL_SPREAD_SPEED,
+                    GLOCK_BURST_DAMAGE, GLOCK_MIN_DAMAGE, GLOCK_DAMAGE_FALLOFF_RANGE);
                 CSQC_SpawnCasing("models/weapons/9mmcasing.mdl",
                     '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }
@@ -375,7 +378,8 @@ void() CSQC_PredictGlockCommand =
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csglock/fireburst.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(GLOCK_BURST_SPREAD, GLOCK_MOVE_SPREAD, GLOCK_FULL_SPREAD_SPEED);
+                CSQC_PredictedImpact(GLOCK_BURST_SPREAD, GLOCK_MOVE_SPREAD, GLOCK_FULL_SPREAD_SPEED,
+                    GLOCK_BURST_DAMAGE, GLOCK_MIN_DAMAGE, GLOCK_DAMAGE_FALLOFF_RANGE);
                 CSQC_SpawnCasing("models/weapons/9mmcasing.mdl",
                     '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }

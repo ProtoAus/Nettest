@@ -1,0 +1,153 @@
+#define 9MMAR_IDLE1 0
+#define 9MMAR_IDLE2 1
+#define 9MMAR_SECONDARY 2
+#define 9MMAR_RELOAD 3
+#define 9MMAR_DRAW 4
+#define 9MMAR_FIRE1 5
+#define 9MMAR_FIRE2 6
+#define 9MMAR_FIRE3 7
+
+entityDef weapon_9mmAR
+{
+	"editor_color"		".3 .3 1"
+	"editor_mins"		"-16 -16 -16"
+	"editor_maxs"		"16 16 16"
+	"editor_usage"		"9mm AR"
+	"editor_rotatable"	"1"
+
+	"inherit"		"weapon_base"
+	"model"			"models/w_9mmar.mdl"
+	"model_player"		"models/p_9mmar.mdl"
+	"model_view"		"models/v_9mmar.mdl"
+	"animPrefix"		"mp5"
+
+	// ncWeapon specific
+	"def_fireInfo"		"fireInfo_9mmAR"
+	"def_altFireInfo"	"fireInfo_ARGrenade"
+	"inv_name"			"9mm AR"
+	"clipSize"			"50"
+	"clipSizeDefault"	"25"
+
+	"def_ejectBrass"	"debris_brass_fast"
+	"ejectBrassDelay"	"0"
+	"ejectBrassOffset"	"17 6 -8"
+
+	"ammoIcon"			"weapon_9mmar.ammo"
+	"ammo2Icon"			"weapon_9mmar.ammo2"
+	"crosshair"			"weapon_9mmar.crosshair"
+	"icon"				"weapon_9mmar.weapon"
+	"iconSelected"			"weapon_9mmar.weapon_s"
+	"killIcon"		"d_9mmAR"
+
+	"act_fire"			"$9MMAR_FIRE1,$9MMAR_FIRE2,$9MMAR_FIRE3"
+//	"act_holster"		"$9MMAR_HOLSTER"
+	"act_reload"		"$9MMAR_RELOAD"
+	"act_draw"			"$9MMAR_DRAW"
+	"act_idle"			"$9MMAR_IDLE1,$9MMAR_IDLE2"
+
+	"snd_fire"			"Weapon_MP5.Single"
+	"snd_empty"			"Weapons.Empty"
+
+	// hlWeapon specific
+	"hudSlot"			"2"
+	"hudSlotPos"		"0"
+	"weight"			"15"
+	"fireUnderwater"	"0"
+}
+
+entityDef projectile_9mmAR
+{
+	"inherit"		"projectile_bullet_base"
+	"damage"		"skill:plr_9mmAR_bullet"
+	"spread"		"0.025 0.025"
+}
+
+entityDef fireInfo_9mmAR
+{
+	"def_onFire"		"projectile_9mmAR"
+	"ammoType"			"ammo_9mm"
+	"ammoRequired"		"1"
+	"ammoPerShot"		"1"
+	"fireRate"			"0.085"
+	"punchAngle"		"-2 0 0"
+	"model_flash"		"sprites/muzzleflash1.spr"
+}
+
+entityDef fireInfo_ARGrenade
+{
+	"def_onFire"		"projectile_ARgrenade"
+	"ammoType"			"ammo_m203_grenade"
+	"ammoRequired"		"1"
+	"ammoPerShot"		"1"
+	"fireRate"			"1"
+	"punchAngle"		"-10 0 0"
+	"snd_fire"			"Weapon_MP5.Double"
+	"act_fire"			"$9MMAR_SECONDARY"
+}
+
+entityDef projectile_ARgrenade
+{
+	"spawnclass"		"ncProjectile"
+	"model"				"models/grenade.mdl"
+	"offset"			"16 0 0"
+	"velocity"			"800 0 0"
+	"angular_velocity"	"-300 0 0"
+	"gravity"			"0.5"
+	"bounce"			"1"
+	"mins"				"0 0 0"
+	"maxs"				"0 0 0"
+	"detonate_on_fuse"	"0"
+	"detonate_on_death"	"1"
+	"detonate_on_world"	"1"
+	"detonate_on_actor"	"1"
+	"snd_explode"		"fx.explosion"
+	"model_detonate"	"fx_explosion.main"
+	"decal_detonate"	"ExplosionScorch"
+	"smoke_fly"			"weapon_9mmAR.nadetrail"
+
+	"def_damage"		"damage_ARgrenadeDirect"
+	"def_splash_damage"	"damage_ARgrenadeSplash"
+
+	"detonate_offset"			"24"
+	"explode_light_color"		"1 0.5 0"
+	"explode_light_radius"		"1024"
+	"explode_light_fadetime"	"3"
+}
+
+entityDef damage_ARgrenadeDirect
+{
+	"damage"	"50"
+}
+
+entityDef damage_ARgrenadeSplash
+{
+	"damage"	"skill:plr_9mmAR_grenade"
+	"radius"	"160"
+	"knockback"	"300"
+	"push"		"10000"
+}
+
+// multiplayer version
+entityDef projectile_9mmAR_mp
+{
+	"inherit"		"projectile_bullet_base"
+	"damage"		"skill:plr_9mmAR_bullet"
+	"spread"		"0.05 0.05"
+}
+
+entityDef fireInfo_9mmAR_mp
+{
+	"def_onFire"		"projectile_9mmAR_mp"
+	"ammoType"			"ammo_9mm"
+	"ammoRequired"		"1"
+	"ammoPerShot"		"1"
+	"fireRate"			"0.085"
+	"punchAngle"		"-2 0 0"
+	"model_flash"		"sprites/muzzleflash1.spr"
+}
+
+entityDef weapon_9mmAR_mp
+{
+	"inherit"			"weapon_9mmAR"
+	"def_fireInfo"		"fireInfo_9mmAR_mp"
+}

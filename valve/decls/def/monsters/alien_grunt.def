@@ -1,0 +1,64 @@
+entityDef monster_alien_grunt
+{
+	"inherit"	"hlBaseMonster"
+	"spawnclass"	"ncMonster"
+	"model"			"models/agrunt.mdl"
+	"netname"		"Alien Grunt"
+	"health"		"skill:agrunt_health"
+	"mins"			"-16 -16 0"
+	"maxs"			"16 16 72"
+	"eye_height"	"64"
+	"team"			"2"
+	"propdata"		"actor_alien"
+	"speed_walk"	"46"
+	"speed_run"		"292"
+
+	"def_attack_melee"		"melee_agrunt_punch"
+	"attack_melee_range"	"96"
+	"attack_ranged_range"	"512"
+
+	"snd_alert"				"AlienGrunt.Alert
+	"snd_idle"				"AlienGrunt.Idle"
+	"snd_pain"				"AlienGrunt.Pain"
+	"snd_death"				"AlienGrunt.Pain"
+	"snd_melee_attack"		"AlienGrunt.Attack"
+	"snd_melee_attack_hit"	"AlienGrunt.AttackHit"
+	"snd_melee_attack_miss"	"AlienGrunt.AttackMiss"
+
+	"mindset_idle"			"agrunt_idle"
+	"mindset_defense"		"agrunt_takeCover"
+	"mindset_combat"		"agrunt_combatFace"
+	"mindset_hunt"			"agrunt_searchPlayer"
+
+	// animation event callbacks
+	events {
+		1 "SpawnProjectileDef"	"ranged_agrunt_shot_orange"
+		1 "StartSoundDef"		"AlienGrunt.FireGun"
+
+		2 "SpawnProjectileDef"	"ranged_agrunt_shot_red"
+		2 "StartSoundDef"		"AlienGrunt.FireGun"
+
+		3 "SpawnProjectileDef"	"ranged_agrunt_shot_orange"
+		3 "StartSoundDef"		"AlienGrunt.FireGun"
+
+		4 "SpawnProjectileDef"	"ranged_agrunt_shot_red"
+		4 "StartSoundDef"		"AlienGrunt.FireGun"
+
+		5 "SpawnProjectileDef"	"ranged_agrunt_shot_orange"
+		5 "StartSoundDef"		"AlienGrunt.FireGun"
+
+		10 "StartSoundDef"		"AlienGrunt.LeftFoot"
+		11 "StartSoundDef"		"AlienGrunt.RightFoot"
+	}
+}
+
+entityDef melee_agrunt_punch
+{
+	"damage"	"skill:agrunt_dmg_punch"
+	"delay"		"0.25f"
+}
+
+entityDef damage_hornetDirect
+{
+	damage "skill:hornet_dmg"
+}

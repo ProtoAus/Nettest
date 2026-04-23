@@ -46,10 +46,10 @@ const float MAX_AMMO_M4A1             = 90;
 const float M4A1_BASE_SPREAD            = 0.01;
 const float M4A1_MOVE_SPREAD            = 0.06;
 const float M4A1_FULL_SPREAD_SPEED      = 320;
-const float M4A1_CLOSE_DAMAGE           = 18;
-const float M4A1_MIN_DAMAGE             = 10;
-const float M4A1_SILENCED_CLOSE_DAMAGE  = 16;
-const float M4A1_SILENCED_MIN_DAMAGE    = 9;
+const float M4A1_CLOSE_DAMAGE           = 24;
+const float M4A1_MIN_DAMAGE             = 14;
+const float M4A1_SILENCED_CLOSE_DAMAGE  = 22;
+const float M4A1_SILENCED_MIN_DAMAGE    = 12;
 const float M4A1_DAMAGE_FALLOFF_RANGE   = 3072;
 const float M4A1_DRYFIRE_DELAY          = 0.2;
 
@@ -113,7 +113,7 @@ float(float now) SH_M4A1TryReload =
 {
     if (self.weaponstate == WS_SPECIAL)
         return 0;
-    return SH_StandardTryReload(now, mag_m4a1, ammo_m4a1, MAX_MAG_M4A1);
+    return SH_StandardTryReload(now, mag_m4a1, ammo_m4a1, MAX_MAG_M4A1, M4A1_RELOAD_DURATION);
 };
 
 float(float now) SH_M4A1TryAltFire =
@@ -145,73 +145,21 @@ void(entity player) W_M4A1PickupCopy =
 
 void() W_M4A1Shoot =
 {
-    vector src, dir, end;
-    vector flat_vel;
-    float  spread, sx, sy;
-    float  move_speed, dist, damage;
-    float  close_dmg, min_dmg;
+    float close_dmg, min_dmg;
 
-    makevectors(self.v_angle);
-    src = self.origin + self.view_ofs;
-
-    flat_vel   = self.velocity;
-    flat_vel_z = 0;
-    move_speed = vlen(flat_vel);
-
-    spread = M4A1_BASE_SPREAD + (move_speed / M4A1_FULL_SPREAD_SPEED) * M4A1_MOVE_SPREAD;
-    spread = min(spread, M4A1_BASE_SPREAD + M4A1_MOVE_SPREAD);
-    spread = spread * SH_GetSpreadScale() + sh_spread_flat;
-
-    if (spread > 0)
+    if (self.m4a1_silenced)
     {
-        sx  = SH_SpreadJitter(self.wep_action_id, 0) * spread;
-        sy  = SH_SpreadJitter(self.wep_action_id, 1) * spread;
-        dir = normalize(v_forward + v_right * sx + v_up * sy);
+        close_dmg = M4A1_SILENCED_CLOSE_DAMAGE;
+        min_dmg   = M4A1_SILENCED_MIN_DAMAGE;
     }
     else
-        dir = v_forward;
-    end = src + dir * 8192;
-
-    traceline(src, end, MOVE_NORMAL | MOVE_LAGGED, self);
-
-    if (trace_fraction < 1.0)
     {
-        dist = vlen(trace_endpos - src);
-
-        if (W_CanDamageTarget(trace_ent))
-        {
-            if (self.m4a1_silenced)
-            {
-                close_dmg = M4A1_SILENCED_CLOSE_DAMAGE;
-                min_dmg   = M4A1_SILENCED_MIN_DAMAGE;
-            }
-            else
-            {
-                close_dmg = M4A1_CLOSE_DAMAGE;
-                min_dmg   = M4A1_MIN_DAMAGE;
-            }
-
-            damage = W_LinearDamageFalloff(dist, close_dmg, min_dmg, M4A1_DAMAGE_FALLOFF_RANGE);
-            W_ApplyDamage(self, trace_ent, damage);
-        }
-        else
-        {
-            W_ImpactEffect(trace_endpos);
-        }
-
-        // Debug: send server hit position to shooter only
-        {
-            float saved_dim = dimension_send;
-            dimension_send = self.dimension_seen;
-            WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
-            WriteByte(MSG_MULTICAST, CSQC_EVENT_DEBUG_IMPACT);
-            WriteCoord(MSG_MULTICAST, trace_endpos_x);
-            WriteCoord(MSG_MULTICAST, trace_endpos_y);
-            WriteCoord(MSG_MULTICAST, trace_endpos_z);
-            multicast(trace_endpos, MULTICAST_PVS);
-            dimension_send = saved_dim;
-        }
+        close_dmg = M4A1_CLOSE_DAMAGE;
+        min_dmg   = M4A1_MIN_DAMAGE;
     }
+
+    W_PenetratingHitscanShoot(M4A1_BASE_SPREAD, M4A1_MOVE_SPREAD, M4A1_FULL_SPREAD_SPEED,
+        close_dmg, min_dmg, M4A1_DAMAGE_FALLOFF_RANGE, 48, 0.97);
 };
 
 void() W_M4A1Fire =
@@ -342,6 +290,7 @@ void() W_M4A1Drop =
     tgt.weap_drop_func = W_M4A1Drop;
     tgt.pickupcopy   = W_M4A1PickupCopy;
     tgt.touch        = weapon_touch;
+    tgt.dropped_spin = 1;
     tgt.think        = weapon_become_solid;
     tgt.nextthink    = time + 0.7;
 };
@@ -359,9 +308,11 @@ void() weapon_m4a1 =
     self.weap_drop_func = W_M4A1Drop;
     self.pickupcopy    = W_M4A1PickupCopy;
     self.touch         = weapon_touch;
+    self.dropped_spin  = 1;
     self.mag_m4a1      = MAX_MAG_M4A1;
     self.ammo_m4a1     = MAX_AMMO_M4A1;
     self.m4a1_silenced = TRUE;
+    W_RegisterMapWeapon(weapon_m4a1);
 };
 
 #endif // SSQC
@@ -402,7 +353,10 @@ void() CSQC_PredictM4A1Command =
                         localsound("sounds/weapons/wpn_csm4a1/fire2.wav");
                 }
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(M4A1_BASE_SPREAD, M4A1_MOVE_SPREAD, M4A1_FULL_SPREAD_SPEED);
+                CSQC_PredictedImpact(M4A1_BASE_SPREAD, M4A1_MOVE_SPREAD, M4A1_FULL_SPREAD_SPEED,
+                    self.m4a1_silenced ? M4A1_SILENCED_CLOSE_DAMAGE : M4A1_CLOSE_DAMAGE,
+                    self.m4a1_silenced ? M4A1_SILENCED_MIN_DAMAGE   : M4A1_MIN_DAMAGE,
+                    M4A1_DAMAGE_FALLOFF_RANGE);
                 CSQC_SpawnCasing("models/weapons/riflecasing.mdl",
                     '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }

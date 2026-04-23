@@ -1,0 +1,10 @@
+typeInfo zombie_idle
+{
+	"task_1"			"StopMovement"
+	"task_2"			"PlayActivity idle"
+	"task_3"			"Wait 2"
+	"task_4"			"WaitPVS"
+	"NewEnemy"		"ChangeMindset combat"
+	"CanMeleeAttack1"	"PerformSchedule zombie_meleeAttack"
+	"CanRangedAttack1"	"ChangeMindset combat"
+}

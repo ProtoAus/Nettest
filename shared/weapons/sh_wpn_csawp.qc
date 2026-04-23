@@ -77,7 +77,7 @@ float(float now) SH_AWPTryFire =
 
 float(float now) SH_AWPTryReload =
 {
-    float r = SH_StandardTryReload(now, mag_awp, ammo_awp, MAX_MAG_AWP);
+    float r = SH_StandardTryReload(now, mag_awp, ammo_awp, MAX_MAG_AWP, AWP_RELOAD_DURATION);
     if (r == 1)
         self.zoomstage = 0;
     return r;
@@ -114,11 +114,11 @@ void(entity player) W_AWPPickupCopy =
 void() W_AWPShoot =
 {
     if (self.zoomstage > 0)
-        W_StandardHitscanShoot(0, AWP_MOVE_SPREAD, AWP_FULL_SPREAD_SPEED,
-            AWP_CLOSE_DAMAGE, AWP_MIN_DAMAGE, AWP_DAMAGE_FALLOFF_RANGE);
+        W_PenetratingHitscanShoot(0, AWP_MOVE_SPREAD, AWP_FULL_SPREAD_SPEED,
+            AWP_CLOSE_DAMAGE, AWP_MIN_DAMAGE, AWP_DAMAGE_FALLOFF_RANGE, 128, 0.985);
     else
-        W_StandardHitscanShoot(AWP_BASE_SPREAD, AWP_MOVE_SPREAD, AWP_FULL_SPREAD_SPEED,
-            AWP_CLOSE_DAMAGE, AWP_MIN_DAMAGE, AWP_DAMAGE_FALLOFF_RANGE);
+        W_PenetratingHitscanShoot(AWP_BASE_SPREAD, AWP_MOVE_SPREAD, AWP_FULL_SPREAD_SPEED,
+            AWP_CLOSE_DAMAGE, AWP_MIN_DAMAGE, AWP_DAMAGE_FALLOFF_RANGE, 128, 0.985);
 };
 
 void() W_AWPFire =
@@ -214,6 +214,7 @@ void() W_AWPDrop =
     tgt.weapon = WEP_CSAWP; tgt.weapon_slot = SLOT_PRIMARY;
     tgt.weap_draw = W_AWPEquip; tgt.weap_drop_func = W_AWPDrop;
     tgt.pickupcopy = W_AWPPickupCopy; tgt.touch = weapon_touch;
+    tgt.dropped_spin = 1;
     tgt.think = weapon_become_solid; tgt.nextthink = time + 0.7;
 };
 
@@ -225,7 +226,9 @@ void() weapon_csawp =
     self.weapon = WEP_CSAWP; self.weapon_slot = SLOT_PRIMARY;
     self.weap_draw = W_AWPEquip; self.weap_drop_func = W_AWPDrop;
     self.pickupcopy = W_AWPPickupCopy; self.touch = weapon_touch;
+    self.dropped_spin = 1;
     self.mag_awp = MAX_MAG_AWP; self.ammo_awp = MAX_AMMO_AWP;
+    W_RegisterMapWeapon(weapon_csawp);
 };
 
 #endif // SSQC
@@ -270,7 +273,8 @@ void() CSQC_PredictAWPCommand =
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csawp/fire.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(self.zoomstage > 0 ? 0 : AWP_BASE_SPREAD, AWP_MOVE_SPREAD, AWP_FULL_SPREAD_SPEED);
+                CSQC_PredictedImpact(self.zoomstage > 0 ? 0 : AWP_BASE_SPREAD, AWP_MOVE_SPREAD, AWP_FULL_SPREAD_SPEED,
+                    AWP_CLOSE_DAMAGE, AWP_MIN_DAMAGE, AWP_DAMAGE_FALLOFF_RANGE);
                 CSQC_SpawnCasing("models/weapons/riflecasingbig.mdl",
                     '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }

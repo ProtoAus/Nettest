@@ -1,0 +1,25 @@
+#pragma target fte_5768
+#pragma progs_dat  "../../progs.dat"
+#pragma forcecrc 54730
+
+#define QWSSQC
+#define SERVER
+#define VALVE
+
+#includelist
+../../../src/common/include.src
+../../../src/shared/defs.h
+../../../src/server/defs.h
+../../../src/botlib/botinfo.h
+../../../src/gs-entbase/server.src
+../../../src/gs-entbase/shared.src
+../../../valve/src/server/defs.h
+../../../valve/src/shared/include.src
+../../../valve/src/server/HLScientist.qc
+../../../valve/src/server/HLSuit.qc
+../../../valve/src/server/XenDecore.qc
+../../../src/botlib/include.src
+../../../valve/src/server/server.qc
+../../../src/server/include.src
+../../../src/shared/include.src
+#endlist

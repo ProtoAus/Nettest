@@ -1,0 +1,20 @@
+entityDef monster_cockroach
+{
+	"inherit"		"hlBaseMonster"
+	"spawnclass"		"ncTalkMonster"
+	"model"			"models/roach.mdl"
+	"netname"		"Cockroach"
+	"health"		"1"
+	"mins"			"-8 -8 0"
+	"maxs"			"8 8 8"
+	"eye_height"		"64"
+	"team"			"0"
+	"propdata"		"actor_alien"
+
+	"speed_walk"		"100"
+	"speed_run"		"100"
+
+	"snd_walk"		"Roach.Walk"
+
+	"OnPlayerTouch"		"!self,Damage,1,0.0,-1"
+}

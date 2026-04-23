@@ -1,0 +1,9 @@
+typeInfo barney_establishLoF
+{
+	"task_1"			"SetFailSchedule barney_fail"
+	"task_2"			"TargetEnemy"
+	"task_3"			"Sentence !BA_ATTACK"
+	"task_4"			"RunToTarget"
+	"task_5"			"WaitForMovement"
+	"task_6"			"PerformSchedule barney_rangedAttack"
+}

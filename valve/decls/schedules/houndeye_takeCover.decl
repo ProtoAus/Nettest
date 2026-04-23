@@ -1,0 +1,15 @@
+typeInfo houndeye_takeCover
+{
+	"task_1"		"SetFailSchedule houndeye_rangedAttack"
+	"task_2"		"StopMovement"
+	"task_3"		"Wait 0.2"
+	"task_4"		"FindCoverFromEnemy"
+	"task_5"		"StartSound HoundEye.Hunt"
+	"task_6"		"RunToTarget"
+	"task_7"		"WaitForMovement"
+	"task_8"		"Remember inCover"
+	"task_9"		"PerformSchedule houndeye_waitInCover"
+	"task_9"		"ChangeMindset combat"
+	"fail_NewEnemy"	"1"
+	"fail_OccludedEnemy"	"1"
+}

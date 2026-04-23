@@ -47,8 +47,8 @@ const float HLSG_PELLETS              = 8;
 const float HLSG_DBL_PELLETS          = 16;
 const float HLSG_SPREAD               = 0.08;
 const float HLSG_DBL_SPREAD           = 0.12;
-const float HLSG_PELLET_CLOSE_DAMAGE  = 6;
-const float HLSG_PELLET_MIN_DAMAGE    = 3;
+const float HLSG_PELLET_CLOSE_DAMAGE  = 13;
+const float HLSG_PELLET_MIN_DAMAGE    = 4;
 const float HLSG_PELLET_FALLOFF_RANGE = 1024;
 const float HLSG_DRYFIRE_DELAY        = 0.2;
 
@@ -99,33 +99,57 @@ float(float now) SH_ShotgunTickState =
 
 float(float now) SH_ShotgunTryFire =
 {
+#ifdef CSQC
+    if (cltime < self.csqc_fire_guard) return 0;
+#endif
     if (self.weaponstate != WS_IDLE) return 0;
     if (now < self.attack_finished) return 0;
 
     if (self.mag_shotgun <= 0)
-    { self.attack_finished = now + HLSG_DRYFIRE_DELAY; return -1; }
+    {
+        self.attack_finished = now + HLSG_DRYFIRE_DELAY;
+#ifdef CSQC
+        self.csqc_fire_guard = cltime + HLSG_DRYFIRE_DELAY;
+#endif
+        return -1;
+    }
 
     self.mag_shotgun     -= 1;
     self.weaponstate      = WS_FIRE;
     self.wep_action_id   += 1;
     self.wep_anim_start   = now;
     self.attack_finished  = now + HLSG_FIRE_DELAY;
+#ifdef CSQC
+    self.csqc_fire_guard  = cltime + HLSG_FIRE_DELAY;
+#endif
     return 1;
 };
 
 float(float now) SH_ShotgunTryDoubleFire =
 {
+#ifdef CSQC
+    if (cltime < self.csqc_fire_guard) return 0;
+#endif
     if (self.weaponstate != WS_IDLE) return 0;
     if (now < self.attack_finished) return 0;
 
     if (self.mag_shotgun < 2)
-    { self.attack_finished = now + HLSG_DRYFIRE_DELAY; return -1; }
+    {
+        self.attack_finished = now + HLSG_DRYFIRE_DELAY;
+#ifdef CSQC
+        self.csqc_fire_guard = cltime + HLSG_DRYFIRE_DELAY;
+#endif
+        return -1;
+    }
 
     self.mag_shotgun     -= 2;
     self.weaponstate      = WS_SPECIAL;
     self.wep_action_id   += 1;
     self.wep_anim_start   = now;
     self.attack_finished  = now + HLSG_DBLFIRE_DELAY;
+#ifdef CSQC
+    self.csqc_fire_guard  = cltime + HLSG_DBLFIRE_DELAY;
+#endif
     return 1;
 };
 
@@ -177,18 +201,7 @@ void(float pellets, float spread_val) W_ShotgunFirePellets =
             else
                 W_ImpactEffect(trace_endpos);
 
-            // Debug: send server hit position to shooter only
-            {
-                float saved_dim = dimension_send;
-                dimension_send = self.dimension_seen;
-                WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
-                WriteByte(MSG_MULTICAST, CSQC_EVENT_DEBUG_IMPACT);
-                WriteCoord(MSG_MULTICAST, trace_endpos_x);
-                WriteCoord(MSG_MULTICAST, trace_endpos_y);
-                WriteCoord(MSG_MULTICAST, trace_endpos_z);
-                multicast(trace_endpos, MULTICAST_PVS);
-                dimension_send = saved_dim;
-            }
+            W_DebugImpact(trace_endpos, W_LinearDamageFalloff(dist, HLSG_PELLET_CLOSE_DAMAGE, HLSG_PELLET_MIN_DAMAGE, HLSG_PELLET_FALLOFF_RANGE), W_BoneToHitgroup(trace_bone_id));
         }
     }
 };
@@ -347,7 +360,7 @@ void() W_ShotgunEquip =
     self.weaponstate = WS_DRAW; self.wep_action_id += 1;
     self.wep_anim_start = time; self.weaponframe = HLSG_DRAW_START;
     self.wep_nextframe = time + HLSG_FRAME_INTERVAL;
-    W_SetCrosshairProfile(HLSG_SPREAD, 0, 320, 6, TRUE);
+    W_SetCrosshairProfile(HLSG_SPREAD, 0, 320, 3, TRUE);
 };
 
 void() W_ShotgunDrop =
@@ -373,6 +386,7 @@ void() weapon_hlshotgun =
     self.weap_draw = W_ShotgunEquip; self.weap_drop_func = W_ShotgunDrop;
     self.pickupcopy = W_ShotgunPickupCopy; self.touch = weapon_touch;
     self.mag_shotgun = MAX_MAG_SHOTGUN; self.ammo_shotgun = MAX_AMMO_SHOTGUN;
+    W_RegisterMapWeapon(weapon_hlshotgun);
 };
 
 #endif // SSQC
@@ -411,7 +425,8 @@ void() CSQC_PredictShotgunCommand =
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_hlshotgun/fire2.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedShotgunImpact(HLSG_DBL_PELLETS, HLSG_DBL_SPREAD);
+                CSQC_PredictedShotgunImpact(HLSG_DBL_PELLETS, HLSG_DBL_SPREAD,
+                    HLSG_PELLET_CLOSE_DAMAGE, HLSG_PELLET_MIN_DAMAGE, HLSG_PELLET_FALLOFF_RANGE);
             }
         }
     }
@@ -428,7 +443,8 @@ void() CSQC_PredictShotgunCommand =
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_hlshotgun/fire1.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedShotgunImpact(HLSG_PELLETS, HLSG_SPREAD);
+                CSQC_PredictedShotgunImpact(HLSG_PELLETS, HLSG_SPREAD,
+                    HLSG_PELLET_CLOSE_DAMAGE, HLSG_PELLET_MIN_DAMAGE, HLSG_PELLET_FALLOFF_RANGE);
             }
         }
         else if (r == -1)

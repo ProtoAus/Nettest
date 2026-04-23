@@ -1,0 +1,31 @@
+mutliplayer
+{
+	when-cvar g_gametype equals deathmatch
+	replace weapon_357 weapon_357_mp 
+	replace weapon_python weapon_357_mp 
+	replace weapon_9mmAR weapon_9mmAR_mp 
+	replace weapon_mp5 weapon_9mmAR_mp 
+	replace weapon_crossbow weapon_crossbow_mp 
+	replace weapon_shotgun weapon_shotgun_mp 
+}
+
+deprecated
+{
+	replace weapon_python weapon_357
+	replace weapon_mp5 weapon_9mmAR
+	replace weapon_glock weapon_9mmhandgun
+	replace ammo_mp5clip ammo_9mmAR
+	replace ammo_9mmARclip ammo_9mmAR
+	replace ammo_glockclip ammo_9mmclip
+	replace ammo_mp5grenades ammo_ARgrenades
+}
+
+librequake
+{
+	replace monster_army monster_human_grunt
+	replace monster_demon1 monster_bullchicken
+	replace monster_tarbaby monster_headcrab
+	replace monster_wizard monster_alien_controller
+	replace monster_ogre monster_alien_grunt
+	replace monster_shambler monster_gargantua
+}

@@ -1,0 +1,9 @@
+"lang" 
+{ 
+	"Language" "English" 
+	"Tokens" 
+	{ 
+		"USERINFO_HELP" "Select an entry from the list of players to view information about them. That information is not verified, and we can make no guarantee that it is accurate.    A verification based mechanism based on a known GUID may be introduced in the future.    You can use the `ap_userID @username@fedi.instance` command to import profile settings from an ActivityPub profile."
+		"EMPTY_PLAYERSLOT"		"Empty player slot"
+	} 
+}

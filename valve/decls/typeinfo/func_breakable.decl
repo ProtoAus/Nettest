@@ -1,0 +1,68 @@
+// "spawnobject" key
+typeInfo objects
+{
+	"1" "item_battery"
+	"2" "item_healthkit"
+	"3" "weapon_9mmhandgun"
+	"4" "weapon_9mmclip"
+	"5" "weapon_9mmAR"
+	"6" "ammo_9mmAR"
+	"7" "ammo_ARgrenades"
+	"8" "weapon_shotgun"
+	"9" "ammo_buckshot"
+	"10" "weapon_crossbow"
+	"11" "ammo_crossbow"
+	"12" "weapon_357"
+	"13" "ammo_357"
+	"14" "weapon_rpg"
+	"15" "ammo_rpgclip"
+	"16" "ammo_gaussclip"
+	"17" "weapon_hegrenade"
+	"18" "weapon_tripmine"
+	"19" "weapon_satchel"
+	"20" "weapon_snark"
+	"21" "weapon_hornetgun"
+}
+
+// "material" key
+typeInfo surfaces
+{
+	"0" "gs_material_glass"
+	"1" "gs_material_wood"
+	"2" "gs_material_metal"
+	"3" "gs_material_flesh"
+	"4" "gs_material_cinderblock"
+	"5" "gs_material_tile"
+	"6" "gs_material_computer"
+	"7" "gs_material_unbreakableglass"
+	"8" "gs_material_rocks"
+}
+
+// "propdata" key
+typeInfo props
+{
+	"1" "Wooden.Tiny"
+	"2" "Wooden.Small"
+	"3" "Wooden.Medium"
+	"4" "Wooden.Large"
+	"5" "Wooden.Huge"
+	"6" "Metal.Small"
+	"7" "Metal.Medium"
+	"8" "Metal.Large"
+	"9" "Cardboard.Small"
+	"10" "Cardboard.Medium"
+	"11" "Cardboard.Large"
+	"12" "Stone.Small"
+	"13" "Stone.Medium"
+	"14" "Stone.Large"
+	"15" "Stone.Huge"
+	"16" "Glass.Small"
+	"17" "Plastic.Small"
+	"18" "Plastic.Medium"
+	"19" "Plastic.Large"
+	"20" "Pottery.Small"
+	"21" "Pottery.Medium"
+	"22" "Pottery.Large"
+	"23" "Pottery.Huge"
+	"24" "Glass.Window"
+}

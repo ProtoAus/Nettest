@@ -1,0 +1,4 @@
+path_ttf fonts/verdana.ttf
+size_ttf 10
+path_bitmap fonts/verdana.png
+size_bitmap "5 10"

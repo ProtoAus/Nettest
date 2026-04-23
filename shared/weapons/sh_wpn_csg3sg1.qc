@@ -76,7 +76,7 @@ float(float now) SH_G3SG1TryFire =
 
 float(float now) SH_G3SG1TryReload =
 {
-    float r = SH_StandardTryReload(now, mag_g3sg1, ammo_g3sg1, MAX_MAG_G3SG1);
+    float r = SH_StandardTryReload(now, mag_g3sg1, ammo_g3sg1, MAX_MAG_G3SG1, G3SG1_RELOAD_DURATION);
     if (r == 1)
         self.zoomstage = 0;
     return r;
@@ -114,11 +114,11 @@ void() W_G3SG1Shoot =
 {
     // Scoped: zero base spread, movement still applies
     if (self.zoomstage > 0)
-        W_StandardHitscanShoot(0, G3SG1_MOVE_SPREAD, G3SG1_FULL_SPREAD_SPEED,
-            G3SG1_CLOSE_DAMAGE, G3SG1_MIN_DAMAGE, G3SG1_DAMAGE_FALLOFF_RANGE);
+        W_PenetratingHitscanShoot(0, G3SG1_MOVE_SPREAD, G3SG1_FULL_SPREAD_SPEED,
+            G3SG1_CLOSE_DAMAGE, G3SG1_MIN_DAMAGE, G3SG1_DAMAGE_FALLOFF_RANGE, 96, 0.98);
     else
-        W_StandardHitscanShoot(G3SG1_BASE_SPREAD, G3SG1_MOVE_SPREAD, G3SG1_FULL_SPREAD_SPEED,
-            G3SG1_CLOSE_DAMAGE, G3SG1_MIN_DAMAGE, G3SG1_DAMAGE_FALLOFF_RANGE);
+        W_PenetratingHitscanShoot(G3SG1_BASE_SPREAD, G3SG1_MOVE_SPREAD, G3SG1_FULL_SPREAD_SPEED,
+            G3SG1_CLOSE_DAMAGE, G3SG1_MIN_DAMAGE, G3SG1_DAMAGE_FALLOFF_RANGE, 96, 0.98);
 };
 
 void() W_G3SG1Fire =
@@ -232,6 +232,7 @@ void() weapon_g3sg1 =
     self.touch         = weapon_touch;
     self.mag_g3sg1     = MAX_MAG_G3SG1;
     self.ammo_g3sg1    = MAX_AMMO_G3SG1;
+    W_RegisterMapWeapon(weapon_g3sg1);
 };
 
 #endif // SSQC
@@ -275,7 +276,8 @@ void() CSQC_PredictG3SG1Command =
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csg3sg1/fire.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(self.zoomstage > 0 ? 0 : G3SG1_BASE_SPREAD, G3SG1_MOVE_SPREAD, G3SG1_FULL_SPREAD_SPEED);
+                CSQC_PredictedImpact(self.zoomstage > 0 ? 0 : G3SG1_BASE_SPREAD, G3SG1_MOVE_SPREAD, G3SG1_FULL_SPREAD_SPEED,
+                    G3SG1_CLOSE_DAMAGE, G3SG1_MIN_DAMAGE, G3SG1_DAMAGE_FALLOFF_RANGE);
                 CSQC_SpawnCasing("models/weapons/riflecasing.mdl",
                     '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }

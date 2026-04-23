@@ -17,12 +17,21 @@ Eye : view_ofs.z = 48
 //  Hull / physics constants
 // ============================================================================
 
-vector PM_MINS             = '-16 -16 0';   // standing hull bottom — never changes
+vector PM_MINS;             // standing hull bottom       — set by PM_ReadMovevars
 vector PM_MAXS;             // standing hull top          — set by PM_ReadMovevars
 vector PM_DUCK_MINS;        // duck hull bottom           — set by PM_ReadMovevars
 vector PM_DUCK_MAXS;        // duck hull top              — set by PM_ReadMovevars
 vector PM_VIEW_OFS;         // standing eye offset        — set by PM_ReadMovevars
 vector PM_DUCK_VIEW_OFS;    // ducked eye offset          — set by PM_ReadMovevars
+
+// Vertical shift applied to all hull/view constants when the player model's
+// natural pivot is not at the feet. Set per-spawn from the loaded model's
+// .mins_z (in PlayerSpawn) so GoldSrc-style player models — whose origins
+// commonly sit at the body's center — render at the correct floor height
+// without their feet sinking into the geometry. PM_ReadMovevars folds this
+// into PM_MINS/PM_MAXS/PM_VIEW_OFS so every collision and view computation
+// already accounts for it.
+float  pm_player_z_offset;
 
 float  PM_STEPSIZE         = 18;
 float  PM_FLYFRICTION      = 4;
@@ -32,9 +41,8 @@ float  PM_MAX_CLIP_PLANES  = 8;   // raised from 5 to match ramp-fix bump count
 float  PM_MAX_JUMPFIX_DP   = -0.1;  // ramp-fix dot-product threshold
 float  PM_BTN_JUMP         = 2;     // bit in input_buttons
 float  PM_BTN_DUCK         = 32;    // +button6 via DP_INPUTBUTTONS
-float  PM_BTN_SPRINT       = 8;     // +button4  — run faster (sv_sprintspeed)
+float  PM_BTN_SPRINT       = 8;     // +button4  — speed modifier (sv_shiftspeed multiplier)
 float  PM_BTN_USE          = 128;   // +button8 / +use     — high friction
-float  PM_BTN_WALK         = 256;   // +speed   / +button9 — walk slower (sv_walkspeed)
 float  PM_DUCK_TIME        = 0.4;
 float  PM_DUCKING_MULTIPLIER = 0.333;
 float  PM_FIXEDSTEP_EPSILON = 0.000001;
@@ -94,8 +102,7 @@ vector pm_ladder_normal;  // outward-facing normal of the active ladder surface
 
 float  mv_gravity;
 float  mv_maxspeed;
-float  mv_shiftspeed;     // reduced max speed when +button4 (shift/walk) is held
-float  mv_walkspeed;      // effective max speed when PM_BTN_WALK is held  (0 = disabled)
+float  mv_shiftspeed;     // absolute speed cap (qu/s) applied when PM_BTN_SPRINT is held (0 = disabled)
 float  mv_stopspeed;
 float  mv_friction;
 float  mv_waterfriction;
@@ -133,6 +140,15 @@ vector PM_CurrentMins()
     return PM_MINS;
 }
 
+// Keep the player entity at its true movement hull.  Expanded hit volume
+// lives on a separate hit-proxy entity (see Player_HitProxy_Ensure in
+// sv_player.qc) so weapon traces can reach outstretched limbs without
+// inflating player-vs-player collision.
+void(entity e, vector mn, vector mx) SetHitboxSize =
+{
+    setsize(e, mn, mx);
+};
+
 void PM_TraceHull(vector start, vector mins, vector maxs, vector end)
 {
     tracebox(start, mins, maxs, end, MOVE_NORMAL, self);
@@ -141,6 +157,84 @@ void PM_TraceHull(vector start, vector mins, vector maxs, vector end)
 void PM_Trace(vector start, vector end)
 {
     PM_TraceHull(start, PM_CurrentMins(), PM_CurrentMaxs(), end);
+}
+
+// ============================================================================
+//  Player-vs-player wall fix
+//
+//  Bbox-on-bbox slides snap their contact normal to the closest cardinal
+//  axis (±X or ±Y), which makes brushing past another player feel
+//  rubbery — tiny lateral wobbles flip the normal and the slide stutters.
+//
+//  When the slide trace hits a player AND the contact is mostly horizontal
+//  (i.e. we hit their side, not their head/feet), recompute the normal as
+//  the horizontal radial from their origin to ours. That gives the smooth
+//  "cylinder" feel: walking into someone slides cleanly around them, like
+//  brushing past a pillar. Vertical contacts (|normal.z| >= 0.7) are left
+//  alone so jumping ON a player still triggers ground detection — you can
+//  stand on their head as before.
+//
+//  Caller passes the trace_plane_normal AS-IS for non-player or vertical
+//  contacts, REPLACED for player-side hits.
+// ============================================================================
+// An entity pmove should treat as a living-player wall.
+// Accepts both the engine-replicated player ("player") and the CSQC
+// visual proxy ("player_visual_proxy"). Dead bodies excluded — they must
+// be transparent to live players' traces regardless of whether the next
+// solid=SOLID_NOT snapshot has arrived yet (closes the one-snapshot gap
+// between server-side death and client-side proxy update).
+float PM_IsLivePlayerCollider(entity e)
+{
+    if (!e) return FALSE;
+    if (e.classname != "player" && e.classname != "player_visual_proxy")
+        return FALSE;
+#ifdef SSQC
+    if (e.is_dead) return FALSE;
+#endif
+#ifdef CSQC
+    if (e.vis_is_dead) return FALSE;
+#endif
+    return TRUE;
+}
+
+// Auto-disentangle: at the end of pmove, if our bbox is embedded inside
+// another live player (telefrag-grade overlap, e.g. spawning into a body
+// or a server/client reconciliation snapping positions into each other),
+// pop out along the axis with the smallest penetration. Position-only —
+// no velocity impulse, so there's no "push" feel. Pure AABB response,
+// matches BSP-wall slide behavior exactly.
+void PM_DisentangleFromPlayer()
+{
+    tracebox(pm_origin, PM_CurrentMins(), PM_CurrentMaxs(), pm_origin, MOVE_NORMAL, self);
+    if (!trace_startsolid) return;
+    if (!PM_IsLivePlayerCollider(trace_ent)) return;
+
+    // Compute the AABB overlap on each axis.
+    vector my_mins = pm_origin + PM_CurrentMins();
+    vector my_maxs = pm_origin + PM_CurrentMaxs();
+    vector hi_mins = trace_ent.absmin;
+    vector hi_maxs = trace_ent.absmax;
+
+    float ox = min(my_maxs_x, hi_maxs_x) - max(my_mins_x, hi_mins_x);
+    float oy = min(my_maxs_y, hi_maxs_y) - max(my_mins_y, hi_mins_y);
+    float oz = min(my_maxs_z, hi_maxs_z) - max(my_mins_z, hi_mins_z);
+
+    // Guard against degenerate overlap reads (shouldn't happen given
+    // startsolid was true, but cheap to clamp).
+    if (ox < 0) ox = 0;
+    if (oy < 0) oy = 0;
+    if (oz < 0) oz = 0;
+
+    // Nudge 1 unit past the overlap so the next tracebox clears.
+    vector push = '0 0 0';
+    if (ox <= oy && ox <= oz)
+        push_x = (pm_origin_x >= trace_ent.origin_x) ? (ox + 1) : -(ox + 1);
+    else if (oy <= oz)
+        push_y = (pm_origin_y >= trace_ent.origin_y) ? (oy + 1) : -(oy + 1);
+    else
+        push_z = (pm_origin_z >= trace_ent.origin_z) ? (oz + 1) : -(oz + 1);
+
+    pm_origin = pm_origin + push;
 }
 
 // ============================================================================
@@ -156,6 +250,13 @@ float PM_TestPositionExt(vector pos, vector mins, vector maxs)
 float PM_TestPosition(vector pos)
 {
     return PM_TestPositionExt(pos, PM_CurrentMins(), PM_CurrentMaxs());
+}
+
+// Entity-aware variant: uses MOVE_NORMAL so other players / breakables count.
+float PM_TestPositionFull(vector pos)
+{
+    tracebox(pos, PM_CurrentMins(), PM_CurrentMaxs(), pos, MOVE_NORMAL, self);
+    return !trace_startsolid && !trace_allsolid;
 }
 
 float PM_MoveScale()
@@ -180,9 +281,9 @@ void PM_SyncHull()
 {
 #if defined(SSQC) || defined(CSQC)
     if (self.flags & FL_DUCKING)
-        setsize(self, PM_DUCK_MINS, PM_DUCK_MAXS);
+        SetHitboxSize(self, PM_DUCK_MINS, PM_DUCK_MAXS);
     else
-        setsize(self, PM_MINS, PM_MAXS);
+        SetHitboxSize(self, PM_MINS, PM_MAXS);
 #endif
 }
 
@@ -193,8 +294,11 @@ void PM_UnDuck()
     new_origin = pm_origin;
     // Undo the ground duck origin shift: restore feet to world floor level.
     // In air there was no shift, so don't compensate.
+    // Use the *difference* between standing and ducked floor positions, not
+    // PM_DUCK_MINS_z alone — this works whether PM_MINS_z is 0 (legacy: feet
+    // at origin) or negative (player model with body-center origin).
     if (pm_onground)
-        new_origin_z += PM_DUCK_MINS_z;
+        new_origin_z += PM_DUCK_MINS_z - PM_MINS_z;
 
     if (!PM_TestPositionExt(new_origin, PM_MINS, PM_MAXS))
         return;
@@ -265,9 +369,12 @@ void PM_CheckDuck()
                 // On ground: shift origin down so feet stay planted at the same
                 // world position (mirrors GoldSrc origin -= duck_mins - stand_mins).
                 // In air: no shift — hull bottom rises, enabling crouch-jump.
+                // Formula uses both PM_MINS_z and PM_DUCK_MINS_z so it works
+                // regardless of whether origin is at feet (PM_MINS_z=0, legacy)
+                // or body center (PM_MINS_z=-36, GoldSrc model offset).
                 if (pm_onground)
                 {
-                    pm_origin_z -= PM_DUCK_MINS_z;
+                    pm_origin_z += PM_MINS_z - PM_DUCK_MINS_z;
                     // Unstick if the shift pushed us into geometry
                     if (!PM_TestPosition(pm_origin))
                     {
@@ -286,12 +393,15 @@ void PM_CheckDuck()
             }
             else
             {
-                // Animate view toward (PM_DUCK_VIEW_OFS_z - PM_DUCK_MINS_z) so that
-                // when the duck finalises on ground and origin shifts down by
-                // PM_DUCK_MINS_z, the eye world-position is continuous (no pop).
+                // Animate view toward the post-duck eye position, anticipating the
+                // origin shift the transition will apply on completion. The
+                // PM_MINS_z term keeps this consistent for both legacy (origin at
+                // feet) and GoldSrc model (origin at body center) hull setups —
+                // collapses back to the original (PM_DUCK_VIEW_OFS_z - PM_DUCK_MINS_z)
+                // when PM_MINS_z is 0.
                 duck_fraction = PM_SplineFraction(duck_time, 1 / PM_DUCK_TIME);
                 self.view_ofs_z = PM_VIEW_OFS_z * (1 - duck_fraction)
-                                + (PM_DUCK_VIEW_OFS_z - PM_DUCK_MINS_z) * duck_fraction;
+                                + (PM_DUCK_VIEW_OFS_z + PM_MINS_z - PM_DUCK_MINS_z) * duck_fraction;
             }
         }
         else if (self.flags & FL_DUCKING)
@@ -424,8 +534,23 @@ float PM_SlideMove()
         else
             PM_Trace(pm_origin, pm_origin + pm_velocity * time_left);
 
+        // Pure AABB slide: the raw trace_plane_normal from tracebox is
+        // one of the six cardinal face normals of the other player's
+        // bbox, so velocity-clipping below behaves exactly like sliding
+        // against a BSP wall. No cylinder remapping.
+
         if (trace_startsolid || trace_allsolid)
         {
+            // Embedded in another player (live OR dead): don't zero
+            // velocity. Live → end-of-step disentangle nudges us out.
+            // Dead → corpse should be transparent, so bailing without
+            // zeroing velocity prevents the local stutter while the
+            // server's solid=SOLID_NOT snapshot reaches the proxy.
+            if (trace_ent
+                && (trace_ent.classname == "player"
+                    || trace_ent.classname == "player_visual_proxy"))
+                break;
+
             pm_velocity = '0 0 0';
             return PM_BLOCKED_FLOOR | PM_BLOCKED_STEP | PM_BLOCKED_OTHER;
         }
@@ -487,24 +612,12 @@ float PM_SlideMove()
 
         time_left -= time_left * trace_fraction;
 
-        // First-impact airborne differentiated clip (Momentum Mod):
-        // On the very first collision while airborne, use different
-        // overbounce for floors vs walls.  sv_bounce defaults to 0,
-        // making this a no-op unless explicitly configured for surf.
+        // First-impact airborne clip (Momentum Mod):
+        // On the very first collision while airborne, do a plain slide clip
+        // and skip the multi-plane resolution pass below.
         if (num_planes == 1 && !pm_onground)
         {
-            vector first_plane = planes[0];
-            if (first_plane_z >= PM_MIN_STEP_NORMAL)
-            {
-                // Floor/slope: no bounce
-                pm_velocity = PM_ClipVelocity(original_velocity, first_plane, 1);
-            }
-            else
-            {
-                // Wall: slight bounce based on sv_bounce
-                float sv_bounce_val = cvar("sv_bounce");
-                pm_velocity = PM_ClipVelocity(original_velocity, first_plane, 1 + sv_bounce_val);
-            }
+            pm_velocity = PM_ClipVelocity(original_velocity, planes[0], 1);
             original_velocity = pm_velocity;
             continue;
         }
@@ -645,8 +758,28 @@ float PM_StepSlideMove(float in_air)
     // slide at the elevated height
     PM_SlideMove();
 
+    // Guard: if the elevated slide left us inside an entity (another player,
+    // a breakable, etc.), discard the step path entirely.
+    PM_TraceHull(pm_origin, PM_CurrentMins(), PM_CurrentMaxs(), pm_origin);
+    if (trace_startsolid)
+    {
+        pm_origin   = down_origin;
+        pm_velocity = down_velocity;
+        return blocked;
+    }
+
     // step back down
     PM_Trace(pm_origin, pm_origin - '0 0 1' * stepsize);
+    // Revert if step-down landed us inside a solid entity (e.g. another
+    // player's hull).  Without this we'd stay 18u elevated and re-enter
+    // the same state every frame.
+    if (trace_startsolid || trace_allsolid)
+    {
+        pm_origin     = down_origin;
+        pm_velocity   = down_velocity;
+        pm_velocity_z = 0;
+        return blocked;
+    }
     if (trace_fraction != 1 && trace_plane_normal_z < PM_MIN_STEP_NORMAL)
     {
         // landed on a wall, not a floor – fall back to the flat path
@@ -906,6 +1039,46 @@ float PM_FlyMove()
     return PM_StepSlideMove(FALSE);
 }
 
+// Port of CGameMovement::StayOnGround (Source SDK / Momentum Mod).
+// After horizontal movement, re-snap the player to walkable floor so they
+// don't briefly leave ground when walking down a slope and don't slowly
+// drift on a 45° slope when standing still.
+//
+// Algorithm: trace 2 units UP first (escapes minor floor penetration so
+// the down trace starts from a guaranteed-clear position), then trace
+// PM_STEPSIZE units DOWN. Snap to the hit position if walkable.
+//
+// Snap acceptance is intentionally LOOSER than CategorizePosition's: a
+// hull trace whose first contact catches the edge of a 45° slope or an
+// adjacent face can return normal_z slightly under 0.7. Refusing to snap
+// in that case leaves the player floating fractionally above the slope,
+// CategorizePosition flickers off-ground, gravity sneaks in for a tick,
+// SlideMove projects velocity along the slope, and the player drifts
+// downhill. Accepting any normal_z >= 0.5 (~60°) keeps them glued to
+// surfaces they were already on without snapping onto walls.
+void PM_StayOnGround()
+{
+    vector start;
+
+    start = pm_origin + '0 0 2';
+
+    // Up trace: find guaranteed safe space above. Hull-traced so it
+    // handles ceilings — same as Source's TracePlayerBBox.
+    PM_Trace(pm_origin, start);
+    start = trace_endpos;
+
+    // Down trace from the safe position.
+    PM_Trace(start, pm_origin - '0 0 1' * PM_STEPSIZE);
+    if (trace_fraction <= 0 || trace_fraction >= 1)
+        return;
+    if (trace_startsolid || trace_allsolid)
+        return;
+    if (trace_plane_normal_z < 0.5)
+        return;
+
+    pm_origin = trace_endpos;
+}
+
 void PM_FollowGroundPlane()
 {
     // Feet-origin adaptation: keep the horizontal speed the player earned,
@@ -933,7 +1106,6 @@ float PM_AirMove()
     vector wishvel, wishdir;
     vector fwd2d, right2d;
     vector walk_dest;
-    vector walk_delta;
     float  wishspeed;
     float  fmove, smove;
     float  scale;
@@ -955,6 +1127,26 @@ float PM_AirMove()
     wishvel_z = 0;
 
     wishspeed = vlen(wishvel);
+
+    // Diagonal-bug cap (grounded only): forward+strafe gives sqrt(2) ×
+    // the single-axis wishspeed because both components add into vlen.
+    // The mv_maxspeed cap below masks it for run speed (cl_forwardspeed
+    // > mv_maxspeed makes the diagonal also clip to mv_maxspeed) but
+    // not for ducking (scale shrinks fmove/smove well below mv_maxspeed,
+    // so diagonal sneaks under the cap and ends up 1.41× faster).
+    // Capping to the larger single-axis value normalises the speed.
+    // Air movement is intentionally left alone — strafe-jumping needs
+    // the uncapped wishspeed to drive PM_AirAccelerate.
+    if (pm_onground)
+    {
+        float per_axis = max(fabs(fmove), fabs(smove));
+        if (per_axis > 0 && wishspeed > per_axis)
+        {
+            wishvel   = wishvel * (per_axis / wishspeed);
+            wishspeed = per_axis;
+        }
+    }
+
     if (wishspeed > mv_maxspeed)
     {
         wishvel   = wishvel * (mv_maxspeed / wishspeed);
@@ -992,60 +1184,29 @@ float PM_AirMove()
             return 0;
         }
 
-        // Feet-origin adaptation of GoldSrc's initial horizontal walk trace:
-        // try to move straight along the current floor plane first. On ramps
-        // this avoids feeding every frame through clip/step logic, which can
-        // shave horizontal speed noticeably at lower sv_accelerate values.
-        walk_delta = [pm_velocity_x * pm_frametime, pm_velocity_y * pm_frametime, 0];
-        walk_dest = pm_origin + walk_delta;
-        if (pm_groundnormal_z >= PM_MIN_STEP_NORMAL
-            && pm_groundnormal_z > PM_FIXEDSTEP_EPSILON)
-        {
-            walk_dest_z += -(
-                walk_delta_x * pm_groundnormal_x +
-                walk_delta_y * pm_groundnormal_y
-            ) / pm_groundnormal_z;
-        }
+        // Horizontal-only walk trace, matching Source/Momentum Mod WalkMove.
+        // Z is intentionally NOT projected onto the slope normal — a diagonal
+        // down-trace on a narrow downward slope catches on adjacent edge
+        // geometry (walls/steps the bbox overhangs), producing the "stuck on
+        // a thin downhill ramp" bug that gets worse at low speed. The flat
+        // horizontal trace stays clear; PM_StayOnGround in PM_PlayerMoveStep
+        // pulls us back onto the slope after.
+        walk_dest = [
+            pm_origin_x + pm_velocity_x * pm_frametime,
+            pm_origin_y + pm_velocity_y * pm_frametime,
+            pm_origin_z
+        ];
 
         PM_Trace(pm_origin, walk_dest);
         if (trace_fraction == 1 && !trace_startsolid && !trace_allsolid)
         {
             pm_origin = trace_endpos;
-
-            // Step-down snap: keep the player grounded when walking off
-            // stairs/ledges up to PM_STEPSIZE high.  Mirrors the slope-glue
-            // snap on the PM_StepSlideMove path below, and Source's
-            // StayOnGround().
-            PM_Trace(pm_origin, pm_origin - '0 0 1' * PM_STEPSIZE);
-            if (trace_fraction < 1 && !trace_startsolid && !trace_allsolid
-                && trace_plane_normal_z >= PM_MIN_STEP_NORMAL)
-            {
-                pm_origin = trace_endpos;
-            }
-
-            return 0;
+            return 0;   // PM_StayOnGround drops us back to slope
         }
 
         PM_FollowGroundPlane();
 
-        float ground_blocked = PM_StepSlideMove(FALSE);
-
-        // Slope-glue: pull the player down onto downward slopes after zeroing z.
-        // Only needed when we moved freely or hit a floor/angled surface — skip
-        // when we blocked against a vertical wall (PM_BLOCKED_STEP).  Running
-        // the snap at a wall-floor junction causes the hull to clip into the wall
-        // by floating-point epsilon, producing a 1-frame sink + NudgePosition pop.
-        if (!(ground_blocked & PM_BLOCKED_STEP))
-        {
-            PM_Trace(pm_origin, pm_origin - '0 0 1' * PM_STEPSIZE);
-            if (trace_fraction < 1 && !trace_startsolid && !trace_allsolid
-                && trace_plane_normal_z >= PM_MIN_STEP_NORMAL)
-            {
-                pm_origin = trace_endpos;
-            }
-        }
-
-        return ground_blocked;
+        return PM_StepSlideMove(FALSE);
     }
     else
     {
@@ -1294,8 +1455,10 @@ void PM_CheckJump()
         PM_EmitStepSound(strcat("sounds/player/step", itos(floor(random() * 4) + 1), ".wav"), 1.0);
 
     pm_onground       = FALSE;
-    pm_velocity_z    += 270;
-    self.spread_penalty = 4.0;   // jump spread penalty
+    // CS 1.6 jump impulse: sqrt(2 * sv_gravity * 45) — 45-unit apex at g=800
+    // gives the canonical 268.328 u/s.  Scales correctly with custom gravity.
+    pm_velocity_z    += sqrt(2 * mv_gravity * 45);
+    self.spread_penalty = SPREAD_PENALTY_JUMP;
 
     // CS 1.6 stamina: penalise jump height if still fatigued, then reset timer
     if (mv_stamina)
@@ -1392,6 +1555,66 @@ void PM_CheckWaterJump()
 //  22.  PM_NudgePosition  –  un-stuck on 1/8-unit grid
 // ============================================================================
 
+// Soft entity-aware depenetration.  Runs only when the world-only nudge
+// left us overlapping another solid entity (another player, breakable,
+// etc.).  Pushes horizontally away from the nearest offender in 0.5u
+// steps until clear, or accepts overlap if no clear spot is found
+// within 8 units (brief overlap beats frozen players).
+void PM_SoftDepenetrate()
+{
+    entity  e, best;
+    float   best_dsq, dsq;
+    vector  push, delta, try;
+    float   i;
+
+    best     = world;
+    best_dsq = 4096;   // 64*64 search radius
+
+    for (e = findradius(pm_origin, 64); e; e = e.chain)
+    {
+        if (e == self)
+            continue;
+        if (e.solid == SOLID_NOT || e.solid == SOLID_TRIGGER)
+            continue;
+
+        delta   = e.origin - pm_origin;
+        delta_z = 0;
+        dsq     = delta * delta;
+        if (dsq < best_dsq)
+        {
+            best_dsq = dsq;
+            best     = e;
+        }
+    }
+
+    if (best == world)
+        return;   // nothing nearby; accept current position
+
+    push = pm_origin - best.origin;
+    push_z = 0;
+    if (push * push < 0.0001)
+    {
+        // exact overlap – pick a deterministic horizontal direction.
+        // Derive from origin bits so it's identical on client + server.
+        float ang = (pm_origin_x + pm_origin_y) * 0.1;
+        push_x = cos(ang);
+        push_y = sin(ang);
+        push_z = 0;
+    }
+    push = normalize(push);
+
+    for (i = 1; i <= 16; i++)
+    {
+        try = pm_origin + push * (i * 0.5);
+        if (PM_TestPositionFull(try))
+        {
+            pm_origin = try;
+            return;
+        }
+    }
+    // no clear spot – leave pm_origin alone; next frame's slide will try again.
+}
+
 void PM_NudgePosition()
 {
     vector  base, try;
@@ -1401,6 +1624,20 @@ void PM_NudgePosition()
     sign[0] = 0;
     sign[1] = -0.125;
     sign[2] =  0.125;
+
+    // Fast path: if the current sub-pixel position is already valid, leave
+    // it alone. The grid snap below destroys movement precision below 1/8
+    // unit (catastrophic at low speeds — at 1 u/s and 100 Hz tickrate the
+    // per-tick displacement is 0.01 unit, far below the grid resolution,
+    // so off-axis components get rounded away every tick and direction
+    // snaps to the dominant axis). The grid path is only needed when the
+    // player is actually embedded in geometry.
+    if (PM_TestPosition(pm_origin))
+    {
+        if (!PM_TestPositionFull(pm_origin))
+            PM_SoftDepenetrate();
+        return;
+    }
 
     // snap to 1/8-unit grid
     base_x = rint(pm_origin_x * 8) / 8;
@@ -1421,6 +1658,8 @@ void PM_NudgePosition()
         if (PM_TestPosition(try))
         {
             pm_origin = try;
+            if (!PM_TestPositionFull(pm_origin))
+                PM_SoftDepenetrate();
             return;
         }
     }
@@ -1433,12 +1672,16 @@ void PM_NudgePosition()
         if (PM_TestPosition(try))
         {
             pm_origin = try;
+            if (!PM_TestPositionFull(pm_origin))
+                PM_SoftDepenetrate();
             return;
         }
     }
 
-    // nothing worked – leave position unchanged
+    // nothing worked – leave position on the grid snap and try entity push.
     pm_origin = base;
+    if (!PM_TestPositionFull(pm_origin))
+        PM_SoftDepenetrate();
 }
 
 // ============================================================================
@@ -1465,6 +1708,18 @@ void PM_SpectatorMove()
             + v_up       * input_movevalues_z;
 
     wishspeed = vlen(wishvel);
+
+    // Diagonal-bug cap: forward+strafe (or +up) sums into vlen and gives
+    // sqrt(2)–sqrt(3) × the single-axis speed. Cap to the largest single
+    // axis so noclip flies the same speed in every direction.
+    float per_axis = max(max(fabs(input_movevalues_x), fabs(input_movevalues_y)),
+                         fabs(input_movevalues_z));
+    if (per_axis > 0 && wishspeed > per_axis)
+    {
+        wishvel   = wishvel * (per_axis / wishspeed);
+        wishspeed = per_axis;
+    }
+
     if (wishspeed > mv_spectatormaxspeed)
     {
         wishvel   = wishvel * (mv_spectatormaxspeed / wishspeed);
@@ -1487,38 +1742,67 @@ void PM_SpectatorMove()
 // ============================================================================
 //  23b. PM_NoclipMove  –  free fly through walls (noclip)
 //
-//  Identical structure to PM_SpectatorMove but uses pm_noclipspeed (default
-//  3 × sv_maxspeed) so the player moves notably faster than spectators.
+//  Free fly through walls with smooth acceleration and friction.
 //  Origin is moved directly with no collision traces.
 // ============================================================================
+
+float PM_NOCLIP_ACCEL     = 10;   // acceleration rate (same as ground accel)
+float PM_NOCLIP_FRICTION  = 5;    // friction when decelerating
+float PM_NOCLIP_SPRINT    = 2.5;  // sprint multiplier (shift / +button4)
+float PM_NOCLIP_DUCK      = 0.4;  // duck multiplier (ctrl / +button6)
 
 void PM_NoclipMove()
 {
     vector wishvel, wishdir;
-    float  wishspeed, maxspeed;
+    float  wishspeed, maxspeed, factor;
+    float  speed, newspeed, control, drop;
 
-    maxspeed = cvar("pm_noclipspeed");
-    if (maxspeed <= 0)
-        maxspeed = mv_maxspeed * 3;
+    maxspeed = mv_maxspeed * 5;
+
+    // speed multipliers from held buttons
+    factor = 1.0;
+    if (input_buttons & PM_BTN_SPRINT)
+        factor *= PM_NOCLIP_SPRINT;
+    if (input_buttons & PM_BTN_DUCK)
+        factor *= PM_NOCLIP_DUCK;
 
     // wish velocity from full 3-D view (forward + right + up)
-    wishvel = pm_forward * input_movevalues_x
-            + pm_right   * input_movevalues_y
-            + v_up       * input_movevalues_z;
+    wishvel = pm_forward * input_movevalues_x * factor
+            + pm_right   * input_movevalues_y * factor
+            + v_up       * input_movevalues_z * factor;
 
-    wishspeed = vlen(wishvel);
-
-    // Scale input to noclip speed — input_movevalues are clamped to
-    // cl_forwardspeed (~400) by the engine, so we rescale them to fill
-    // the full noclip range.
+    wishdir  = wishvel;
+    wishspeed = vlen(wishdir);
     if (wishspeed > 0)
+        wishdir = wishdir * (1.0 / wishspeed);
+
+    // Diagonal-bug cap: cap to the largest single-axis input so flying
+    // forward+strafe+up can't sneak ~sqrt(3) × the cardinal speed past
+    // the maxspeed clamp below.
+    float per_axis = max(max(fabs(input_movevalues_x), fabs(input_movevalues_y)),
+                         fabs(input_movevalues_z)) * factor;
+    if (per_axis > 0 && wishspeed > per_axis)
+        wishspeed = per_axis;
+
+    // clamp to max noclip speed (with factor already baked into wish)
+    if (wishspeed > maxspeed * factor)
+        wishspeed = maxspeed * factor;
+
+    // smooth acceleration towards wish velocity
+    PM_Accelerate(wishdir, wishspeed, PM_NOCLIP_ACCEL);
+
+    // friction — bleed off speed when not pushing or overshooting
+    speed = vlen(pm_velocity);
+    if (speed < 1)
     {
-        wishdir = normalize(wishvel);
-        pm_velocity = wishdir * maxspeed;
+        pm_velocity = '0 0 0';
     }
     else
     {
-        pm_velocity = '0 0 0';
+        control = max(speed, maxspeed * 0.25);
+        drop = control * PM_NOCLIP_FRICTION * pm_frametime;
+        newspeed = max(speed - drop, 0) / speed;
+        pm_velocity = pm_velocity * newspeed;
     }
 
     // move directly — no collision
@@ -1529,60 +1813,88 @@ void PM_NoclipMove()
 //  24.  PM_ReadMovevars  –  populate movevars from engine cvars
 // ============================================================================
 
+// Helper: read a movement cvar from serverinfo (client) or local cvar (server).
+// The server pushes movement cvars to serverinfo so clients auto-sync.
+float(string name, float fallback) PM_ReadMovevar =
+{
+    float val;
+#ifdef CSQC
+    val = serverkeyfloat(name, 0);
+#else
+    val = cvar(name);
+#endif
+    if (!val) val = fallback;
+    return val;
+};
+
 void PM_ReadMovevars()
 {
     // Hull height cvar — set to 56 (default) or 72 (GoldSrc proportions).
     // All duck/view values are derived so crouching adjusts automatically.
     float h;
-    h = cvar("pm_hull_height");
+    h = PM_ReadMovevar("sv_hull_height", 72);
     if (h < 32) h = 56;
 
-    //  standing hull:  0 → h   (feet at origin)
+    //  standing hull:  0 → h   (feet at origin), shifted down by pm_player_z_offset
     //  duck hull:    h/4 → 3h/4 (symmetric shrink — feet pull up h/4 in air)
     //  eye heights:  h-8 standing, 3h/4-4 ducked (after ground origin shift, eyes at h/4-4 from floor)
-    PM_MAXS_x = 16;         PM_MAXS_y = 16;         PM_MAXS_z = h;
-    PM_DUCK_MINS_x = -16;   PM_DUCK_MINS_y = -16;   PM_DUCK_MINS_z = h * 0.25;
-    PM_DUCK_MAXS_x = 16;    PM_DUCK_MAXS_y = 16;    PM_DUCK_MAXS_z = h * 0.75;
-    PM_VIEW_OFS_x = 0;      PM_VIEW_OFS_y = 0;      PM_VIEW_OFS_z = h - 8;
-    PM_DUCK_VIEW_OFS_x = 0; PM_DUCK_VIEW_OFS_y = 0; PM_DUCK_VIEW_OFS_z = h * 0.75 - 4;
+    //  All Z values get -pm_player_z_offset folded in so the entity .origin
+    //  sits at the model's natural pivot height instead of its feet.
+    //
+    // Hardcoded to half-height (36 for default h=72) to match the GoldSrc CS
+    // player model convention (origin at body center). Both server and client
+    // compile this file, so this single assignment keeps the prediction hull
+    // in sync with the server's authoritative hull — without it, the client
+    // predicts with the wrong bounds and the view drifts under high ping.
+    pm_player_z_offset = h * 0.5;
+    float zo = pm_player_z_offset;
+    PM_MINS_x = -16;        PM_MINS_y = -16;        PM_MINS_z = 0 - zo;
+    PM_MAXS_x = 16;         PM_MAXS_y = 16;         PM_MAXS_z = h - zo;
+    PM_DUCK_MINS_x = -16;   PM_DUCK_MINS_y = -16;   PM_DUCK_MINS_z = h * 0.25 - zo;
+    PM_DUCK_MAXS_x = 16;    PM_DUCK_MAXS_y = 16;    PM_DUCK_MAXS_z = h * 0.75 - zo;
+    // Standing eye height controlled by sv_eye_height (mod default 56).
+     // Origin sits zo above the feet, so subtract zo to land the eye at
+     // sv_eye_height units above the ground. Server pushes this cvar into
+     // serverinfo via SV_UpdateMovementServerInfo; CSQC's PM_ReadMovevar
+     // reads it back via serverkeyfloat — both sides converge on the
+     // same value so prediction and view stay in sync.
+    float eye_h = PM_ReadMovevar("sv_eye_height", 56);
+    PM_VIEW_OFS_x = 0;      PM_VIEW_OFS_y = 0;      PM_VIEW_OFS_z = eye_h - zo;
+    PM_DUCK_VIEW_OFS_x = 0; PM_DUCK_VIEW_OFS_y = 0; PM_DUCK_VIEW_OFS_z = h * 0.75 - 4 - zo;
 
-    mv_gravity           = cvar("sv_gravity");
-    if (!mv_gravity)          mv_gravity           = 800;
+    mv_gravity           = PM_ReadMovevar("sv_gravity", 800);
+    mv_maxspeed          = PM_ReadMovevar("sv_maxspeed", 270);
+    mv_shiftspeed        = PM_ReadMovevar("sv_shiftspeed", 135);
 
-    mv_maxspeed          = cvar("sv_maxspeed");
-    if (!mv_maxspeed)         mv_maxspeed          = 320;
+    // Per-weapon weight scaling.  self is the player entity in both
+    // SSQC and CSQC (= predicted_player during prediction), so reading
+    // self.weapon converges identically and weapon-switch speed change
+    // is predicted instantly.
+    float wep_spd_factor = Weapon_SpeedFactor(self.weapon);
+    mv_maxspeed   *= wep_spd_factor;
+    mv_shiftspeed *= wep_spd_factor;
+    mv_stopspeed         = PM_ReadMovevar("sv_stopspeed", 100);
+    mv_friction          = PM_ReadMovevar("sv_friction", 4);
+    mv_waterfriction     = PM_ReadMovevar("sv_waterfriction", 1);
+    mv_accelerate        = PM_ReadMovevar("sv_accelerate", 5);
 
-    mv_shiftspeed        = cvar("sv_shiftspeed");
-    if (!mv_shiftspeed)       mv_shiftspeed        = 135;
-
-    mv_walkspeed         = cvar("sv_walkspeed");
-    if (!mv_walkspeed)        mv_walkspeed         = 135;
-
-    mv_stopspeed         = cvar("sv_stopspeed");
-    if (!mv_stopspeed)        mv_stopspeed         = 100;
-
-    mv_friction          = cvar("sv_friction");
-    if (!mv_friction)         mv_friction          = 4;
-
-    mv_waterfriction     = cvar("sv_waterfriction");
-    if (!mv_waterfriction)    mv_waterfriction     = 1;
-
-    mv_accelerate        = cvar("sv_accelerate");
-    if (!mv_accelerate)       mv_accelerate        = 10;
-
-    // sv_airaccelerate: GoldSrc uses ~10, Quake uses same as sv_accelerate.
-    // A separate lower value gives tighter, more predictable air strafing.
-    mv_airaccelerate     = cvar("sv_airaccelerate");
+    // sv_airaccelerate: mod default 150 (high-accel strafe feel). If the
+    // movevar is 0 for some reason, fall back to mv_accelerate rather
+    // than leaving air control at zero.
+    mv_airaccelerate     = PM_ReadMovevar("sv_airaccelerate", 150);
     if (!mv_airaccelerate)    mv_airaccelerate     = mv_accelerate;
 
-    mv_wateraccelerate   = cvar("sv_wateraccelerate");
-    if (!mv_wateraccelerate)  mv_wateraccelerate   = 10;
-
-    mv_spectatormaxspeed = cvar("sv_spectatormaxspeed");
-    if (!mv_spectatormaxspeed) mv_spectatormaxspeed = 500;
-
-    mv_stamina           = cvar("sv_stamina");   // 0 = off (default), 1 = CS 1.6 landing fatigue
-    mv_autohop           = cvar("sv_autohop");   // 0 = require jump release (default), 1 = autohop
+    mv_wateraccelerate   = PM_ReadMovevar("sv_wateraccelerate", 10);
+    mv_spectatormaxspeed = PM_ReadMovevar("sv_spectatormaxspeed", 500);
+    mv_stamina           = PM_ReadMovevar("sv_stamina", 0);
+    mv_autohop           = PM_ReadMovevar("sv_autohop", 0);
+#ifdef CSQC
+    // Client-side autohop: predicts bunnyhop locally even when the server
+    // hasn't enabled it.  Will desync from the server if sv_autohop is 0
+    // (server rejects the queued jump on landing) — that's by design.
+    if (cvar("cl_autohop"))
+        mv_autohop = 1;
+#endif
 
     // per-entity gravity multiplier
     mv_entgravity = self.gravity ? self.gravity : 1;
@@ -1628,8 +1940,17 @@ void() PM_CheckTriggerPushes =
     player_absmin = pm_origin + PM_CurrentMins();
     player_absmax = pm_origin + PM_CurrentMaxs();
 
+    // Safety cap — mirrors PM_CheckLadder.  Under heavy prediction replay
+    // (sv_minping high forcing catch-up steps in CSQC_BuildPresentationView)
+    // the cumulative walk has hit the VM runaway limit; a corrupted list
+    // with a cycle would loop forever here too.
+    float iter_count = 0;
     for (trig = push_trigger_list; trig; trig = trig.push_next)
     {
+        iter_count = iter_count + 1;
+        if (iter_count > 256)
+            break;
+
         trig_absmin = trig.origin + trig.mins;
         trig_absmax = trig.origin + trig.maxs;
 
@@ -1661,8 +1982,14 @@ void() PM_CheckTeleportTriggers =
     player_absmin = pm_origin + PM_CurrentMins();
     player_absmax = pm_origin + PM_CurrentMaxs();
 
+    // Safety cap — same rationale as PM_CheckLadder / PM_CheckTriggerPushes.
+    float iter_count = 0;
     for (trig = teleport_trigger_list; trig; trig = trig.tele_next)
     {
+        iter_count = iter_count + 1;
+        if (iter_count > 256)
+            break;
+
         if (!trig.tele_resolved) continue;
 
         trig_absmin = trig.origin + trig.mins;
@@ -1836,8 +2163,20 @@ void() PM_CheckLadder =
     player_absmin = pm_origin + player_mins;
     player_absmax = pm_origin + player_maxs;
 
+    // Safety cap: the VM aborts on runaway instruction count, and under
+    // heavy prediction replay (e.g. sv_minping 900 forcing lots of catch-up
+    // steps in CSQC_BuildPresentationView) the cumulative ladder walk has
+    // been seen to exceed that limit — plus a corrupted list with a cycle
+    // would loop forever here.  No real map has hundreds of ladders, so a
+    // hard cap at 256 iterations is a no-op for healthy state and a clean
+    // escape hatch for the degenerate cases.
+    float iter_count = 0;
     for (trig = ladder_trigger_list; trig; trig = trig.ladder_next)
     {
+        iter_count = iter_count + 1;
+        if (iter_count > 256)
+            break;
+
         trig_absmin = trig.origin + trig.mins;
         trig_absmax = trig.origin + trig.maxs;
 
@@ -1924,15 +2263,98 @@ float pm_suppress_sounds;
 // cltime of the most recent localsound played by this client.
 // Used by CSQC_Event_Sound to gate echo suppression on actual local playback.
 float pm_last_local_step_time;
+
+// cl_debug_footsteps cadence bookkeeping. Per-tag so each log line's `dt`
+// field represents the interval since the last occurrence of that tag,
+// letting the user read predicted-vs-replay-vs-server cadence at a glance
+// without cross-line subtraction.
+float cl_last_predicted_step_time;
+float cl_last_replay_step_time;
 #endif
 
-// Step sounds are server-side only: the SSQC sound() call is heard by all
-// clients including the local player via the normal network sound path.
-// CSQC prediction does NOT play a local duplicate — that caused double steps.
+// Step sound emission, predicted on the stepper's CSQC and attacker-
+// excluded on the server so there's no ping-delayed echo layered on top
+// of the predicted step. The shared PM_UpdateStepSound above runs on both
+// sides and keeps pm_step_time in sync, so both paths hit this helper at
+// the same cadence.
 void(string snd, float vol) PM_EmitStepSound =
 {
 #ifdef SSQC
-    sound(self, CHAN_BODY, snd, vol, ATTN_NORM);
+    if (cvar("sv_debug_footsteps"))
+    {
+        float sv_dt = self.sv_last_step_time > 0 ? (time - self.sv_last_step_time) : 0;
+        print(sprintf("^6[step-server]^7 ent=%g t=%.3f dt=%.3f snd=%s vol=%.2f ",
+                      num_for_edict(self), time, sv_dt, snd, vol),
+              sprintf("pstep=%.3f ft=%.4f spd=%.0f grnd=%g\n",
+                      self.pm_step_time, pm_frametime,
+                      vlen([self.velocity_x, self.velocity_y, 0]),
+                      (self.flags & FL_ONGROUND) ? 1 : 0));
+        self.sv_last_step_time = time;
+    }
+
+    // Route through a multicast event with an attacker-exclude byte.
+    // Every OTHER client in PVS hears the step at ping-latency; the
+    // stepper's CSQC already played its own copy via localsound below
+    // (the non-replay prediction pass, before pm_suppress_sounds flips).
+    WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
+    WriteByte(MSG_MULTICAST, CSQC_EVENT_FOOTSTEP_SOUND);
+    WriteByte(MSG_MULTICAST, num_for_edict(self));
+    WriteByte(MSG_MULTICAST, bound(0, vol * 255, 255));
+    WriteString(MSG_MULTICAST, snd);
+    WriteCoord(MSG_MULTICAST, self.origin_x);
+    WriteCoord(MSG_MULTICAST, self.origin_y);
+    WriteCoord(MSG_MULTICAST, self.origin_z);
+    multicast(self.origin, MULTICAST_PVS);
+#endif
+#ifdef CSQC
+    {
+        // Verbosity levels:
+        //   1 = only audible events (predict, recv-play, recv-skip, server)
+        //   2 = also include replay internals (suppressed steps from
+        //       reconciliation — useful for deep debugging, noisy at
+        //       high ping because each reconcile covers ~ping ms of
+        //       buffered input and replays N muted steps through it).
+        float verbose = cvar("cl_debug_footsteps");
+        float cl_speed = vlen([self.velocity_x, self.velocity_y, 0]);
+        float cl_grnd  = (self.flags & FL_ONGROUND) ? 1 : 0;
+        if (pm_suppress_sounds)
+        {
+            if (verbose >= 2)
+            {
+                float rp_dt = cl_last_replay_step_time > 0 ? (time - cl_last_replay_step_time) : 0;
+                print(sprintf("^1[step-replay]^7 t=%.3f dt=%.3f snd=%s vol=%.2f ",
+                              time, rp_dt, snd, vol),
+                      sprintf("pstep=%.3f ft=%.4f spd=%.0f grnd=%g suppress=1\n",
+                              self.pm_step_time, pm_frametime, cl_speed, cl_grnd));
+                cl_last_replay_step_time = time;
+            }
+        }
+        else if (verbose >= 1)
+        {
+            float pr_dt = cl_last_predicted_step_time > 0 ? (time - cl_last_predicted_step_time) : 0;
+            print(sprintf("^5[step-predict]^7 t=%.3f dt=%.3f snd=%s vol=%.2f ",
+                          time, pr_dt, snd, vol),
+                  sprintf("pstep=%.3f ft=%.4f spd=%.0f grnd=%g suppress=0\n",
+                          self.pm_step_time, pm_frametime, cl_speed, cl_grnd));
+            cl_last_predicted_step_time = time;
+        }
+    }
+
+    // Suppressed during reconciliation replays so repeated input ticks
+    // don't re-fire the same step each tick. Only the fresh (non-replay)
+    // prediction pass emits — that's the tick where pm_step_time crosses
+    // zero in real time.
+    if (pm_suppress_sounds) return;
+    // FTE extended localsound: (snd, channel, volume). Purely listener-
+    // relative — no 3D positioning, no reverb, no distance attenuation —
+    // so it stays pinned to the player regardless of how fast they move
+    // (the positional sound(self, …) path trails the visual position
+    // because the audio engine samples the emitter origin on its own
+    // cadence). CHAN_BODY keeps the auto-replace semantics so a new step
+    // cuts any tail of the previous one. Volume is honored: duck 0.4,
+    // walk 0.5, sprint 1.0, ladder 0.65, water 0.5 — set by the branch
+    // in PM_UpdateStepSound above.
+    localsound(snd, CHAN_BODY, vol);
 #endif
 };
 
@@ -2029,9 +2451,22 @@ void PM_PlayerMoveStep()
     // --- read cvars ---
     PM_ReadMovevars();
 
-    // Shift/walk modifier (+button4): reduces mv_maxspeed to sv_shiftspeed.
-    if ((input_buttons & PM_BTN_SPRINT) && !(self.flags & FL_DUCKING) && mv_shiftspeed > 0)
-        mv_maxspeed = mv_shiftspeed;
+    // Shift speed cap (+button4): clamps the player's input magnitude AND
+    // max speed to sv_shiftspeed (an absolute speed in qu/s).  Applied on
+    // both CSQC prediction and SSQC, so the client and server agree.
+    // sv_shiftspeed 0 = disabled.  Crouch bypasses it.
+    // Noclip also bypasses it — in noclip +button4 is purely a speed-up key
+    // (PM_NOCLIP_SPRINT multiplier in PM_NoclipMove); applying the walk cap
+    // here would fight that and net out to a speed drop.
+    if ((input_buttons & PM_BTN_SPRINT) && !(self.flags & FL_DUCKING)
+        && mv_shiftspeed > 0
+        && self.pm_movetype != PM_MOVETYPE_NOCLIP)
+    {
+        input_movevalues_x = bound(-mv_shiftspeed, input_movevalues_x, mv_shiftspeed);
+        input_movevalues_y = bound(-mv_shiftspeed, input_movevalues_y, mv_shiftspeed);
+        if (mv_maxspeed > mv_shiftspeed)
+            mv_maxspeed = mv_shiftspeed;
+    }
 
     // --- build movement axes ---
     makevectors(input_angles);
@@ -2129,20 +2564,38 @@ void PM_PlayerMoveStep()
     else if (self.pm_movetype == PM_MOVETYPE_FLY)
         blocked = PM_FlyMove();
     else
+    {
         blocked = PM_AirMove();
+
+        // Unconditional ground re-snap after horizontal movement, mirroring
+        // Source/Momentum Mod's StayOnGround() call from WalkMove. Picks up
+        // the cases the inline step-down snaps inside PM_AirMove miss:
+        //   - velocity-zero early-return path (line ~1142) — fixes drift
+        //     while standing on a 45° slope
+        //   - airborne branch entered for one tick while walking down a
+        //     slope — fixes stutter on thin downward ramps
+        // Gated on was_onground so we don't snap a player who jumped off a
+        // ledge mid-tick, and on pm_velocity_z to skip mid-jump cases
+        // (matches CategorizePosition's own >180 threshold).
+        if (was_onground && pm_velocity_z <= 180)
+            PM_StayOnGround();
+    }
 
     // second categorize for landing detection
     PM_CategorizePosition();
 
-    // Landing spread penalty: just transitioned from airborne to grounded
+    // Landing spread penalty: just transitioned from airborne to grounded.
+    // Smaller than the jump penalty so touchdown doesn't bloom the crosshair
+    // as hard — matches the intuition that jumping commits you to a bigger
+    // disruption than a controlled landing.
     if (pm_onground && !was_onground)
-        self.spread_penalty = 4.0;
+        self.spread_penalty = SPREAD_PENALTY_LAND;
 
     // Decay spread penalty over time, quantized to 0.05 steps
     // so client and server converge to the same discrete values
     if (self.spread_penalty > 0)
     {
-        self.spread_penalty -= pm_frametime * 2.0;
+        self.spread_penalty -= pm_frametime * 4.0;
         if (self.spread_penalty > 0)
             self.spread_penalty = floor(self.spread_penalty * 20) / 20;
         else
@@ -2176,11 +2629,24 @@ void PM_PlayerMoveStep()
     // footstep / ladder / water step sounds
     PM_UpdateStepSound();
 
+    // If we're embedded inside another player (e.g. just spawned into a
+    // teammate's body, or a head-stand collapsed into overlap), nudge
+    // outward so we resolve the overlap in 1–2 frames instead of getting
+    // permanently stuck.
+    PM_DisentangleFromPlayer();
+
 done:
     // --- write results back to entity ---
     setorigin(self, pm_origin);
     self.velocity = pm_velocity;
     PM_SyncHull();
+
+#ifdef SSQC
+    // QC-side collision against rotated physics-prop shapes — runs AFTER
+    // commit so it can write to self.origin / self.velocity directly,
+    // bypassing any global-aliasing concerns with pm_origin/pm_velocity.
+    PhysProp_DepenetratePlayer(self);
+#endif
 
     if (pm_onground)
         self.flags = self.flags | FL_ONGROUND;

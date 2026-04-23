@@ -1,0 +1,250 @@
+﻿// Microsoft Visual C++ generated resource script.
+//
+#include "..\include\SpecialK\resource.h"
+#include "..\include\SpecialK\DLL_VERSION.H"
+
+#define APSTUDIO_READONLY_SYMBOLS
+/////////////////////////////////////////////////////////////////////////////
+//
+// Generated from the TEXTINCLUDE 2 resource.
+//
+#include "winres.h"
+
+/////////////////////////////////////////////////////////////////////////////
+#undef APSTUDIO_READONLY_SYMBOLS
+
+/////////////////////////////////////////////////////////////////////////////
+// English (United States) resources
+
+#if !defined(AFX_RESOURCE_DLL) || defined(AFX_TARG_ENU)
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+
+#ifdef APSTUDIO_INVOKED
+/////////////////////////////////////////////////////////////////////////////
+//
+// TEXTINCLUDE
+//
+
+1 TEXTINCLUDE
+BEGIN
+    "..\\include\\SpecialK\\resource.h\0"
+END
+
+2 TEXTINCLUDE
+BEGIN
+END
+
+3 TEXTINCLUDE
+BEGIN
+    "\r\n"
+    "\0"
+END
+
+#endif    // APSTUDIO_INVOKED
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Version
+//
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    SK_FILE_VERSION
+ PRODUCTVERSION SK_PRODUCT_VERSION
+ FILEFLAGSMASK  0x3fL
+#ifdef _DEBUG
+ FILEFLAGS      0x1L
+#else
+ FILEFLAGS      0x0L
+#endif
+ FILEOS         0x40004L
+ FILETYPE       0x2L
+ FILESUBTYPE    0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName",     "The Special☆K Group"
+            VALUE "FileDescription", "Special K Modding System"
+            VALUE "FileVersion",     SK_VERSION_STR_A
+#ifdef _WIN64
+            VALUE "InternalName",    "SpecialK64.dll"
+#else
+            VALUE "InternalName",    "SpecialK32.dll"
+#endif
+            VALUE "LegalCopyright",  "Copyleft © 2015-2026"
+            VALUE "ProductName",     "Special K"
+            VALUE "ProductVersion",  SK_VERSION_STR_A
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// WAVE
+//
+
+IDR_CRASH                 WAVE                    "crash.wav"
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// TEXT
+//
+
+IDR_LICENSE_7ZIP          TEXT                    "licenses/7zip.txt"
+IDR_LICENSE_ADL           TEXT                    "licenses/ADL.txt"
+IDR_LICENSE_DXTEX         TEXT                    "licenses/DirectXTex.txt"
+IDR_LICENSE_FONTAWESOME   TEXT                    "licenses/fontawesome.txt"
+IDR_LICENSE_FREETYPE2     TEXT                    "licenses/FreeType2.txt"
+IDR_LICENSE_GLM_0_9_4_5   TEXT                    "licenses/GLM_0_9_4_5.txt"
+IDR_LICENSE_NLOHMANN_JSON TEXT                    "licenses/nlohmann-json.txt"
+IDR_LICENSE_IMGUI         TEXT                    "licenses/ImGui.txt"
+IDR_LICENSE_MINHOOK       TEXT                    "licenses/MinHook.txt"
+IDR_LICENSE_NVAPI         TEXT                    "licenses/nvapi.txt"
+IDR_LICENSE_OVERVIEW      TEXT                    "licenses/Overview.txt"
+IDR_LICENSE_SPECIALK      TEXT                    "licenses/SpecialK.txt"
+IDR_LICENSE_STB           TEXT                    "licenses/stb.txt"
+IDR_LICENSE_VULKAN        TEXT                    "licenses/Vulkan.txt"
+IDR_LICENSE_OPENLIBSYS    TEXT                    "licenses/OpenLibSys.txt"
+IDR_LICENSE_SAFETYHOOK    TEXT                    "licenses/safetyhook.txt"
+IDR_LICENSE_ZYDIS         TEXT                    "licenses/Zydis.txt"
+IDR_LICENSE_FILEBROWSER   TEXT                    "licenses/imgui-filebrowser.txt"
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// 7ZIP
+//
+
+#if !(defined _WIN64)
+#else
+//IDR_LIBSCEPAD_PACKAGE   7ZIP                    "packages/libScePad_64.7z"
+#endif
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// DESIGNINFO
+//
+
+#ifdef APSTUDIO_INVOKED
+GUIDELINES DESIGNINFO
+BEGIN
+    IDD_REMIND_ME_LATER, DIALOG
+    BEGIN
+        LEFTMARGIN, 7
+        RIGHTMARGIN, 214
+        TOPMARGIN, 7
+        BOTTOMMARGIN, 21
+    END
+
+    IDD_UPDATE, DIALOG
+    BEGIN
+        LEFTMARGIN, 7
+        RIGHTMARGIN, 220
+        TOPMARGIN, 7
+        BOTTOMMARGIN, 114
+    END
+END
+#endif    // APSTUDIO_INVOKED
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Dialog
+//
+
+IDD_REMIND_ME_LATER DIALOGEX 0, 0, 221, 28
+STYLE DS_SYSMODAL | DS_SETFONT | DS_MODALFRAME | DS_SETFOREGROUND | DS_FIXEDSYS | DS_CENTER | WS_POPUP | WS_VISIBLE | WS_CAPTION
+EXSTYLE WS_EX_TOOLWINDOW
+CAPTION "Reschedule Update"
+FONT 8, "MS Shell Dlg", 400, 0, 0x1
+BEGIN
+    DEFPUSHBUTTON   "OK",                  IDOK,                   163,7,50,14
+    LTEXT           "Check Version Again", IDC_STATIC,             7,10,66,8
+    COMBOBOX                               IDC_NEXT_VERSION_CHECK, 78,8,78,30,  CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+END
+
+// I see Dead Dialogs!  [Legacy Garbage, Steam is now the official distribution platform]
+IDD_UPDATE DIALOGEX 0, 0, 227, 119
+STYLE DS_SETFONT | DS_MODALFRAME | DS_SETFOREGROUND | DS_FIXEDSYS | DS_CENTER | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
+CAPTION "Special K Software Update"
+FONT 8, "MS Shell Dlg", 400, 0, 0x1
+BEGIN
+    CONTROL         "Automatic Update",                        IDC_AUTO_CMD,       "Button",            BS_COMMANDLINK  | WS_TABSTOP, 16,29,110,25
+    CONTROL         "&Keep Downloaded Files",                  IDC_KEEP_DOWNLOADS, "Button",            BS_AUTOCHECKBOX | WS_TABSTOP, 26,55,89,10
+    CONTROL         "",                                        IDC_UPDATE_PROGRESS,"msctls_progress32",PBS_SMOOTH       | WS_BORDER,  15,12,197,14
+    CONTROL         "&Backup Existing Files",                  IDC_BACKUP_FILES,   "Button",            BS_AUTOCHECKBOX | WS_TABSTOP, 26,66,81,10
+    CONTROL         "Manual Update\n(Requires 7-zip Software)",IDC_MANUAL_CMD,     "Button",            BS_COMMANDLINK  | WS_TABSTOP, 15,76,146,37
+    CTEXT           "X Files\t(Y MiB)",                        IDC_DOWNLOAD_SIZE,                                                     118,56,102,8
+    CTEXT           "Z Files\t(W MiB)",                        IDC_BACKUP_SIZE,                                                       118,67,102,8
+END
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// AFX_DIALOG_LAYOUT
+//
+
+IDD_REMIND_ME_LATER AFX_DIALOG_LAYOUT
+BEGIN
+    0
+END
+
+IDD_UPDATE AFX_DIALOG_LAYOUT
+BEGIN
+    0
+END
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Dialog Info
+//
+
+IDD_REMIND_ME_LATER DLGINIT
+BEGIN
+    IDC_NEXT_VERSION_CHECK, 0x403, 12, 0
+0x654e, 0x7478, 0x4c20, 0x7561, 0x636e, 0x0068,
+    IDC_NEXT_VERSION_CHECK, 0x403, 17, 0
+0x6641, 0x6574, 0x2072, 0x3531, 0x4d20, 0x6e69, 0x7475, 0x7365, "\000"
+    IDC_NEXT_VERSION_CHECK, 0x403, 13, 0
+0x6641, 0x6574, 0x2072, 0x2031, 0x6f48, 0x7275, "\000"
+    IDC_NEXT_VERSION_CHECK, 0x403, 15, 0
+0x6641, 0x6574, 0x2072, 0x3231, 0x4820, 0x756f, 0x7372, "\000"
+    IDC_NEXT_VERSION_CHECK, 0x403, 9, 0
+0x6f54, 0x6f6d, 0x7272, 0x776f, "\000"
+    IDC_NEXT_VERSION_CHECK, 0x403, 6, 0
+0x654e, 0x6576, 0x0072,
+    0
+END
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Cursor
+//
+
+IDC_CURSOR_POINTER      CURSOR                  "cursors\\ovr_ptr.cur"
+IDC_CURSOR_HORZ         CURSOR                  "cursors\\ovr_horz.cur"
+
+#endif    // English (United States) resources
+/////////////////////////////////////////////////////////////////////////////
+
+
+
+#ifndef APSTUDIO_INVOKED
+/////////////////////////////////////////////////////////////////////////////
+//
+// Generated from the TEXTINCLUDE 3 resource.
+//
+
+
+/////////////////////////////////////////////////////////////////////////////
+#endif    // not APSTUDIO_INVOKED

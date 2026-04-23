@@ -1,0 +1,67 @@
+entityDef monster_barney
+{
+	"inherit"	"hlBaseMonster"
+	"spawnclass"			"ncTalkMonster"
+	"model"					"models/barney.mdl"
+	"netname"				"Barney"
+	"health"				"skill:barney_health"
+	"mins"					"-16 -16 0"
+	"maxs"					"16 16 72"
+	"eye_height"			"64"
+	"team"					"0"
+	"propdata"				"actor_human"
+
+	"def_attack_ranged"		"ranged_barney_shot"
+	"attack_ranged_range"	"1024"
+	"reload_count"			"18"
+	"follow_on_use"			"1"
+	"weapon_drawn"			"0"
+	"body_on_draw"			"1:2"
+	"speed_walk"			"64"
+	"speed_run"				"364"
+
+	"snd_pain"				"Barney.Pain"
+	"snd_death"				"Barney.Die"
+	"snd_ranged_attack"		"Barney.FirePistol"
+	"snd_reload"			"HGrunt.Reload"
+
+	"talk_answer"			"!BA_ANSWER"
+	"talk_ask"				"!BA_QUESTION"
+	"talk_ally_shoot"		"!BA_SHOOT"
+	"talk_idle"				"!BA_IDLE"
+	"talk_hearing"			"!BA_HEAR"
+	"talk_smelling"			"!BA_SMELL"
+	"talk_stare"			"!BA_STARE"
+	"talk_survived"			"!BA_WOUND"
+	"talk_wounded"			"!BA_WOUND"
+	"talk_player_ask"		"!BA_QUESTION"
+	"talk_player_greet"		"!BA_HELLO"
+	"talk_player_idle"		"!BA_IDLE"
+	"talk_player_wounded1"	"!BA_CUREA"
+	"talk_player_wounded2"	"!BA_CUREB"
+	"talk_player_wounded3"	"!BA_CUREC"
+	"talk_unfollow"			"!BA_WAIT"
+	"talk_follow"			"!BA_OK"
+	"talk_stop_follow"		"!BA_STOP"
+	"talk_deny_follow"		"!BA_POK"
+
+	"mindset_idle"			"barney_idle"
+	"mindset_follow"		"barney_follow"
+	"mindset_defense"		"barney_takeCover"
+	"mindset_combat"		"barney_combatFace"
+	"mindset_hunt"			"barney_searchEnemy"
+
+	// pre-disaster
+	when "spawnflags" equals "256" {
+		"follow_on_use"		"0"
+		"mindset_follow"	"barney_followDeny"
+	}
+}
+
+entityDef ranged_barney_shot
+{
+	"inherit"	"projectile_bullet_base"
+	"damage"	"skill:hgrunt_pellets"
+	"delay"		"0.5"
+}
+

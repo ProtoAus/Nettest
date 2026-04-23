@@ -7,9 +7,12 @@
 //
 
 // Remove a teleport trigger from the CSQC list (called by CSQC_Ent_Remove)
+// Iteration-capped to defend against cycle corruption — see matching
+// commentary in cl_push.qc push_list_remove_csqc.
 void(entity trig) tele_list_remove_csqc =
 {
 	entity cur, prev;
+	float  i;
 
 	if (teleport_trigger_list == trig)
 	{
@@ -19,6 +22,7 @@ void(entity trig) tele_list_remove_csqc =
 	}
 
 	prev = world;
+	i = 0;
 	for (cur = teleport_trigger_list; cur; cur = cur.tele_next)
 	{
 		if (cur == trig)
@@ -29,6 +33,14 @@ void(entity trig) tele_list_remove_csqc =
 			return;
 		}
 		prev = cur;
+		i = i + 1;
+		if (i > 4096)
+		{
+			dprint("tele_list_remove_csqc: cycle detected, breaking chain\n");
+			if (prev)
+				prev.tele_next = world;
+			return;
+		}
 	}
 };
 
@@ -48,9 +60,29 @@ void() CSQC_TeleportTrigger_Update =
 	setorigin(self, org);
 	setsize(self, emins, emaxs);
 
-	if (self.tele_next == world && teleport_trigger_list != self)
+	if (teleport_trigger_list != self)
 	{
-		self.tele_next        = teleport_trigger_list;
-		teleport_trigger_list = self;
+		entity scan;
+		float  i = 0;
+		float  already_present = 0;
+		for (scan = teleport_trigger_list; scan; scan = scan.tele_next)
+		{
+			if (scan == self)
+			{
+				already_present = 1;
+				break;
+			}
+			i = i + 1;
+			if (i > 4096)
+			{
+				dprint("CSQC_TeleportTrigger_Update: cycle detected during add-scan\n");
+				break;
+			}
+		}
+		if (!already_present)
+		{
+			self.tele_next        = teleport_trigger_list;
+			teleport_trigger_list = self;
+		}
 	}
 };

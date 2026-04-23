@@ -68,8 +68,10 @@ float(entity playerent, float changedflags) trigger_ladder_SendEntity =
 //  Spawn
 // ---------------------------------------------------------------------------
 
-/*QUAKED trigger_ladder (.5 .5 .5) ?
-Climbable ladder volume.
+/*QUAKED func_ladder (.5 .5 .5) ?
+Climbable ladder volume.  This is the canonical classname (matches
+GoldSrc/Source convention — the brush *is* the climbable volume, no
+touch handler involved).
 
 Set 'angles' to the direction a player faces when on the ladder (outward from
 the wall surface).  Leave angles at '0 0 0' for an auto-detected normal based
@@ -78,7 +80,7 @@ on the player's view direction.
 GoldSrc-style movement: looking up + pressing forward climbs up.  Jump pushes
 away from the wall.
 */
-void() trigger_ladder =
+void() func_ladder =
 {
     if (self.angles != '0 0 0')
         SetMovedir();
@@ -98,4 +100,13 @@ void() trigger_ladder =
     self.pvsflags   = PVSF_NOREMOVE;
     self.SendEntity = trigger_ladder_SendEntity;
     self.SendFlags  = 1;
+};
+
+/*QUAKED trigger_ladder (.5 .5 .5) ?
+Backwards-compatibility alias for func_ladder.  Older maps in this mod
+were authored with this classname; new maps should prefer func_ladder.
+*/
+void() trigger_ladder =
+{
+    func_ladder();
 };

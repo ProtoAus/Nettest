@@ -1,0 +1,45 @@
+typeInfo window
+{
+	"title"	"Test Window"
+	"size"	"640 480"
+}
+
+typeInfo text
+{
+	"1"	"First Item"
+	"2"	"Second Item"
+	"3"	"Third Item"
+
+	"0"	"Close"
+}
+
+typeInfo commands
+{
+	"1"	"say One."
+	"2"	"say Two."
+	"3"	"say Three."
+
+	"0"	"vguiMenuClose"
+}
+
+typeInfo images
+{
+	"1"	"gfx/first.png"
+	"2"	"gfx/second.png"
+	"3"	"gfx/third.png"
+}
+
+typeInfo description
+{
+	"1"	"This is the first item."
+	"2"	"You could localize this text too."
+	"3"	"Third item."
+	
+	"0"	"Close this window."
+}
+
+typeInfo title
+{
+	"1"	"The First Item"
+	"0"	"Close Panel"
+}

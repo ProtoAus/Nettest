@@ -79,7 +79,7 @@ float(float now) SH_M249TryFire =
 
 float(float now) SH_M249TryReload =
 {
-    return SH_StandardTryReload(now, mag_m249, ammo_m249, MAX_MAG_M249);
+    return SH_StandardTryReload(now, mag_m249, ammo_m249, MAX_MAG_M249, M249_RELOAD_DURATION);
 };
 
 // ============================================================
@@ -96,8 +96,8 @@ void(entity player) W_M249PickupCopy =
 
 void() W_M249Shoot =
 {
-    W_StandardHitscanShoot(M249_BASE_SPREAD, M249_MOVE_SPREAD, M249_FULL_SPREAD_SPEED,
-        M249_CLOSE_DAMAGE, M249_MIN_DAMAGE, M249_DAMAGE_FALLOFF_RANGE);
+    W_PenetratingHitscanShoot(M249_BASE_SPREAD, M249_MOVE_SPREAD, M249_FULL_SPREAD_SPEED,
+        M249_CLOSE_DAMAGE, M249_MIN_DAMAGE, M249_DAMAGE_FALLOFF_RANGE, 48, 0.97);
 };
 
 void() W_M249Fire =
@@ -202,6 +202,7 @@ void() W_M249Drop =
     tgt.weap_drop_func = W_M249Drop;
     tgt.pickupcopy   = W_M249PickupCopy;
     tgt.touch        = weapon_touch;
+    tgt.dropped_spin = 1;
     tgt.think        = weapon_become_solid;
     tgt.nextthink    = time + 0.7;
 };
@@ -219,8 +220,10 @@ void() weapon_m249 =
     self.weap_drop_func = W_M249Drop;
     self.pickupcopy    = W_M249PickupCopy;
     self.touch         = weapon_touch;
+    self.dropped_spin  = 1;
     self.mag_m249      = MAX_MAG_M249;
     self.ammo_m249     = MAX_AMMO_M249;
+    W_RegisterMapWeapon(weapon_m249);
 };
 
 #endif // SSQC
@@ -250,7 +253,8 @@ void() CSQC_PredictM249Command =
                 else
                     sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csm249/fire2.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(M249_BASE_SPREAD, M249_MOVE_SPREAD, M249_FULL_SPREAD_SPEED);
+                CSQC_PredictedImpact(M249_BASE_SPREAD, M249_MOVE_SPREAD, M249_FULL_SPREAD_SPEED,
+                    M249_CLOSE_DAMAGE, M249_MIN_DAMAGE, M249_DAMAGE_FALLOFF_RANGE);
                 CSQC_SpawnCasing("models/weapons/riflecasing.mdl",
                     '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }

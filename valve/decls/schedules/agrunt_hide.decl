@@ -1,0 +1,12 @@
+typeInfo hgrunt_hide
+{
+	"task_1"					"StopMovement"
+	"task_2"					"SetFailSchedule reload"
+	"task_3"					"FindCoverFromEnemy"
+	"task_4"					"RunToTarget"
+	"task_5"					"WaitForMovement"
+	"task_6"					"Remember inCover"
+	"task_7"					"TurnToEnemy"
+	"fail_onHeavyDamage"		"1"
+	"fail_onAlertSound"			"1"
+}

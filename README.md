@@ -197,8 +197,7 @@ Ported from **EzQuake's pmove.c** with GoldSrc-authentic physics.
 | `mv_airaccelerate` | 10 | Air acceleration (enables strafing) |
 | `mv_stamina` | 1 | CS 1.6 landing fatigue |
 | `mv_autohop` | 0 | Auto-bunnyhop on hold |
-| `sv_sprintspeed` | -- | Sprint speed multiplier |
-| `sv_walkspeed` | -- | Walk speed (hold +speed) |
+| `sv_shiftspeed` | 135 | Absolute speed cap (qu/s) while +button4 (shift) is held. Clamps input + max speed. 0 = disabled |
 | `pm_hull_height` | 56 | Player hull height |
 
 ---

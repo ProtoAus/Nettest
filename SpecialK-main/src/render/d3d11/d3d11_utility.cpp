@@ -1,0 +1,333 @@
+﻿// This is an open source non-commercial project. Dear PVS-Studio, please check it.
+// PVS-Studio Static Code Analyzer for C, C++, C#, and Java: https://pvs-studio.com
+/**
+* This file is part of Special K.
+*
+* Special K is free software : you can redistribute it
+* and/or modify it under the terms of the GNU General Public License
+* as published by The Free Software Foundation, either version 3 of
+* the License, or (at your option) any later version.
+*
+* Special K is distributed in the hope that it will be useful,
+*
+* But WITHOUT ANY WARRANTY; without even the implied warranty of
+* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+* GNU General Public License for more details.
+*
+* You should have received a copy of the GNU General Public License
+* along with Special K.
+*
+*   If not, see <http://www.gnu.org/licenses/>.
+*
+**/
+
+#include <SpecialK/stdafx.h>
+
+#ifdef  __SK_SUBSYSTEM__
+#undef  __SK_SUBSYSTEM__
+#endif
+#define __SK_SUBSYSTEM__ L"D3D11 Util"
+
+#include <SpecialK/render/d3d11/d3d11_core.h>
+
+const char*
+SK_D3D11_DescribeUsage (D3D11_USAGE usage) noexcept
+{
+  switch (usage)
+  {
+    case D3D11_USAGE_DEFAULT:
+      return "Default";
+    case D3D11_USAGE_DYNAMIC:
+      return "Dynamic";
+    case D3D11_USAGE_IMMUTABLE:
+      return "Immutable";
+    case D3D11_USAGE_STAGING:
+      return "Staging";
+    default:
+      return "UNKNOWN";
+  }
+}
+
+
+const char*
+SK_D3D11_DescribeFilter (D3D11_FILTER filter) noexcept
+{
+  switch (filter)
+  {
+    case D3D11_FILTER_MIN_MAG_MIP_POINT:
+      return "D3D11_FILTER_MIN_MAG_MIP_POINT";
+    case D3D11_FILTER_MIN_MAG_POINT_MIP_LINEAR:
+      return "D3D11_FILTER_MIN_MAG_POINT_MIP_LINEAR";
+    case D3D11_FILTER_MIN_POINT_MAG_LINEAR_MIP_POINT:
+      return "D3D11_FILTER_MIN_POINT_MAG_LINEAR_MIP_POINT";
+    case D3D11_FILTER_MIN_POINT_MAG_MIP_LINEAR:
+      return "D3D11_FILTER_MIN_POINT_MAG_MIP_LINEAR";
+    case D3D11_FILTER_MIN_LINEAR_MAG_MIP_POINT:
+      return "D3D11_FILTER_MIN_LINEAR_MAG_MIP_POINT";
+    case D3D11_FILTER_MIN_LINEAR_MAG_POINT_MIP_LINEAR:
+      return "D3D11_FILTER_MIN_LINEAR_MAG_POINT_MIP_LINEAR";
+    case D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT:
+      return "D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT";
+    case D3D11_FILTER_MIN_MAG_MIP_LINEAR:
+      return "D3D11_FILTER_MIN_MAG_MIP_LINEAR";
+
+    case D3D11_FILTER_ANISOTROPIC:
+      return "D3D11_FILTER_ANISOTROPIC";
+
+    case D3D11_FILTER_COMPARISON_MIN_MAG_MIP_POINT:
+      return "D3D11_FILTER_COMPARISON_MIN_MAG_MIP_POINT";
+    case D3D11_FILTER_COMPARISON_MIN_MAG_POINT_MIP_LINEAR:
+      return "D3D11_FILTER_COMPARISON_MIN_MAG_POINT_MIP_LINEAR";
+    case D3D11_FILTER_COMPARISON_MIN_POINT_MAG_LINEAR_MIP_POINT:
+      return "D3D11_FILTER_COMPARISON_MIN_POINT_MAG_LINEAR_MIP_POINT";
+    case D3D11_FILTER_COMPARISON_MIN_POINT_MAG_MIP_LINEAR:
+      return "D3D11_FILTER_COMPARISON_MIN_POINT_MAG_MIP_LINEAR";
+    case D3D11_FILTER_COMPARISON_MIN_LINEAR_MAG_MIP_POINT:
+      return "D3D11_FILTER_COMPARISON_MIN_LINEAR_MAG_MIP_POINT";
+    case D3D11_FILTER_COMPARISON_MIN_LINEAR_MAG_POINT_MIP_LINEAR:
+      return "D3D11_FILTER_COMPARISON_MIN_LINEAR_MAG_POINT_MIP_LINEAR";
+    case D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT:
+      return "D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT";
+    case D3D11_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR:
+      return "D3D11_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR";
+
+    case D3D11_FILTER_COMPARISON_ANISOTROPIC:
+      return "D3D11_FILTER_COMPARISON_ANISOTROPIC";
+
+    case D3D11_FILTER_MINIMUM_MIN_MAG_MIP_POINT:
+      return "D3D11_FILTER_MINIMUM_MIN_MAG_MIP_POINT";
+    case D3D11_FILTER_MINIMUM_MIN_MAG_POINT_MIP_LINEAR:
+      return "D3D11_FILTER_MINIMUM_MIN_MAG_POINT_MIP_LINEAR";
+    case D3D11_FILTER_MINIMUM_MIN_POINT_MAG_LINEAR_MIP_POINT:
+      return "D3D11_FILTER_MINIMUM_MIN_POINT_MAG_LINEAR_MIP_POINT";
+    case D3D11_FILTER_MINIMUM_MIN_POINT_MAG_MIP_LINEAR:
+      return "D3D11_FILTER_MINIMUM_MIN_POINT_MAG_MIP_LINEAR";
+    case D3D11_FILTER_MINIMUM_MIN_LINEAR_MAG_MIP_POINT:
+      return "D3D11_FILTER_MINIMUM_MIN_LINEAR_MAG_MIP_POINT";
+    case D3D11_FILTER_MINIMUM_MIN_LINEAR_MAG_POINT_MIP_LINEAR:
+      return "D3D11_FILTER_MINIMUM_MIN_LINEAR_MAG_POINT_MIP_LINEAR";
+    case D3D11_FILTER_MINIMUM_MIN_MAG_LINEAR_MIP_POINT:
+      return "D3D11_FILTER_MINIMUM_MIN_MAG_LINEAR_MIP_POINT";
+    case D3D11_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR:
+      return "D3D11_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR";
+
+    case D3D11_FILTER_MINIMUM_ANISOTROPIC:
+      return "D3D11_FILTER_MINIMUM_ANISOTROPIC";
+
+    case D3D11_FILTER_MAXIMUM_MIN_MAG_MIP_POINT:
+      return "D3D11_FILTER_MAXIMUM_MIN_MAG_MIP_POINT";
+    case D3D11_FILTER_MAXIMUM_MIN_MAG_POINT_MIP_LINEAR:
+      return "D3D11_FILTER_MAXIMUM_MIN_MAG_POINT_MIP_LINEAR";
+    case D3D11_FILTER_MAXIMUM_MIN_POINT_MAG_LINEAR_MIP_POINT:
+      return "D3D11_FILTER_MAXIMUM_MIN_POINT_MAG_LINEAR_MIP_POINT";
+    case D3D11_FILTER_MAXIMUM_MIN_POINT_MAG_MIP_LINEAR:
+      return "D3D11_FILTER_MAXIMUM_MIN_POINT_MAG_MIP_LINEAR";
+    case D3D11_FILTER_MAXIMUM_MIN_LINEAR_MAG_MIP_POINT:
+      return "D3D11_FILTER_MAXIMUM_MIN_LINEAR_MAG_MIP_POINT";
+    case D3D11_FILTER_MAXIMUM_MIN_LINEAR_MAG_POINT_MIP_LINEAR:
+      return "D3D11_FILTER_MAXIMUM_MIN_LINEAR_MAG_POINT_MIP_LINEAR";
+    case D3D11_FILTER_MAXIMUM_MIN_MAG_LINEAR_MIP_POINT:
+      return "D3D11_FILTER_MAXIMUM_MIN_MAG_LINEAR_MIP_POINT";
+    case D3D11_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR:
+      return "D3D11_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR";
+
+    case D3D11_FILTER_MAXIMUM_ANISOTROPIC:
+      return "D3D11_FILTER_MAXIMUM_ANISOTROPIC";
+
+    default:
+      return "Unknown";
+  };
+}
+
+std::string
+SK_D3D11_DescribeMiscFlags (D3D11_RESOURCE_MISC_FLAG flags)
+{
+  std::string               out;
+  std::stack <const char *> flag_text;
+
+  if (flags & D3D11_RESOURCE_MISC_GENERATE_MIPS)
+    flag_text.push ("Generates Mipmaps");
+
+  if (flags & D3D11_RESOURCE_MISC_SHARED)
+    flag_text.push ("Shared Resource");
+
+  if (flags & D3D11_RESOURCE_MISC_TEXTURECUBE)
+    flag_text.push ("Cubemap");
+
+  if (flags & D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS)
+    flag_text.push ("Draw Indirect Arguments");
+
+  if (flags & D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS)
+    flag_text.push ("Allows Raw Buffer Views");
+
+  if (flags & D3D11_RESOURCE_MISC_BUFFER_STRUCTURED)
+    flag_text.push ("Structured Buffer");
+
+  if (flags & D3D11_RESOURCE_MISC_RESOURCE_CLAMP)
+    flag_text.push ("Resource Clamp");
+
+  if (flags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX)
+    flag_text.push ("Shared Key Mutex");
+
+  if (flags & D3D11_RESOURCE_MISC_GDI_COMPATIBLE)
+    flag_text.push ("GDI Compatible");
+
+  if (flags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE)
+    flag_text.push ("Shared Through NT Handles");
+
+  if (flags & D3D11_RESOURCE_MISC_RESTRICTED_CONTENT)
+    flag_text.push ("Content is Encrypted");
+
+  if (flags & D3D11_RESOURCE_MISC_RESTRICT_SHARED_RESOURCE)
+    flag_text.push ("Shared Encrypted Content");
+
+  if (flags & D3D11_RESOURCE_MISC_RESTRICT_SHARED_RESOURCE_DRIVER)
+    flag_text.push ("Driver-level Encrypted Resource Sharing");
+
+  if (flags & D3D11_RESOURCE_MISC_GUARDED)
+    flag_text.push ("Guarded");
+
+  if (flags & D3D11_RESOURCE_MISC_TILE_POOL)
+    flag_text.push ("Stored in Tiled Resource Memory Pool");
+
+  if (flags & D3D11_RESOURCE_MISC_TILED)
+    flag_text.push ("Tiled Resource");
+
+  while (! flag_text.empty ())
+  { out += flag_text.top   ();
+           flag_text.pop   ();
+    if (! flag_text.empty  ())
+      out += ", ";
+  }
+
+  return
+    out;
+}
+
+std::string
+SK_D3D11_DescribeBindFlags (UINT flags)
+{
+  std::string               out;
+  std::stack <const char *> flag_text;
+
+  if (flags & D3D11_BIND_CONSTANT_BUFFER)
+    flag_text.push ("Constant Buffer");
+
+  if (flags & D3D11_BIND_DECODER)
+    flag_text.push ("Video Decoder");
+
+  if (flags & D3D11_BIND_DEPTH_STENCIL)
+    flag_text.push ("Depth/Stencil");
+
+  if (flags & D3D11_BIND_INDEX_BUFFER)
+    flag_text.push ("Index Buffer");
+
+  if (flags & D3D11_BIND_RENDER_TARGET)
+    flag_text.push ("Render Target");
+
+  if (flags & D3D11_BIND_SHADER_RESOURCE)
+    flag_text.push ("Shader Resource");
+
+  if (flags & D3D11_BIND_STREAM_OUTPUT)
+    flag_text.push ("Stream Output");
+
+  if (flags & D3D11_BIND_UNORDERED_ACCESS)
+    flag_text.push ("Unordered Access");
+
+  if (flags & D3D11_BIND_VERTEX_BUFFER)
+    flag_text.push ("Vertex Buffer");
+
+  if (flags & D3D11_BIND_VIDEO_ENCODER)
+    flag_text.push ("Video Encoder");
+
+  while (! flag_text.empty ())
+  { out += flag_text.top   ();
+           flag_text.pop   ();
+    if (!  flag_text.empty ())
+      out += ", ";
+  }
+
+  return
+    out;
+}
+
+const char*
+SK_D3D11_FilterToStr (D3D11_FILTER filter) noexcept
+{
+  switch (filter)
+  {
+    case D3D11_FILTER_MIN_MAG_MIP_POINT:
+return "D3D11_FILTER_MIN_MAG_MIP_POINT";
+    case D3D11_FILTER_MIN_MAG_POINT_MIP_LINEAR:
+return "D3D11_FILTER_MIN_MAG_POINT_MIP_LINEAR";
+    case D3D11_FILTER_MIN_POINT_MAG_LINEAR_MIP_POINT:
+return "D3D11_FILTER_MIN_POINT_MAG_LINEAR_MIP_POINT";
+    case D3D11_FILTER_MIN_POINT_MAG_MIP_LINEAR:
+return "D3D11_FILTER_MIN_POINT_MAG_MIP_LINEAR";
+    case D3D11_FILTER_MIN_LINEAR_MAG_MIP_POINT:
+return "D3D11_FILTER_MIN_LINEAR_MAG_MIP_POINT";
+    case D3D11_FILTER_MIN_LINEAR_MAG_POINT_MIP_LINEAR:
+return "D3D11_FILTER_MIN_LINEAR_MAG_POINT_MIP_LINEAR";
+    case D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT:
+return "D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT";
+    case D3D11_FILTER_MIN_MAG_MIP_LINEAR:
+return "D3D11_FILTER_MIN_MAG_MIP_LINEAR";
+    case D3D11_FILTER_ANISOTROPIC:
+return "D3D11_FILTER_ANISOTROPIC";
+    case D3D11_FILTER_COMPARISON_MIN_MAG_MIP_POINT:
+return "D3D11_FILTER_COMPARISON_MIN_MAG_MIP_POINT";
+    case D3D11_FILTER_COMPARISON_MIN_MAG_POINT_MIP_LINEAR:
+return "D3D11_FILTER_COMPARISON_MIN_MAG_POINT_MIP_LINEAR";
+    case D3D11_FILTER_COMPARISON_MIN_POINT_MAG_LINEAR_MIP_POINT:
+return "D3D11_FILTER_COMPARISON_MIN_POINT_MAG_LINEAR_MIP_POINT";
+    case D3D11_FILTER_COMPARISON_MIN_POINT_MAG_MIP_LINEAR:
+return "D3D11_FILTER_COMPARISON_MIN_POINT_MAG_MIP_LINEAR";
+    case D3D11_FILTER_COMPARISON_MIN_LINEAR_MAG_MIP_POINT:
+return "D3D11_FILTER_COMPARISON_MIN_LINEAR_MAG_MIP_POINT";
+    case D3D11_FILTER_COMPARISON_MIN_LINEAR_MAG_POINT_MIP_LINEAR:
+return "D3D11_FILTER_COMPARISON_MIN_LINEAR_MAG_POINT_MIP_LINEAR";
+    case D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT:
+return "D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT";
+    case D3D11_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR:
+return "D3D11_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR";
+    case D3D11_FILTER_COMPARISON_ANISOTROPIC:
+return "D3D11_FILTER_COMPARISON_ANISOTROPIC";
+    case D3D11_FILTER_MINIMUM_MIN_MAG_MIP_POINT:
+return "D3D11_FILTER_MINIMUM_MIN_MAG_MIP_POINT";
+    case D3D11_FILTER_MINIMUM_MIN_MAG_POINT_MIP_LINEAR:
+return "D3D11_FILTER_MINIMUM_MIN_MAG_POINT_MIP_LINEAR";
+    case D3D11_FILTER_MINIMUM_MIN_POINT_MAG_LINEAR_MIP_POINT:
+return "D3D11_FILTER_MINIMUM_MIN_POINT_MAG_LINEAR_MIP_POINT";
+    case D3D11_FILTER_MINIMUM_MIN_POINT_MAG_MIP_LINEAR:
+return "D3D11_FILTER_MINIMUM_MIN_POINT_MAG_MIP_LINEAR";
+    case D3D11_FILTER_MINIMUM_MIN_LINEAR_MAG_MIP_POINT:
+return "D3D11_FILTER_MINIMUM_MIN_LINEAR_MAG_MIP_POINT";
+    case D3D11_FILTER_MINIMUM_MIN_LINEAR_MAG_POINT_MIP_LINEAR:
+return "D3D11_FILTER_MINIMUM_MIN_LINEAR_MAG_POINT_MIP_LINEAR";
+    case D3D11_FILTER_MINIMUM_MIN_MAG_LINEAR_MIP_POINT:
+return "D3D11_FILTER_MINIMUM_MIN_MAG_LINEAR_MIP_POINT";
+    case D3D11_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR:
+return "D3D11_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR";
+    case D3D11_FILTER_MINIMUM_ANISOTROPIC:
+return "D3D11_FILTER_MINIMUM_ANISOTROPIC";
+    case D3D11_FILTER_MAXIMUM_MIN_MAG_MIP_POINT:
+return "D3D11_FILTER_MAXIMUM_MIN_MAG_MIP_POINT";
+    case D3D11_FILTER_MAXIMUM_MIN_MAG_POINT_MIP_LINEAR:
+return "D3D11_FILTER_MAXIMUM_MIN_MAG_POINT_MIP_LINEAR";
+    case D3D11_FILTER_MAXIMUM_MIN_POINT_MAG_LINEAR_MIP_POINT:
+return "D3D11_FILTER_MAXIMUM_MIN_POINT_MAG_LINEAR_MIP_POINT";
+    case D3D11_FILTER_MAXIMUM_MIN_POINT_MAG_MIP_LINEAR:
+return "D3D11_FILTER_MAXIMUM_MIN_POINT_MAG_MIP_LINEAR";
+    case D3D11_FILTER_MAXIMUM_MIN_LINEAR_MAG_MIP_POINT:
+return "D3D11_FILTER_MAXIMUM_MIN_LINEAR_MAG_MIP_POINT";
+    case D3D11_FILTER_MAXIMUM_MIN_LINEAR_MAG_POINT_MIP_LINEAR:
+return "D3D11_FILTER_MAXIMUM_MIN_LINEAR_MAG_POINT_MIP_LINEAR";
+    case D3D11_FILTER_MAXIMUM_MIN_MAG_LINEAR_MIP_POINT:
+return "D3D11_FILTER_MAXIMUM_MIN_MAG_LINEAR_MIP_POINT";
+    case D3D11_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR:
+return "D3D11_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR";
+    case D3D11_FILTER_MAXIMUM_ANISOTROPIC:
+return "D3D11_FILTER_MAXIMUM_ANISOTROPIC";
+    default: return "UNKNOWN";
+  }
+}

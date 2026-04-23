@@ -1,0 +1,55 @@
+entityDef projectile_bullet_base
+{
+	"spawnclass"			"ncProjectile"
+	"is_bullet"				"1"
+	"decal_impact"			"Impact.BigShot"
+	"detonate_on_world" 	"1"
+}
+
+entityDef projectile_egonbeam
+{
+	"spawnclass"			"ncProjectile"
+	"is_bullet"				"1"
+	"damage"				"skill:plr_egon"
+	"detonate_on_world" 	"0"
+}
+
+entityDef ranged_agrunt_shot_red
+{
+	"spawnclass"			"ncProjectile"
+	"model"					"models/hornet.mdl"
+
+	"def_damage"			"damage_hornetDirect"
+	"health"				"0"
+	"velocity"				"600"
+	"fuse"					"10"
+	"detonate_on_fuse"		"1"
+	"detonate_on_death"		"0"
+	"detonate_on_world"		"0"
+	"detonate_on_actor"		"1"
+	"impact_damage_effect"	"1"
+	"impact_gib"			"0"
+	"smoke_fly"				"weapon_hornet.red_trail"
+}
+
+
+entityDef ranged_agrunt_shot_orange
+{
+	"spawnclass"			"ncProjectile"
+	"model"					"models/hornet.mdl"
+
+	"def_damage"			"damage_hornetDirect"
+	"health"				"0"
+	"velocity"				"800"
+	"fuse"					"10"
+	"detonate_on_fuse"		"1"
+	"detonate_on_death"		"0"
+	"detonate_on_world"		"0"
+	"detonate_on_actor"		"1"
+	"impact_damage_effect"	"1"
+	"impact_gib"			"0"
+	"smoke_fly"				"weapon_hornet.trail"
+	"trackEnemy"			"1"
+	"trackJitter"			"8 16 16"
+	"trackDelay"			"0.1"
+}

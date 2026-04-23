@@ -1,0 +1,7 @@
+path fonts/default
+path_ttf fonts/nimbus/NimbusSanL-Reg.otf
+size 16
+
+// bitmap fallbacks
+path_bitmap fonts/nimbus/NimbusSanL-Reg.png
+size_bitmap "8 16"

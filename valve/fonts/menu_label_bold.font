@@ -1,0 +1,6 @@
+rendersize "14 12"
+path fonts/nimbus/NimbusSanL-Bol.otf
+size 12
+
+path_bitmap fonts/nimbus/NimbusSanL-Bol.png
+size_bitmap "6 12"

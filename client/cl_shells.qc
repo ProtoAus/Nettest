@@ -7,8 +7,9 @@
 //  Ported from NewQuake/weapons/accessory.qc.
 // ============================================================
 
-.float fly_sound;   // bounce sound counter for casings
-.float shell_delay; // debounce timer for touch sounds
+.float fly_sound;       // bounce sound counter for casings
+.float shell_delay;     // debounce timer for touch sounds
+.float shell_deadline;  // force-settle if not grounded by this time
 
 // ------------------------------------------------------------
 //  Model lookup by shell/mag type
@@ -132,16 +133,17 @@ void() CSQC_ShellSettleThink =
 {
     vector flat_vel;
 
-    // Still has significant velocity — check again later
+    // Still has significant velocity — check again later (unless deadline passed)
     flat_vel = self.velocity;
     flat_vel_z = 0;
-    if (fabs(self.velocity_z) > 30 || vlen(flat_vel) > 30)
+    if ((fabs(self.velocity_z) > 30 || vlen(flat_vel) > 30)
+        && time < self.shell_deadline)
     {
         self.nextthink = time + 0.2;
         return;
     }
 
-    // Trace down to find the floor normal
+    // Trace down to find the floor normal and force settle
     traceline(self.origin, self.origin - '0 0 32', TRUE, self);
     if (trace_fraction < 1)
         CSQC_ShellSettle(trace_plane_normal);
@@ -174,6 +176,7 @@ void(string mdl, vector origin_offset, vector base_velocity, vector velocity_jit
     accessory.movetype = move_type;
     accessory.touch = CSQC_ShellTouch;
     accessory.shell_delay = time + 0.05;
+    accessory.shell_deadline = time + 10;
     accessory.drawmask = MASK_ENGINE;
     setsize(accessory, '0 0 0', '0 0 0');
 
@@ -234,6 +237,7 @@ void(string mdl, vector org, vector vel, vector avel, float move_type, float lif
     accessory.movetype = move_type;
     accessory.touch = CSQC_ShellTouch;
     accessory.shell_delay = time + 0.05;
+    accessory.shell_deadline = time + 10;
     accessory.drawmask = MASK_ENGINE;
     setsize(accessory, '0 0 0', '0 0 0');
 

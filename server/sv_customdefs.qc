@@ -3,6 +3,13 @@
 
 const float FL_JUMPRELEASED = 4096;
 
+// Hitclaim dedup — written by W_ApplyDamage in sv_weapons.qc and read by
+// SV_HandleHitclaim in sv_player.qc so server-auth hits and client
+// claims don't double-damage the same target within a single shot.
+// Declared here (earliest server-side file) so both users see them.
+.entity last_damaged_target;
+.float  last_damaged_time;
+
 // ---- mover / door / button fields ----
 .vector pos1;           // closed/bottom position
 .vector pos2;           // open/top position
@@ -24,6 +31,14 @@ float sv_use_is_player_direct;  // TRUE only during SV_PlayerTryUse
 // Damage callbacks (set on any entity that can take damage)
 .void() on_damaged;     // called when health reduced but still > 0
 .void() on_killed;      // called when health reaches 0
+
+// Map weapon tracking — for round reset
+.float map_weapon;          // TRUE if this weapon was placed in the map (not dropped)
+.void() map_weapon_spawn;   // spawn function to call on reset
+entity map_weapon_chain;    // linked list of map weapon spawn records
+.entity map_weapon_next;    // next in chain
+.vector map_weapon_origin;  // original spawn position
+.vector map_weapon_angles;  // original spawn angles
 
 void() sub_remove =
 {
@@ -85,6 +100,7 @@ void() light =
 
 // Per-player team fields — auto-networked to each client via clientstat()
 .float player_team;
+.float player_model_index;  // 0-3, which character model the player chose
 .float team_menu_request_serial;
 .float deaths;
 
@@ -103,6 +119,8 @@ float freeze_end_time;      // server time when freeze ends
 float round_restart_time;   // server time when round will restart (during ROUND_END)
 float map_restart_time;     // server time when map will restart (during MAP_END)
 float round_winning_team;   // team that won the round (0=timer/draw, TEAM_BLUE, TEAM_RED)
+float blue_team_score;      // rounds won by blue team
+float red_team_score;       // rounds won by red team
 
 // Per-player stats for map timer, round number, max rounds
 .float sv_maptimeleft;
@@ -120,6 +138,8 @@ float round_winning_team;   // team that won the round (0=timer/draw, TEAM_BLUE,
 .float death_time;          // server time when player died (0 = alive, -1 = past delay)
 .float sv_death_delay_left; // clientstat: seconds left in death delay
 .float sv_is_dead;          // clientstat: 1 when dead, 0 when alive
+.float sv_blue_score;       // clientstat: blue team round wins
+.float sv_red_score;        // clientstat: red team round wins
 
 // Fall damage tracking
 .float fall_velocity;       // current downward speed while airborne

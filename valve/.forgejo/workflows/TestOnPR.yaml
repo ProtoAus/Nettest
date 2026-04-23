@@ -1,0 +1,26 @@
+name: Test QuakeC Progs Compilation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  build:
+    runs-on: docker
+
+    steps:
+    - name: clone nuclide
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 1
+        repository: vera/nuclide
+        ref: current
+
+    - name: clone game
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 1
+        path: "./${{ github.event.repository.name }}"
+
+    - name: build progs
+      run: make game GAME=${{ github.event.repository.name }}

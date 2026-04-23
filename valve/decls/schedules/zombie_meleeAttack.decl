@@ -1,0 +1,10 @@
+typeInfo zombie_meleeAttack
+{
+	"task_1"					"SetFailSchedule zombie_combatFace"
+	"task_2"					"StopMovement"
+	"task_3"					"TurnToEnemy"
+	"task_4"					"StopMovement"
+	"task_5"					"PlayActivity meleeAttack1"
+	"DeadEnemy"				"PerformSchedule zombie_idle"
+	"CanRangedAttack1"			"ChangeMindset combat"
+}

@@ -159,7 +159,12 @@ void(float zoomstage) HUD_DrawCrosshair =
     vector sz;
     vector colour;
 
-    scoped_weapon = getstati(STAT_CROSSHAIR_DISABLED);
+    // Drive visibility off the predicted weapon rather than the networked
+    // STAT_CROSSHAIR_DISABLED stat — weapon switches are client-predicted,
+    // so this flips instantly on a switch regardless of ping.  The stat
+    // still arrives from the server but we intentionally ignore it here.
+    float wep = predicted_player ? predicted_player.weapon : WEP_NONE;
+    scoped_weapon = !Weapon_HasCrosshair(wep);
 
     if (zoomstage > 0 || scoped_weapon)
     {

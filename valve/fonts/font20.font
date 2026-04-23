@@ -1,0 +1,5 @@
+path "creditsfont?fmt=h"
+path_ttf fonts/nimbus/NimbusSanL-Bol.otf
+path_bitmap "creditsfont?fmt=h"
+size 20
+additive 1

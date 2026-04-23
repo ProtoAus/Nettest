@@ -1,0 +1,32 @@
+entityDef monster_apache
+{
+	"spawnclass"	"ncTalkMonster"
+	"model"			"models/apache.mdl"
+	"netname"		"Apache"
+	"health"		"0"
+	"mins"			"-32 -32 0"
+	"maxs"			"32 32 64"
+	"eye_height"	"0"
+	"team"			"2"
+	"propdata"		"actor_robot"
+
+	"speed_walk"	"200"
+	"speed_run"		"200"
+	"flying"		"1"
+	"fly_offset"	"768"
+
+	"snd_fly"		"Apache.Rotor"
+	//				Apache.RotorSpinup
+	//				Apache.RPG
+	//				ApacheHVR.Ignite
+
+	// primary ranged attack
+	"def_attack_ranged"		"ranged_hgrunt_mp5"
+	"snd_ranged_attack"		"Apache.FireGun"
+	"attack_ranged_range"	"2048"
+
+	// special attack
+	"def_attack_special_1"	"projectile_rocket"
+	"attack_special_range"	"1024"
+	"projectile_delay"		"1.0"
+}

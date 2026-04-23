@@ -646,6 +646,7 @@ const float MAX_INPUTS = 64;
 _input_t _input_buffer[MAX_INPUTS];
 float _input_index;
 float _input_length;
+float sui_text_input_focused;  // TRUE when a text field has focus — suppresses WASD nav
 
 
 // probably good to use it like while (sui_get_input(char, scan)) { ... };
@@ -675,6 +676,10 @@ void() sui_clear_input =
 
 vector(float scan) sui_input_dir =
 {
+	// Don't let WASD navigate when a text field is focused
+	if (sui_text_input_focused)
+		return '0 0 0';
+
 	string cmd = getkeybind(scan);
 	if (cmd == "+forward" || cmd == "+lookup" || scan == K_UPARROW || scan == K_GP_DPAD_UP)
 		return '0 -1 0';
@@ -684,7 +689,7 @@ vector(float scan) sui_input_dir =
 		return '-1 0 0';
 	if (cmd == "+moveright" || cmd == "+lookright" || scan == K_RIGHTARROW || scan == K_GP_DPAD_RIGHT)
 		return '1 0 0';
-	
+
 	return '0 0 0';
 }
 
@@ -917,7 +922,7 @@ void(string command) _sui_unbind =
 
 void(float scan, string command) _sui_do_keybind =
 {
-	if (scan == K_ESCAPE) 
+	if (scan == K_ESCAPE)
 	{
 		_sui_binding_command = "";
 		_sui_binding_command_name = "";
@@ -981,7 +986,7 @@ float(float evtype, float scanx, float chary, float devid) sui_input_event =
 			_sui_mouse1_down(FALSE);
 		else
 			_sui_add_input(chary, scanx);
-		
+
 		return mouse_hit || sui_block_input_fn(scanx, chary);
 		break;
 	case IE_KEYUP:
@@ -1013,6 +1018,7 @@ void(float width, float height) sui_begin =
 	_sui_hijacked_dirs = 0;
 	_action_elements_index = 0;
 	_sui_draw_initialized = TRUE;
+	sui_text_input_focused = FALSE;
 	
 	sui_reset_frame();
 	sui_push_frame([0, 0], [width, height]);
@@ -1078,7 +1084,8 @@ void(vector pos, vector size, float width, vector color, float alpha, float flag
 void(vector pos, vector size, string text, vector color, float alpha, float flags) sui_text =
 {
 	sui_transform_box(pos, [stringwidth(text, 1, size), size_y]);
-	
+
+	drawstring(pos + '1 1 0', text, size, '0 0 0', alpha * 0.5, flags);
 	drawstring(pos, text, size, color, alpha, flags);
 };
 
@@ -1131,6 +1138,7 @@ void(string id, vector pos, vector size, __inout string text, __inout float curs
 	if (sui_is_clicked(id)) cursor = strlen(text);
 	if (sui_is_last_clicked(id))
 	{
+		sui_text_input_focused = TRUE;
 		float char = 0;
 		float scan = 0;
 		while(sui_get_input(char, scan)) sui_handle_text_input(char, scan, text, cursor);
@@ -1168,7 +1176,12 @@ void(string id, vector size, vector contentsize, __inout vector offset, vector s
 			offset_y += (diff * contentsize_y) / size_y; //  * contentsize_y; // (size_y / contentsize_y);
 		}
 
-		sui_fill(barpos, barsize, '0.1 0.1 0.1' * (1 - sui_is_hovered(barname)), 0.66, 0);
+		// Green thumb to match the return/accept buttons in the menu palette
+		// (MENU_BUTTON_RETURN / MENU_BUTTON_RETURN_BORDER).  Brightens toward
+		// the border colour on hover so it reads as interactive.
+		vector bar_col = sui_is_hovered(barname) ? '0.4 0.6 0.4' : '0.18 0.32 0.18';
+		sui_fill(barpos, barsize, bar_col, 0.9, 0);
+		sui_border_box(barpos, barsize, 1, '0.4 0.6 0.4', 1.0, 0);
 		sui_action_element(barpos, barsize, barname, sui_noop, TRUE);
 		sui_pop_frame();
 	} 

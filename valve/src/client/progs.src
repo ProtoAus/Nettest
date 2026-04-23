@@ -1,0 +1,31 @@
+#pragma target fte_5768
+#pragma progs_dat  "../../csprogs.dat"
+#pragma forcecrc 54730
+
+#define CSQC
+#define CLIENT
+#define VALVE
+
+#includelist
+../../../src/common/include.src
+../../../src/shared/defs.h
+../../../src/client/defs.h
+../../../valve/src/client/defs.h
+../../../src/vgui/include.src
+../../../src/gs-entbase/client.src
+../../../src/gs-entbase/shared.src
+../../../valve/src/shared/include.src
+../../../valve/src/client/draw.qc
+../../../valve/src/client/init.qc
+../../../valve/src/client/flashlight.qc
+../../../valve/src/client/entities.qc
+../../../valve/src/client/cmds.qc
+../../../valve/src/client/game_event.qc
+../../../valve/src/client/camera.qc
+../../../valve/src/client/viewmodel.qc
+../../../valve/src/client/obituary.qc
+../../../valve/src/client/hud_sprite.qc
+../../../valve/src/client/scoreboard.qc
+../../../src/client/include.src
+../../../src/shared/include.src
+#endlist

@@ -1,0 +1,153 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.2.32210.308
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "SpecialK", "SpecialK.vcxproj", "{6E61C1C4-82B1-43E8-BB58-BFE41AC6D9B3}"
+	ProjectSection(ProjectDependencies) = postProject
+		{F142A341-5EE0-442D-A15F-98AE9B48DBAE} = {F142A341-5EE0-442D-A15F-98AE9B48DBAE}
+		{63D8FE45-68D6-4AD5-9807-DDC7A6B63037} = {63D8FE45-68D6-4AD5-9807-DDC7A6B63037}
+		{371B9FA9-4C90-4AC6-A123-ACED756D6C77} = {371B9FA9-4C90-4AC6-A123-ACED756D6C77}
+	EndProjectSection
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "libSKinHook", "depends\derivative\SKinHook\build\libSKinHook.vcxproj", "{F142A341-5EE0-442D-A15F-98AE9B48DBAE}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "DirectXTex", "depends\src\DirectXTex\DirectXTex_Desktop_2015.vcxproj", "{371B9FA9-4C90-4AC6-A123-ACED756D6C77}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "libzma", "depends\src\lzma\libzma\libzma.vcxproj", "{63D8FE45-68D6-4AD5-9807-DDC7A6B63037}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{F47C123E-ECB9-40BA-A7F7-37DA33F55283}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Win32 = Debug|Win32
+		Debug|x64 = Debug|x64
+		Release (clang)|Win32 = Release (clang)|Win32
+		Release (clang)|x64 = Release (clang)|x64
+		Release|Win32 = Release|Win32
+		Release|x64 = Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{6E61C1C4-82B1-43E8-BB58-BFE41AC6D9B3}.Debug|Win32.ActiveCfg = Release|Win32
+		{6E61C1C4-82B1-43E8-BB58-BFE41AC6D9B3}.Debug|x64.ActiveCfg = Release|x64
+		{6E61C1C4-82B1-43E8-BB58-BFE41AC6D9B3}.Release (clang)|Win32.ActiveCfg = Release (clang)|Win32
+		{6E61C1C4-82B1-43E8-BB58-BFE41AC6D9B3}.Release (clang)|Win32.Build.0 = Release (clang)|Win32
+		{6E61C1C4-82B1-43E8-BB58-BFE41AC6D9B3}.Release (clang)|x64.ActiveCfg = Release (clang)|x64
+		{6E61C1C4-82B1-43E8-BB58-BFE41AC6D9B3}.Release (clang)|x64.Build.0 = Release (clang)|x64
+		{6E61C1C4-82B1-43E8-BB58-BFE41AC6D9B3}.Release|Win32.ActiveCfg = Release|Win32
+		{6E61C1C4-82B1-43E8-BB58-BFE41AC6D9B3}.Release|Win32.Build.0 = Release|Win32
+		{6E61C1C4-82B1-43E8-BB58-BFE41AC6D9B3}.Release|x64.ActiveCfg = Release|x64
+		{6E61C1C4-82B1-43E8-BB58-BFE41AC6D9B3}.Release|x64.Build.0 = Release|x64
+		{F142A341-5EE0-442D-A15F-98AE9B48DBAE}.Debug|Win32.ActiveCfg = Release|Win32
+		{F142A341-5EE0-442D-A15F-98AE9B48DBAE}.Debug|x64.ActiveCfg = Release|x64
+		{F142A341-5EE0-442D-A15F-98AE9B48DBAE}.Release (clang)|Win32.ActiveCfg = Release (clang)|Win32
+		{F142A341-5EE0-442D-A15F-98AE9B48DBAE}.Release (clang)|Win32.Build.0 = Release (clang)|Win32
+		{F142A341-5EE0-442D-A15F-98AE9B48DBAE}.Release (clang)|x64.ActiveCfg = Release (clang)|x64
+		{F142A341-5EE0-442D-A15F-98AE9B48DBAE}.Release (clang)|x64.Build.0 = Release (clang)|x64
+		{F142A341-5EE0-442D-A15F-98AE9B48DBAE}.Release|Win32.ActiveCfg = Release|Win32
+		{F142A341-5EE0-442D-A15F-98AE9B48DBAE}.Release|Win32.Build.0 = Release|Win32
+		{F142A341-5EE0-442D-A15F-98AE9B48DBAE}.Release|x64.ActiveCfg = Release|x64
+		{F142A341-5EE0-442D-A15F-98AE9B48DBAE}.Release|x64.Build.0 = Release|x64
+		{371B9FA9-4C90-4AC6-A123-ACED756D6C77}.Debug|Win32.ActiveCfg = Release|Win32
+		{371B9FA9-4C90-4AC6-A123-ACED756D6C77}.Debug|x64.ActiveCfg = Release|x64
+		{371B9FA9-4C90-4AC6-A123-ACED756D6C77}.Release (clang)|Win32.ActiveCfg = Release (clang)|Win32
+		{371B9FA9-4C90-4AC6-A123-ACED756D6C77}.Release (clang)|Win32.Build.0 = Release (clang)|Win32
+		{371B9FA9-4C90-4AC6-A123-ACED756D6C77}.Release (clang)|x64.ActiveCfg = Release|x64
+		{371B9FA9-4C90-4AC6-A123-ACED756D6C77}.Release (clang)|x64.Build.0 = Release|x64
+		{371B9FA9-4C90-4AC6-A123-ACED756D6C77}.Release|Win32.ActiveCfg = Release|Win32
+		{371B9FA9-4C90-4AC6-A123-ACED756D6C77}.Release|Win32.Build.0 = Release|Win32
+		{371B9FA9-4C90-4AC6-A123-ACED756D6C77}.Release|x64.ActiveCfg = Release|x64
+		{371B9FA9-4C90-4AC6-A123-ACED756D6C77}.Release|x64.Build.0 = Release|x64
+		{63D8FE45-68D6-4AD5-9807-DDC7A6B63037}.Debug|Win32.ActiveCfg = Release|Win32
+		{63D8FE45-68D6-4AD5-9807-DDC7A6B63037}.Debug|x64.ActiveCfg = Release|x64
+		{63D8FE45-68D6-4AD5-9807-DDC7A6B63037}.Release (clang)|Win32.ActiveCfg = Release (clang)|Win32
+		{63D8FE45-68D6-4AD5-9807-DDC7A6B63037}.Release (clang)|Win32.Build.0 = Release (clang)|Win32
+		{63D8FE45-68D6-4AD5-9807-DDC7A6B63037}.Release (clang)|x64.ActiveCfg = Release (clang)|x64
+		{63D8FE45-68D6-4AD5-9807-DDC7A6B63037}.Release (clang)|x64.Build.0 = Release (clang)|x64
+		{63D8FE45-68D6-4AD5-9807-DDC7A6B63037}.Release|Win32.ActiveCfg = Release|Win32
+		{63D8FE45-68D6-4AD5-9807-DDC7A6B63037}.Release|Win32.Build.0 = Release|Win32
+		{63D8FE45-68D6-4AD5-9807-DDC7A6B63037}.Release|x64.ActiveCfg = Release|x64
+		{63D8FE45-68D6-4AD5-9807-DDC7A6B63037}.Release|x64.Build.0 = Release|x64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{6E61C1C4-82B1-43E8-BB58-BFE41AC6D9B3} = {F47C123E-ECB9-40BA-A7F7-37DA33F55283}
+		{F142A341-5EE0-442D-A15F-98AE9B48DBAE} = {F47C123E-ECB9-40BA-A7F7-37DA33F55283}
+		{371B9FA9-4C90-4AC6-A123-ACED756D6C77} = {F47C123E-ECB9-40BA-A7F7-37DA33F55283}
+		{63D8FE45-68D6-4AD5-9807-DDC7A6B63037} = {F47C123E-ECB9-40BA-A7F7-37DA33F55283}
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {21CF21BF-49F5-4F39-8B07-B3F55895F534}
+	EndGlobalSection
+	GlobalSection(Performance) = preSolution
+		HasPerformanceSessions = true
+	EndGlobalSection
+	GlobalSection(Performance) = preSolution
+		HasPerformanceSessions = true
+	EndGlobalSection
+	GlobalSection(Performance) = preSolution
+		HasPerformanceSessions = true
+	EndGlobalSection
+	GlobalSection(Performance) = preSolution
+		HasPerformanceSessions = true
+	EndGlobalSection
+	GlobalSection(Performance) = preSolution
+		HasPerformanceSessions = true
+	EndGlobalSection
+	GlobalSection(Performance) = preSolution
+		HasPerformanceSessions = true
+	EndGlobalSection
+	GlobalSection(Performance) = preSolution
+		HasPerformanceSessions = true
+	EndGlobalSection
+	GlobalSection(Performance) = preSolution
+		HasPerformanceSessions = true
+	EndGlobalSection
+	GlobalSection(Performance) = preSolution
+		HasPerformanceSessions = true
+	EndGlobalSection
+	GlobalSection(Performance) = preSolution
+		HasPerformanceSessions = true
+	EndGlobalSection
+	GlobalSection(Performance) = preSolution
+		HasPerformanceSessions = true
+	EndGlobalSection
+	GlobalSection(Performance) = preSolution
+		HasPerformanceSessions = true
+	EndGlobalSection
+	GlobalSection(Performance) = preSolution
+		HasPerformanceSessions = true
+	EndGlobalSection
+	GlobalSection(Performance) = preSolution
+		HasPerformanceSessions = true
+	EndGlobalSection
+	GlobalSection(Performance) = preSolution
+		HasPerformanceSessions = true
+	EndGlobalSection
+	GlobalSection(Performance) = preSolution
+		HasPerformanceSessions = true
+	EndGlobalSection
+	GlobalSection(Performance) = preSolution
+		HasPerformanceSessions = true
+	EndGlobalSection
+	GlobalSection(Performance) = preSolution
+		HasPerformanceSessions = true
+	EndGlobalSection
+	GlobalSection(Performance) = preSolution
+		HasPerformanceSessions = true
+	EndGlobalSection
+	GlobalSection(Performance) = preSolution
+		HasPerformanceSessions = true
+	EndGlobalSection
+	GlobalSection(Performance) = preSolution
+		HasPerformanceSessions = true
+	EndGlobalSection
+	GlobalSection(Performance) = preSolution
+		HasPerformanceSessions = true
+	EndGlobalSection
+	GlobalSection(Performance) = preSolution
+		HasPerformanceSessions = true
+	EndGlobalSection
+EndGlobal

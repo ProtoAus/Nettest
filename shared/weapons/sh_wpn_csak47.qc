@@ -38,8 +38,8 @@ const float MAX_AMMO_AK47            = 90;
 const float AK47_BASE_SPREAD          = 0.012;
 const float AK47_MOVE_SPREAD          = 0.07;
 const float AK47_FULL_SPREAD_SPEED    = 320;
-const float AK47_CLOSE_DAMAGE         = 16;
-const float AK47_MIN_DAMAGE           = 8;
+const float AK47_CLOSE_DAMAGE         = 34;
+const float AK47_MIN_DAMAGE           = 20;
 const float AK47_DAMAGE_FALLOFF_RANGE = 2304;
 const float AK47_DRYFIRE_DELAY        = 0.2;
 
@@ -72,7 +72,7 @@ float(float now) SH_AK47TryFire =
 
 float(float now) SH_AK47TryReload =
 {
-    return SH_StandardTryReload(now, mag_ak47, ammo_ak47, MAX_MAG_AK47);
+    return SH_StandardTryReload(now, mag_ak47, ammo_ak47, MAX_MAG_AK47, AK47_RELOAD_DURATION);
 };
 
 // ============================================================
@@ -89,8 +89,8 @@ void(entity player) W_AK47PickupCopy =
 
 void() W_AK47Shoot =
 {
-    W_StandardHitscanShoot(AK47_BASE_SPREAD, AK47_MOVE_SPREAD, AK47_FULL_SPREAD_SPEED,
-        AK47_CLOSE_DAMAGE, AK47_MIN_DAMAGE, AK47_DAMAGE_FALLOFF_RANGE);
+    W_PenetratingHitscanShoot(AK47_BASE_SPREAD, AK47_MOVE_SPREAD, AK47_FULL_SPREAD_SPEED,
+        AK47_CLOSE_DAMAGE, AK47_MIN_DAMAGE, AK47_DAMAGE_FALLOFF_RANGE, 64, 0.97);
 };
 
 void() W_AK47Fire =
@@ -206,6 +206,7 @@ void() weapon_ak47 =
     self.touch         = weapon_touch;
     self.mag_ak47      = MAX_MAG_AK47;
     self.ammo_ak47     = MAX_AMMO_AK47;
+    W_RegisterMapWeapon(weapon_ak47);
 };
 
 #endif // SSQC
@@ -258,7 +259,8 @@ void() CSQC_PredictAK47Command =
                 else
                     sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csak47/fire2.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(AK47_BASE_SPREAD, AK47_MOVE_SPREAD, AK47_FULL_SPREAD_SPEED);
+                CSQC_PredictedImpact(AK47_BASE_SPREAD, AK47_MOVE_SPREAD, AK47_FULL_SPREAD_SPEED,
+                    AK47_CLOSE_DAMAGE, AK47_MIN_DAMAGE, AK47_DAMAGE_FALLOFF_RANGE);
                 CSQC_SpawnCasing("models/weapons/riflecasing.mdl",
                     '8 -6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }

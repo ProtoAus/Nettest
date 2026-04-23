@@ -1,0 +1,90 @@
+#define 9MMHANDGUN_IDLE1		0
+#define 9MMHANDGUN_IDLE2		1
+#define 9MMHANDGUN_IDLE3		2
+#define 9MMHANDGUN_FIRE			3
+#define 9MMHANDGUN_FIRELAST		4
+#define 9MMHANDGUN_RELOADEMPTY		5
+#define 9MMHANDGUN_RELOAD		6
+#define 9MMHANDGUN_DRAW			7
+#define 9MMHANDGUN_HOLSTER		8
+
+entityDef weapon_9mmhandgun
+{
+	"editor_color"		".3 .3 1"
+	"editor_mins"		"-16 -16 -16"
+	"editor_maxs"		"16 16 16"
+	"editor_usage"		"9mm Handgun"
+	"editor_rotatable"	"1"
+
+	"inherit"		"weapon_base"
+	"model"			"models/w_9mmhandgun.mdl"
+	"model_player"		"models/p_9mmhandgun.mdl"
+	"model_view"		"models/v_9mmhandgun.mdl"
+	"animPrefix"		"onehand"
+	"killIcon"		"d_9mmhandgun"
+
+	// weapon specific
+	"def_fireInfo"		"fireInfo_glock"
+	"def_altFireInfo"	"fireInfo_altGlock"
+	"inv_name"		"9mm Handgun"
+	"clipSize"		"17"
+	"ammoType" 		"ammo_9mm"
+	"ammoRequired" 		"1"
+	"ammoPerShot"		"1"
+	"punchAngle"		"-2 0 0"
+
+	"ammoIcon"		"weapon_9mmhandgun.ammo"
+	"crosshair"		"weapon_9mmhandgun.crosshair"
+	"icon"			"weapon_9mmhandgun.weapon"
+	"iconSelected"		"weapon_9mmhandgun.weapon_s"
+
+	"def_ejectBrass"	"debris_brass"
+	"ejectBrassDelay"	"10"
+	"ejectBrassOffset"	"18 6 -6"
+
+	"act_fire"		"$9MMHANDGUN_FIRE"
+	"act_fireLast"		"$9MMHANDGUN_FIRELAST"
+	"act_holster"		"$9MMHANDGUN_HOLSTER"
+	"act_reload"		"$9MMHANDGUN_RELOAD"
+	"act_reloadEmpty"	"$9MMHANDGUN_RELOADEMPTY"
+	"act_draw"		"$9MMHANDGUN_DRAW"
+	"act_idle"		"$9MMHANDGUN_IDLE1,$9MMHANDGUN_IDLE2,$9MMHANDGUN_IDLE3"
+
+	"snd_fire"		"Weapon_Glock.Single"
+	"snd_altfire"		"Weapon_Glock.Single"
+	"snd_empty"		"Weapons.Empty"
+
+	// hlWeapon specific
+	"hudSlot"		"1"
+	"hudSlotPos"		"0"
+	"weight"		"10"
+	"fireUnderwater"	"1"
+}
+
+entityDef projectile_glock
+{
+	"inherit"		"projectile_bullet_base"
+	"damage"		"skill:plr_9mm_bullet"
+	"spread"		"0.01 0.01"
+}
+
+entityDef projectile_glock_fast
+{
+	"inherit"		"projectile_bullet_base"
+	"damage"		"skill:plr_9mm_bullet"
+	"spread"		"0.1 0.1"
+}
+
+entityDef fireInfo_glock
+{
+	"def_onFire"		"projectile_glock"
+	"fireRate" 		".3"
+	"model_flash"		"sprites/muzzleflash2.spr"
+}
+
+entityDef fireInfo_altGlock
+{
+	"def_onFire"		"projectile_glock_fast"
+	"fireRate"		".2"
+	"model_flash"		"sprites/muzzleflash2.spr"
+}

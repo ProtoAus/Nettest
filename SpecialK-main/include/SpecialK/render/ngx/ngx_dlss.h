@@ -1,0 +1,46 @@
+﻿/**
+* This file is part of Special K.
+*
+* Special K is free software : you can redistribute it
+* and/or modify it under the terms of the GNU General Public License
+* as published by The Free Software Foundation, either version 3 of
+* the License, or (at your option) any later version.
+*
+* Special K is distributed in the hope that it will be useful,
+*
+* But WITHOUT ANY WARRANTY; without even the implied warranty of
+* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+* GNU General Public License for more details.
+*
+* You should have received a copy of the GNU General Public License
+* along with Special K.
+*
+*   If not, see <http://www.gnu.org/licenses/>.
+*
+**/
+
+#pragma once
+
+#include <render/ngx/ngx_defs.h>
+
+NVSDK_NGX_Parameter* SK_NGX_GetDLSSParameters  (void);
+NVSDK_NGX_Parameter* SK_NGX_GetDLSSDParameters (void);
+NVSDK_NGX_Parameter* SK_NGX_GetDLSSGParameters (void);
+bool                 SK_NGX_IsUsingDLSS        (void);
+bool                 SK_NGX_IsUsingDLSS_D      (void);
+bool                 SK_NGX_IsUsingDLSS_G      (void); 
+void                 SK_NGX_DLSS_CreateFeatureOverrideParams (NVSDK_NGX_Parameter *InParameters, NVSDK_NGX_Feature InFeatureID);
+void                 SK_NGX_DLSS_ControlPanel  (void);
+void                 SK_NGX_DLSS_GetResolution            (int& x, int& y, int& out_x, int& out_y);
+const char*          SK_NGX_DLSS_GetCurrentPerfQualityStr (void);
+const char*          SK_NGX_DLSS_GetCurrentPresetStr      (void);
+int                  SK_NGX_DLSSG_GetMultiFrameCount      (void);
+
+extern bool __SK_HasDLSSGStatusSupport;
+extern bool __SK_IsDLSSGActive;
+extern UINT __SK_DLSSGMultiFrameCount;
+extern bool __SK_DoubleUpOnReflex;
+extern bool __SK_ForceDLSSGPacing;
+
+void SK_NGX12_DumpBuffers_DLSSG (ID3D12GraphicsCommandList *pCommandList);
+extern ID3D12GraphicsCommandList *SK_DLSSG_CopyCommandList;

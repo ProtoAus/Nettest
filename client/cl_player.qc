@@ -45,6 +45,7 @@ float  sv_confirmed_cmdframe;    // last acknowledged command for baseline
 float  sv_confirmed_slot_primary;
 float  sv_confirmed_slot_secondary;
 float  sv_confirmed_slot_melee;
+float  sv_confirmed_slot_utility;
 float  sv_confirmed_weapon;
 float  sv_confirmed_previous_weapon;
 float  sv_confirmed_weaponstate;
@@ -87,8 +88,20 @@ float  sv_confirmed_mag_glock;
 float  sv_confirmed_ammo_glock;
 float  sv_confirmed_mag_g3sg1;
 float  sv_confirmed_ammo_g3sg1;
+float  sv_confirmed_mag_hlsmg;
+float  sv_confirmed_ammo_hlsmg;
+float  sv_confirmed_ammo_hlsmg_grenades;
+float  sv_confirmed_mag_hlrpg;
+float  sv_confirmed_ammo_hlrpg;
+float  sv_confirmed_ammo_hlgrenade;
+float  sv_confirmed_mag_hlglock;
+float  sv_confirmed_ammo_hlglock;
+float  sv_confirmed_ammo_hlegon;
+float  sv_confirmed_mag_csusp;
+float  sv_confirmed_ammo_csusp;
+float  sv_confirmed_csusp_silenced;
 
-float  csqc_prediction_valid;    // TRUE once predicted_player can drive view
+// csqc_prediction_valid moved to cl_customdefs.qc so cl_cameras.qc can read it.
 float  csqc_baseline_valid;      // TRUE once an authoritative proxy snapshot arrived
 float  csqc_proxy_seen;          // owner-only proxy seen this map/session
 float  csqc_proxy_entnum;
@@ -111,6 +124,24 @@ float  pred_cmd_impulse[128];
 float  pred_cmd_count;
 float  pred_cmd_latest_sequence;
 
+// --- Remote player interpolation buffer ---
+// Ring buffer of the last N server snapshots per remote player. Fed by
+// CSQC_SampleRemotePlayersForInterp (called once per render frame; only
+// actually records when the server's `time` global advances = new
+// snapshot arrived). Used by cl_interp_time to render each remote player
+// N seconds behind the latest snapshot, lerping between two known
+// positions instead of extrapolating. Trades latency for smoothness —
+// useful at low sv_mintic / against players with low cl_netfps.
+const float INTERP_HIST_SIZE   = 8;
+const float INTERP_MAX_PLAYERS = 32;
+
+vector g_interp_origin  [INTERP_MAX_PLAYERS * INTERP_HIST_SIZE];
+float  g_interp_time    [INTERP_MAX_PLAYERS * INTERP_HIST_SIZE];  // cltime-frame timestamp
+float  g_interp_head    [INTERP_MAX_PLAYERS];
+float  g_interp_count   [INTERP_MAX_PLAYERS];
+float  g_interp_last_serverprevtime;   // last value of FTE's serverprevtime — ticks when a new snapshot arrives
+float  g_interp_last_snap_cltime;      // cltime at which the most recent snapshot was recorded — basis for extrap dt
+
 // ---------------------------------------------------------------------------
 //  Presentation, live input, and diagnostics
 // ---------------------------------------------------------------------------
@@ -124,8 +155,7 @@ float  csqc_live_left;
 float  csqc_live_right;
 float  csqc_live_up;
 float  csqc_live_down;
-float  csqc_live_buttons;
-float  csqc_pred_debug;
+// csqc_live_buttons moved to cl_customdefs.qc so cl_cameras.qc can read it.
 float  csqc_dbg_last_key_time;
 string csqc_dbg_last_key_cmd;
 float  csqc_dbg_last_key_down;
@@ -241,8 +271,6 @@ void(float scan, float down) CSQC_UpdateLiveInputFromBind =
 		CSQC_SetLiveButton(PM_BTN_DUCK, down);
 	else if (cmd == "+button7" || cmd == "+sprint")
 		CSQC_SetLiveButton(PM_BTN_SPRINT, down);
-	else if (cmd == "+speed" || cmd == "+button9")
-		CSQC_SetLiveButton(PM_BTN_WALK, down);
 	else if (cmd == "+use")
 	{
 		// Only fire sound + impulse on the initial press, not on OS key-repeat.
@@ -323,7 +351,7 @@ void() CSQC_LatchLiveInputFromCommand =
 	// Take engine-reported bits as the base, then re-apply any custom bits that
 	// CSQC_UpdateLiveInputFromBind set via CSQC_SetLiveButton.  Without this,
 	// the engine's overwrite every input frame clears PM_BTN_SPRINT / PM_BTN_USE.
-	float custom_bits = PM_BTN_USE | PM_BTN_WALK;
+	float custom_bits = PM_BTN_USE;
 	csqc_live_buttons = input_buttons | (csqc_live_buttons & custom_bits);
 };
 
@@ -430,6 +458,7 @@ void(entity src) CSQC_StoreConfirmedStateFromEntity =
 	sv_confirmed_slot_primary      = src.slot_primary;
 	sv_confirmed_slot_secondary    = src.slot_secondary;
 	sv_confirmed_slot_melee        = src.slot_melee;
+	sv_confirmed_slot_utility      = src.slot_utility;
 	sv_confirmed_weapon           = src.weapon;
 	sv_confirmed_previous_weapon  = src.previous_weapon;
 	sv_confirmed_weaponstate      = src.weaponstate;
@@ -472,6 +501,18 @@ void(entity src) CSQC_StoreConfirmedStateFromEntity =
 	sv_confirmed_ammo_glock       = src.ammo_glock;
 	sv_confirmed_mag_g3sg1        = src.mag_g3sg1;
 	sv_confirmed_ammo_g3sg1       = src.ammo_g3sg1;
+	sv_confirmed_mag_hlsmg        = src.mag_hlsmg;
+	sv_confirmed_ammo_hlsmg       = src.ammo_hlsmg;
+	sv_confirmed_ammo_hlsmg_grenades = src.ammo_hlsmg_grenades;
+	sv_confirmed_mag_hlrpg        = src.mag_hlrpg;
+	sv_confirmed_ammo_hlrpg       = src.ammo_hlrpg;
+	sv_confirmed_ammo_hlgrenade   = src.ammo_hlgrenade;
+	sv_confirmed_mag_hlglock      = src.mag_hlglock;
+	sv_confirmed_ammo_hlglock     = src.ammo_hlglock;
+	sv_confirmed_ammo_hlegon      = src.ammo_hlegon;
+	sv_confirmed_mag_csusp        = src.mag_csusp;
+	sv_confirmed_ammo_csusp       = src.ammo_csusp;
+	sv_confirmed_csusp_silenced   = src.csusp_silenced;
 };
 
 void() CSQC_ResetToConfirmedMoveState =
@@ -494,6 +535,11 @@ void() CSQC_ResetToConfirmedMoveState =
 	self.spread_penalty          = sv_confirmed_spread_penalty;
 	self.fire_spread_penalty     = sv_confirmed_fire_spread_penalty;
 	self.pm_step_time            = sv_confirmed_step_time;
+
+	// Sync hull size to match the confirmed duck state.
+	// Without this, the predicted player replays commands with the wrong
+	// hull size, causing permanent prediction divergence when ducked.
+	PM_SyncHull();
 };
 
 void() CSQC_ResetToConfirmedState =
@@ -539,6 +585,8 @@ void() CSQC_ResetToConfirmedState =
 	float old_ammo_glock;
 	float old_mag_g3sg1;
 	float old_ammo_g3sg1;
+	float old_mag_csusp;
+	float old_ammo_csusp;
 
 	old_weapon = self.weapon;
 	old_weaponstate = self.weaponstate;
@@ -581,12 +629,15 @@ void() CSQC_ResetToConfirmedState =
 	old_ammo_glock = self.ammo_glock;
 	old_mag_g3sg1 = self.mag_g3sg1;
 	old_ammo_g3sg1 = self.ammo_g3sg1;
+	old_mag_csusp = self.mag_csusp;
+	old_ammo_csusp = self.ammo_csusp;
 
 	CSQC_ResetToConfirmedMoveState();
 
 	self.slot_primary     = sv_confirmed_slot_primary;
 	self.slot_secondary   = sv_confirmed_slot_secondary;
 	self.slot_melee       = sv_confirmed_slot_melee;
+	self.slot_utility     = sv_confirmed_slot_utility;
 	self.weapon          = sv_confirmed_weapon;
 	self.previous_weapon = sv_confirmed_previous_weapon;
 	self.weaponstate     = sv_confirmed_weaponstate;
@@ -631,6 +682,19 @@ void() CSQC_ResetToConfirmedState =
 	self.ammo_glock      = sv_confirmed_ammo_glock;
 	self.mag_g3sg1       = sv_confirmed_mag_g3sg1;
 	self.ammo_g3sg1      = sv_confirmed_ammo_g3sg1;
+	self.mag_hlsmg       = sv_confirmed_mag_hlsmg;
+	self.ammo_hlsmg      = sv_confirmed_ammo_hlsmg;
+	self.ammo_hlsmg_grenades = sv_confirmed_ammo_hlsmg_grenades;
+	self.mag_hlrpg       = sv_confirmed_mag_hlrpg;
+	self.ammo_hlrpg      = sv_confirmed_ammo_hlrpg;
+	self.ammo_hlgrenade  = sv_confirmed_ammo_hlgrenade;
+	self.mag_hlglock     = sv_confirmed_mag_hlglock;
+	self.ammo_hlglock    = sv_confirmed_ammo_hlglock;
+	self.ammo_hlegon     = sv_confirmed_ammo_hlegon;
+	self.mag_csusp       = sv_confirmed_mag_csusp;
+	self.ammo_csusp      = sv_confirmed_ammo_csusp;
+	// csusp_silenced is NOT reset from server — client prediction is authoritative
+	// for this toggle, same convention as m4a1_silenced.
 
 	// Keep a single weapon action monotonic. Once local prediction is already
 	// further through that same action, don't let a delayed server snapshot pull
@@ -734,6 +798,11 @@ void() CSQC_ResetToConfirmedState =
 			self.mag_g3sg1 = max(self.mag_g3sg1, old_mag_g3sg1);
 			self.ammo_g3sg1 = min(self.ammo_g3sg1, old_ammo_g3sg1);
 		}
+		else if (self.weapon == WEP_CSUSP)
+		{
+			self.mag_csusp = max(self.mag_csusp, old_mag_csusp);
+			self.ammo_csusp = min(self.ammo_csusp, old_ammo_csusp);
+		}
 
 		if (old_weaponstate == WS_IDLE && self.weaponstate != WS_IDLE)
 		{
@@ -783,6 +852,7 @@ void() CSQC_EnsurePredictedPlayer =
 	predicted_player.slot_primary     = WEP_NONE;
 	predicted_player.slot_secondary   = WEP_NONE;
 	predicted_player.slot_melee       = WEP_NONE;
+	predicted_player.slot_utility     = WEP_NONE;
 	predicted_player.previous_weapon  = WEP_NONE;
 	predicted_player.weapon          = WEP_NONE;
 	predicted_player.weaponstate     = WS_IDLE;
@@ -825,6 +895,9 @@ void() CSQC_EnsurePredictedPlayer =
 	predicted_player.ammo_glock      = 0;
 	predicted_player.mag_g3sg1       = 0;
 	predicted_player.ammo_g3sg1      = 0;
+	predicted_player.mag_csusp       = 0;
+	predicted_player.ammo_csusp      = 0;
+	predicted_player.csusp_silenced  = sv_confirmed_csusp_silenced;
 };
 
 string() CSQC_DebugSeedSource =
@@ -868,9 +941,18 @@ float() CSQC_SeedPredictedPlayerFromEngine =
 	if (!predicted_player.view_ofs_x && !predicted_player.view_ofs_y && !predicted_player.view_ofs_z)
 		predicted_player.view_ofs = PM_VIEW_OFS;
 
+	// Set initial hull size
+	{
+		entity save = self;
+		self = predicted_player;
+		PM_SyncHull();
+		self = save;
+	}
+
 	predicted_player.slot_primary     = WEP_NONE;
 	predicted_player.slot_secondary   = WEP_NONE;
 	predicted_player.slot_melee       = WEP_NONE;
+	predicted_player.slot_utility     = WEP_NONE;
 	predicted_player.previous_weapon  = WEP_NONE;
 	predicted_player.weapon          = engine_player.weapon;
 	predicted_player.weaponstate     = WS_IDLE;
@@ -976,116 +1058,6 @@ void() CSQC_CheckDebugPreviewResponse =
 	}
 };
 
-void() CSQC_DrawPredictionDebug =
-{
-	float box_height;
-	float oldest;
-	float server_error;
-	string line;
-	string seed_source;
-	vector live_move;
-	vector server_delta;
-	float y;
-
-	if (!csqc_pred_debug)
-		return;
-
-	box_height = 214;
-	if (csqc_pred_debug > 1)
-		box_height = 238;
-
-	drawfill([8, 8], [620, box_height], [0, 0, 0], 0.65, 0);
-
-	localplayer = CSQC_GetEngineLocalPlayer();
-	oldest = CSQC_FirstBufferedSequence();
-	seed_source = CSQC_DebugSeedSource();
-	server_error = 0;
-	if (predicted_player && csqc_baseline_valid)
-	{
-		server_delta = predicted_player.origin - sv_confirmed_origin;
-		server_error = vlen(server_delta);
-	}
-
-	y = 12;
-	line = sprintf("pred_debug  cltime %.3f  frametime %.4f", cltime, frametime);
-	drawstring([12, y], line, [8, 8], [1, 1, 1], 1, 0);
-	y += 12;
-
-	line = sprintf("proxy %.0f ent %.0f  baseline %.0f  seed %s",
-		csqc_proxy_seen, csqc_proxy_entnum, csqc_baseline_valid, seed_source);
-	drawstring([12, y], line, [8, 8], [1, 1, 1], 1, 0);
-	y += 12;
-
-	line = sprintf("frames ccmd %.0f  scmd %.0f  oldest %.0f  latest %.0f  count %.0f",
-		clientcommandframe, servercommandframe, oldest,
-		pred_cmd_latest_sequence, pred_cmd_count);
-	drawstring([12, y], line, [8, 8], [1, 1, 1], 1, 0);
-	y += 12;
-
-	line = sprintf("ages key %.1fms  input %.1fms  snap %.1fms  recon %.1fms  present %.1fms",
-		(cltime - csqc_dbg_last_key_time) * 1000,
-		(cltime - csqc_dbg_last_inputframe_time) * 1000,
-		(cltime - csqc_dbg_last_snapshot_time) * 1000,
-		(cltime - csqc_dbg_last_reconcile_time) * 1000,
-		(cltime - csqc_dbg_last_present_time) * 1000);
-	drawstring([12, y], line, [8, 8], [1, 1, 1], 1, 0);
-	y += 12;
-
-	line = sprintf("last key %s %s", csqc_dbg_last_key_cmd, csqc_dbg_last_key_down ? "down" : "up");
-	drawstring([12, y], line, [8, 8], [1, 1, 0.5], 1, 0);
-	y += 12;
-
-	live_move = CSQC_BuildLiveMoveValues();
-	line = sprintf("live mv %.0f %.0f %.0f  btn %.0f", live_move_x,
-		live_move_y, live_move_z, csqc_live_buttons);
-	drawstring([12, y], line, [8, 8], [0.8, 1, 0.8], 1, 0);
-	y += 12;
-
-	if (predicted_player)
-	{
-		line = sprintf("pred org %.2f %.2f %.2f  vel %.2f %.2f %.2f  carry %.4f",
-			predicted_player.origin_x, predicted_player.origin_y, predicted_player.origin_z,
-			predicted_player.velocity_x, predicted_player.velocity_y, predicted_player.velocity_z,
-			predicted_player.pm_timecarry);
-		drawstring([12, y], line, [8, 8], [0.7, 0.9, 1], 1, 0);
-		y += 12;
-	}
-
-	if (csqc_baseline_valid)
-	{
-		line = sprintf("auth org %.2f %.2f %.2f  vel %.2f %.2f %.2f",
-			sv_confirmed_origin_x, sv_confirmed_origin_y, sv_confirmed_origin_z,
-			sv_confirmed_velocity_x, sv_confirmed_velocity_y, sv_confirmed_velocity_z);
-		drawstring([12, y], line, [8, 8], [1, 0.8, 0.7], 1, 0);
-		y += 12;
-	}
-
-	line = sprintf("pred-auth err %.3f  replay from %.0f  count %.0f",
-		server_error, csqc_dbg_last_replay_from, csqc_dbg_last_replay_count);
-	drawstring([12, y], line, [8, 8], [1, 0.7, 0.7], 1, 0);
-	y += 12;
-
-	line = sprintf("ackdrop %.0f  overflow %.0f  probe preview %.1fms  predict %.1fms  pending %.0f",
-		csqc_dbg_ack_fell_out, csqc_dbg_ring_overflowed,
-		csqc_dbg_last_preview_response_ms, csqc_dbg_last_predict_response_ms, csqc_dbg_probe_pending);
-	drawstring([12, y], line, [8, 8], [1, 1, 0.6], 1, 0);
-	y += 12;
-
-	line = sprintf("preview dt %.1fms  predict dt %.1fms",
-		csqc_dbg_last_preview_dt, csqc_dbg_last_predict_dt);
-	drawstring([12, y], line, [8, 8], [1, 1, 0.6], 1, 0);
-	y += 12;
-
-	if (csqc_pred_debug > 1 && localplayer)
-	{
-		line = sprintf("engine org %.2f %.2f %.2f  vel %.2f %.2f %.2f",
-			localplayer.origin_x, localplayer.origin_y, localplayer.origin_z,
-			localplayer.velocity_x, localplayer.velocity_y, localplayer.velocity_z);
-		drawstring([12, y], line, [8, 8], [0.7, 1, 0.7], 1, 0);
-	}
-};
-
-
 // ---------------------------------------------------------------------------
 //  Command buffer storage and replay
 // ---------------------------------------------------------------------------
@@ -1175,8 +1147,20 @@ void() CSQC_ReconcilePrediction =
 
 	CSQC_EnsurePredictedPlayer();
 
+	// Smoothing diagnostics — reconcile fires once per authoritative
+	// snapshot, so the time between calls is the snapshot inter-arrival
+	// interval.  Skip the first (no prior timestamp) and push ms.
+	if (smooth_last_snap_cltime > 0)
+		Smooth_Push(SMOOTH_M_SNAP, (cltime - smooth_last_snap_cltime) * 1000);
+	smooth_last_snap_cltime = cltime;
+
 	entity saved = self;
 	self = predicted_player;
+
+	// Capture predicted origin BEFORE reset-to-confirmed + replay so the
+	// final post-replay origin can be diffed: that delta is the visible
+	// "reconcile correction" that yanks the view if prediction drifted.
+	smooth_pre_reset_origin = self.origin;
 
 	saved_timelength = input_timelength;
 	saved_angles = input_angles;
@@ -1244,6 +1228,11 @@ void() CSQC_ReconcilePrediction =
 	csqc_dbg_last_reconcile_time = cltime;
 	csqc_dbg_seed_source = 2;
 
+	// Smoothing — reconcile correction magnitude.  Replay should
+	// reproduce the same end origin as the extrapolation chain if
+	// prediction matched server; any delta is the visible yank.
+	Smooth_Push(SMOOTH_M_RECONC, vlen(self.origin - smooth_pre_reset_origin));
+
 	input_timelength = saved_timelength;
 	input_angles     = saved_angles;
 	input_movevalues = saved_movevalues;
@@ -1269,6 +1258,7 @@ void() CSQC_PredictCurrentCommand =
 	csqc_pred_sequence = clientcommandframe;
 	csqc_pred_time = cltime;
 	PM_PlayerMove();
+	CSQC_CheckPickupTouches();   // MVP weapon-pickup prediction — self is predicted_player
 	CSQC_PredictWeaponCommand();
 	csqc_dbg_last_predict_dt = (cltime - csqc_dbg_last_key_time) * 1000;
 	CSQC_CheckDebugPredictResponse();
@@ -1297,6 +1287,7 @@ void() CSQC_BuildPresentationView =
 	float saved_fuser2;
 	float saved_spread_penalty;
 	float saved_fire_spread_penalty;
+	float saved_step_time;
 	float saved_impulse;
 	vector saved_origin;
 	vector saved_velocity;
@@ -1347,6 +1338,7 @@ void() CSQC_BuildPresentationView =
 	saved_fuser2 = self.pm_fuser2;
 	saved_spread_penalty = self.spread_penalty;
 	saved_fire_spread_penalty = self.fire_spread_penalty;
+	saved_step_time = self.pm_step_time;
 
 	saved_timelength = input_timelength;
 	saved_angles = input_angles;
@@ -1359,6 +1351,18 @@ void() CSQC_BuildPresentationView =
 	input_buttons = csqc_live_buttons;
 	input_impulse = 0;
 	CSQC_ClampMoveInputs();
+
+	// Freeze time: the buffered command was zeroed by CSQC_Input_Frame, but
+	// this render-rate preview sim reads live WASD directly.  Without this
+	// mirror, a single preview step produces ~1 frame of visible motion
+	// before the next tick's reconcile snaps it back — looks like a server
+	// correction but is a local bypass.
+	if (getstatf(STAT_ROUND_PHASE) == ROUND_PHASE_FREEZE)
+	{
+		input_movevalues_x = 0;
+		input_movevalues_y = 0;
+		input_buttons = input_buttons & ~1;
+	}
 
 	float fixedstep = cvar("sv_mintic");
 	if (fixedstep < 0.001) fixedstep = 0.01;
@@ -1378,6 +1382,46 @@ void() CSQC_BuildPresentationView =
 	csqc_dbg_last_preview_dt = (cltime - csqc_dbg_last_key_time) * 1000;
 	CSQC_CheckDebugPreviewResponse();
 
+	// Smoothing diagnostics — per-frame visual-step samples.  Use
+	// saved_velocity (stable, captured before the preview physics
+	// sub-steps) rather than self.velocity which swings transiently
+	// inside the TOSS loop.  Gate tightly: real locomotion only, sane
+	// frametime, step within a plausible frame-budget (filter out
+	// teleports / respawn jumps / initial (0,0,0) seed), and ratio
+	// within a physically meaningful range (≤ 4x expected — anything
+	// larger implies a preview-vs-predict out-of-phase sample which
+	// isn't a rendering artefact the user perceives as jitter).
+	{
+		vector step_vec = csqc_present_origin - smooth_last_present_origin;
+		float  step_len = vlen(step_vec);
+
+		vector vel_horiz = saved_velocity;
+		vel_horiz_z = 0;
+		float speed_h = vlen(vel_horiz);
+
+		float expected  = speed_h * frametime;
+		float plausible = expected * 2.0 + 1.0;
+
+		if (speed_h > 50 && frametime > 0.001
+		    && expected > 0.05
+		    && step_len < plausible)
+		{
+			float ratio = step_len / expected;
+			if (ratio >= 0 && ratio <= 4)
+			{
+				Smooth_Push(SMOOTH_M_STEP, step_len);
+				Smooth_Push(SMOOTH_M_REGULAR, ratio);
+
+				vector vdir = vel_horiz * (1.0 / speed_h);
+				vector step_horiz = step_vec;
+				step_horiz_z = 0;
+				float fwd_step = step_horiz * vdir;
+				Smooth_Push(SMOOTH_M_FWDSTEP, fwd_step);
+			}
+		}
+		smooth_last_present_origin = csqc_present_origin;
+	}
+
 	setorigin(self, saved_origin);
 	self.velocity = saved_velocity;
 	self.view_ofs = saved_view_ofs;
@@ -1395,6 +1439,13 @@ void() CSQC_BuildPresentationView =
 	self.pm_fuser2 = saved_fuser2;
 	self.spread_penalty = saved_spread_penalty;
 	self.fire_spread_penalty = saved_fire_spread_penalty;
+	// Preview MUST NOT leak pm_step_time mutations back into the real
+	// prediction — the preview runs at render rate on live WASD, but the
+	// fresh prediction (CSQC_PredictCurrentCommand) runs at input rate on
+	// the buffered command. If preview ticks the step timer forward, the
+	// next real prediction inherits a corrupted timer and fires extra
+	// steps. Restore it alongside the other move fields.
+	self.pm_step_time = saved_step_time;
 
 	input_timelength = saved_timelength;
 	input_angles = saved_angles;
@@ -1419,8 +1470,143 @@ void() CSQC_BuildPresentationView =
 //  Called in CSQC_UpdateView before addentities(MASK_ENGINE).  Writing to
 //  ent.origin here affects this frame's render position only; the engine
 //  overwrites it with fresh lerp data at the start of the next frame.
+//
+//  Tuning cvars (all live, no restart needed):
+//    cl_extrap                  1   master toggle; 0 = pure engine lerp only
+//    cl_extrap_grounded         0   extrapolate grounded players too (snap-
+//                                   back risk on direction changes — try 1
+//                                   for sniper-tracking feel)
+//    cl_extrap_grounded_minspeed 0  only extrap grounded if XY speed exceeds
+//                                   this (e.g. 200 to skip extrap on slow
+//                                   players where direction-change snap-back
+//                                   is most visible; 0 = always)
+//    cl_extrap_max              3   max extrap window in ticrate multiples
+//                                   (default = ticrate * 3 ≈ 45 ms at 66 Hz)
+//    cl_debug_extrap            0   1 = print per-player extrap delta each
+//                                   frame to console (spammy, use briefly)
 // ---------------------------------------------------------------------------
 
+// Record a remote player snapshot into the interp ring buffer.
+//
+// This mod networks remote-player visuals via CSQC_Ent_Update as
+// player_visual_proxy entities, NOT via the engine's default
+// player-slot broadcast. So the correct per-player "snapshot arrived"
+// signal is CSQC_PlayerVisual_Update (called in cl_player.qc when a
+// VP_SF_POSE_CL section lands), not a scan over 1..maxclients slots
+// (those report GE_ACTIVE=0 on this mod).
+//
+// Takes the fresh origin as a parameter rather than reading proxy.origin,
+// because CSQC_PlayerVisual_Update only commits the snapshot via
+// setorigin() at the END of the function — reading proxy.origin from
+// an earlier hook site captured one-snapshot-stale data and caused
+// cl_interp_time to lock the model in place.
+//
+// Key: vis_owner_entnum (the player's slot, 1..maxclients — stable).
+// Tag: cltime, so all downstream math is in a single clock frame.
+void(entity proxy, vector snap_origin) CSQC_RecordProxySnapshot =
+{
+	if (proxy.vis_owner_entnum <= 0 || proxy.vis_owner_entnum > INTERP_MAX_PLAYERS)
+		return;
+	if (proxy.vis_owner_entnum == player_localentnum)
+		return;   // don't buffer our own proxy — local player uses prediction
+
+	float slot = proxy.vis_owner_entnum - 1;
+	float base = slot * INTERP_HIST_SIZE;
+	float idx  = g_interp_head[slot];
+
+	g_interp_origin[base + idx] = snap_origin;
+	g_interp_time  [base + idx] = cltime;
+
+	g_interp_head[slot] = (idx + 1) % INTERP_HIST_SIZE;
+	if (g_interp_count[slot] < INTERP_HIST_SIZE)
+		g_interp_count[slot] = g_interp_count[slot] + 1;
+
+	g_interp_last_snap_cltime = cltime;
+};
+
+// Retained but now a no-op; the per-proxy hook in CSQC_PlayerVisual_Update
+// does the actual sampling. Keeping the call sites intact avoids churn.
+void() CSQC_SampleRemotePlayersForInterp =
+{
+};
+
+// Lookup an interpolated origin for `slot` at `render_time` (seconds on the
+// server clock). Returns '0 0 0' and sets interp_lookup_ok=0 if the buffer
+// can't bracket render_time (too new = extrap needed; too old = no data).
+float interp_lookup_ok;
+
+vector(float slot, float render_time) CSQC_LookupInterpedOrigin =
+{
+	interp_lookup_ok = 0;
+	if (slot >= INTERP_MAX_PLAYERS)
+		return '0 0 0';
+	if (g_interp_count[slot] < 2)
+		return '0 0 0';
+
+	float base  = slot * INTERP_HIST_SIZE;
+	float count = g_interp_count[slot];
+	float head  = g_interp_head[slot];
+
+	// Walk from newest backward to find the first sample at or before render_time.
+	float i;
+	float older_idx = -1;
+	float newer_idx = -1;
+	for (i = 0; i < count; i++)
+	{
+		float idx = (head - 1 - i + INTERP_HIST_SIZE) % INTERP_HIST_SIZE;
+		if (g_interp_time[base + idx] <= render_time)
+		{
+			older_idx = idx;
+			break;
+		}
+		newer_idx = idx;
+	}
+
+	if (older_idx < 0) return '0 0 0';  // render_time older than all samples
+	if (newer_idx < 0) return '0 0 0';  // render_time newer than all samples (need extrap)
+
+	float t_old = g_interp_time[base + older_idx];
+	float t_new = g_interp_time[base + newer_idx];
+	if (t_new <= t_old)
+		return '0 0 0';
+
+	float frac = (render_time - t_old) / (t_new - t_old);
+	interp_lookup_ok = 1;
+	return g_interp_origin[base + older_idx] * (1 - frac)
+	     + g_interp_origin[base + newer_idx] * frac;
+};
+
+// Push cl_interp_time as userinfo so the server can read it in
+// Lagcomp_GetRewindSeconds and add it to the rewind window. Without
+// this, shooters running cl_interp_time > 0 see the hit-compensation
+// falling short by exactly their interp amount (phantom misses).
+// The dedup guard makes the per-frame call essentially free.
+float cl_interp_pushed_init;
+float cl_interp_last_pushed;
+
+void() CSQC_PushInterpUserInfo =
+{
+	float v = cvar("cl_interp_time");
+	if (cl_interp_pushed_init && v == cl_interp_last_pushed)
+		return;
+	cl_interp_pushed_init = 1;
+	cl_interp_last_pushed = v;
+	localcmd(sprintf("setinfo cl_interp_time %f\n", v));
+};
+
+// NOTE: cl_extrap_* cvars only have a visible effect when at least one
+// other player is connected.  In a single-player session the per-player
+// loop body never executes, so every cvar combination produces identical
+// (zero) behavior — set cl_debug_extrap 1 to confirm via the
+// "no remote players" notice.  cl_debug_extrap uses print() (not dprint)
+// so output is visible without enabling `developer 1`.
+//
+// When cl_interp_time > 0, remote players are rendered N seconds behind
+// the latest snapshot, blending between two known positions from the
+// ring buffer. Adds visual latency = cl_interp_time, but produces
+// maximum smoothness regardless of snapshot rate or any remote player's
+// cl_netfps. Falls back to extrap when the buffer can't bracket the
+// requested time (startup, packet loss). Pass-through when 0.
 void() CSQC_ExtrapolateRemotePlayers =
 {
 	float n;
@@ -1429,38 +1615,205 @@ void() CSQC_ExtrapolateRemotePlayers =
 	vector base_origin;
 	vector extrap_origin;
 	entity ent;
+	float seen_remote = 0;
+
+	float extrap_debug = cvar("cl_debug_extrap");
+
+	// Master toggle: unset cvar = on (preserves default behavior),
+	// explicit 0 = off.
+	float master;
+	if (cvar_string("cl_extrap") == "")
+		master = 1;
+	else
+		master = cvar("cl_extrap");
+
+	float extrap_grounded = cvar("cl_extrap_grounded");
+	float grounded_minspeed = cvar("cl_extrap_grounded_minspeed");
+
+	float max_mult = cvar("cl_extrap_max");
+	if (max_mult <= 0) max_mult = 3;
+
+	// cl_interp_time: render N seconds behind the latest snapshot using
+	// the ring buffer (overrides extrap per-player when data available).
+	float interp_time = cvar("cl_interp_time");
+	if (interp_time < 0) interp_time = 0;
 
 	gravity = cvar("sv_gravity");
 	if (!gravity) gravity = 800;
 
-	// cltime = local wall clock  |  time = server game time at last packet
-	dt = cltime - time;
-	dt = bound(0, dt, 0.1);
-	if (dt <= 0)
-		return;
+	float ticrate = cvar("sv_mintic");
+	if (ticrate <= 0) ticrate = 0.015;
 
-	for (n = 1; n <= maxclients; n++)
+	// dt = how much real time has passed since the most recent snapshot
+	// was recorded. Measured entirely in cltime-frame so it can't invert
+	// on a remote-hosted server (where `time` is offset from cltime by
+	// the server's pre-connect run time).
+	dt = cltime - g_interp_last_snap_cltime;
+
+	if (extrap_debug)
 	{
-		if (n == player_localentnum)
+		print(sprintf("[extrap] enter cltime=%.3f last_snap_cltime=%.3f dt=%.3f\n",
+			cltime, g_interp_last_snap_cltime, dt));
+		print(sprintf("[extrap]   master=%g grounded=%g minspeed=%g maxmult=%g interp=%.3f\n",
+			master, extrap_grounded, grounded_minspeed, max_mult, interp_time));
+		print(sprintf("[extrap]   maxclients=%g player_localentnum=%g\n",
+			maxclients, player_localentnum));
+	}
+
+	// If both systems are off, nothing to do.
+	if (!master && interp_time <= 0)
+	{
+		if (extrap_debug) print("[extrap] both off (cl_extrap=0 and cl_interp_time=0) — skipping\n");
+		return;
+	}
+
+	// Before any snapshot has been recorded, g_interp_last_snap_cltime == 0
+	// — the ring buffer is empty, so neither interp nor extrap can do
+	// anything useful yet.
+	if (g_interp_last_snap_cltime <= 0)
+	{
+		if (extrap_debug)
+			print("[extrap] skip — no snapshot recorded yet (waiting for first serverprevtime change)\n");
+		return;
+	}
+
+	// Per-proxy gating: the dt clamp below only gates EXTRAP, not interp.
+	// Interp can always run if cl_interp_time > 0 and the buffer brackets
+	// the requested (cltime - interp_time) — it doesn't care about how
+	// much time has passed since the latest snapshot.
+	float extrap_ok = master && (dt >= 0) && (dt <= ticrate * max_mult);
+	if (master && !extrap_ok && extrap_debug)
+		print(sprintf("[extrap] extrap-disabled this frame — dt=%.3f outside (0, %.3f]  (interp still runs if on)\n",
+			dt, ticrate * max_mult));
+
+	// Iterate player_visual_proxy entities (this mod's custom remote-player
+	// networking, not engine-default player slots). findchain returns a
+	// linked list via .chain.
+	entity proxy = findchain(classname, "player_visual_proxy");
+	while (proxy)
+	{
+		float owner = proxy.vis_owner_entnum;
+		if (owner <= 0 || owner == player_localentnum)
+		{
+			proxy = proxy.chain;
 			continue;
+		}
 
-		if (!(float)getentity(n, GE_ACTIVE))
+		seen_remote = 1;
+
+		if (extrap_debug)
+			print(sprintf("[extrap]   proxy owner=%g origin=(%.1f %.1f %.1f) flags=%g\n",
+				owner, proxy.origin_x, proxy.origin_y, proxy.origin_z, proxy.flags));
+
+		// Lerp-behind path: independent of cl_extrap. If cl_interp_time
+		// is set and the ring buffer can bracket (cltime - interp_time),
+		// use a blended origin from two known snapshots. This path can
+		// run with cl_extrap 0 for pure lerp-between-snapshots behavior.
+		if (interp_time > 0)
+		{
+			vector lerped = CSQC_LookupInterpedOrigin(owner - 1, cltime - interp_time);
+			if (interp_lookup_ok)
+			{
+				// setorigin (not direct .origin = ...) so the engine's
+				// spatial index and gettaginfo see the updated position.
+				// A direct field write leaves hitbox bones anchored to the
+				// last setorigin, which produces the "hitboxes lag behind
+				// the model and snap back" symptom.
+				setorigin(proxy, lerped);
+				if (extrap_debug)
+					print(sprintf("[extrap] proxy owner=%g  interp-behind=%.3fs\n",
+						owner, interp_time));
+				proxy = proxy.chain;
+				continue;
+			}
+			if (extrap_debug)
+				print(sprintf("[extrap] proxy owner=%g  interp buffer miss\n", owner));
+		}
+
+		// ---- Extrap path (only runs if cl_extrap is enabled) ----
+		// When cl_extrap is off AND interp missed (or isn't configured),
+		// we simply leave the proxy at its last-setorigin (the snapshot
+		// position) — that's the "pure lerp, nothing else" mode.
+		if (!extrap_ok)
+		{
+			if (extrap_debug)
+				print(sprintf("[extrap] proxy owner=%g  extrap off — holding snapshot pos\n", owner));
+			proxy = proxy.chain;
 			continue;
+		}
 
-		// engine's interpolated position for this slot
-		base_origin = getentity(n, GE_ORIGIN);
+		// Grounded players: by default trust pure engine interpolation.
+		// Walking direction changes too often for velocity-based
+		// extrapolation to be a win — it causes snap-back when the next
+		// packet contradicts the guess. Opt-in via cl_extrap_grounded.
+		if (proxy.flags & FL_ONGROUND)
+		{
+			if (!extrap_grounded)
+			{
+				if (extrap_debug)
+					print(sprintf("[extrap] proxy owner=%g skipped (grounded, cl_extrap_grounded=0)\n", owner));
+				proxy = proxy.chain;
+				continue;
+			}
 
-		ent = edict_num(n);
+			if (grounded_minspeed > 0)
+			{
+				float xy_speed = sqrt(proxy.velocity_x * proxy.velocity_x
+				                    + proxy.velocity_y * proxy.velocity_y);
+				if (xy_speed < grounded_minspeed)
+				{
+					if (extrap_debug)
+						print(sprintf("[extrap] proxy owner=%g skipped (xy_speed=%.1f < %.1f)\n",
+							owner, xy_speed, grounded_minspeed));
+					proxy = proxy.chain;
+					continue;
+				}
+			}
+		}
 
-		// velocity-based extrapolation
-		extrap_origin = base_origin + ent.velocity * dt;
+		// Extrap from the LATEST SNAPSHOT origin (newest ring-buffer entry),
+		// not from proxy.origin. The previous frame overwrote proxy.origin
+		// with an extrapped value; extrapping that again compounds velocity
+		// each frame and produces severe overshoot — the "player traveling
+		// way too quickly" symptom. player_visual_proxy is a CSQC entity
+		// without engine-side snapshot reset, so we have to pin the basis
+		// ourselves.
+		float slot = owner - 1;
+		if (slot < 0 || slot >= INTERP_MAX_PLAYERS || g_interp_count[slot] < 1)
+		{
+			base_origin = proxy.origin;   // fallback: no buffer yet
+		}
+		else
+		{
+			float base = slot * INTERP_HIST_SIZE;
+			float newest_idx = (g_interp_head[slot] - 1 + INTERP_HIST_SIZE) % INTERP_HIST_SIZE;
+			base_origin = g_interp_origin[base + newest_idx];
+		}
 
-		// gravity correction when airborne
-		if (!(ent.flags & FL_ONGROUND))
+		extrap_origin = base_origin + proxy.velocity * dt;
+
+		if (!(proxy.flags & FL_ONGROUND))
 			extrap_origin_z -= 0.5 * gravity * dt * dt;
 
-		ent.origin = extrap_origin;
+		// setorigin so hitboxes (gettaginfo) and model render from the
+		// same position — a direct .origin assignment leaves the engine's
+		// spatial index stale.
+		setorigin(proxy, extrap_origin);
+
+		if (extrap_debug)
+		{
+			vector delta = extrap_origin - base_origin;
+			print(sprintf("[extrap] proxy owner=%g  dt=%.3f  delta=(%.2f %.2f %.2f) len=%.2f%s\n",
+				owner, dt,
+				delta_x, delta_y, delta_z, vlen(delta),
+				(proxy.flags & FL_ONGROUND) ? " [grounded]" : ""));
+		}
+
+		proxy = proxy.chain;
 	}
+
+	if (extrap_debug && !seen_remote)
+		print("[extrap] no remote players in this session — cvar settings will have no visible effect\n");
 };
 
 // ---------------------------------------------------------------------------
@@ -1489,6 +1842,22 @@ void() CSQC_SetupRemotePlayerSolids =
 
 		ent = edict_num(n);
 		if (!ent || ent == world)
+			continue;
+
+		// Skip slots with no model (disconnected/invalid player)
+		if (!ent.modelindex)
+			continue;
+
+		// Skip slots that aren't actually a player. On listen server,
+		// edict_num(n) for n > num-real-players can return a CSQC entity
+		// the engine assigned to that slot via SendEntity (e.g. our
+		// func_breakable brushes use slots 86+). Without this guard we
+		// stomp their bbox to PM_MINS/MAXS and solid to SOLID_SLIDEBOX
+		// every prediction frame, producing 31 invisible player-shaped
+		// colliders piled at world origin. The model-prefix check is
+		// safe: real player entities always wear a "models/player/..." MDL,
+		// brush submodels are "*N", everything else has a different prefix.
+		if (substring(ent.model, 0, 14) != "models/player/")
 			continue;
 
 		// Use duck hull if the remote player is crouching
@@ -1530,11 +1899,16 @@ void() CSQC_Input_Frame =
 		input_buttons = input_buttons & ~1;
 	}
 
-	// Dead: capture freecam input before zeroing, then block
+	// Dead: build freecam input from live directional state, then block server-bound movement
 	if (getstatf(STAT_IS_DEAD))
 	{
-		spec_freecam_fwd = input_movevalues_x / 350;
-		spec_freecam_side = input_movevalues_y / 350;
+		// Use csqc_live_* booleans (latched above from input_movevalues before zeroing)
+		spec_freecam_fwd = 0;
+		spec_freecam_side = 0;
+		if (csqc_live_forward) spec_freecam_fwd += 1;
+		if (csqc_live_back)    spec_freecam_fwd -= 1;
+		if (csqc_live_right)   spec_freecam_side += 1;
+		if (csqc_live_left)    spec_freecam_side -= 1;
 		input_movevalues = '0 0 0';
 		input_buttons = 0;
 	}
@@ -1543,6 +1917,455 @@ void() CSQC_Input_Frame =
 	CSQC_PredictCurrentCommand();
 };
 
+
+// ---------------------------------------------------------------------------
+//  CSQC player visual proxy — predraw + receiver
+//
+//  CSQC entity with predraw for full animation control. Uses ONLY
+//  engine built-in fields from cl_defs.qc — NO redeclarations.
+//  bonecontrol1-4 and subblendfrac only work on CSQC entities.
+// ---------------------------------------------------------------------------
+
+const string PLAYER_VISUAL_MODEL = "models/player/leet/leet.mdl";
+
+// Custom fields only (no engine equivalents to shadow).
+// vis_owner_entnum is forward-declared in client/cl_customdefs.qc so
+// CSQC_SendHitclaim (in sh_weapon_logic.qc, compiled earlier) can read it.
+.float vis_anim_top;
+.float vis_anim_bottom;
+.float vis_anim_top_time;
+.float vis_anim_bottom_time;
+.float vis_weapon_id;
+.float vis_pitch;
+.float vis_prev_cltime;
+.vector vis_prev_origin;
+.float vis_last_anim_top;
+.float vis_last_anim_bottom;
+.float vis_aim_yaw;          // server-sent aim direction (never modified by predraw)
+.float vis_anim_top_gen;     // fire/reload generation counter — detects re-fires
+.float vis_last_anim_top_gen;
+
+// Weapon attachment entity + state
+.entity vis_weapon_ent;
+.string vis_weapon_model;
+
+float spec_target;
+float spec_mode;
+const float SPEC_MODE_FIRSTPERSON_FWD = 0;  // must match cl_spectate.qc
+
+// Bone name array for skeleton mirroring (from cstrike/src/shared/skeleton.h).
+// Used to copy bone positions from the player to the weapon attachment.
+// These names match what FTE uses internally for HLMDL bone lookup.
+string g_pbones[] =
+{
+	"Bip01",
+	"Bip01 Footsteps",
+	"Bip01 Pelvis",
+	"Bip01 L Leg",
+	"Bip01 L Leg1",
+	"Bip01 L Foot",
+	"Bip01 L Toe0",
+	"Bip01 L Toe01",
+	"Bip01 L Toe02",
+	"Dummy16",
+	"Bip01 R Leg",
+	"Bip01 R Leg1",
+	"Bip01 R Foot",
+	"Bip01 R Toe0",
+	"Bip01 R Toe01",
+	"Bip01 R Toe02",
+	"Dummy11",
+	"Bip01 Spine",
+	"Bip01 Spine1",
+	"Bip01 Spine2",
+	"Bip01 Spine3",
+	"Bip01 Neck",
+	"Bip01 Head",
+	"Dummy21",
+	"Dummy08",
+	"Bone02",
+	"Bone03",
+	"Bone04",
+	"Dummy05",
+	"Bone09",
+	"Bone10",
+	"Dummy04",
+	"Bone05",
+	"Bone06",
+	"Dummy03",
+	"Bone07",
+	"Bone08",
+	"Dummy09",
+	"Bone11",
+	"Bone12",
+	"Dummy10",
+	"Bone13",
+	"Bone14",
+	"Bone15",
+	"Bip01 L Arm",
+	"Bip01 L Arm1",
+	"Bip01 L Arm2",
+	"Bip01 L Hand",
+	"Bip01 L Finger0",
+	"Bip01 L Finger01",
+	"Bip01 L Finger02",
+	"Dummy06",
+	"Bip01 L Finger1",
+	"Bip01 L Finger11",
+	"Bip01 L Finger12",
+	"Dummy07",
+	"Bip01 R Arm",
+	"Bip01 R Arm1",
+	"Bip01 R Arm2",
+	"Bip01 R Hand",
+	"Bip01 R Finger0",
+	"Bip01 R Finger01",
+	"Bip01 R Finger02",
+	"Dummy01",
+	"Bip01 R Finger1",
+	"Bip01 R Finger11",
+	"Bip01 R Finger12",
+	"Dummy02",
+	"Box02",
+	"Bone08",
+	"Bone15"
+};
+
+float() CSQC_PlayerVisual_Predraw =
+{
+	// Hide the visual proxy when we shouldn't see it:
+	// 1. Own body in first person (not chase cam, not spectating)
+	// 2. Spectated player's body in first-person spectate mode
+	if (self.vis_owner_entnum == player_localentnum
+	    && spec_target == 0 && !cvar("chase_active"))
+		return PREDRAW_NEXT;
+
+	if (spec_target > 0 && spec_mode == SPEC_MODE_FIRSTPERSON_FWD
+	    && self.vis_owner_entnum == spec_target)
+		return PREDRAW_NEXT;
+
+	// Snap local player's proxy to predicted position so it doesn't
+	// flicker between server snapshots when in chase_active.
+	if (self.vis_owner_entnum == player_localentnum && predicted_player
+	    && csqc_prediction_valid)
+		setorigin(self, csqc_present_origin);
+
+	float dt;
+	if (self.vis_prev_cltime > 0)
+		dt = cltime - self.vis_prev_cltime;
+	else
+		dt = 0;
+	self.vis_prev_cltime = cltime;
+	dt = bound(0, dt, 0.1);
+
+	if (self.vis_anim_bottom != self.vis_last_anim_bottom)
+	{
+		self.vis_anim_bottom_time = 0;
+		self.vis_last_anim_bottom = self.vis_anim_bottom;
+	}
+	if (self.vis_anim_top != self.vis_last_anim_top
+	    || self.vis_anim_top_gen != self.vis_last_anim_top_gen)
+	{
+		self.vis_anim_top_time = 0;
+		self.vis_last_anim_top = self.vis_anim_top;
+		self.vis_last_anim_top_gen = self.vis_anim_top_gen;
+	}
+	self.vis_anim_top_time += dt;
+
+	// --- Strafe body twist + backpedal detection ---
+	// Compute BEFORE animation timer so we know if we're backpedaling.
+	self.angles_y = self.vis_aim_yaw;  // reset to original aim each frame
+
+	vector vel2d = self.velocity; vel2d_z = 0;
+	float speed2d = vlen(vel2d);
+	float leg_twist = 0;
+	float backpedaling = FALSE;
+	if (speed2d > 10)
+	{
+		float vel_yaw = vectoyaw(vel2d);
+		float yaw_diff = vel_yaw - self.vis_aim_yaw;
+		// Normalize to -180..180
+		yaw_diff -= floor((yaw_diff + 180) / 360) * 360;
+
+		// Beyond ±89° = backpedaling. Mirror the angle so legs face
+		// the opposite direction (e.g. moving back-right → legs face forward-left).
+		if (fabs(yaw_diff) > 95)
+		{
+			backpedaling = TRUE;
+			// Flip: 135° becomes -45°, -135° becomes 45°, 180° becomes 0°
+			if (yaw_diff > 0)
+				yaw_diff = yaw_diff - 180;
+			else
+				yaw_diff = yaw_diff + 180;
+		}
+
+		float speed_frac = bound(0, speed2d / 250, 1);
+		leg_twist = yaw_diff * speed_frac;
+	}
+
+	// Rotate whole model toward movement (legs face walk direction)
+	self.angles_y += leg_twist;
+
+	// Counter-rotate upper body back to aim direction via subblendfrac.
+	self.subblendfrac = bound(-1, leg_twist / 90, 1);
+
+	// Animation timer: for locomotion (RUN/CROUCH_RUN), advance by distance
+	// traveled so feet sync to the ground. For idle/jump, use regular time.
+	// The dev's formula: frame1time += dot(delta, v_forward) / qu_per_sec
+	float is_locomotion = (self.vis_anim_bottom == CSANIM_RUN
+	                    || self.vis_anim_bottom == CSANIM_RUN_CROUCH);
+
+	if (is_locomotion && speed2d > 1)
+	{
+		// How many QU the walk cycle covers per second of animation time.
+		// Tune this to match the model — higher = faster foot cycle.
+		// sv_anim_qu_per_sec overrides for testing (default 240).
+		float qu_per_sec = cvar("sv_anim_qu_per_sec");
+		if (qu_per_sec <= 0) qu_per_sec = 240;
+
+		vector delta = self.origin - self.vis_prev_origin;
+		delta_z = 0;  // horizontal distance only
+		makevectors([0, self.angles_y, 0]);
+
+		float dist_fwd = delta * v_forward;
+		if (backpedaling)
+			dist_fwd = -fabs(dist_fwd);  // ensure negative for reverse
+
+		self.vis_anim_bottom_time += dist_fwd / qu_per_sec;
+	}
+	else
+	{
+		// Idle/jump: regular time-based advancement
+		if (backpedaling)
+			self.vis_anim_bottom_time -= dt;
+		else
+			self.vis_anim_bottom_time += dt;
+	}
+	self.vis_prev_origin = self.origin;
+
+	// Wrap negative time so engine doesn't choke (valve hack)
+	if (self.vis_anim_bottom_time < 0)
+		self.vis_anim_bottom_time = 10.0;
+
+	// FTE basebone: bones < basebone → .baseframe, bones >= basebone → .frame
+	//
+	// Our model: torso at LOW indices, legs at HIGH indices (L Thigh=43+).
+	// Split at first leg bone so:
+	//   .baseframe = aim (torso)       → bones < basebone
+	//   .frame     = locomotion (legs) → bones >= basebone
+	self.frame          = self.vis_anim_bottom;       // legs
+	self.frame1time     = self.vis_anim_bottom_time;
+	self.baseframe      = self.vis_anim_top;          // torso
+	self.baseframe1time = self.vis_anim_top_time;
+
+	float bb = cvar("sv_player_basebone");
+	if (bb <= 0) bb = gettagindex(self, "Bip01 L Thigh");
+	self.basebone = bb;
+
+	// Torso aim blending via subblend fracs (.frame side).
+	// subblend2frac = Y axis (pitch / up-down aiming)
+	float sb = self.vis_pitch / 90;
+	self.subblend2frac = sb;
+
+	// Progressive spine twist via bonecontrol
+	makevectors([0, self.angles_y, 0]);
+	float fCorrect = dotproduct(self.velocity, v_right) * 0.25;
+	self.bonecontrol1 = fCorrect;
+	self.bonecontrol2 = fCorrect * 0.5;
+	self.bonecontrol3 = fCorrect * 0.25;
+	self.bonecontrol4 = fCorrect * 0.125;
+
+	addentity(self);
+
+	// --- Weapon attachment (p_model) ---
+	string pmdl = W_GetPModelPath(self.vis_weapon_id);
+	if (pmdl != "")
+	{
+		entity wep = self.vis_weapon_ent;
+		if (!wep)
+		{
+			wep = spawn();
+			wep.classname = "player_weapon_attach";
+			wep.solid = SOLID_NOT;
+			self.vis_weapon_ent = wep;
+		}
+
+		// Update model if weapon changed
+		if (self.vis_weapon_model != pmdl)
+		{
+			setmodel(wep, pmdl);
+			self.vis_weapon_model = pmdl;
+			if (wep.skeletonindex)
+				skel_delete(wep.skeletonindex);
+			wep.skeletonindex = 0;
+		}
+
+		if (wep.modelindex)
+		{
+			if (!wep.skeletonindex)
+				wep.skeletonindex = skel_create(wep.modelindex);
+
+			if (wep.skeletonindex)
+			{
+				// Build the weapon skeleton from its own default pose
+				skel_build(wep.skeletonindex, wep, wep.modelindex, 0, 0, -1);
+
+				// Mirror player bones → weapon bones (valve pattern)
+				float i, pbone, wbone;
+				vector bpos;
+				for (i = 0; i < g_pbones.length; i++)
+				{
+					pbone = gettagindex(self, g_pbones[i]);
+					wbone = gettagindex(wep, g_pbones[i]);
+					if (wbone > 0 && pbone > 0)
+					{
+						bpos = gettaginfo(self, pbone);
+						skel_set_bone_world(wep, wbone, bpos, v_forward, v_right, v_up);
+					}
+				}
+
+				// Bones are set in world space via skel_set_bone_world,
+				// so the entity origin must be 0 — otherwise the origin
+				// gets added on top and the weapon double-offsets + lags.
+				setorigin(wep, '0 0 0');
+				wep.angles = '0 0 0';
+				addentity(wep);
+			}
+		}
+	}
+	else if (self.vis_weapon_ent)
+	{
+		// No weapon — hide attachment
+		if (self.vis_weapon_ent.skeletonindex)
+		{
+			skel_delete(self.vis_weapon_ent.skeletonindex);
+			self.vis_weapon_ent.skeletonindex = 0;
+		}
+		self.vis_weapon_model = "";
+	}
+
+	return PREDRAW_NEXT;
+};
+
+// Mirror of server's VP_SF_* — sectioned sends to skip unchanged fields.
+const float VP_SF_POSE_CL     = 1;
+const float VP_SF_ANIM_CL     = 2;
+const float VP_SF_IDENTITY_CL = 4;
+
+void() CSQC_PlayerVisual_Update =
+{
+	self.vis_owner_entnum = readbyte();
+	float section_bits    = readbyte();
+
+	vector new_origin = self.origin;
+	float  had_pose   = (section_bits & VP_SF_POSE_CL);
+
+	if (section_bits & VP_SF_POSE_CL)
+	{
+		new_origin_x  = readcoord();
+		new_origin_y  = readcoord();
+		new_origin_z  = readcoord();
+		self.angles_x = readfloat();
+		self.angles_y = readfloat();
+		self.angles_z = readfloat();
+		self.vis_aim_yaw = self.angles_y;  // preserve original aim before predraw modifies it
+		self.velocity_x = readcoord();
+		self.velocity_y = readcoord();
+		self.velocity_z = readcoord();
+	}
+
+	if (section_bits & VP_SF_ANIM_CL)
+	{
+		// Wire order: byte1 = .frame (legs), byte2 = .baseframe (torso)
+		self.vis_anim_bottom  = readbyte();   // .frame    = locomotion (legs)
+		self.vis_anim_top     = readbyte();   // .baseframe = aim (torso)
+		self.vis_pitch        = readfloat();
+		self.flags            = readfloat();
+		self.vis_anim_top_gen = readbyte();
+	}
+
+	float identity_changed = (section_bits & VP_SF_IDENTITY_CL);
+	string mdl_path = self.model;   // default: keep current model when identity didn't change
+
+	if (identity_changed)
+	{
+		self.vis_weapon_id = readbyte();
+		self.skin          = readbyte();
+		self.colormap      = readbyte();
+		float team_model_byte = readbyte();
+		// Death byte — server sets when owner.is_dead. Drops proxy
+		// solidity so the corpse stops shoving live players around.
+		self.vis_is_dead = readbyte();
+
+		if (team_model_byte == 255)
+			mdl_path = "models/player/sini.mdl";
+		else
+		{
+			float vis_team  = floor(team_model_byte / 4) + 1;
+			float vis_model = team_model_byte % 4;
+			if (vis_team == TEAM_BLUE)
+				mdl_path = team_blue_models[vis_model];
+			else
+				mdl_path = team_red_models[vis_model];
+		}
+	}
+
+	if (self.classname != "player_visual_proxy")
+	{
+		self.classname = "player_visual_proxy";
+		self.drawmask = MASK_ENGINE;
+		self.predraw = CSQC_PlayerVisual_Predraw;
+	}
+
+	// Feed the interp ring buffer when a real pose arrived. Pass
+	// new_origin directly — self.origin isn't committed via setorigin
+	// until line ~2311 below, so reading it here would capture stale
+	// data (the previous snapshot's origin).
+	if (section_bits & VP_SF_POSE_CL)
+		CSQC_RecordProxySnapshot(self, new_origin);
+
+	// Model change can only happen when IDENTITY section arrived — skip
+	// setmodel/setcustomskin/setsize entirely otherwise (frequent case
+	// for idle pose-only updates).
+	float model_changed = identity_changed && (self.model != mdl_path);
+	if (model_changed)
+	{
+		string prev_model = self.model;
+		float  prev_mi    = self.modelindex;
+		// Explicitly detach any prior model binding before the re-bind.  If
+		// this CSQC entity slot was previously a func_breakable / func_wall,
+		// its BSP-submodel binding otherwise survives the setmodel-over and
+		// renders as a ghost brush at our new (player) origin.
+		setmodel(self, "");
+		setmodel(self, mdl_path);
+		if (cvar("sv_debug_ent_types"))
+		{
+			print(sprintf("  [vis %g] want='%s' prev_model='%s' prev_mi=%g → model='%s' mi=%g\n",
+			              self.entnum, mdl_path, prev_model, prev_mi,
+			              self.model, self.modelindex));
+		}
+		setcustomskin(self, "", "geomset 0 2\n");
+		// setmodel resets bbox to the model's bounds — restore pmove hull
+		// so MOVE_HITMODEL traces use the right broad-phase volume.
+		setsize(self, '-16 -16 0', '16 16 56');
+	}
+	if (had_pose)
+		setorigin(self, new_origin);
+
+	// Solidity policy — set LAST so setmodel/setsize re-link calls can't
+	// silently default solid back to SOLID_BBOX.
+	//   • OWN proxy → SOLID_NOT (otherwise predicted_player's pmove
+	//     traceboxes hit it on every frame — instant stutter, since
+	//     pmove ignores `self` only, not arbitrary other entities).
+	//   • DEAD other player → SOLID_NOT (corpse must not block the living).
+	//   • Live other players → SOLID_BBOX so the local CSQC bullet trace
+	//     (with MOVE_HITMODEL) can broad-phase against the bbox and
+	//     refine to model hitboxes.
+	if (self.vis_owner_entnum == player_localentnum || self.vis_is_dead)
+		self.solid = SOLID_NOT;
+	else
+		self.solid = SOLID_BBOX;
+};
 
 // ---------------------------------------------------------------------------
 //  CSQC_Ent_Spawn / CSQC_Ent_Update  -  explicit owner-only proxy snapshots
@@ -1559,33 +2382,76 @@ noref void(float netentnum) CSQC_Ent_Spawn =
 //  (trigger handlers live in cl_push.qc and cl_teleport.qc)
 // ---------------------------------------------------------------------------
 
+// Diagnostic — when sv_debug_ent_types is nonzero, report every time a CSQC
+// entity slot receives a different type byte than the previous update.  That
+// exposes server-side entnum recycling between e.g. func_breakable (type 5)
+// and player_visual_proxy (type 8), which would leak model/origin state.
+.float dbg_last_ent_type;
 noref void(float isnew) CSQC_Ent_Update =
 {
 	float ent_type;
 
 	ent_type = readbyte();
 
+	// One-log-per-transition for every CSQC entity.  Tracks server-entnum →
+	// CSQC-ent-type changes to diagnose "brush attached to player" slot-reuse
+	// bugs.  Prints on first receive AND on any type change, gated behind
+	// sv_debug_ent_types since the map-join spam isn't useful in normal play.
+	if ((isnew || self.dbg_last_ent_type != ent_type) && cvar("sv_debug_ent_types"))
+	{
+		print(sprintf("[ent %g] type %g%s%s origin=%v model='%s'\n",
+		              self.entnum, ent_type,
+		              isnew ? " (new)" : "",
+		              (self.dbg_last_ent_type && self.dbg_last_ent_type != ent_type)
+		                ? sprintf(" (was %g!)", self.dbg_last_ent_type) : "",
+		              self.origin, self.model));
+	}
+	self.dbg_last_ent_type = ent_type;
+
 	if (ent_type == CSQC_ENT_PUSH_TRIGGER)
 	{
 		CSQC_PushTrigger_Update();
+		CSQC_NetStat_RecordTrigger(NET_SZ_PUSH_TRIG);
 		return;
 	}
 
 	if (ent_type == CSQC_ENT_TELEPORT_TRIGGER)
 	{
 		CSQC_TeleportTrigger_Update();
+		CSQC_NetStat_RecordTrigger(NET_SZ_TELE_TRIG);
 		return;
 	}
 
 	if (ent_type == CSQC_ENT_LADDER_TRIGGER)
 	{
 		CSQC_LadderTrigger_Update();
+		CSQC_NetStat_RecordTrigger(NET_SZ_LADDER_TRIG);
+		return;
+	}
+
+	if (ent_type == CSQC_ENT_CAMERA)
+	{
+		CSQC_Camera_Update();
 		return;
 	}
 
 	if (ent_type == CSQC_ENT_SOLID_BRUSH)
 	{
 		CSQC_SolidBrush_Update();
+		CSQC_NetStat_RecordBrush();
+		return;
+	}
+
+	if (ent_type == CSQC_ENT_PLAYER_VISUAL)
+	{
+		CSQC_PlayerVisual_Update();
+		CSQC_NetStat_RecordVisual(self.vis_owner_entnum);
+		return;
+	}
+
+	if (ent_type == CSQC_ENT_DROPPED_WEAPON)
+	{
+		CSQC_DroppedWeapon_Update(isnew);
 		return;
 	}
 
@@ -1606,79 +2472,104 @@ noref void(float isnew) CSQC_Ent_Update =
 		self.pm_timecarry = 0;
 	}
 
-	setorigin(self, readvector());
-	self.velocity      = readvector();
-	self.view_ofs      = readvector();
-	self.flags         = readfloat();
-	self.pm_movetype   = readfloat();
-	self.pm_jump_held  = readfloat();
-	self.pm_jump_msec  = readfloat();
-	self.pm_waterjumptime = readfloat();
-	self.pm_in_duck    = readfloat();
-	self.pm_duck_msec  = readfloat();
-	self.pm_oldbuttons    = readfloat();
-	self.pm_timecarry     = readfloat();
-	self.pm_teleport_time        = readfloat();
-	self.pm_ladder_detach_time   = readfloat();
-	self.pm_fuser2               = readfloat();
-	self.spread_penalty          = readfloat();
-	self.fire_spread_penalty     = readfloat();
-	self.pm_step_time            = readfloat();
+	float changedflags = readbyte();
+	CSQC_NetStat_RecordProxy(changedflags);
 
-	// Weapon prediction state
-	self.slot_primary      = readfloat();
-	self.slot_secondary    = readfloat();
-	self.slot_melee        = readfloat();
-	self.weapon          = readfloat();
-	self.previous_weapon = readfloat();
-	self.weaponstate     = readfloat();
-	self.wep_action_id   = readfloat();
-	self.attack_finished = cltime + readfloat();   // server sends remaining time
+	if (changedflags & PM_SF_MOVEMENT)
 	{
-		float _elapsed = readfloat();   // server sends time since animation began
-		if (_elapsed > 0)
-			self.wep_anim_start = cltime - _elapsed;
-		else if (self.weaponstate != WS_IDLE)
-			self.wep_anim_start = cltime;   // animation just started this server frame
-		else
-			self.wep_anim_start = 0;
+		setorigin(self, readvector());
+		self.velocity      = readvector();
+		self.view_ofs      = readvector();
+		self.flags         = readfloat();
+		self.pm_movetype   = readfloat();
+		self.pm_jump_held  = readfloat();
+		self.pm_jump_msec  = readfloat();
+		self.pm_waterjumptime = readfloat();
+		self.pm_in_duck    = readfloat();
+		self.pm_duck_msec  = readfloat();
+		self.pm_oldbuttons    = readfloat();
+		self.pm_timecarry     = readfloat();
+		self.pm_teleport_time        = readfloat();
+		self.pm_ladder_detach_time   = readfloat();
+		self.pm_fuser2               = readfloat();
+		self.spread_penalty          = readfloat();
+		self.fire_spread_penalty     = readfloat();
+		self.pm_step_time            = readfloat();
 	}
-	self.mag_deagle      = readfloat();
-	self.ammo_deagle     = readfloat();
-	self.mag_ak47        = readfloat();
-	self.ammo_ak47       = readfloat();
-	self.mag_m4a1        = readfloat();
-	self.ammo_m4a1       = readfloat();
-	self.m4a1_silenced   = readfloat();
-	self.mag_flakshotgun = readfloat();
-	self.mag_pistol      = readfloat();
-	self.ammo_pistol     = readfloat();
-	self.mag_scout       = readfloat();
-	self.ammo_scout      = readfloat();
-	self.mag_357         = readfloat();
-	self.ammo_357        = readfloat();
-	self.mag_m249        = readfloat();
-	self.ammo_m249       = readfloat();
-	self.zoomstage       = readfloat();
-	self.mag_awp         = readfloat();
-	self.ammo_awp        = readfloat();
-	self.mag_98k         = readfloat();
-	self.ammo_98k        = readfloat();
-	self.mag_shotgun     = readfloat();
-	self.ammo_shotgun    = readfloat();
-	self.mag_m3          = readfloat();
-	self.ammo_m3         = readfloat();
-	self.mag_mp5         = readfloat();
-	self.ammo_mp5        = readfloat();
-	self.mag_crossbow    = readfloat();
-	self.ammo_crossbow   = readfloat();
-	self.mag_grenadelauncher = readfloat();
-	self.mag_rebar       = readfloat();
-	self.ammo_gauss      = readfloat();
-	self.mag_glock       = readfloat();
-	self.ammo_glock      = readfloat();
-	self.mag_g3sg1       = readfloat();
-	self.ammo_g3sg1      = readfloat();
+
+	if (changedflags & PM_SF_WEAPON_STATE)
+	{
+		self.slot_primary      = readbyte();
+		self.slot_secondary    = readbyte();
+		self.slot_melee        = readbyte();
+		self.slot_utility      = readbyte();
+		self.weapon          = readbyte();
+		self.previous_weapon = readbyte();
+		self.weaponstate     = readbyte();
+		self.wep_action_id   = readlong();   // 32-bit — matches server's WriteLong in PM_PredictionProxy_SendEntity
+		self.attack_finished = cltime + readfloat();   // server sends remaining time
+		{
+			float _elapsed = readfloat();   // server sends time since animation began
+			if (_elapsed > 0)
+				self.wep_anim_start = cltime - _elapsed;
+			else if (self.weaponstate != WS_IDLE)
+				self.wep_anim_start = cltime;   // animation just started this server frame
+			else
+				self.wep_anim_start = 0;
+		}
+		self.zoomstage       = readbyte();
+	}
+
+	if (changedflags & PM_SF_AMMO)
+	{
+		self.mag_deagle      = readbyte();
+		self.ammo_deagle     = readbyte();
+		self.mag_ak47        = readbyte();
+		self.ammo_ak47       = readbyte();
+		self.mag_m4a1        = readbyte();
+		self.ammo_m4a1       = readbyte();
+		self.m4a1_silenced   = readbyte();
+		self.mag_flakshotgun = readbyte();
+		self.mag_pistol      = readbyte();
+		self.ammo_pistol     = readbyte();
+		self.mag_scout       = readbyte();
+		self.ammo_scout      = readbyte();
+		self.mag_357         = readbyte();
+		self.ammo_357        = readbyte();
+		self.mag_m249        = readbyte();
+		self.ammo_m249       = readbyte();
+		self.mag_awp         = readbyte();
+		self.ammo_awp        = readbyte();
+		self.mag_98k         = readbyte();
+		self.ammo_98k        = readbyte();
+		self.mag_shotgun     = readbyte();
+		self.ammo_shotgun    = readbyte();
+		self.mag_m3          = readbyte();
+		self.ammo_m3         = readbyte();
+		self.mag_mp5         = readbyte();
+		self.ammo_mp5        = readbyte();
+		self.mag_crossbow    = readbyte();
+		self.ammo_crossbow   = readbyte();
+		self.mag_grenadelauncher = readbyte();
+		self.mag_rebar       = readbyte();
+		self.ammo_gauss      = readbyte();
+		self.mag_glock       = readbyte();
+		self.ammo_glock      = readbyte();
+		self.mag_g3sg1       = readbyte();
+		self.ammo_g3sg1      = readbyte();
+		self.mag_hlsmg       = readbyte();
+		self.ammo_hlsmg      = readbyte();
+		self.ammo_hlsmg_grenades = readbyte();
+		self.mag_hlrpg       = readbyte();
+		self.ammo_hlrpg      = readbyte();
+		self.ammo_hlgrenade  = readbyte();
+		self.mag_hlglock     = readbyte();
+		self.ammo_hlglock    = readbyte();
+		self.ammo_hlegon     = readbyte();
+		self.mag_csusp       = readbyte();
+		self.ammo_csusp      = readbyte();
+		self.csusp_silenced  = readbyte();
+	}
 
 	CSQC_StoreConfirmedStateFromEntity(self);
 	sv_confirmed_cmdframe        = servercommandframe;

@@ -1,0 +1,11 @@
+typeInfo houndeye_combatFace
+{
+	"task_1"				"StopMovement"
+	"task_2"				"PlayActivity idleAngry"
+	"task_3"				"TurnToEnemy"
+	"task_4"				"PerformSchedule houndeye_sweep"
+	"fail_onDeadEnemy"		"1"
+	"fail_onDamage"			"1"
+	"CanRangedAttack1"		"PerformSchedule houndeye_rangedAttack"
+	"Damage"				"AlertSquadWithMindset defense"
+}

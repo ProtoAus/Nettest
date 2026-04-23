@@ -1,0 +1,8 @@
+typeInfo zombie_establishLoF
+{
+	"task_1"			"TargetNearestPlayer"
+	"task_2"			"WalkToTarget"
+	"task_3"			"WaitForMovement"
+	"CanMeleeAttack1"	"PerformSchedule zombie_meleeAttack"
+	"CanRangedAttack1"	"PerformSchedule zombie_establishLoF"
+}

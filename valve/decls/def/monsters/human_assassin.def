@@ -1,0 +1,38 @@
+entityDef monster_human_assassin
+{
+	"inherit"	"hlBaseMonster"
+	"spawnclass"			"ncTalkMonster"
+	"model"					"models/hassassin.mdl"
+	"netname"				"Human Assassin"
+	"health"				"skill:hassassin_health"
+	"mins"					"-16 -16 0"
+	"maxs"					"16 16 72"
+	"eye_height"			"64"
+	"team"					"1"
+	"propdata"				"actor_human"
+
+	"attack_ranged_range"	"512"
+	"attack_melee_range"	"86"
+	"def_attack_melee"		"melee_hassassin_kick"
+
+	"speed_walk"			"0"
+	"speed_run"				"364"
+
+	// animation event callbacks
+	events {
+		1 "SpawnProjectileDef"	"ranged_hassassin_shot"
+		1 "StartSoundDef"		"HAssassin.Shot"
+	}
+}
+
+entityDef melee_hassassin_kick
+{
+	"damage"	"skill:bullsquid_dmg_bite"
+	"delay"		"0.25"
+}
+
+entityDef ranged_hassassin_shot
+{
+	"inherit"	"projectile_bullet_base"
+	"damage"	"skill:9mm_bullet"
+}

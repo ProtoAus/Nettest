@@ -1,0 +1,10 @@
+typeInfo zombie_combatFace
+{
+	"task_1"				"StopMovement"
+	"task_2"				"PlayActivity idleAngry"
+	"task_3"				"TurnToEnemy"
+	"task_4"				"PerformSchedule zombie_sweep"
+	"fail_onDeadEnemy"		"1"
+	"CanMeleeAttack1"	"PerformSchedule zombie_meleeAttack"
+	"CanRangedAttack1"	"PerformSchedule zombie_establishLoF"
+}

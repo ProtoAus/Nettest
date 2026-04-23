@@ -1,0 +1,9 @@
+typeInfo agrunt_idle
+{
+	"task_1"			"StopMovement"
+	"task_2"			"PlayActivity idle"
+	"task_3"			"Wait 2"
+	"task_4"			"WaitPVS"
+	"NewEnemy"			"AlertSquadWithMindset combat"
+	"Damage"			"AlertSquadWithMindset defense"
+}

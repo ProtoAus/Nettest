@@ -1,0 +1,9 @@
+typeInfo headcrab_combatFace
+{
+	"task_1"				"StopMovement"
+	"task_2"				"PlayActivity idleAngry"
+	"task_3"				"TurnToEnemy"
+	"task_4"				"PerformSchedule headcrab_sweep"
+	"fail_onDeadEnemy"		"1"
+	"CanRangedAttack1"		"PerformSchedule headcrab_rangedAttack"
+}

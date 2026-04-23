@@ -31,8 +31,8 @@ const float FLAKSHOTGUN_DRYFIRE_DELAY  = 0.5;
 // --- Balance ---
 const float FLAKSHOTGUN_PELLETS              = 8;
 const float FLAKSHOTGUN_SPREAD               = 0.04;
-const float FLAKSHOTGUN_PELLET_CLOSE_DAMAGE  = 6;
-const float FLAKSHOTGUN_PELLET_MIN_DAMAGE    = 3;
+const float FLAKSHOTGUN_PELLET_CLOSE_DAMAGE  = 15;
+const float FLAKSHOTGUN_PELLET_MIN_DAMAGE    = 4;
 const float FLAKSHOTGUN_DAMAGE_FALLOFF_RANGE = 1024;
 
 // --- Pre-computed state durations ---
@@ -85,7 +85,11 @@ void() W_FlakShotgunShoot =
         dir = normalize(v_forward + v_right * sx + v_up * sy);
         end = src + dir * 8192;
 
+#ifdef SSQC
+        Lagcomp_TraceLine(src, end, MOVE_NORMAL | MOVE_LAGGED, self);
+#else
         traceline(src, end, MOVE_NORMAL | MOVE_LAGGED, self);
+#endif
 
         if (trace_fraction < 1.0)
         {
@@ -97,24 +101,30 @@ void() W_FlakShotgunShoot =
                     FLAKSHOTGUN_PELLET_CLOSE_DAMAGE, FLAKSHOTGUN_PELLET_MIN_DAMAGE,
                     FLAKSHOTGUN_DAMAGE_FALLOFF_RANGE);
                 W_ApplyDamage(self, trace_ent, damage);
+                if (trace_ent.classname == "player")
+                {
+                    float pelletmat = IMPACT_MAT_FLESH;
+                    float pellet_hg = W_BoneToHitgroup(trace_bone_id);
+                    if (pellet_hg == HITGROUP_HEAD || trace_ent.health <= 0)
+                        pelletmat = IMPACT_MAT_FLESH_LETHAL;
+                    W_ImpactEffectAllMat(trace_endpos, trace_plane_normal, pelletmat);
+                }
+                else
+                {
+                    // Breakable — auto-classify; flesh breakables get the
+                    // lethal upgrade on the killing pellet.
+                    float bmat = W_ClassifyImpactMaterial(trace_ent);
+                    if (bmat == IMPACT_MAT_FLESH && trace_ent.health <= 0)
+                        bmat = IMPACT_MAT_FLESH_LETHAL;
+                    W_ImpactEffectAllMat(trace_endpos, trace_plane_normal, bmat);
+                }
             }
             else
             {
                 W_ImpactEffect(trace_endpos);
             }
 
-            // Debug: send server hit position to shooter only
-            {
-                float saved_dim = dimension_send;
-                dimension_send = self.dimension_seen;
-                WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
-                WriteByte(MSG_MULTICAST, CSQC_EVENT_DEBUG_IMPACT);
-                WriteCoord(MSG_MULTICAST, trace_endpos_x);
-                WriteCoord(MSG_MULTICAST, trace_endpos_y);
-                WriteCoord(MSG_MULTICAST, trace_endpos_z);
-                multicast(trace_endpos, MULTICAST_PVS);
-                dimension_send = saved_dim;
-            }
+            W_DebugImpact(trace_endpos, W_LinearDamageFalloff(dist, FLAKSHOTGUN_PELLET_CLOSE_DAMAGE, FLAKSHOTGUN_PELLET_MIN_DAMAGE, FLAKSHOTGUN_DAMAGE_FALLOFF_RANGE), W_BoneToHitgroup(trace_bone_id));
         }
 
         pellet += 1;
@@ -199,6 +209,7 @@ void() W_FlakShotgunDrop =
     tgt.weap_drop_func = W_FlakShotgunDrop;
     tgt.pickupcopy   = W_FlakShotgunPickupCopy;
     tgt.touch        = weapon_touch;
+    tgt.dropped_spin = 1;   // classic-Quake spin on dropped pickup
     tgt.think        = weapon_become_solid;
     tgt.nextthink    = time + 0.7;
 };
@@ -216,7 +227,9 @@ void() weapon_flakshotgun =
     self.weap_drop_func = W_FlakShotgunDrop;
     self.pickupcopy    = W_FlakShotgunPickupCopy;
     self.touch         = weapon_touch;
+    self.dropped_spin  = 1;
     self.mag_flakshotgun = MAX_MAG_FLAKSHOTGUN;
+    W_RegisterMapWeapon(weapon_flakshotgun);
 };
 
 #endif // SSQC
@@ -256,7 +269,8 @@ void() CSQC_PredictFlakShotgunCommand =
                 else
                     localsound("sounds/weapons/wpn_flakshotgun/fire4.wav");
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedShotgunImpact(FLAKSHOTGUN_PELLETS, FLAKSHOTGUN_SPREAD);
+                CSQC_PredictedShotgunImpact(FLAKSHOTGUN_PELLETS, FLAKSHOTGUN_SPREAD,
+                    FLAKSHOTGUN_PELLET_CLOSE_DAMAGE, FLAKSHOTGUN_PELLET_MIN_DAMAGE, FLAKSHOTGUN_DAMAGE_FALLOFF_RANGE);
             }
         }
         else if (r == -1)

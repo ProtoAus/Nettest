@@ -1,0 +1,23 @@
+entityDef monster_babycrab
+{
+	"inherit"	"hlBaseMonster"
+	"spawnclass"			"ncMonster"
+	"inherit"				"monster_headcrab"
+	"model"					"models/baby_headcrab.mdl"
+	"health"				"skill:babycrab_health"
+	"leap_damage"			"skill:babycrab_dmg_bite"
+
+	"snd_idle"				"Babycrab.Idle"
+	"snd_pain"				"Babycrab.Pain"
+	"snd_death"				"Babycrab.Die"
+	"snd_melee_attack_hit"	"Babycrab.Bite"
+
+	events {
+		jump "AddVelocity" "512 0 250"
+		jump "StartSoundDef" "Babycrab.Attack"
+		jump_variation1 "AddVelocity" "512 0 250"
+		jump_variation1 "StartSoundDef" "Babycrab.Attack"
+		jump_variation2 "AddVelocity" "512 0 250"
+		jump_variation2 "StartSoundDef" "Babycrab.Attack"
+	}
+}

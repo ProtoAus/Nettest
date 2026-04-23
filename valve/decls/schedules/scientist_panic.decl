@@ -1,0 +1,10 @@
+typeInfo scientist_panic
+{
+	"task_1"					"StopMovement"
+	"task_2"					"SetFailSchedule idle"
+	"task_3"					"Sequence panic"
+	"task_4"					"Sequence panic"
+	"task_5"					"Sequence panic"
+	"task_6"					"PlayActivity takeCover"
+	"fail_onEnemyDeath"			"1"
+}

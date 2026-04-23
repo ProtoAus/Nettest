@@ -39,8 +39,8 @@ const float MAX_AMMO_SCOUT            = 30;
 const float SCOUT_BASE_SPREAD          = 0.02;
 const float SCOUT_MOVE_SPREAD          = 0.08;
 const float SCOUT_FULL_SPREAD_SPEED    = 320;
-const float SCOUT_CLOSE_DAMAGE         = 90;
-const float SCOUT_MIN_DAMAGE           = 65;
+const float SCOUT_CLOSE_DAMAGE         = 70;
+const float SCOUT_MIN_DAMAGE           = 50;
 const float SCOUT_DAMAGE_FALLOFF_RANGE = 4096;
 const float SCOUT_DRYFIRE_DELAY        = 0.2;
 
@@ -75,7 +75,7 @@ float(float now) SH_ScoutTryFire =
 
 float(float now) SH_ScoutTryReload =
 {
-    float r = SH_StandardTryReload(now, mag_scout, ammo_scout, MAX_MAG_SCOUT);
+    float r = SH_StandardTryReload(now, mag_scout, ammo_scout, MAX_MAG_SCOUT, SCOUT_RELOAD_DURATION);
     if (r == 1)
         self.zoomstage = 0;   // unscope on reload
     return r;
@@ -111,71 +111,13 @@ void(entity player) W_ScoutPickupCopy =
 
 void() W_ScoutShoot =
 {
-    vector src, dir, end;
-    vector flat_vel;
-    float  spread, sx, sy;
-    float  move_speed, dist, damage;
-
-    makevectors(self.v_angle);
-    src = self.origin + self.view_ofs;
-
-    flat_vel   = self.velocity;
-    flat_vel_z = 0;
-    move_speed = vlen(flat_vel);
-
+    // Scoped: no base spread. Unscoped: full base spread.
     if (self.zoomstage > 0)
-    {
-        // Scoped: no base spread, but movement/penalties still apply
-        spread = (move_speed / SCOUT_FULL_SPREAD_SPEED) * SCOUT_MOVE_SPREAD;
-        spread = min(spread, SCOUT_MOVE_SPREAD);
-    }
+        W_PenetratingHitscanShoot(0, SCOUT_MOVE_SPREAD, SCOUT_FULL_SPREAD_SPEED,
+            SCOUT_CLOSE_DAMAGE, SCOUT_MIN_DAMAGE, SCOUT_DAMAGE_FALLOFF_RANGE, 80, 0.98);
     else
-    {
-        spread = SCOUT_BASE_SPREAD + (move_speed / SCOUT_FULL_SPREAD_SPEED) * SCOUT_MOVE_SPREAD;
-        spread = min(spread, SCOUT_BASE_SPREAD + SCOUT_MOVE_SPREAD);
-    }
-    spread = spread * SH_GetSpreadScale() + sh_spread_flat;
-
-    if (spread > 0)
-    {
-        sx  = SH_SpreadJitter(self.wep_action_id, 0) * spread;
-        sy  = SH_SpreadJitter(self.wep_action_id, 1) * spread;
-        dir = normalize(v_forward + v_right * sx + v_up * sy);
-    }
-    else
-        dir = v_forward;
-    end = src + dir * 8192;
-
-    W_WeaponTraceLine(src, end);
-
-    if (trace_fraction < 1.0)
-    {
-        dist = vlen(trace_endpos - src);
-
-        if (W_CanDamageTarget(trace_ent))
-        {
-            damage = W_LinearDamageFalloff(dist,
-                SCOUT_CLOSE_DAMAGE, SCOUT_MIN_DAMAGE, SCOUT_DAMAGE_FALLOFF_RANGE);
-            W_ApplyDamage(self, trace_ent, damage);
-        }
-        else
-        {
-            W_ImpactEffect(trace_endpos);
-        }
-
-        // Debug: send server hit position to shooter only
-        {
-            float saved_dim = dimension_send;
-            dimension_send = self.dimension_seen;
-            WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
-            WriteByte(MSG_MULTICAST, CSQC_EVENT_DEBUG_IMPACT);
-            WriteCoord(MSG_MULTICAST, trace_endpos_x);
-            WriteCoord(MSG_MULTICAST, trace_endpos_y);
-            WriteCoord(MSG_MULTICAST, trace_endpos_z);
-            multicast(trace_endpos, MULTICAST_PVS);
-            dimension_send = saved_dim;
-        }
-    }
+        W_PenetratingHitscanShoot(SCOUT_BASE_SPREAD, SCOUT_MOVE_SPREAD, SCOUT_FULL_SPREAD_SPEED,
+            SCOUT_CLOSE_DAMAGE, SCOUT_MIN_DAMAGE, SCOUT_DAMAGE_FALLOFF_RANGE, 80, 0.98);
 };
 
 void() W_ScoutFire =
@@ -301,6 +243,7 @@ void() weapon_scout =
     self.touch         = weapon_touch;
     self.mag_scout     = MAX_MAG_SCOUT;
     self.ammo_scout    = MAX_AMMO_SCOUT;
+    W_RegisterMapWeapon(weapon_scout);
 };
 
 #endif // SSQC
@@ -348,7 +291,8 @@ void() CSQC_PredictScoutCommand =
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csscout/fire.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(self.zoomstage > 0 ? 0 : SCOUT_BASE_SPREAD, SCOUT_MOVE_SPREAD, SCOUT_FULL_SPREAD_SPEED);
+                CSQC_PredictedImpact(self.zoomstage > 0 ? 0 : SCOUT_BASE_SPREAD, SCOUT_MOVE_SPREAD, SCOUT_FULL_SPREAD_SPEED,
+                    SCOUT_CLOSE_DAMAGE, SCOUT_MIN_DAMAGE, SCOUT_DAMAGE_FALLOFF_RANGE);
                 CSQC_SpawnCasing("models/weapons/riflecasingbig.mdl",
                     '8 -6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }

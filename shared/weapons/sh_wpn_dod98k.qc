@@ -46,11 +46,11 @@ const float MAX_AMMO_98K              = 25;
 const float K98_BASE_SPREAD           = 0.025;
 const float K98_MOVE_SPREAD           = 0.09;
 const float K98_FULL_SPREAD_SPEED     = 320;
-const float K98_CLOSE_DAMAGE          = 100;
-const float K98_MIN_DAMAGE            = 70;
+const float K98_CLOSE_DAMAGE          = 80;
+const float K98_MIN_DAMAGE            = 60;
 const float K98_DAMAGE_FALLOFF_RANGE  = 4096;
 const float K98_DRYFIRE_DELAY         = 0.2;
-const float K98_STAB_DAMAGE           = 55;
+const float K98_STAB_DAMAGE           = 70;
 const float K98_STAB_RANGE            = 72;
 
 // --- Pre-computed state durations ---
@@ -101,7 +101,7 @@ float(float now) SH_98KTryReload =
 {
     if (self.weaponstate == WS_SPECIAL)
         return 0;
-    return SH_StandardTryReload(now, mag_98k, ammo_98k, MAX_MAG_98K);
+    return SH_StandardTryReload(now, mag_98k, ammo_98k, MAX_MAG_98K, K98_RELOAD_DURATION);
 };
 
 float(float now) SH_98KTryStab =
@@ -128,8 +128,8 @@ void(entity player) W_98KPickupCopy =
 
 void() W_98KShoot =
 {
-    W_StandardHitscanShoot(K98_BASE_SPREAD, K98_MOVE_SPREAD, K98_FULL_SPREAD_SPEED,
-        K98_CLOSE_DAMAGE, K98_MIN_DAMAGE, K98_DAMAGE_FALLOFF_RANGE);
+    W_PenetratingHitscanShoot(K98_BASE_SPREAD, K98_MOVE_SPREAD, K98_FULL_SPREAD_SPEED,
+        K98_CLOSE_DAMAGE, K98_MIN_DAMAGE, K98_DAMAGE_FALLOFF_RANGE, 80, 0.98);
 };
 
 void() W_98KStab =
@@ -250,6 +250,7 @@ void() weapon_dod98k =
     self.weap_draw = W_98KEquip; self.weap_drop_func = W_98KDrop;
     self.pickupcopy = W_98KPickupCopy; self.touch = weapon_touch;
     self.mag_98k = MAX_MAG_98K; self.ammo_98k = MAX_AMMO_98K;
+    W_RegisterMapWeapon(weapon_dod98k);
 };
 
 #endif // SSQC
@@ -280,7 +281,7 @@ void() CSQC_Predict98KCommand =
         if (SH_98KTryStab(csqc_pred_time))
         {
             CSQC_MarkPendingWeaponAck();
-            CSQC_PredictedMeleeTrace(K98_STAB_RANGE,
+            CSQC_PredictedMeleeTrace(K98_STAB_RANGE, K98_STAB_DAMAGE,
                 "sounds/weapons/wpn_dod98k/stab.wav", "",
                 "sounds/weapons/wpn_dod98k/stab.wav");
             CSQC_RecordPredictedWeaponSound();
@@ -298,7 +299,8 @@ void() CSQC_Predict98KCommand =
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_dod98k/fire.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(K98_BASE_SPREAD, K98_MOVE_SPREAD, K98_FULL_SPREAD_SPEED);
+                CSQC_PredictedImpact(K98_BASE_SPREAD, K98_MOVE_SPREAD, K98_FULL_SPREAD_SPEED,
+                    K98_CLOSE_DAMAGE, K98_MIN_DAMAGE, K98_DAMAGE_FALLOFF_RANGE);
                 CSQC_SpawnCasing("models/weapons/riflecasingbig.mdl",
                     '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }

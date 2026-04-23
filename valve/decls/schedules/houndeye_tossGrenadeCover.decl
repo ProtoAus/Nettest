@@ -1,0 +1,6 @@
+typeInfo houndeye_tossGrenadeCover
+{
+	"task_1"			"TurnToEnemy"
+	"task_2"			"AttackRanged2"
+	"task_3"			"PerformSchedule houndeye_takeCover"
+}

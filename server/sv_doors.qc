@@ -186,11 +186,22 @@ void() func_button =
 
     SV_InitReplicatedSolidBrush();
     self.brush_type   = BRUSH_TYPE_BUTTON;
+    self.button_state = BUTTON_STATE_BOTTOM;
+    self.mover_state  = MOVER_STATE_BOTTOM;
+
+    // Bhop gamemode: leave the brush solid but inert — no use/touch/damage.
+    if (cvar("sv_gamemode") == GAMEMODE_BHOP)
+    {
+        self.blocked    = __NULL__;
+        self.use        = __NULL__;
+        self.touch      = __NULL__;
+        self.takedamage = DAMAGE_NO;
+        return;
+    }
+
     self.blocked      = button_blocked;
     self.use          = button_use;
     self.touch        = button_touch;
-    self.button_state = BUTTON_STATE_BOTTOM;
-    self.mover_state  = MOVER_STATE_BOTTOM;
 
     if (self.health)
     {
@@ -482,6 +493,16 @@ void() func_door =
 
     self.door_state  = DOOR_STATE_BOTTOM;
     self.mover_state = MOVER_STATE_BOTTOM;
+
+    // Bhop gamemode: leave the door solid but inert — no auto-trigger, no use,
+    // no blocked crush.  Players treat it like static world geometry.
+    if (cvar("sv_gamemode") == GAMEMODE_BHOP)
+    {
+        self.blocked    = __NULL__;
+        self.use        = __NULL__;
+        self.takedamage = DAMAGE_NO;
+        return;
+    }
 
     if (!self.targetname)
         door_spawn_trigger();

@@ -2,7 +2,7 @@
 //  client/cl_spectate.qc  -  Death camera and spectator system
 //
 //  Phases:
-//    1. Death cam (mp_deathdelay): 3rd person at death spot
+//    1. Death cam (mp_respawndelay): 3rd person at death spot
 //    2. TDM: auto-respawn after delay
 //    3. Elimination: spectator mode with player cycling and camera modes
 // ============================================================
@@ -15,7 +15,11 @@ float SPEC_MODE_FREECAM      = 2;
 // Camera distance constants
 float SPEC_CAM_BACK     = 80;
 float SPEC_CAM_UP       = 40;
-float SPEC_FREECAM_SPEED = 320;
+float SPEC_FREECAM_SPEED = 800;
+float SPEC_FREECAM_ACCEL = 10;
+float SPEC_FREECAM_FRICTION = 5;
+float SPEC_FREECAM_SPRINT = 2.5;
+float SPEC_FREECAM_DUCK  = 0.4;
 float SPEC_SHADOW        = 1;   // drop shadow offset for spectator HUD text
 
 // State
@@ -27,6 +31,11 @@ vector spec_death_origin;    // latched death position
 vector spec_death_angles;    // latched death view direction
 vector spec_freecam_origin;
 vector spec_freecam_angles;
+vector spec_freecam_velocity;
+float spec_freecam_fwd_smooth;
+float spec_freecam_side_smooth;
+vector spec_follow_origin;   // smoothed target origin for follow modes
+vector spec_follow_angles;   // smoothed target angles for follow modes
 float spec_hint_time;        // cltime when button hints expire
 
 // spec_freecam_fwd and spec_freecam_side declared in cl_customdefs.qc
@@ -77,6 +86,11 @@ float(float dir) Spectate_FindTarget =
             continue;
 
         spec_target = n;
+        // Seed smooth follow state from new target to avoid lerp pop
+        spec_follow_origin = (vector)getentity(n, GE_ORIGIN);
+        spec_follow_origin_z += PM_VIEW_OFS_z;
+        spec_follow_angles = (vector)getentity(n, GE_ANGLES);
+        spec_follow_angles_x = 0 - spec_follow_angles_x;
         return n;
     }
 
@@ -87,23 +101,33 @@ float(float dir) Spectate_FindTarget =
 //  Mode cycling
 // ============================================================
 
+float spec_last_cycle_time;
+
 void() Spectate_CycleMode =
 {
+    // Debounce: ignore rapid key repeats
+    if (cltime - spec_last_cycle_time < 0.3)
+        return;
+    spec_last_cycle_time = cltime;
+
     spec_mode = spec_mode + 1;
     if (spec_mode > SPEC_MODE_FREECAM)
         spec_mode = SPEC_MODE_FIRSTPERSON;
 
-    if (spec_mode == SPEC_MODE_FREECAM)
+    // Follow modes need a valid target. Skip to freecam if nobody available.
+    if (spec_mode != SPEC_MODE_FREECAM)
     {
-        // Seed freecam from current camera position
-        spec_freecam_origin = campos;
-        spec_freecam_angles = camang;
-    }
-    else
-    {
-        // Entering player-follow mode — find a target if we don't have one
         if (spec_target <= 0)
             Spectate_FindTarget(1);
+        if (spec_target <= 0)
+            spec_mode = SPEC_MODE_FREECAM;
+    }
+
+    if (spec_mode == SPEC_MODE_FREECAM)
+    {
+        spec_freecam_origin = campos;
+        spec_freecam_angles = camang;
+        spec_freecam_velocity = '0 0 0';
     }
 };
 
@@ -173,6 +197,7 @@ void() Spectate_CheckTargetAlive =
             spec_mode = SPEC_MODE_FREECAM;
             spec_freecam_origin = campos;
             spec_freecam_angles = camang;
+            spec_freecam_velocity = '0 0 0';
         }
         return;
     }
@@ -187,6 +212,7 @@ void() Spectate_CheckTargetAlive =
             spec_mode = SPEC_MODE_FREECAM;
             spec_freecam_origin = campos;
             spec_freecam_angles = camang;
+            spec_freecam_velocity = '0 0 0';
         }
     }
 };
@@ -223,28 +249,71 @@ void() Spectate_UpdateCamera =
 
     if (spec_mode == SPEC_MODE_FREECAM)
     {
-        // Noclip-style fly camera using live button state
+        // Momentum-style fly camera with acceleration and friction
         spec_freecam_angles = view_angles;
         makevectors(spec_freecam_angles);
         fwd = v_forward;
         rt = v_right;
-        up = v_up;
+        up = '0 0 1';
 
-        vector move_dir = '0 0 0';
-        // Read live movement from csqc_live_buttons and approximate WASD
-        // +forward/+back/+moveleft/+moveright map to input_movevalues in
-        // the engine, but those are zeroed for dead players. Use the raw
-        // input_movevalues that were captured BEFORE the dead-zero in
-        // CSQC_Input_Frame. Since we can't access those, use a simpler
-        // approach: build from csqc_live_buttons sprint bit for speed,
-        // and just use the standard input_movevalues which for freecam
-        // we'll read before zeroing.
-        // Actually the simplest: read view_angles for direction, build
-        // movement from whatever input_movevalues was before zeroing.
-        // We capture pre-zero values in spec globals below.
-        move_dir = fwd * spec_freecam_fwd + rt * spec_freecam_side;
+        // Smooth raw input to avoid stutter between input frames
+        float lerp_speed = bound(0, frametime * 20, 1);
+        spec_freecam_fwd_smooth += (spec_freecam_fwd - spec_freecam_fwd_smooth) * lerp_speed;
+        spec_freecam_side_smooth += (spec_freecam_side - spec_freecam_side_smooth) * lerp_speed;
 
-        spec_freecam_origin = spec_freecam_origin + move_dir * SPEC_FREECAM_SPEED * frametime;
+        // Speed multipliers from held buttons
+        float factor = 1.0;
+        if (csqc_live_buttons & PM_BTN_SPRINT)
+            factor *= SPEC_FREECAM_SPRINT;
+        if (csqc_live_buttons & PM_BTN_DUCK)
+            factor *= SPEC_FREECAM_DUCK;
+
+        // Build wish velocity from smoothed input + vertical from live buttons
+        float vert = 0;
+        if (csqc_live_buttons & PM_BTN_JUMP)
+            vert += 1;
+        if (csqc_live_buttons & PM_BTN_DUCK)
+            vert -= 1;
+
+        vector wishvel = (fwd * spec_freecam_fwd_smooth
+                        + rt * spec_freecam_side_smooth
+                        + up * vert) * SPEC_FREECAM_SPEED * factor;
+
+        float wishspeed = vlen(wishvel);
+        vector wishdir = wishvel;
+        if (wishspeed > 0)
+            wishdir = wishdir * (1.0 / wishspeed);
+
+        float maxspeed = SPEC_FREECAM_SPEED * factor;
+        if (wishspeed > maxspeed)
+            wishspeed = maxspeed;
+
+        // Accelerate towards wish velocity
+        float currentspeed = spec_freecam_velocity * wishdir;
+        float addspeed = wishspeed - currentspeed;
+        if (addspeed > 0)
+        {
+            float accelspeed = SPEC_FREECAM_ACCEL * frametime * wishspeed;
+            if (accelspeed > addspeed)
+                accelspeed = addspeed;
+            spec_freecam_velocity = spec_freecam_velocity + wishdir * accelspeed;
+        }
+
+        // Friction — bleed off speed
+        float speed = vlen(spec_freecam_velocity);
+        if (speed < 1)
+        {
+            spec_freecam_velocity = '0 0 0';
+        }
+        else
+        {
+            float control = max(speed, maxspeed * 0.25);
+            float drop = control * SPEC_FREECAM_FRICTION * frametime;
+            float newspeed = max(speed - drop, 0) / speed;
+            spec_freecam_velocity = spec_freecam_velocity * newspeed;
+        }
+
+        spec_freecam_origin = spec_freecam_origin + spec_freecam_velocity * frametime;
 
         campos = spec_freecam_origin;
         camang = spec_freecam_angles;
@@ -257,32 +326,58 @@ void() Spectate_UpdateCamera =
     if (spec_target <= 0)
         return;
 
-    target_origin = getentity(spec_target, GE_ORIGINANDVECTORS);
-    fwd = v_forward;
-    rt = v_right;
-    up = v_up;
+    target_origin = (vector)getentity(spec_target, GE_ORIGIN);
 
-    // Add eye offset (approximate standing view offset)
-    target_origin_z = target_origin_z + 22;
+    // Add eye offset (standing player view height)
+    target_origin_z = target_origin_z + PM_VIEW_OFS_z;
+
+    // Get the target's actual angles.
+    // The engine entity's angles_x is 0 (set by SH_PlayerAnim_Update to
+    // keep the body upright). The real view pitch is in the visual proxy's
+    // vis_pitch field (the player's v_angle_x sent via SendEntity).
+    vector target_angles = (vector)getentity(spec_target, GE_ANGLES);
+    target_angles_z = 0;
+
+    // Find the visual proxy for this player and read vis_pitch
+    entity vis = findfloat(world, vis_owner_entnum, spec_target);
+    if (vis)
+        target_angles_x = vis.vis_pitch;
+    else
+    {
+        // Fallback: undo QW pitch compression
+        target_angles_x = 0 - target_angles_x * 3;
+        target_angles_x = bound(-90, target_angles_x, 90);
+    }
+
+    // Smooth interpolation toward server-sent position/angles
+    float follow_lerp = bound(0, frametime * 30, 1);
+    spec_follow_origin += (target_origin - spec_follow_origin) * follow_lerp;
+    spec_follow_angles += (target_angles - spec_follow_angles) * follow_lerp;
+    spec_follow_angles_z = 0;   // kill roll
 
     if (spec_mode == SPEC_MODE_FIRSTPERSON)
     {
-        campos = target_origin;
-        camang = vectoangles(fwd, up);
+        campos = spec_follow_origin;
+        camang = spec_follow_angles;
         setproperty(VF_ORIGIN, campos);
         setproperty(VF_ANGLES, camang);
+        // Hide the spectated player's model so it doesn't block the view
+        setproperty(VF_VIEWENTITY, spec_target);
     }
     else if (spec_mode == SPEC_MODE_THIRDPERSON)
     {
+        makevectors(spec_follow_angles);
+        fwd = v_forward;
         cam_offset = fwd * (-SPEC_CAM_BACK) + '0 0 1' * SPEC_CAM_UP;
-        cam_pos = target_origin + cam_offset;
+        cam_pos = spec_follow_origin + cam_offset;
 
-        traceline(target_origin, cam_pos, TRUE, world);
+        traceline(spec_follow_origin, cam_pos, TRUE, world);
         if (trace_fraction < 1)
             cam_pos = trace_endpos + trace_plane_normal * 2;
 
         campos = cam_pos;
-        camang = vectoangles(normalize(target_origin - cam_pos), '0 0 1');
+        camang = vectoangles(normalize(spec_follow_origin - cam_pos), '0 0 1');
+        camang_x = 0 - camang_x;   // fix Quake inverted pitch
         setproperty(VF_ORIGIN, campos);
         setproperty(VF_ANGLES, camang);
     }
@@ -340,7 +435,7 @@ void() Spectate_DrawHUD =
     float gamemode;
 
     cx = g_width * 0.5;
-    cy = g_height * 0.4;
+    cy = g_height * 0.4 + 42;
     text_size = [24, 24];
     sub_size = [12, 12];
 

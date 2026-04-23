@@ -1,0 +1,11 @@
+typeInfo barney_searchEnemy
+{
+	"task_1"			"TargetNearestEnemy"
+	"task_2"			"RunToEnemyWithinRadius 96"
+	"NewEnemy"			"AlertSquadWithMindset combat"
+	"Damage"			"AlertSquadWithMindset defense"
+	"fail_onDeadEnemy"	"1"
+	"fail_onDamage"		"1"
+	"CanRangedAttack1"	"AlertSquadWithMindset combat" 
+	"CanRangedAttack2"	"AlertSquadWithMindset combat" 
+}

@@ -1,0 +1,462 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release (clang)|Win32">
+      <Configuration>Release (clang)</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release (clang)|x64">
+      <Configuration>Release (clang)</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{F142A341-5EE0-442D-A15F-98AE9B48DBAE}</ProjectGuid>
+    <RootNamespace>libMinHook</RootNamespace>
+    <Keyword>Win32Proj</Keyword>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <PreferredToolArchitecture>x64</PreferredToolArchitecture>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <PlatformToolset>ClangCL</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <PreferredToolArchitecture>x64</PreferredToolArchitecture>
+    <VCToolsVersion>14.36.32532</VCToolsVersion>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <CharacterSet>Unicode</CharacterSet>
+    <PlatformToolset>ClangCL</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <VCToolsVersion>14.36.32532</VCToolsVersion>
+    <PreferredToolArchitecture>x64</PreferredToolArchitecture>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <PreferredToolArchitecture>x64</PreferredToolArchitecture>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <PlatformToolset>ClangCL</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <PreferredToolArchitecture>x64</PreferredToolArchitecture>
+    <VCToolsVersion>14.36.32532</VCToolsVersion>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <CharacterSet>Unicode</CharacterSet>
+    <PlatformToolset>ClangCL</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <VCToolsVersion>14.36.32532</VCToolsVersion>
+    <PreferredToolArchitecture>x64</PreferredToolArchitecture>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <_ProjectFileVersion>10.0.40219.1</_ProjectFileVersion>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">$(SolutionDir)lib\$(Configuration)\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(SolutionDir)lib\$(Configuration)\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">$(SolutionDir)depends\lib\MinHook\$(Platform)\</OutDir>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">$(SolutionDir)depends\lib\MinHook\$(Platform)\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(SolutionDir)depends\lib\MinHook\$(Platform)\</OutDir>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">$(SolutionDir)depends\lib\MinHook\$(Platform)\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">$(ProjectName).x86</TargetName>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">libMinHook</TargetName>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">libMinHook</TargetName>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(ProjectName).x64</TargetName>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='Release|x64'">libMinHook64</TargetName>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">libMinHook64</TargetName>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <IncludePath>$(SolutionDir)include;$(IncludePath)</IncludePath>
+    <EnableMicrosoftCodeAnalysis>false</EnableMicrosoftCodeAnalysis>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">
+    <IncludePath>$(SolutionDir)include;$(IncludePath)</IncludePath>
+    <EnableMicrosoftCodeAnalysis>false</EnableMicrosoftCodeAnalysis>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <IncludePath>$(SolutionDir)include;$(VC_IncludePath);$(WindowsSDK_IncludePath);$(SolutionDir)\depends\include;$(SolutionDir)\depends\build\x64;C:\Program Files (x86)\Microsoft DirectX SDK (June 2010)\Include;$(SolutionDir)include\SpecialK</IncludePath>
+    <CodeAnalysisRuleSet>AllRules.ruleset</CodeAnalysisRuleSet>
+    <EnableCppCoreCheck>true</EnableCppCoreCheck>
+    <LinkIncremental>false</LinkIncremental>
+    <EnableMicrosoftCodeAnalysis>false</EnableMicrosoftCodeAnalysis>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">
+    <IncludePath>$(SolutionDir)include;$(VC_IncludePath);$(WindowsSDK_IncludePath);$(SolutionDir)\depends\include;$(SolutionDir)\depends\build\x64;C:\Program Files (x86)\Microsoft DirectX SDK (June 2010)\Include;$(SolutionDir)include\SpecialK</IncludePath>
+    <CodeAnalysisRuleSet>AllRules.ruleset</CodeAnalysisRuleSet>
+    <EnableCppCoreCheck>true</EnableCppCoreCheck>
+    <LinkIncremental>false</LinkIncremental>
+    <EnableMicrosoftCodeAnalysis>false</EnableMicrosoftCodeAnalysis>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <CodeAnalysisRuleSet>AllRules.ruleset</CodeAnalysisRuleSet>
+    <EnableCppCoreCheck>true</EnableCppCoreCheck>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <ClCompile>
+      <Optimization>MaxSpeed</Optimization>
+      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>NTDDI_VERSION=NTDDI_WIN11_GE;_WIN32_WINNT=_WIN32_WINNT_WIN10;WIN32;_DEBUG;_LIB;STRICT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <WarningLevel>Level4</WarningLevel>
+      <EnableEnhancedInstructionSet>StreamingSIMDExtensions2</EnableEnhancedInstructionSet>
+      <WholeProgramOptimization>true</WholeProgramOptimization>
+      <ExceptionHandling>Async</ExceptionHandling>
+      <EnableFiberSafeOptimizations>true</EnableFiberSafeOptimizations>
+      <StringPooling>true</StringPooling>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+      <ControlFlowGuard>false</ControlFlowGuard>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <FloatingPointModel>Precise</FloatingPointModel>
+      <FloatingPointExceptions>false</FloatingPointExceptions>
+      <PreprocessKeepComments>false</PreprocessKeepComments>
+      <SmallerTypeCheck>false</SmallerTypeCheck>
+      <AssemblerOutput>All</AssemblerOutput>
+      <UseUnicodeForAssemblerListing>true</UseUnicodeForAssemblerListing>
+      <BrowseInformation>false</BrowseInformation>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <DiagnosticsFormat>Caret</DiagnosticsFormat>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <DisableSpecificWarnings>4005;4201;4702;4061;4714;4820;5045</DisableSpecificWarnings>
+      <UndefinePreprocessorDefinitions>__midl</UndefinePreprocessorDefinitions>
+      <AdditionalOptions>/Zo /Gw /Gm- /O0 /GR /cgthreads8 /Zf %(AdditionalOptions)</AdditionalOptions>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <CompileAsManaged>false</CompileAsManaged>
+      <CompileAsWinRT>false</CompileAsWinRT>
+      <CreateHotpatchableImage>true</CreateHotpatchableImage>
+      <RuntimeTypeInfo>true</RuntimeTypeInfo>
+      <OpenMPSupport>false</OpenMPSupport>
+      <CompileAs>Default</CompileAs>
+      <ProgramDataBaseFileName>$(SolutionDir)depends\lib\$(TargetName)\$(Platform)\$(TargetName).pdb</ProgramDataBaseFileName>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
+      <OmitFramePointers>false</OmitFramePointers>
+      <UseFullPaths>false</UseFullPaths>
+      <GuardEHContMetadata>false</GuardEHContMetadata>
+    </ClCompile>
+    <Lib />
+    <Lib>
+      <LinkTimeCodeGeneration>true</LinkTimeCodeGeneration>
+    </Lib>
+    <Bscmake>
+      <PreserveSbr>false</PreserveSbr>
+    </Bscmake>
+    <ProjectReference />
+    <Xdcmake>
+      <DocumentLibraryDependencies>false</DocumentLibraryDependencies>
+    </Xdcmake>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Midl>
+      <TargetEnvironment>X64</TargetEnvironment>
+    </Midl>
+    <ClCompile>
+      <Optimization>MaxSpeed</Optimization>
+      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>NTDDI_VERSION=NTDDI_WIN11_GE;_WIN32_WINNT=_WIN32_WINNT_WIN10;WIN32;_DEBUG;_LIB;STRICT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <WarningLevel>Level4</WarningLevel>
+      <EnableEnhancedInstructionSet>NotSet</EnableEnhancedInstructionSet>
+      <DiagnosticsFormat>Caret</DiagnosticsFormat>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <OmitFramePointers>false</OmitFramePointers>
+      <WholeProgramOptimization>true</WholeProgramOptimization>
+      <ExceptionHandling>Async</ExceptionHandling>
+      <EnableFiberSafeOptimizations>true</EnableFiberSafeOptimizations>
+      <StringPooling>true</StringPooling>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+      <ControlFlowGuard>false</ControlFlowGuard>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <FloatingPointModel>Precise</FloatingPointModel>
+      <FloatingPointExceptions>false</FloatingPointExceptions>
+      <PreprocessKeepComments>false</PreprocessKeepComments>
+      <SmallerTypeCheck>false</SmallerTypeCheck>
+      <AssemblerOutput>All</AssemblerOutput>
+      <UseUnicodeForAssemblerListing>true</UseUnicodeForAssemblerListing>
+      <BrowseInformation>false</BrowseInformation>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <DisableSpecificWarnings>4005;4201;4702;4061;4714;4820;5045</DisableSpecificWarnings>
+      <UndefinePreprocessorDefinitions>__midl</UndefinePreprocessorDefinitions>
+      <AdditionalOptions>/Zo /Gw /Gm- /O0 /GR /cgthreads8 /Zf %(AdditionalOptions)</AdditionalOptions>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <CompileAsManaged>false</CompileAsManaged>
+      <CompileAsWinRT>false</CompileAsWinRT>
+      <RuntimeTypeInfo>true</RuntimeTypeInfo>
+      <OpenMPSupport>false</OpenMPSupport>
+      <CompileAs>Default</CompileAs>
+      <ProgramDataBaseFileName>$(SolutionDir)depends\lib\$(TargetName)\$(Platform)\$(TargetName).pdb</ProgramDataBaseFileName>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
+      <UseFullPaths>false</UseFullPaths>
+      <GuardEHContMetadata>false</GuardEHContMetadata>
+    </ClCompile>
+    <Lib />
+    <Lib>
+      <LinkTimeCodeGeneration>true</LinkTimeCodeGeneration>
+    </Lib>
+    <Bscmake>
+      <PreserveSbr>false</PreserveSbr>
+    </Bscmake>
+    <ProjectReference />
+    <Xdcmake>
+      <DocumentLibraryDependencies>false</DocumentLibraryDependencies>
+    </Xdcmake>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <ClCompile>
+      <Optimization>MaxSpeed</Optimization>
+      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>NTDDI_VERSION=WDK_NTDDI_VERSION;_WIN32_WINNT=_WIN32_WINNT_WIN10;WIN32;NDEBUG;_LIB;_WIN7_PLATFORM_UPDATE;_WIN32_WINNT=0x0601;_CRT_STDIO_ARBITRARY_WIDE_SPECIFIERS;SK_BUILD_DLL=1;SK_EXPORTS;_USRDLL;_WINDOWS;DIRECTINPUT_VERSION=0x0800;GLEW_STATIC;PSAPI_VERSION=1;_CRT_SECURE_NO_WARNINGS;_CRT_NON_CONFORMING_SWPRINTFS;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;STRICT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <WarningLevel>Level4</WarningLevel>
+      <WholeProgramOptimization>true</WholeProgramOptimization>
+      <EnableEnhancedInstructionSet>StreamingSIMDExtensions2</EnableEnhancedInstructionSet>
+      <ExceptionHandling>Async</ExceptionHandling>
+      <StringPooling>true</StringPooling>
+      <OmitFramePointers>false</OmitFramePointers>
+      <CreateHotpatchableImage>true</CreateHotpatchableImage>
+      <AdditionalOptions>/GS- /Gs8192 /Ob3 /Zo /Gw /GR /cgthreads8 /Zc:implicitNoexcept /Zc:strictStrings- /Zf</AdditionalOptions>
+      <ProgramDataBaseFileName>$(SolutionDir)depends\lib\$(TargetName)\$(Platform)\$(TargetName).pdb</ProgramDataBaseFileName>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
+      <EnableFiberSafeOptimizations>true</EnableFiberSafeOptimizations>
+      <ConformanceMode>true</ConformanceMode>
+      <DisableSpecificWarnings>4005;4201;4702;4061;4714;4820;5045</DisableSpecificWarnings>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+      <RuntimeTypeInfo>true</RuntimeTypeInfo>
+      <UseUnicodeForAssemblerListing>true</UseUnicodeForAssemblerListing>
+      <CompileAs>Default</CompileAs>
+      <UseFullPaths>false</UseFullPaths>
+      <SDLCheck>false</SDLCheck>
+      <DiagnosticsFormat>Caret</DiagnosticsFormat>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <FloatingPointExceptions>false</FloatingPointExceptions>
+      <IntelJCCErratum>true</IntelJCCErratum>
+    </ClCompile>
+    <Lib />
+    <ProjectReference />
+    <Xdcmake />
+    <Xdcmake>
+      <DocumentLibraryDependencies>false</DocumentLibraryDependencies>
+    </Xdcmake>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release (clang)|Win32'">
+    <ClCompile>
+      <Optimization>MaxSpeed</Optimization>
+      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>SK_BUILT_BY_CLANG;NTDDI_VERSION=NTDDI_WIN11_GE;_WIN32_WINNT=_WIN32_WINNT_WIN10;WIN32;NDEBUG;_LIB;_WIN7_PLATFORM_UPDATE;_WIN32_WINNT=0x0601;_CRT_STDIO_ARBITRARY_WIDE_SPECIFIERS;SK_BUILD_DLL=1;SK_EXPORTS;_USRDLL;_WINDOWS;DIRECTINPUT_VERSION=0x0800;GLEW_STATIC;PSAPI_VERSION=1;_CRT_SECURE_NO_WARNINGS;_CRT_NON_CONFORMING_SWPRINTFS;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;STRICT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <WarningLevel>Level4</WarningLevel>
+      <WholeProgramOptimization>true</WholeProgramOptimization>
+      <EnableEnhancedInstructionSet>StreamingSIMDExtensions2</EnableEnhancedInstructionSet>
+      <ExceptionHandling>Async</ExceptionHandling>
+      <StringPooling>true</StringPooling>
+      <OmitFramePointers>true</OmitFramePointers>
+      <CreateHotpatchableImage>true</CreateHotpatchableImage>
+      <AdditionalOptions>/GS- /Gs8192 /Zo /Gw /GR /cgthreads8 -O3 -Qunused-arguments -Wno-unused-function -Wno-invalid-offsetof -Wno-unused-parameter -Wno-microsoft-cast -Wno-unused-variable</AdditionalOptions>
+      <ProgramDataBaseFileName>$(SolutionDir)depends\lib\$(TargetName)\$(Platform)\$(TargetName).pdb</ProgramDataBaseFileName>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
+      <EnableFiberSafeOptimizations>true</EnableFiberSafeOptimizations>
+      <ConformanceMode>true</ConformanceMode>
+      <DisableSpecificWarnings>4005;4201;4702;4061;4714;4820;5045</DisableSpecificWarnings>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+      <RuntimeTypeInfo>true</RuntimeTypeInfo>
+      <UseUnicodeForAssemblerListing>true</UseUnicodeForAssemblerListing>
+      <CompileAs>Default</CompileAs>
+      <UseFullPaths>false</UseFullPaths>
+      <SDLCheck>false</SDLCheck>
+      <DiagnosticsFormat>Caret</DiagnosticsFormat>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+    </ClCompile>
+    <Lib />
+    <ProjectReference />
+    <Xdcmake />
+    <Xdcmake>
+      <DocumentLibraryDependencies>false</DocumentLibraryDependencies>
+    </Xdcmake>
+    <Lib />
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Midl>
+      <TargetEnvironment>X64</TargetEnvironment>
+    </Midl>
+    <ClCompile>
+      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>NTDDI_VERSION=WDK_NTDDI_VERSION;_WIN32_WINNT=_WIN32_WINNT_WIN10;_WIN64;WIN32;NDEBUG;_LIB;_CRT_STDIO_ARBITRARY_WIDE_SPECIFIERS;SK_BUILD_DLL=1;SK_EXPORTS;_USRDLL;_WINDOWS;DIRECTINPUT_VERSION=0x0800;GLEW_STATIC;PSAPI_VERSION=1;_CRT_SECURE_NO_WARNINGS;_CRT_NON_CONFORMING_SWPRINTFS;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;STRICT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <WarningLevel>Level4</WarningLevel>
+      <ExceptionHandling>Async</ExceptionHandling>
+      <StringPooling>true</StringPooling>
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <WholeProgramOptimization>true</WholeProgramOptimization>
+      <AdditionalOptions>/GS- /Gs8192 /Ob3 /Zo /Gw /GR /cgthreads8 /Zc:implicitNoexcept /Zc:strictStrings- /Zf /jumptablerdata</AdditionalOptions>
+      <ProgramDataBaseFileName>$(SolutionDir)depends\lib\$(TargetName)\$(Platform)\$(TargetName).pdb</ProgramDataBaseFileName>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
+      <OmitFramePointers>false</OmitFramePointers>
+      <EnableFiberSafeOptimizations>true</EnableFiberSafeOptimizations>
+      <ConformanceMode>true</ConformanceMode>
+      <DisableSpecificWarnings>4005;4201;4702;4061;4714;4820;5045</DisableSpecificWarnings>
+      <EnableEnhancedInstructionSet>NotSet</EnableEnhancedInstructionSet>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+      <RuntimeTypeInfo>true</RuntimeTypeInfo>
+      <UseUnicodeForAssemblerListing>true</UseUnicodeForAssemblerListing>
+      <UseFullPaths>false</UseFullPaths>
+      <SDLCheck>false</SDLCheck>
+      <DiagnosticsFormat>Caret</DiagnosticsFormat>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <FloatingPointExceptions>false</FloatingPointExceptions>
+      <IntelJCCErratum>true</IntelJCCErratum>
+    </ClCompile>
+    <Lib />
+    <Lib />
+    <ProjectReference />
+    <Link>
+      <EnableCOMDATFolding>false</EnableCOMDATFolding>
+      <GenerateDebugInformation>DebugFull</GenerateDebugInformation>
+    </Link>
+    <Bscmake />
+    <Xdcmake />
+    <Xdcmake>
+      <DocumentLibraryDependencies>false</DocumentLibraryDependencies>
+    </Xdcmake>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release (clang)|x64'">
+    <Midl>
+      <TargetEnvironment>X64</TargetEnvironment>
+    </Midl>
+    <ClCompile>
+      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>SK_BUILT_BY_CLANG;NTDDI_VERSION=NTDDI_WIN11_GE;_WIN32_WINNT=_WIN32_WINNT_WIN10;_WIN64;WIN32;NDEBUG;_LIB;_WIN7_PLATFORM_UPDATE;_WIN32_WINNT=0x0601;_CRT_STDIO_ARBITRARY_WIDE_SPECIFIERS;SK_BUILD_DLL=1;SK_EXPORTS;_USRDLL;_WINDOWS;DIRECTINPUT_VERSION=0x0800;GLEW_STATIC;PSAPI_VERSION=1;_CRT_SECURE_NO_WARNINGS;_CRT_NON_CONFORMING_SWPRINTFS;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;STRICT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <WarningLevel>Level4</WarningLevel>
+      <ExceptionHandling>Async</ExceptionHandling>
+      <StringPooling>true</StringPooling>
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <WholeProgramOptimization>true</WholeProgramOptimization>
+      <AdditionalOptions>/GS- /Gs8192 /Zo /Gw /GR /cgthreads8 -O3 -Qunused-arguments -Wno-unused-function -Wno-invalid-offsetof -Wno-unused-parameter -Wno-microsoft-cast -Wno-unused-variable</AdditionalOptions>
+      <ProgramDataBaseFileName>$(SolutionDir)depends\lib\$(TargetName)\$(Platform)\$(TargetName).pdb</ProgramDataBaseFileName>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
+      <OmitFramePointers>false</OmitFramePointers>
+      <EnableFiberSafeOptimizations>true</EnableFiberSafeOptimizations>
+      <ConformanceMode>true</ConformanceMode>
+      <DisableSpecificWarnings>4005;4201;4702;4061;4714;4820;5045</DisableSpecificWarnings>
+      <EnableEnhancedInstructionSet>NotSet</EnableEnhancedInstructionSet>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+      <RuntimeTypeInfo>true</RuntimeTypeInfo>
+      <UseUnicodeForAssemblerListing>true</UseUnicodeForAssemblerListing>
+      <UseFullPaths>false</UseFullPaths>
+      <SDLCheck>false</SDLCheck>
+      <DiagnosticsFormat>Caret</DiagnosticsFormat>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+    </ClCompile>
+    <Lib />
+    <Lib />
+    <ProjectReference />
+    <Link>
+      <EnableCOMDATFolding>false</EnableCOMDATFolding>
+      <GenerateDebugInformation>DebugFull</GenerateDebugInformation>
+    </Link>
+    <Bscmake />
+    <Xdcmake />
+    <Xdcmake>
+      <DocumentLibraryDependencies>false</DocumentLibraryDependencies>
+    </Xdcmake>
+    <Lib />
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="..\..\..\src\SKinHook\buffer.c" />
+    <ClCompile Include="..\..\..\src\SKinHook\hde\hde32.c" />
+    <ClCompile Include="..\..\..\src\SKinHook\hde\hde64.c" />
+    <ClCompile Include="..\..\..\src\SKinHook\hook.c" />
+    <ClCompile Include="..\..\..\src\SKinHook\trampoline.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\..\include\MinHook\MinHook.h" />
+    <ClInclude Include="..\..\..\src\SKinHook\buffer.h" />
+    <ClInclude Include="..\..\..\src\SKinHook\hde\hde32.h" />
+    <ClInclude Include="..\..\..\src\SKinHook\hde\hde64.h" />
+    <ClInclude Include="..\..\..\src\SKinHook\hde\pstdint.h" />
+    <ClInclude Include="..\..\..\src\SKinHook\hde\table32.h" />
+    <ClInclude Include="..\..\..\src\SKinHook\hde\table64.h" />
+    <ClInclude Include="..\..\..\src\SKinHook\trampoline.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="SKinHook.sln" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+</Project>

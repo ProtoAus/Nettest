@@ -73,7 +73,7 @@ float(float now) SH_357TryReload =
     // 357 blocks reload during attack cooldown (unique to this weapon)
     if (now < self.attack_finished)
         return 0;
-    return SH_StandardTryReload(now, mag_357, ammo_357, MAX_MAG_357);
+    return SH_StandardTryReload(now, mag_357, ammo_357, MAX_MAG_357, W357_RELOAD_DURATION);
 };
 
 // ============================================================
@@ -90,8 +90,8 @@ void(entity player) W_357PickupCopy =
 
 void() W_357Shoot =
 {
-    W_StandardHitscanShoot(W357_BASE_SPREAD, W357_MOVE_SPREAD, W357_FULL_SPREAD_SPEED,
-        W357_CLOSE_DAMAGE, W357_MIN_DAMAGE, W357_DAMAGE_FALLOFF_RANGE);
+    W_PenetratingHitscanShoot(W357_BASE_SPREAD, W357_MOVE_SPREAD, W357_FULL_SPREAD_SPEED,
+        W357_CLOSE_DAMAGE, W357_MIN_DAMAGE, W357_DAMAGE_FALLOFF_RANGE, 48, 0.97);
 };
 
 void() W_357Fire =
@@ -197,6 +197,7 @@ void() weapon_357 =
     self.touch         = weapon_touch;
     self.mag_357       = MAX_MAG_357;
     self.ammo_357      = MAX_AMMO_357;
+    W_RegisterMapWeapon(weapon_357);
 };
 
 #endif // SSQC
@@ -227,7 +228,8 @@ void() CSQC_Predict357Command =
                 else
                     sound(self, CHAN_WEAPON, "sounds/weapons/wpn_hl357/fire2.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(W357_BASE_SPREAD, W357_MOVE_SPREAD, W357_FULL_SPREAD_SPEED);
+                CSQC_PredictedImpact(W357_BASE_SPREAD, W357_MOVE_SPREAD, W357_FULL_SPREAD_SPEED,
+                    W357_CLOSE_DAMAGE, W357_MIN_DAMAGE, W357_DAMAGE_FALLOFF_RANGE);
             }
         }
         else if (r == -1)

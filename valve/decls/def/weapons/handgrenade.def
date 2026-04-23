@@ -1,0 +1,92 @@
+#define GRENADE_IDLE 0
+#define GRENADE_FIDGET 1
+#define GRENADE_CHARGE 2
+#define GRENADE_FIRE1 3
+#define GRENADE_FIRE2 4
+#define GRENADE_FIRE3 5
+#define GRENADE_HOLSTER 6
+#define GRENADE_DRAW 7
+
+entityDef weapon_handgrenade
+{
+	"editor_color"		".3 .3 1"
+	"editor_mins"		"-16 -16 -16"
+	"editor_maxs"		"16 16 16"
+	"editor_usage"		"Hand Grenade"
+	"editor_rotatable"	"1"
+
+	"inherit"		"weapon_base"
+	"model"			"models/w_grenade.mdl"
+	"model_player"		"models/p_grenade.mdl"
+	"model_view"		"models/v_grenade.mdl"
+	"animPrefix"		"crowbar"
+
+	"ammoIcon"		"weapon_handgrenade.ammo"
+	"crosshair"		""
+	"icon"			"weapon_handgrenade.weapon"
+	"iconSelected"		"weapon_handgrenade.weapon_s"
+
+	"inv_name"		"Hand Grenade"
+	// do not enable this, because this very well messes with inheritance...
+	//"inv_weapon"		"weapon_handgrenade"
+	"inv_ammo_handgrenade"	"5"
+	"def_onRelease"		"projectile_handgrenade"
+	"def_onFire"		"projectile_handgrenade"
+
+	"ammoType"		"ammo_handgrenade"
+	"ammoRequired"		"1"
+	"silent_fire"		"1"
+	"chargeTime"		"4"
+	"removeOnEmpty"		"1"
+	"drawAfterRelease"	"1"
+
+	"act_idle"		"$GRENADE_IDLE,$GRENADE_FIDGET"
+	"act_draw"		"$GRENADE_DRAW"
+	"act_holster"		"$GRENADE_HOLSTER"
+	"act_fire"		"$GRENADE_DRAW"
+	"act_delay"		"$GRENADE_CHARGE"
+	"act_release"		"$GRENADE_FIRE1,$GRENADE_FIRE2,$GRENADE_FIRE3"
+
+	// hlWeapon specific
+	"hudSlot"		"4"
+	"hudSlotPos"		"0"
+	"weight"		"5"
+	"crosshair"		"none"
+	"fireUnderwater"	"1"
+}
+
+entityDef projectile_handgrenade
+{
+	"spawnclass"		"ncProjectile"
+	"model"			"models/w_grenade.mdl"
+	"frame"			"1"
+	"fuse"			"4"
+	"thrown"		"1"
+	"detonate_on_fuse"	"1"
+	"detonate_offset"	"64"
+	"bounce"		"1"
+	"angular_velocity"	"-350 0 0"
+	"velocity"		"300 0 40"
+	"model_detonate"	"fx_explosion.main"
+	"snd_explode"		"BaseExplosionEffect.Sound"
+	"snd_bounce"		"Weapon_HandGrenade.GrenadeBounce"
+	"decal_detonate"	"ExplosionScorch"
+	"def_damage"		"damage_handgrenadeDirect"
+	"def_splash_damage"	"damage_handgrenadeSplash"
+
+	"explode_light_color"		"1 0.5 0"
+	"explode_light_radius"		"1024"
+	"explode_light_fadetime"	"3"
+}
+
+entityDef damage_handgrenadeDirect
+{
+	"damage"	"1"
+}
+
+entityDef damage_handgrenadeSplash
+{
+	"damage"	"skill:plr_hand_grenade"
+	"radius"	"250"
+	"push"		"7500"
+}

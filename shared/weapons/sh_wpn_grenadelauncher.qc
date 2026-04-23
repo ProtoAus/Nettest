@@ -196,6 +196,7 @@ void() W_GLDrop =
     tgt.weapon = WEP_GRENADELAUNCHER; tgt.weapon_slot = SLOT_PRIMARY;
     tgt.weap_draw = W_GLEquip; tgt.weap_drop_func = W_GLDrop;
     tgt.pickupcopy = W_GLPickupCopy; tgt.touch = weapon_touch;
+    tgt.dropped_spin = 1;
     tgt.think = weapon_become_solid; tgt.nextthink = time + 0.7;
 };
 
@@ -207,7 +208,9 @@ void() weapon_grenadelauncher =
     self.weapon = WEP_GRENADELAUNCHER; self.weapon_slot = SLOT_PRIMARY;
     self.weap_draw = W_GLEquip; self.weap_drop_func = W_GLDrop;
     self.pickupcopy = W_GLPickupCopy; self.touch = weapon_touch;
+    self.dropped_spin = 1;
     self.mag_grenadelauncher = MAX_MAG_GRENADELAUNCHER;
+    W_RegisterMapWeapon(weapon_grenadelauncher);
 };
 
 #endif // SSQC

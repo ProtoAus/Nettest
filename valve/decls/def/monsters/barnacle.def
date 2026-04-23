@@ -1,0 +1,21 @@
+entityDef monster_barnacle
+{
+	"spawnclass"	"ncMonster"
+	"model"			"models/barnacle.mdl"
+	"netname"		"Barnacle"
+	"health"		"skill:barnacle_health"
+	"mins"			"-16 -16 -32"
+	"maxs"			"16 16 0"
+	"eye_height"	"0"
+	"team"			"2"
+	"propdata"		"actor_human"
+
+	"speed_walk"	"0"
+	"speed_run"		"0" // day one only
+	"static"		"1"
+	"def_puke"		"barnacle_gib"
+
+	events {
+		2 "ShootGib"	"gibs_human 200 1"
+	}
+}

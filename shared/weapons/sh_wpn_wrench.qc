@@ -21,7 +21,7 @@ const float WRENCH_FIRE_DELAY         = 0.6;
 const float WRENCH_IDLE_FRAME         = 0;
 
 // --- Balance ---
-const float WRENCH_DAMAGE             = 25;
+const float WRENCH_DAMAGE             = 60;
 const float WRENCH_RANGE              = 64;
 
 // --- Pre-computed state durations ---
@@ -71,6 +71,9 @@ float(float now) SH_WrenchTickState =
 
 float(float now) SH_WrenchTryFire =
 {
+#ifdef CSQC
+    if (cltime < self.csqc_fire_guard) return 0;
+#endif
     if (self.weaponstate == WS_DRAW)
         return 0;
     if (now < self.attack_finished)
@@ -80,6 +83,9 @@ float(float now) SH_WrenchTryFire =
     self.wep_action_id   += 1;
     self.wep_anim_start   = now;
     self.attack_finished  = now + WRENCH_FIRE_DELAY;
+#ifdef CSQC
+    self.csqc_fire_guard  = cltime + WRENCH_FIRE_DELAY;
+#endif
     return 1;
 };
 
@@ -105,18 +111,7 @@ void() W_WrenchSwing =
 
     if (trace_fraction < 1.0)
     {
-        // Debug: send server hit position to shooter only
-        {
-            float saved_dim = dimension_send;
-            dimension_send = self.dimension_seen;
-            WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
-            WriteByte(MSG_MULTICAST, CSQC_EVENT_DEBUG_IMPACT);
-            WriteCoord(MSG_MULTICAST, trace_endpos_x);
-            WriteCoord(MSG_MULTICAST, trace_endpos_y);
-            WriteCoord(MSG_MULTICAST, trace_endpos_z);
-            multicast(trace_endpos, MULTICAST_PVS);
-            dimension_send = saved_dim;
-        }
+        W_DebugImpact(trace_endpos, WRENCH_DAMAGE, W_BoneToHitgroup(trace_bone_id));
 
         if (random() < 0.5)
             sound(self, CHAN_WEAPON, "sounds/weapons/wpn_wrench/wrenchclank1.wav", 1, ATTN_NORM);
@@ -200,6 +195,7 @@ void() W_WrenchDrop =
     tgt.weap_drop_func = W_WrenchDrop;
     tgt.pickupcopy   = W_WrenchPickupCopy;
     tgt.touch        = weapon_touch;
+    tgt.dropped_spin = 1;
     tgt.think        = weapon_become_solid;
     tgt.nextthink    = time + 0.7;
 };
@@ -217,6 +213,8 @@ void() weapon_wrench =
     self.weap_drop_func = W_WrenchDrop;
     self.pickupcopy    = W_WrenchPickupCopy;
     self.touch         = weapon_touch;
+    self.dropped_spin  = 1;
+    W_RegisterMapWeapon(weapon_wrench);
 };
 
 #endif // SSQC
@@ -235,7 +233,7 @@ void() CSQC_PredictWrenchCommand =
         if (SH_WrenchTryFire(csqc_pred_time))
         {
             CSQC_MarkPendingWeaponAck();
-            CSQC_PredictedMeleeTrace(WRENCH_RANGE,
+            CSQC_PredictedMeleeTrace(WRENCH_RANGE, WRENCH_DAMAGE,
                 "sounds/weapons/wpn_wrench/wrenchclank1.wav",
                 "sounds/weapons/wpn_wrench/wrenchclank2.wav",
                 "sounds/weapons/wpn_wrench/wrenchswing.wav");

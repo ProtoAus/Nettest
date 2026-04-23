@@ -1,0 +1,33 @@
+entityDef monster_snark
+{
+	"inherit"	"hlBaseMonster"
+	"spawnclass"		"ncMonster"
+	"model"				"models/w_squeak.mdl"
+	"netname"			"Snark"
+	"health"			"skill:snark_health"
+	"mins"				"-4 -4 0"
+	"maxs"				"4 4 8"
+	"eye_height"		"12"
+	"team"				"3"
+	"propdata"			"actor_alien"
+	"speed_walk"		"128"
+	"speed_run"			"128"
+	"act_idle"			"0"
+	"act_rangeAttack1"	"2"
+	"act_walk"			"3"
+	"act_run"			"3"
+
+	"attack_ranged_range"	"96"
+
+	//					Snark.Deploy
+	"snd_attack"		"Snark.Bounce"
+	"snd_pain"			"Snark.Die"
+	"snd_death"			"Snark.Die"
+	"snd_gib"			"Snark.Gibbed"
+	"leap_damage"		"skill:snark_dmg_bite"
+
+	events {
+		jump "AddVelocity" "512 0 250"
+		jump "StartSoundDef" "Snark.Squeak"
+	}
+}

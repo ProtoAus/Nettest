@@ -13,6 +13,12 @@
 
 float(entity playerent, float changedflags) solid_brush_SendEntity =
 {
+    if (cvar("sv_debug_ent_types") && self.classname == "func_breakable")
+    {
+        bprint(PRINT_HIGH, sprintf("[brush send] ent=%g model='%s' origin=%v\n",
+                                   num_for_edict(self), self.model, self.origin));
+    }
+
     WriteByte(MSG_ENTITY, CSQC_ENT_SOLID_BRUSH);
     WriteString(MSG_ENTITY, self.model);
 
@@ -53,6 +59,32 @@ float(entity playerent, float changedflags) solid_brush_SendEntity =
         WriteByte(MSG_ENTITY, self.mover_state);
         WriteByte(MSG_ENTITY, (self.brush_type == BRUSH_TYPE_DOOR && (self.spawnflags & 64)) ? 1 : 0);
     }
+
+    // Material code (BREAKABLE_*). 0 = default/concrete for non-breakable
+    // brushes — CSQC's local impact classifier reads .style off the
+    // trace_ent so the shooter sees per-material bullet effects without
+    // needing the server's CSQC_EVENT_IMPACT round-trip.
+    WriteByte(MSG_ENTITY, self.style);
+
+    // Current health. Clamped to [0, 32767] and written as a short so the
+    // attacker's CSQC can subtract predicted damage and decide whether the
+    // shot would break the brush, playing the break sound locally without
+    // a server round-trip. Non-breakable brushes report 0 so CSQC can
+    // distinguish "damageable breakable" (health > 0) from "static wall"
+    // (health == 0) without a second flag.
+    WriteShort(MSG_ENTITY, bound(0, self.health, 32767));
+
+    // max_health + cnt let CSQC spawn matching debris gibs locally when
+    // the attacker predicts a break. Same values the server would pass to
+    // CSQC_SpawnGlassGibs / CSQC_SpawnDebrisGibs via the gib events.
+    WriteShort(MSG_ENTITY, bound(0, self.max_health, 32767));
+    WriteByte(MSG_ENTITY, bound(0, self.cnt, 255));
+
+    // Broken flag — func_breakable flips this when destroyed. Client
+    // uses it to toggle drawmask / solid so the brush cleanly reappears
+    // on round restart without relying on engine to re-send after a
+    // SendEntity = __NULL__ transition.
+    WriteByte(MSG_ENTITY, self.breakable_broken ? 1 : 0);
 
     return TRUE;
 };

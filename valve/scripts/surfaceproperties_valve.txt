@@ -1,0 +1,196 @@
+default
+{
+	part_bulletimpact "impact_default.main"
+	bulletimpact "sfx_impact.default"
+	stepleft "Default.StepLeft"
+	stepright "Default.StepRight"
+	scraperough "scrape.default"
+	scrapesmooth "scrape.default"
+}
+
+gs_material_glass
+{
+	gamematerial Y
+	part_bulletimpact "impact_glass.main"
+	bulletimpact "sfx_impact.glass"
+	stepleft "Glass.StepLeft"
+	stepright "Glass.StepRight"
+	break "func_breakable.break_glass"
+}
+
+gs_material_wood
+{
+	gamematerial W
+	part_bulletimpact "impact_default.main"
+	bulletimpact "sfx_impact.wood"
+	stepleft "Wood.StepLeft"
+	stepright "Wood.StepRight"
+	break "func_breakable.break_wood"
+}
+
+gs_material_metal
+{
+	gamematerial M
+	part_bulletimpact "impact_unbreakable.main"
+	bulletimpact "sfx_impact.metal"
+	stepleft "SolidMetal.StepLeft"
+	stepright "SolidMetal.StepRight"
+	break "func_breakable.break_metal"
+}
+
+gs_material_ladder
+{
+	part_bulletimpact "impact_default.main"
+	bulletimpact "sfx_impact.metal"
+	stepleft "Ladder.StepLeft"
+	stepright "Ladder.StepRight"
+}
+
+gs_material_flesh
+{
+	gamematerial F
+	part_bulletimpact "flesh.bulletimpact"
+	bulletimpact "sfx_impact.flesh"
+	stepleft "Flesh.StepLeft"
+	stepright "Flesh.StepRight"
+	break "func_breakable.break_flesh"
+}
+
+gs_material_cinderblock
+{
+	part_bulletimpact "impact_default.main"
+	bulletimpact "sfx_impact.concrete"
+	stepleft "Default.StepLeft"
+	stepright "Default.StepRight"
+	break "func_breakable.break_cinder"
+}
+
+gs_material_tile
+{
+	gamematerial T
+	part_bulletimpact "impact_default.main"
+	bulletimpact "sfx_impact.tile"
+	stepleft "Tile.StepLeft"
+	stepright "Tile.StepRight"
+	break "func_breakable.break_cinder"
+}
+
+gs_material_computer
+{
+	gamematerial P
+	part_bulletimpact "impact_default.main"
+	bulletimpact "sfx_impact.computer"
+	stepleft "Computer.StepLeft"
+	stepright "Computer.StepRight"
+	break "func_breakable.break_computer"
+}
+
+gs_material_unbreakableglass
+{
+	part_bulletimpact "impact_unbreakable.main"
+	bulletimpact "sfx_impact.glass"
+	stepleft "Glass.StepLeft"
+	stepright "Glass.StepRight"
+	break "func_breakable.break_glass"
+}
+
+gs_material_rocks
+{
+	part_bulletimpact "impact_default.main"
+	bulletimpact "sfx_impact.concrete"
+	stepleft "Default.StepLeft"
+	stepright "Default.StepRight"
+	break "func_breakable.break_cinder"
+}
+
+gs_material_concrete
+{
+	gamematerial C
+	part_bulletimpact "impact_default.main"
+	bulletimpact "sfx_impact.concrete"
+	stepleft "Concrete.StepLeft"
+	stepright "Concrete.StepRight"
+	break "func_breakable.break_cinder"
+}
+
+gs_material_dirt
+{
+	gamematerial D
+	part_bulletimpact "impact_default.main"
+	bulletimpact "sfx_impact.dirt"
+	stepleft "Dirt.StepLeft"
+	stepright "Dirt.StepRight"
+	break "func_breakable.break_rocks"
+}
+
+gs_material_grate
+{
+	gamematerial G
+	part_bulletimpact "impact_default.main"
+	bulletimpact "sfx_impact.grate"
+	stepleft "MetalGrate.StepLeft"
+	stepright "MetalGrate.StepRight"
+	break "func_breakable.break_metal"
+}
+
+gs_material_alien
+{
+	gamematerial H
+	part_bulletimpact "alien.bulletimpact"
+	bulletimpact "sfx_impact.alien"
+	stepleft "Alien.StepLeft"
+	stepright "Alien.StepRight"
+	break "func_breakable.break_flesh"
+}
+
+gs_material_foliage
+{
+	gamematerial O
+	part_bulletimpact "impact_default.main"
+	bulletimpact "sfx_impact.foliage"
+	stepleft "Grass.StepLeft"
+	stepright "Grass.StepRight"
+}
+
+gs_material_slosh
+{
+	gamematerial S
+	part_bulletimpact "impact_default.main"
+	bulletimpact "sfx_impact.slosh"
+	stepleft "SlipperySlime.StepLeft"
+	stepright "SlipperySlime.StepRight"
+}
+
+gs_material_vent
+{
+	gamematerial V
+	part_bulletimpact "impact_default.main"
+	bulletimpact "sfx_impact.snow"
+	stepleft "MetalVent.StepLeft"
+	stepright "MetalVent.StepRight"
+	break "func_breakable.break_metal"
+}
+
+water
+{
+	part_bulletimpact "fx_impact.water"
+	bulletimpact "sfx_impact.slosh"
+	stepleft "Water.StepLeft"
+	stepright "Water.StepRight"
+}
+
+lava
+{
+	part_bulletimpact "fx_impact.lava"
+	bulletimpact "sfx_impact.slosh"
+	stepleft "Water.StepLeft"
+	stepright "Water.StepRight"
+}
+
+slime
+{
+	part_bulletimpact "fx_impact.slime"
+	bulletimpact "sfx_impact.slosh"
+	stepleft "SlipperySlime.StepLeft"
+	stepright "SlipperySlime.StepRight"
+}

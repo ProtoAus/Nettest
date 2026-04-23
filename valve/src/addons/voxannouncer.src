@@ -1,0 +1,90 @@
+#pragma PROGS_DAT  "../../plugins/voxannouncer.dat"
+
+#includelist
+../../../src/addon.src
+../shared/events.h
+#endlist
+
+void
+VoxFunc(string strMessage)
+{
+	WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
+	WriteByte(MSG_MULTICAST, EV_CHAT_VOX);
+	WriteString(MSG_MULTICAST, strMessage);
+	msg_entity = world;
+	multicast([0,0,0], MULTICAST_ALL);
+}
+
+void
+Plug_PlayerDeath(entity deadPlayer, entity inflictor, entity attacker, string weaponDef)
+{
+	/* silly announcer */
+	if not (attacker != world && attacker != deadPlayer) {
+		return;
+	}
+
+	int r = floor(random(0,20));
+
+	switch (r) {
+	case 0:
+		VoxFunc("vox/buzwarn vox/go vox/go vox/go");
+		break;
+	case 1:
+		VoxFunc("vox/buzwarn vox/goodbye");
+		break;
+	case 2:
+		VoxFunc("vox/buzwarn vox/woop vox/woop");
+		break;
+	case 3:
+		VoxFunc("vox/buzwarn vox/terminated");
+		break;
+	case 4:
+		VoxFunc("vox/buzwarn vox/to vox/slow vox/pal");
+		break;
+	case 5:
+		VoxFunc("vox/buzwarn vox/that vox/is vox/hot");
+		break;
+	case 6:
+		VoxFunc("vox/buzwarn vox/great vox/kill");
+		break;
+	case 7:
+		VoxFunc("vox/buzwarn vox/good vox/kill");
+		break;
+	case 8:
+		VoxFunc("vox/buzwarn vox/beyond vox/extreme");
+		break;
+	case 9:
+		VoxFunc("vox/buzwarn vox/must vox/explode vox/go vox/bust");
+		break;
+	case 10:
+		VoxFunc("vox/buzwarn vox/supercooled");
+		break;
+	case 11:
+		VoxFunc("vox/buzwarn vox/kill vox/life");
+		break;
+	case 12:
+		VoxFunc("vox/buzwarn vox/kill vox/that vox/pal");
+		break;
+	case 13:
+		VoxFunc("vox/buzwarn vox/explode vox/that vox/pal");
+		break;
+	case 14:
+		VoxFunc("vox/buzwarn vox/life vox/denied");
+		break;
+	case 15:
+		VoxFunc("vox/buzwarn vox/no vox/mercy");
+		break;
+	case 16:
+		VoxFunc("vox/buzwarn vox/target vox/destroyed");
+		break;
+	case 17:
+		VoxFunc("vox/buzwarn vox/adios vox/mister");
+		break;
+	case 18:
+		VoxFunc("vox/buzwarn vox/expect vox/an vox/oscar vox/for vox/that vox/kill");
+		break;
+	default:
+		VoxFunc("vox/buzwarn vox/exterminate vox/exterminate");
+		break;
+	}
+}

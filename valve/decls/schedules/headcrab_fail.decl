@@ -1,0 +1,9 @@
+typeInfo headcrab_fail
+{
+	"task_1"					"StopMovement"
+	"task_2"					"PlayActivity idle"
+	"task_3"					"Wait 2"
+	"task_4"					"WaitPVS"
+	"fail_onCanRangedAttack1"	"1"
+	"NewEnemy"					"PerformSchedule headcrab_combatFace"
+}

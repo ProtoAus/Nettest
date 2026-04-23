@@ -1,0 +1,9 @@
+typeInfo zombie_searchPlayer
+{
+	"task_1"			"TargetNearestPlayer"
+	"task_2"			"RunToEnemyWithinRadius 128"
+	"NewEnemy"		"ChangeMindset combat"
+	"fail_onDeadEnemy"	"1"
+	"fail_onDamage"	"1"
+	"CanMeleeAttack1"	"PerformSchedule zombie_meleeAttack" 
+}

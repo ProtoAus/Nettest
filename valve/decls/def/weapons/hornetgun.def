@@ -1,0 +1,76 @@
+#define HIVE_IDLE 0
+#define HIVE_FIDGET1 1
+#define HIVE_FIDGET2 2
+#define HIVE_HOLSTER 3
+#define HIVE_DRAW 4
+#define HIVE_FIRE 5
+
+entityDef weapon_hornetgun
+{
+	"editor_color"		".3 .3 1"
+	"editor_mins"		"-16 -16 -16"
+	"editor_maxs"		"16 16 16"
+	"editor_usage"		"Hornet Gun"
+	"editor_rotatable"	"1"
+
+	"inherit"		"weapon_base"
+	"model"			"models/w_hgun.mdl"
+	"model_view"		"models/v_hgun.mdl"
+	"animPrefix"		"hive"
+	"killIcon"		"d_grenade"
+
+	// weapon specific
+	"def_fireInfo"		"fireInfo_hornetgun"
+	"def_altFireInfo"	"fireInfo_hornetgunAlt"
+	"inv_name"		"Hornet Gun"
+	"inv_ammo_hornet"	"8"
+
+	"act_fire"		"$HIVE_FIRE"
+	"act_holster"		"$HIVE_HOLSTER"
+	"act_draw"		"$HIVE_DRAW"
+	"act_idle"		"$HIVE_IDLE,$HIVE_FIDGET1,$HIVE_FIDGET2"
+
+	"snd_fire"		"Weapon_Hornetgun.Single"
+
+	// hlWeapon specific
+	"hudSlot"		"3"
+	"hudSlotPos"		"3"
+	"weight"		"10"
+	"regenAmmo"		"1"
+	"regenRate"		"0.7"
+	"fireUnderwater"	"1"
+}
+
+entityDef projectile_hornet
+{
+	"inherit" 	"ranged_agrunt_shot_orange"
+	"damage"	"10"
+	"offset"	"24 8 -16"
+}
+
+entityDef projectile_hornet_red
+{
+	"inherit" 	"ranged_agrunt_shot_red"
+	"damage"	"10"
+	"offset"	"24 8 -16"
+}
+
+entityDef fireInfo_hornetgun
+{
+	"def_onFire"		"projectile_hornet"
+	"ammoType"			"ammo_hornet"
+	"ammoRequired"		"1"
+	"ammoPerShot"		"1"
+	"fireRate"			"1.0"
+	"punchAngle"		"-1 0 0"
+}
+
+entityDef fireInfo_hornetgunAlt
+{
+	"def_onFire"		"projectile_hornet_red"
+	"ammoType"			"ammo_hornet"
+	"ammoRequired"		"1"
+	"ammoPerShot"		"1"
+	"fireRate"			"0.2"
+	"punchAngle"		"-1 0 0"
+}

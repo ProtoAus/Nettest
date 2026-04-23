@@ -1,0 +1,84 @@
+#define GAUSS_IDLE1 0
+#define GAUSS_IDLE2 1
+#define GAUSS_FIDGET 2
+#define GAUSS_SECONDARY_CHARGE 3
+#define GAUSS_SECONDARY_LOOP 4
+#define GAUSS_FIRE1 5
+#define GAUSS_FIRE2 6
+#define GAUSS_HOLSTER 7
+#define GAUSS_DRAW 8
+
+entityDef weapon_gauss
+{
+	"editor_color"		".3 .3 1"
+	"editor_mins"		"-16 -16 -16"
+	"editor_maxs"		"16 16 16"
+	"editor_usage"		"Tau Cannon"
+	"editor_rotatable"	"1"
+
+	"inherit"		"weapon_base"
+	"model"			"models/w_gauss.mdl"
+	"model_player"		"models/p_gauss.mdl"
+	"model_view"		"models/v_gauss.mdl"
+	"animPrefix"		"gauss"
+	"killIcon"		"d_gauss"
+
+	// weapon specific
+	"def_fireInfo"		"fireInfo_gauss"
+	"def_altFireInfo"	"fireInfo_gaussCharge"
+	"inv_ammo_uranium"	"20"
+	"ammoType"			"ammo_uranium"
+	"ammoRequired"		"1"
+	"act_idle"			"$GAUSS_IDLE1,$GAUSS_IDLE2,$GAUSS_IDLE3"
+	"act_draw"			"$GAUSS_DRAW"
+	"act_holster"		"$GAUSS_HOLSTER"
+	"powerAmmo"			"1"
+	"snd_fire"			"Weapon_Gauss.Fire"
+	"snd_empty"			"Weapons.Empty"
+
+	// hlWeapon specific
+	"hudSlot"		"3"
+	"hudSlotPos"	"1"
+	"weight"		"20"
+	"fireUnderwater"	"0"
+}
+
+entityDef projectile_gauss
+{
+	"spawnclass"		"hlGaussBeam"
+}
+
+
+entityDef projectile_gaussCharge
+{
+	"spawnclass"		"hlGaussBeam"
+	"charged"			"1"
+}
+
+entityDef fireInfo_gauss
+{
+	"def_onFire"		"projectile_gauss"
+	"ammoPerShot" 		"2"
+	"fireRate" 			".2"
+	"punchAngle"		"-2 0 0"
+	"act_fire"			"$GAUSS_FIRE1,$GAUSS_FIRE2"
+	"model_flash"		"sprites/muzzleflash2.spr"
+}
+
+entityDef fireInfo_gaussCharge
+{
+	"def_onFire"		"projectile_gaussCharge"
+	"def_onRelease"		"projectile_gaussCharge"
+	"ammoPerShot" 		"5"
+	"fireRate" 			"2"
+	"punchAngle"		"-2 0 0"
+	"model_flash"		"sprites/muzzleflash2.spr"
+	"snd_fireStart"		"Weapon_Gauss.Spin"
+	"snd_fire"			"Weapon_Gauss.StaticDischarge"
+	"snd_release"		"Weapon_Gauss.Fire"
+	"chargeTime"		"5"
+	"act_release"		"$GAUSS_FIRE1,$GAUSS_FIRE2"
+	"act_delay"			"$GAUSS_SECONDARY_CHARGE"
+	"act_loop"			"$GAUSS_SECONDARY_LOOP"
+	"knockbackRelease"	"384"
+}

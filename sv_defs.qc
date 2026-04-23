@@ -404,6 +404,19 @@ int serverid;	/* The unique id of this server within the server cluster. */
 .float frame1time;	/* This controls the time into the framegroup/animation named by .frame, you should increment this value according to frametime or to distance moved, depending on the sort of animation you're attempting. You may wish to avoid incrementing this while lerpfrac is still changing, to avoid wasting parts of the animation. */
 .float basebone;	/* The base* frame animations are equivelent to their non-base versions, except that they only affect bone numbers below the 'basebone' value. This means that the base* animation can affect the legs of a skeletal model independantly of the normal animation fields affecting the torso area. For more complex animation than this, use skeletal objects. */
 .float baseframe;	/* See basebone */
+// Half-Life model bone controllers and subblend fractions.
+// Available server-side after the HALFLIFEMODEL_FIELDS engine patch
+// (moved from csqcextfields → comextqcfields in progdefs.h).
+// MOVE_HITMODEL traces use these via SVPR_Get_FrameState.
+.float bonecontrol1;
+.float bonecontrol2;
+.float bonecontrol3;
+.float bonecontrol4;
+.float bonecontrol5;
+.float subblendfrac;
+.float subblend2frac;
+.float basesubblendfrac;
+.float basesubblend2frac;
 .void() customphysics;	/* Called once each physics frame, overriding the entity's .movetype field and associated logic. You'll probably want to use tracebox to move it through the world. Be sure to call .think as appropriate. */
 .entity tag_entity;
 .float tag_index;
@@ -485,7 +498,7 @@ float parm17, parm18, parm19, parm20, parm21, parm22, parm23, parm24, parm25, pa
 float parm33, parm34, parm35, parm36, parm37, parm38, parm39, parm40, parm41, parm42, parm43, parm44, parm45, parm46, parm47, parm48;
 float parm49, parm50, parm51, parm52, parm53, parm54, parm55, parm56, parm57, parm58, parm59, parm60, parm61, parm62, parm63, parm64;
 var float dimension_send;	/* Used by multicast functionality. Multicasts (and related builtins that multicast internally) will only be sent to players where (player.dimension_see & dimension_send) is non-zero. */
-//var float dimension_default = 255;
+var float dimension_default = 255;
 /* Default dimension bitmask */
 __used var float physics_mode = 2;	/* 0: original csqc - physics are not run
 1: DP-compat. Thinks occur, but not true movetypes.

@@ -1,0 +1,12 @@
+typeInfo agrunt_combatFace
+{
+	"task_1"				"StopMovement"
+	"task_2"				"PlayActivity idleAngry"
+	"task_3"				"TurnToEnemy"
+	"task_4"				"PerformSchedule agrunt_sweep"
+	"fail_onDeadEnemy"		"1"
+	"fail_onDamage"			"1"
+	"CanRangedAttack1"		"PerformSchedule agrunt_rangedAttack1A"
+	"CanRangedAttack2"		"PerformSchedule agrunt_rangedAttack2"
+	"Damage"				"AlertSquadWithMindset defense"
+}

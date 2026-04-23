@@ -1,0 +1,34 @@
+fx.explosion
+{
+	distshader fx.explosion_dist
+	sample weapons/explode3.wav
+	sample weapons/explode4.wav
+	sample weapons/explode5.wav
+	shakes 3.0
+}
+
+fx.explosion_dist
+{
+	sample ambience/distantmortar1.wav
+	sample ambience/distantmortar1.wav
+	sample ambience/distantmortar1.wav
+	volume 1.0
+}
+
+fx.gaussbeam
+{
+	sample weapons/electro4.wav
+	sample weapons/electro5.wav
+	sample weapons/electro6.wav
+} 
+
+DoSpark
+{
+	attenuation idle
+	sample buttons/spark1.wav
+	sample buttons/spark2.wav
+	sample buttons/spark3.wav
+	sample buttons/spark4.wav
+	sample buttons/spark5.wav
+	sample buttons/spark6.wav
+}

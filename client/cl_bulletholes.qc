@@ -70,6 +70,21 @@ void() CSQC_BulletHolesWipeAll =
     bh_count = 0;
 };
 
+// --- Remove all bullet holes belonging to a specific entity ---
+// Called when a func_breakable is destroyed so holes don't float in air.
+void(entity owner_ent) CSQC_BulletHolesRemoveByOwner =
+{
+    entity hole, next;
+    hole = bh_head;
+    while (hole)
+    {
+        next = hole.bh_next;
+        if (hole.owner == owner_ent)
+            CSQC_BulletHoleRemove(hole);
+        hole = next;
+    }
+};
+
 // --- Per-frame: update dynamic holes, reset frame cap ---
 void() CSQC_BulletHolesStartFrame =
 {
@@ -103,6 +118,10 @@ void(vector hit_pos, vector hit_normal, entity hit_target) CSQC_SpawnBulletHole 
 
     // Only on world or BSP entities
     if (hit_target != world && (!hit_target || hit_target.solid != SOLID_BSP))
+        return;
+
+    // No bullet holes on sky
+    if (pointcontents(hit_pos - hit_normal * 2) == CONTENT_SKY)
         return;
 
     if (bh_frame_count >= BULLETHOLE_MAX_PER_FRAME)

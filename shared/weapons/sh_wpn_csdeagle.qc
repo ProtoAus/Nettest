@@ -38,8 +38,8 @@ const float MAX_AMMO_DEAGLE          = 35;
 const float DEAGLE_BASE_SPREAD          = 0.008;
 const float DEAGLE_MOVE_SPREAD          = 0.06;
 const float DEAGLE_FULL_SPREAD_SPEED    = 320;
-const float DEAGLE_CLOSE_DAMAGE         = 54;
-const float DEAGLE_MIN_DAMAGE           = 34;
+const float DEAGLE_CLOSE_DAMAGE         = 27;
+const float DEAGLE_MIN_DAMAGE           = 18;
 const float DEAGLE_DAMAGE_FALLOFF_RANGE = 4096;
 const float DEAGLE_DRYFIRE_DELAY        = 0.2;
 
@@ -75,7 +75,7 @@ float(float now) SH_DeagleTryFire =
 // Returns: 1 = reload started, 0 = blocked
 float(float now) SH_DeagleTryReload =
 {
-    return SH_StandardTryReload(now, mag_deagle, ammo_deagle, MAX_MAG_DEAGLE);
+    return SH_StandardTryReload(now, mag_deagle, ammo_deagle, MAX_MAG_DEAGLE, DEAGLE_RELOAD_DURATION);
 };
 
 // ============================================================
@@ -93,8 +93,8 @@ void(entity player) W_DeaglePickupCopy =
 
 void() W_DeagleShoot =
 {
-    W_StandardHitscanShoot(DEAGLE_BASE_SPREAD, DEAGLE_MOVE_SPREAD, DEAGLE_FULL_SPREAD_SPEED,
-        DEAGLE_CLOSE_DAMAGE, DEAGLE_MIN_DAMAGE, DEAGLE_DAMAGE_FALLOFF_RANGE);
+    W_PenetratingHitscanShoot(DEAGLE_BASE_SPREAD, DEAGLE_MOVE_SPREAD, DEAGLE_FULL_SPREAD_SPEED,
+        DEAGLE_CLOSE_DAMAGE, DEAGLE_MIN_DAMAGE, DEAGLE_DAMAGE_FALLOFF_RANGE, 32, 0.96);
 };
 
 // Fire — called by W_WeaponFrame when button0 pressed (self = player)
@@ -217,6 +217,7 @@ void() weapon_deagle =
     self.touch         = weapon_touch;
     self.mag_deagle    = MAX_MAG_DEAGLE;
     self.ammo_deagle   = MAX_AMMO_DEAGLE;
+    W_RegisterMapWeapon(weapon_deagle);
 };
 
 #endif // SSQC
@@ -248,7 +249,8 @@ void() CSQC_PredictDeagleCommand =
                 else
                     localsound("sounds/weapons/wpn_csdeagle/fire2.wav");
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(DEAGLE_BASE_SPREAD, DEAGLE_MOVE_SPREAD, DEAGLE_FULL_SPREAD_SPEED);
+                CSQC_PredictedImpact(DEAGLE_BASE_SPREAD, DEAGLE_MOVE_SPREAD, DEAGLE_FULL_SPREAD_SPEED,
+                    DEAGLE_CLOSE_DAMAGE, DEAGLE_MIN_DAMAGE, DEAGLE_DAMAGE_FALLOFF_RANGE);
                 CSQC_SpawnCasing("models/weapons/9mmcasing.mdl",
                     '8 -6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }

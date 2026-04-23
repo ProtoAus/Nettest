@@ -1,0 +1,36 @@
+entityDef monster_headcrab
+{
+	"inherit"	"hlBaseMonster"
+	"spawnclass"		"ncMonster"
+	"model"				"models/headcrab.mdl"
+	"netname"			"Headcrab"
+	"health"			"skill:headcrab_health"
+	"mins"				"-16 -16 0"
+	"maxs"				"16 16 72"
+	"eye_height"		"12"
+	"team"				"2"
+	"propdata"			"actor_alien"
+	"speed_walk"		"32"
+	"speed_run"			"72"
+
+	"attack_ranged_range"	"180" // needs launch attack
+
+	"snd_idle"				"Headcrab.Idle"
+	"snd_pain"				"Headcrab.Pain"
+	"snd_death"				"Headcrab.Die"
+	"snd_melee_attack_hit"	"Headcrab.Bite"
+	"leap_damage"			"skill:headcrab_dmg_bite"
+
+	"mindset_idle"			"headcrab_idle"
+	"mindset_combat"		"headcrab_combatFace"
+	"mindset_hunt"			"headcrab_searchEnemy"
+
+	events {
+		jump "AddVelocity" "512 0 250"
+		jump "StartSoundDef" "Headcrab.Attack"
+		jump_variation1 "AddVelocity" "512 0 350"
+		jump_variation1 "StartSoundDef" "Headcrab.Attack"
+		jump_variation2 "AddVelocity" "512 0 350"
+		jump_variation2 "StartSoundDef" "Headcrab.Attack"
+	}
+}

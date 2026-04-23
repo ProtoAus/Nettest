@@ -1,0 +1,8 @@
+entityDef monster_tripmine
+{
+	"spawnclass"	"hlTripmine"
+	"snd_precache1"	"TripmineGrenade.Charge"
+	"snd_precache2"	"TripmineGrenade.Activate"
+
+	"model"			"models/v_tripmine.mdl"
+}

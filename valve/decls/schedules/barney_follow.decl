@@ -1,0 +1,5 @@
+typeInfo barney_follow
+{
+	"task_1"			"TargetActivator"
+	"task_2"			"RunToTargetWithinRadius 96"
+}

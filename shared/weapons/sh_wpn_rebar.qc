@@ -29,8 +29,8 @@ const float REBAR_IDLE_FRAME          = 0;
 const float MAX_MAG_REBAR             = 12;
 
 // --- Balance ---
-const float REBAR_CLOSE_DAMAGE        = 75;
-const float REBAR_MIN_DAMAGE          = 60;
+const float REBAR_CLOSE_DAMAGE        = 110;
+const float REBAR_MIN_DAMAGE          = 100;
 const float REBAR_DAMAGE_FALLOFF_RANGE = 4096;
 const float REBAR_DRYFIRE_DELAY       = 0.2;
 const float REBAR_VISUAL_SPEED        = 3000;   // visual projectile speed (hitscan is instant, this is cosmetic)
@@ -112,18 +112,7 @@ void() W_RebarShoot =
             stuck.nextthink = time + 30;
         }
 
-        // Debug: send server hit position to shooter only
-        {
-            float dbg_saved_dim = dimension_send;
-            dimension_send = self.dimension_seen;
-            WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
-            WriteByte(MSG_MULTICAST, CSQC_EVENT_DEBUG_IMPACT);
-            WriteCoord(MSG_MULTICAST, trace_endpos_x);
-            WriteCoord(MSG_MULTICAST, trace_endpos_y);
-            WriteCoord(MSG_MULTICAST, trace_endpos_z);
-            multicast(trace_endpos, MULTICAST_PVS);
-            dimension_send = dbg_saved_dim;
-        }
+        W_DebugImpact(trace_endpos, W_LinearDamageFalloff(dist, REBAR_CLOSE_DAMAGE, REBAR_MIN_DAMAGE, REBAR_DAMAGE_FALLOFF_RANGE), W_BoneToHitgroup(trace_bone_id));
 
         // Exclude shooter from stick sound — they hear it from client prediction
         saved_dim = dimension_send;
@@ -185,6 +174,7 @@ void() W_RebarDrop =
     tgt.weapon = WEP_REBAR; tgt.weapon_slot = SLOT_PRIMARY;
     tgt.weap_draw = W_RebarEquip; tgt.weap_drop_func = W_RebarDrop;
     tgt.pickupcopy = W_RebarPickupCopy; tgt.touch = weapon_touch;
+    tgt.dropped_spin = 1;
     tgt.think = weapon_become_solid; tgt.nextthink = time + 0.7;
 };
 
@@ -196,7 +186,9 @@ void() weapon_rebar =
     self.weapon = WEP_REBAR; self.weapon_slot = SLOT_PRIMARY;
     self.weap_draw = W_RebarEquip; self.weap_drop_func = W_RebarDrop;
     self.pickupcopy = W_RebarPickupCopy; self.touch = weapon_touch;
+    self.dropped_spin = 1;
     self.mag_rebar = MAX_MAG_REBAR;
+    W_RegisterMapWeapon(weapon_rebar);
 };
 
 #endif // SSQC
@@ -232,10 +224,13 @@ void() CSQC_PredictRebarCommand =
                     {
                         vector hit_pos = trace_endpos;
                         vector hit_normal = trace_plane_normal;
+                        float  hit_damage = W_LinearDamageFalloff(
+                            vlen(hit_pos - fire_org),
+                            REBAR_CLOSE_DAMAGE, REBAR_MIN_DAMAGE, REBAR_DAMAGE_FALLOFF_RANGE);
 
-                        CSQC_BulletImpact(hit_pos, hit_normal);
+                        CSQC_BulletImpact(hit_pos, hit_normal, hit_damage);
                         if (cvar("cl_debug_impacts"))
-                            CSQC_AddDebugImpact(hit_pos, fire_org, '0 1 0');
+                            CSQC_AddDebugImpact(hit_pos, fire_org, '0 1 0', 0, 0);
                         localsound("sounds/weapons/wpn_rebar/stick.wav");
 
                         entity stuck = spawn();

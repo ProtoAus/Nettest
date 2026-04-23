@@ -1,0 +1,173 @@
+entityDef monster_human_grunt
+{
+	"inherit"	"hlBaseMonster"
+	"spawnclass"	"ncTalkMonster"
+	"model"			"models/hgrunt.mdl"
+	"netname"		"Grunt"
+	"health"		"skill:hgrunt_health"
+	"mins"			"-16 -16 0"
+	"maxs"			"16 16 72"
+	"eye_height"	"64"
+	"team"			"1"
+	"propdata"		"actor_human"
+	"speed_walk"	"41"
+	"speed_run"		"304"
+
+	// melee attack
+	"def_attack_melee"		"melee_hgrunt_kick"
+	"attack_melee_range"	"96"
+	"snd_melee_attack"		"HGrunt.Kick"
+
+	// primary ranged attack
+	"def_attack_ranged"		"ranged_hgrunt_mp5"
+	"snd_ranged_attack"		"HGrunt.9MM"
+	"attack_ranged_range"	"1024"
+	"reload_count"			"30"
+
+	// special attack
+	"def_attack_special_1"	"projectile_hgrunt_grenade"
+	"attack_special_range"	"1024"
+	"projectile_delay"		"1.0"
+
+	"talk_answer"			"!HG_ANSWER"
+	"talk_ask"				"!HG_QUEST"
+	"talk_idle"				"!HG_IDLE"
+	"snd_pain"				"HGrunt.Pain"
+	"snd_death"				"HGrunt.Die"
+	"snd_reload"			"HGrunt.Reload"
+	"weapons"				"3"
+
+	"mindset_idle"			"hgrunt_idle"
+	"mindset_defense"		"hgrunt_takeCover"
+	"mindset_combat"		"hgrunt_combatFace"
+	"mindset_hunt"			"hgrunt_searchPlayer"
+
+	"squad_leader_body"		"1:2"
+
+	// grenade launcher
+	when "weapons" contains 4 {
+		"body1"					"4"
+		"def_attack_special_1"	"projectile_hgrunt_ARgrenade"
+		"skin"					"1"
+	}
+
+	// shotgun grunt
+	when "weapons" contains 8 {
+		"body2"				"2"
+		"reload_count"		"8"
+		"snd_ranged_attack"	"HGrunt.Shotgun"
+		"def_attack_ranged"	"ranged_hgrunt_shot"
+	}
+
+	when "spawnflags" contains 32 {
+		"squad_leader"		"1"
+	}
+
+	// animation event callbacks
+	events {
+		2 "StartSoundDef"	"HGrunt.Reload"
+		3 "SpawnProjectileDef"	"melee_hgrunt_kick"
+		4 "SpawnProjectileDef"	"ranged_hgrunt_mp5"
+		5 "SpawnProjectileDef"	"ranged_hgrunt_mp5"
+		6 "SpawnProjectileDef"	"ranged_hgrunt_mp5"
+		7 "SpawnProjectileDef"	"projectile_hgrunt_grenade"
+		8 "SpawnProjectileDef"	"projectile_hgrunt_ARgrenade"
+		9 "SpawnProjectileDef"	"projectile_hgrunt_grenadePlant"
+	}
+}
+
+entityDef melee_hgrunt_kick
+{
+	"spawnclass"	"ncProjectile"
+	"is_bullet"		"1"
+	"damage"		"skill:hgrunt_kick"
+	"delay"			"0.25"
+	"range"			"64"
+}
+
+entityDef ranged_hgrunt_mp5
+{
+	"inherit"		"projectile_bullet_base"
+	"damage"		"skill:hgrunt_pellets"
+	"burst"			"3"
+	"burst_delay"	"0.5"
+	"delay"			"0.1"
+}
+
+entityDef ranged_hgrunt_shot
+{
+	"inherit"		"projectile_bullet_base"
+	"damage"		"skill:hgrunt_pellets"
+	"delay"			"1.0"
+}
+
+entityDef projectile_hgrunt_ARgrenade
+{
+	"spawnclass"				"ncProjectile"
+	"model"						"models/grenade.mdl"
+
+	"def_splash_damage"			"damage_grenadeSplash"
+
+	"health"					"0"
+	"velocity"					"800 0 400"
+	"angular_velocity"			"300 300 300"
+	"fuse"						"4"
+	"bounce"					"1"
+	"detonate_on_fuse"			"1"
+	"detonate_on_death"			"0"
+	"detonate_on_world"			"1"
+	"detonate_on_actor"			"1"
+	"impact_damage_effect"		"1"
+	"impact_gib"				"1"
+
+	"model_detonate"			"fx_explosion.main"
+
+	"explode_light_color"		"2 1.6 0.8"
+	"explode_light_radius"		"320"
+	"explode_light_fadetime"	"0.5"
+
+	"snd_explode"				"weapon_handgrenade.explode"
+	"snd_bounce"				"weapon_handgrenade.bounce"
+}
+
+entityDef projectile_hgrunt_grenade
+{
+	"spawnclass"				"ncProjectile"
+	"model"						"models/w_grenade.mdl"
+
+	"def_splash_damage"			"damage_grenadeSplash"
+
+	"health"					"0"
+	"velocity"					"600 0 200"
+	"angular_velocity"			"300 300 300"
+	"fuse"						"4"
+	"bounce"					"1"
+	"detonate_on_fuse"			"1"
+	"detonate_on_death"			"0"
+	"detonate_on_world"			"0"
+	"detonate_on_actor"			"0"
+	"impact_damage_effect"		"1"
+	"impact_gib"				"1"
+
+	"model_detonate"			"fx_explosion.main"
+
+	"explode_light_color"		"2 1.6 0.8"
+	"explode_light_radius"		"320"
+	"explode_light_fadetime"	"0.5"
+
+	"snd_explode"				"BaseExplosionEffect.Sound"
+	"snd_bounce"				"Weapon_HandGrenade.GrenadeBounce"
+}
+
+entityDef projectile_hgrunt_grenadePlant
+{
+	"inherit"					"projectile_hgrunt_grenade"
+	"velocity"					"15 0 128"
+}
+
+entityDef damage_grenadeSplash
+{
+	"damage"	"150"
+	"radius"	"160"
+}
+

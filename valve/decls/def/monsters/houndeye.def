@@ -1,0 +1,43 @@
+entityDef monster_houndeye
+{
+	"inherit"	"hlBaseMonster"
+	"spawnclass"			"ncMonster"
+	"model"					"models/houndeye.mdl"
+	"netname"				"Houndeye"
+	"health"				"skill:houndeye_health"
+	"mins"					"-16 -16 0"
+	"maxs"					"16 16 72"
+	"eye_height"			"32"
+	"team"					"2"
+	"propdata"				"actor_alien"
+	"speed_walk"			"32"
+	"speed_run"				"192"
+
+	"attack_ranged_range"	"192"
+
+	"snd_idle"				"HoundEye.Idle"
+	"snd_pain"				"HoundEye.Pain"
+	"snd_death"				"HoundEye.Die"
+
+	"mindset_idle"			"houndeye_idle"
+	"mindset_defense"		"houndeye_takeCover"
+	"mindset_combat"		"houndeye_combatFace"
+	"mindset_hunt"			"houndeye_searchPlayer"
+
+	events {
+		1 "StartSoundDef" "HoundEye.Alert"
+
+		2 "StartSoundDef" "HoundEye.Warn"
+
+		3 "Shockwave" "sprites/shockwave.spr 192 0 0 2 16 0 255 255 255 255 0"
+		3 "StartSoundDef" "HoundEye.Sonic"
+
+		4 "AddVelocity" "-200 0 250"
+
+		5 "StartSoundDef" "HoundEye.Pain"
+
+		6 "StartSoundDef" "HoundEye.Pain"
+
+		7 "SetSkin" "0"
+	}
+}

@@ -121,18 +121,7 @@ void() W_CrowbarSwing =
 
     if (trace_fraction < 1.0)
     {
-        // Debug: send server hit position to shooter only
-        {
-            float saved_dim = dimension_send;
-            dimension_send = self.dimension_seen;
-            WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
-            WriteByte(MSG_MULTICAST, CSQC_EVENT_DEBUG_IMPACT);
-            WriteCoord(MSG_MULTICAST, trace_endpos_x);
-            WriteCoord(MSG_MULTICAST, trace_endpos_y);
-            WriteCoord(MSG_MULTICAST, trace_endpos_z);
-            multicast(trace_endpos, MULTICAST_PVS);
-            dimension_send = saved_dim;
-        }
+        W_DebugImpact(trace_endpos, CROWBAR_DAMAGE, W_BoneToHitgroup(trace_bone_id));
 
         // Pick a hit animation
         if (random() < 0.5)
@@ -254,6 +243,7 @@ void() weapon_hlcrowbar =
     self.weapon = WEP_HLCROWBAR; self.weapon_slot = SLOT_MELEE;
     self.weap_draw = W_CrowbarEquip; self.weap_drop_func = W_CrowbarDrop;
     self.pickupcopy = W_CrowbarPickupCopy; self.touch = weapon_touch;
+    W_RegisterMapWeapon(weapon_hlcrowbar);
 };
 
 #endif // SSQC
@@ -279,7 +269,7 @@ void() CSQC_PredictCrowbarCommand =
         if (SH_CrowbarTryFire(csqc_pred_time))
         {
             CSQC_MarkPendingWeaponAck();
-            did_hit = CSQC_PredictedMeleeTrace(CROWBAR_RANGE,
+            did_hit = CSQC_PredictedMeleeTrace(CROWBAR_RANGE, CROWBAR_DAMAGE,
                 "sounds/weapons/wpn_hlcrowbar/hitwall1.wav",
                 "sounds/weapons/wpn_hlcrowbar/hitwall2.wav",
                 "sounds/weapons/wpn_hlcrowbar/miss.wav");

@@ -82,13 +82,46 @@ void() SH_WeaponEnterIdle =
 
 #ifdef CSQC
 void() CSQC_MuzzleFlash;
-void(vector pos, vector eye_pos, vector colour) CSQC_AddDebugImpact;
-void(vector pos, vector normal) CSQC_BulletImpact;
+void(vector pos, vector eye_pos, vector colour, float damage, float hitgroup) CSQC_AddDebugImpact;
+void(vector pos, vector normal, float damage) CSQC_BulletImpact;
+void() HUD_TriggerHitmarker;
 void(vector pos, vector normal) CSQC_BulletImpactSilent;
+
+// Send a hitclaim to the server. Fires when a predicted weapon trace hits
+// a remote player's visual proxy or engine slot. Server gates acceptance
+// on sv_trust_clienthits (1=soft: apply claim + sanity checks, 2=full:
+// apply without checks, 0=ignore). Client gate cl_predict_hits default on.
+// Gated on !pm_suppress_sounds so the claim isn't re-sent on reconcile
+// replay passes for the same shot.
+//
+// `bone_id` is FTE's trace_bone_id from a MOVE_HITMODEL traceline — 1-based
+// index into the target's skeleton; 0 means "no bone info" (body damage
+// only). The server looks up the hitgroup multiplier so headshot bonuses
+// carry through claim-rescued hits.
+void(entity target, float damage, float bone_id) CSQC_SendHitclaim =
+{
+    if (pm_suppress_sounds) return;
+    if (!cvar("cl_predict_hits")) return;
+
+    float target_slot;
+    if (target.classname == "player_visual_proxy")
+        target_slot = target.vis_owner_entnum;
+    else
+        target_slot = target.entnum;
+
+    if (target_slot <= 0 || target_slot > 32) return;
+
+    // Wire format: "hitclaim <slot> <body_damage> <bone_id>". Body damage
+    // is the pre-multiplier falloff value; server applies hitgroup scale.
+    localcmd(sprintf("cmd hitclaim %g %g %g\n", target_slot, damage, bone_id));
+};
 
 // Fire a predicted traceline and show impact effect instantly.
 // Called from per-weapon CSQC prediction after a successful fire.
-void(float spread_base, float spread_move, float spread_fullspeed) CSQC_PredictedImpact =
+// Damage params are passed through to CSQC_BulletImpact so breakable-break
+// prediction can subtract the shot's damage from the brush's replicated HP.
+void(float spread_base, float spread_move, float spread_fullspeed,
+     float close_dmg, float min_dmg, float falloff_range) CSQC_PredictedImpact =
 {
     vector src, dir, end, flat_vel;
     float move_speed, spread, sx, sy;
@@ -119,18 +152,51 @@ void(float spread_base, float spread_move, float spread_fullspeed) CSQC_Predicte
         dir = fwd;
     end = src + dir * 8192;
 
-    traceline(src, end, MOVE_NORMAL, self);
+    // MOVE_HITMODEL refines into model hitboxes (bones) when the trace
+    // enters a SOLID entity. Visual proxies on CSQC are SOLID_BBOX with
+    // the player MDL — so trace_endpos lands on the actual hit bone if a
+    // bone was hit, or continues to the wall behind if all bones were
+    // missed. Either way the visual matches reality.
+    traceline(src, end, MOVE_NORMAL | MOVE_HITMODEL, self);
 
     if (trace_fraction < 1.0)
     {
-        CSQC_BulletImpact(trace_endpos, trace_plane_normal);
+        // Player hit if we landed on the engine player entity (entnum
+        // 1..maxclients) OR on a visual proxy. Hitmarker only — server's
+        // CSQC_EVENT_IMPACT delivers the flesh particle at the same
+        // hitbox-precise position ~ping ms later.
+        float is_player_hit =
+            (trace_ent != world && trace_ent.entnum >= 1 && trace_ent.entnum <= maxclients)
+            || (trace_ent.classname == "player_visual_proxy");
+
+        // Falloff result is the same number the server will apply (before
+        // hitgroup multiplier) — compute once, use for both breakable HP
+        // prediction and the player hitclaim.
+        float dist   = vlen(trace_endpos - src);
+        float damage = W_LinearDamageFalloff(dist, close_dmg, min_dmg, falloff_range);
+
+        if (is_player_hit)
+        {
+            if (cvar("cl_hitmarker") && !pm_suppress_sounds)
+            {
+                localsound("sounds/weapons/hitmarker.wav");
+                HUD_TriggerHitmarker();
+            }
+            CSQC_SendHitclaim(trace_ent, damage, trace_bone_id);
+        }
+        else
+        {
+            CSQC_BulletImpact(trace_endpos, trace_plane_normal, damage);
+        }
         if (cvar("cl_debug_impacts"))
-            CSQC_AddDebugImpact(trace_endpos, src, '0 1 0');
+            CSQC_AddDebugImpact(trace_endpos, src, '0 1 0', 0, 0);
     }
 };
 
-// Fire N predicted pellets (shotgun).
-void(float pellets, float spread_val) CSQC_PredictedShotgunImpact =
+// Fire N predicted pellets (shotgun). Damage params match the server's
+// per-pellet falloff so break prediction agrees with authoritative HP math.
+void(float pellets, float spread_val,
+     float close_dmg, float min_dmg, float falloff_range) CSQC_PredictedShotgunImpact =
 {
     vector src, dir, end;
     vector fwd, rt, up;
@@ -151,20 +217,48 @@ void(float pellets, float spread_val) CSQC_PredictedShotgunImpact =
         dir = normalize(fwd + rt * sx + up * sy);
         end = src + dir * 8192;
 
-        traceline(src, end, MOVE_NORMAL, self);
+        traceline(src, end, MOVE_NORMAL | MOVE_HITMODEL, self);
 
         if (trace_fraction < 1.0)
         {
-            CSQC_BulletImpact(trace_endpos, trace_plane_normal);
+            float is_player_hit =
+                (trace_ent != world && trace_ent.entnum >= 1 && trace_ent.entnum <= maxclients)
+                || (trace_ent.classname == "player_visual_proxy");
+
+            float dist   = vlen(trace_endpos - src);
+            float damage = W_LinearDamageFalloff(dist, close_dmg, min_dmg, falloff_range);
+
+            if (is_player_hit)
+            {
+                if (cvar("cl_hitmarker") && !pm_suppress_sounds)
+                {
+                    localsound("sounds/weapons/hitmarker.wav");
+                    HUD_TriggerHitmarker();
+                }
+                CSQC_SendHitclaim(trace_ent, damage, trace_bone_id);
+            }
+            else
+            {
+                CSQC_BulletImpact(trace_endpos, trace_plane_normal, damage);
+            }
             if (cvar("cl_debug_impacts"))
-                CSQC_AddDebugImpact(trace_endpos, src, '0 1 0');
+                CSQC_AddDebugImpact(trace_endpos, src, '0 1 0', 0, 0);
         }
     }
 };
 
 // Fire a predicted melee trace and show hit effect / play hit sound.
 // Returns TRUE if something was hit.
-float(float range, string hit_snd1, string hit_snd2, string miss_snd) CSQC_PredictedMeleeTrace =
+//
+// `damage` is used to (a) send a hitclaim to the server when a player
+// proxy is hit, and (b) predict func_breakable destruction locally so
+// crates/glass break instantly on the attacker's screen — matches the
+// bullet feel at high ping. Melee uses MOVE_NORMAL (no hitbox refine),
+// so trace_bone_id is 0 and claims register as body damage — no melee
+// headshot multiplier. Upgrade to MOVE_HITMODEL if you want that later.
+void(entity target, float damage) CSQC_PredictBreakableBreak;
+float(float range, float damage,
+      string hit_snd1, string hit_snd2, string miss_snd) CSQC_PredictedMeleeTrace =
 {
     vector src, end;
 
@@ -176,9 +270,25 @@ float(float range, string hit_snd1, string hit_snd2, string miss_snd) CSQC_Predi
 
     if (trace_fraction < 1.0)
     {
+        float is_player_hit =
+            (trace_ent != world && trace_ent.entnum >= 1 && trace_ent.entnum <= maxclients)
+            || (trace_ent.classname == "player_visual_proxy");
+
+        if (is_player_hit)
+        {
+            CSQC_SendHitclaim(trace_ent, damage, 0);   // melee = body damage only
+        }
+        else
+        {
+            // Predict breakable destruction locally so the attacker sees
+            // the crate / glass hide instantly instead of waiting ~ping ms
+            // for the server's solid_brush_SendEntity update.
+            CSQC_PredictBreakableBreak(trace_ent, damage);
+        }
+
         CSQC_BulletImpactSilent(trace_endpos, trace_plane_normal);
         if (cvar("cl_debug_impacts"))
-            CSQC_AddDebugImpact(trace_endpos, src, '0 1 0');
+            CSQC_AddDebugImpact(trace_endpos, src, '0 1 0', 0, 0);
         if (hit_snd2 != "" && random() < 0.5)
             localsound(hit_snd2);
         else if (hit_snd1 != "")

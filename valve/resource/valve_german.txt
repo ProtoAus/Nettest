@@ -1,0 +1,10 @@
+"lang"
+{
+	"Language" "German"
+	"Tokens"
+	{
+		"USERINFO_HELP" "Klicken sie auf einen Spielereintrag um Informationen ueber diesen Spielern herauszufinden.    Die Informationen ist von dem Spieler selbst eingetragen worden, und sind derzeit nicht verifizierbar.    Ein Verifizierungssytem welches GUID parameter in betracht zieht ist in der Entwicklung.    Man kann den `ap_userID @username@fedi.instance` Konsolenkommand um Informationen von einen ActivityPub profil zu importieren."
+
+		"EMPTY_PLAYERSLOT"		"Leerer Spielerslot"
+	}
+}

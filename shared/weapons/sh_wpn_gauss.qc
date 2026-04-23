@@ -48,6 +48,9 @@ const float GAUSS_MAX_CHARGE_DAMAGE   = 200;
 const float GAUSS_DRYFIRE_DELAY       = 0.2;
 const float GAUSS_OVERCHARGE_TIME     = 10.0;   // hold charge this long = self-damage
 const float GAUSS_OVERCHARGE_DAMAGE   = 50;     // damage dealt to self on overcharge
+const float GAUSS_CHARGE_BLAST_RADIUS = 120;    // charged shot explosion radius
+const float GAUSS_CHARGE_BLAST_PUSH   = 600;    // knockback force
+const float GAUSS_CHARGE_BLAST_UPLIFT = 250;    // vertical knockback bonus
 
 // --- Pre-computed durations ---
 const float GAUSS_DRAW_DURATION       = (GAUSS_DRAW_END - GAUSS_DRAW_START) * GAUSS_FRAME_INTERVAL;
@@ -87,17 +90,29 @@ float(float now) SH_GaussTickState =
 
 float(float now) SH_GaussTryPrimaryFire =
 {
+#ifdef CSQC
+    if (cltime < self.csqc_fire_guard) return 0;
+#endif
     if (self.weaponstate == WS_DRAW || self.weaponstate == WS_SPECIAL || self.weaponstate == WS_RELOAD) return 0;
     if (now < self.attack_finished) return 0;
 
     if (self.ammo_gauss < GAUSS_PRIMARY_AMMO_COST)
-    { self.attack_finished = now + GAUSS_DRYFIRE_DELAY; return -1; }
+    {
+        self.attack_finished = now + GAUSS_DRYFIRE_DELAY;
+#ifdef CSQC
+        self.csqc_fire_guard = cltime + GAUSS_DRYFIRE_DELAY;
+#endif
+        return -1;
+    }
 
     self.ammo_gauss      -= GAUSS_PRIMARY_AMMO_COST;
     self.weaponstate      = WS_FIRE;
     self.wep_action_id   += 1;
     self.wep_anim_start   = now;
     self.attack_finished  = now + GAUSS_PRIMARY_DELAY;
+#ifdef CSQC
+    self.csqc_fire_guard  = cltime + GAUSS_PRIMARY_DELAY;
+#endif
     return 1;
 };
 
@@ -183,21 +198,38 @@ void(float damage, float is_primary) W_GaussBeamFire =
         else
             W_ImpactEffect(trace_endpos);
 
-        // Debug: send server hit position to shooter only
+        W_DebugImpact(trace_endpos, damage, W_BoneToHitgroup(trace_bone_id));
+
+        // Charged shot: explosion at impact point
+        if (!is_primary)
         {
-            float saved_dim = dimension_send;
-            dimension_send = self.dimension_seen;
-            WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
-            WriteByte(MSG_MULTICAST, CSQC_EVENT_DEBUG_IMPACT);
-            WriteCoord(MSG_MULTICAST, trace_endpos_x);
-            WriteCoord(MSG_MULTICAST, trace_endpos_y);
-            WriteCoord(MSG_MULTICAST, trace_endpos_z);
-            multicast(trace_endpos, MULTICAST_PVS);
-            dimension_send = saved_dim;
+            te_explosion(trace_endpos);
+
+            // Radius damage + knockback
+            entity e = findradius(trace_endpos, GAUSS_CHARGE_BLAST_RADIUS);
+            while (e)
+            {
+                float bdist = vlen(e.origin - trace_endpos);
+
+                if (W_CanDamageTarget(e))
+                {
+                    float blast_dmg = W_LinearDamageFalloff(bdist, damage * 0.5, damage * 0.1, GAUSS_CHARGE_BLAST_RADIUS);
+                    W_ApplyDamage(self, e, blast_dmg);
+                }
+
+                if (e.classname == "player" && e.health > 0)
+                {
+                    float push_scale = 1 - (bdist / GAUSS_CHARGE_BLAST_RADIUS);
+                    push_scale = max(0, push_scale);
+                    vector push_dir = normalize(e.origin - trace_endpos);
+                    e.velocity += push_dir * GAUSS_CHARGE_BLAST_PUSH * push_scale;
+                    e.velocity_z += GAUSS_CHARGE_BLAST_UPLIFT * push_scale;
+                }
+
+                e = e.chain;
+            }
         }
     }
-
-    // Pushback is now handled in SH_GaussCalcChargeDamage (shared code)
 };
 
 void() W_GaussPrimaryFire =
@@ -362,6 +394,7 @@ void() weapon_gauss =
     self.weap_draw = W_GaussEquip; self.weap_drop_func = W_GaussDrop;
     self.pickupcopy = W_GaussPickupCopy; self.touch = weapon_touch;
     self.ammo_gauss = MAX_AMMO_GAUSS;
+    W_RegisterMapWeapon(weapon_gauss);
 };
 
 #endif // SSQC
@@ -395,9 +428,9 @@ void() CSQC_PredictGaussCommand =
                     traceline(gsrc, gsrc + v_forward * 8192, MOVE_NORMAL, self);
                     if (trace_fraction < 1.0)
                     {
-                        CSQC_BulletImpact(trace_endpos, trace_plane_normal);
+                        CSQC_BulletImpact(trace_endpos, trace_plane_normal, GAUSS_PRIMARY_DAMAGE);
                         if (cvar("cl_debug_impacts"))
-                            CSQC_AddDebugImpact(trace_endpos, gsrc, '0 1 0');
+                            CSQC_AddDebugImpact(trace_endpos, gsrc, '0 1 0', 0, 0);
                     }
                 }
             }
@@ -460,9 +493,9 @@ void() CSQC_PredictGaussCommand =
                     traceline(gsrc, gsrc + v_forward * 8192, MOVE_NORMAL, self);
                     if (trace_fraction < 1.0)
                     {
-                        CSQC_BulletImpact(trace_endpos, trace_plane_normal);
+                        CSQC_BulletImpact(trace_endpos, trace_plane_normal, damage);
                         if (cvar("cl_debug_impacts"))
-                            CSQC_AddDebugImpact(trace_endpos, gsrc, '0 1 0');
+                            CSQC_AddDebugImpact(trace_endpos, gsrc, '0 1 0', 0, 0);
                     }
                 }
             }
