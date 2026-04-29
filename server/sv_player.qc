@@ -64,21 +64,88 @@ entity(string spawn_classname) PlayerFindSpawnByClassname =
     return choice_any;
 };
 
+// FFA spawn picker: same reservoir-sampling logic as
+// PlayerFindSpawnByClassname, but accepts spawn points of EITHER classname
+// so blue + red spawns merge into a single pool. Used only by the FFA
+// branch in PlayerGetSpawnPointEntity below — the team-mode picker stays
+// strict so blue players never land at red spawns and vice versa.
+entity(string a, string b) PlayerFindSpawnByEitherClassname =
+{
+    entity spot, choice_free, choice_any;
+    float count_free, count_any;
+
+    spot = world;
+    choice_free = world;
+    choice_any  = world;
+    count_free = 0;
+    count_any  = 0;
+
+    while (TRUE)
+    {
+        spot = nextent(spot);
+        if (!spot)
+            break;
+        if (spot.classname != a && spot.classname != b)
+            continue;
+
+        count_any = count_any + 1;
+        if (random() < (1 / count_any))
+            choice_any = spot;
+
+        if (Spawn_IsClear(spot))
+        {
+            count_free = count_free + 1;
+            if (random() < (1 / count_free))
+                choice_free = spot;
+        }
+    }
+
+    if (choice_free)
+        return choice_free;
+    return choice_any;
+};
+
 // Strict team-spawn policy: TEAM_BLUE only ever spawns at blue classnames,
-// TEAM_RED only ever spawns at red classnames. The opposing team's spawns
-// are NEVER queried from the wrong branch. The final fallback to the
-// neutral "info_player_start" is only reached if the map has no team-
-// specific spawns for this player's team at all — that's a map bug, and
-// we emit a developer warning so the mapper notices.
+// TEAM_RED only ever spawns at red classnames.  When the map has no team
+// spawns for this player's team, we fall through to a CS-style two-step
+// chain: BLUE plays the CT side (info_player_start primary, info_player_
+// deathmatch as cross-backup) and RED plays the T side (info_player_
+// deathmatch primary, info_player_start as cross-backup).  The cross-
+// backup catches single-class CS maps that ship only one of the two.
+// PlayerPlaceAtSpawnPoint handles the "no spawn at all" case by snapping
+// to (0,0,1) so the spawn pipeline never returns world to its callers.
 entity() PlayerGetSpawnPointEntity =
 {
     entity spawnpoint;
     float is_team_player;
+    string cs_primary, cs_backup;
 
     spawnpoint = world;
     is_team_player = FALSE;
 
-    if (self.player_team == TEAM_BLUE)
+    if (Gamemode_HasUnifiedTeams())
+    {
+        // Unified-team gamemodes (FFA + Bhop) pool both teams' spawns
+        // through the same canonical → start → team1/2 fallback chain
+        // so existing maps with team-only spawn entities work without
+        // re-editing. Player still has a backend TEAM_BLUE/TEAM_RED
+        // value (set by their model pick on the team-select panel);
+        // we just don't let it filter the spawn pool here.
+        is_team_player = TRUE;
+        spawnpoint = PlayerFindSpawnByEitherClassname(
+            "info_player_blue", "info_player_red");
+        if (!spawnpoint)
+            spawnpoint = PlayerFindSpawnByEitherClassname(
+                "info_player_start_blue", "info_player_start_red");
+        if (!spawnpoint)
+            spawnpoint = PlayerFindSpawnByEitherClassname(
+                "info_player_team1", "info_player_team2");
+        // Fall through to the CS-style cs_primary/cs_backup chain below
+        // when neither team has tagged spawns on this map.
+        cs_primary = "info_player_start";
+        cs_backup  = "info_player_deathmatch";
+    }
+    else if (self.player_team == TEAM_BLUE)
     {
         is_team_player = TRUE;
         spawnpoint = PlayerFindSpawnByClassname("info_player_blue");
@@ -86,6 +153,9 @@ entity() PlayerGetSpawnPointEntity =
             spawnpoint = PlayerFindSpawnByClassname("info_player_start_blue");
         if (!spawnpoint)
             spawnpoint = PlayerFindSpawnByClassname("info_player_team1");
+        // CS CT side maps to BLUE.
+        cs_primary = "info_player_start";
+        cs_backup  = "info_player_deathmatch";
     }
     else if (self.player_team == TEAM_RED)
     {
@@ -95,26 +165,45 @@ entity() PlayerGetSpawnPointEntity =
             spawnpoint = PlayerFindSpawnByClassname("info_player_start_red");
         if (!spawnpoint)
             spawnpoint = PlayerFindSpawnByClassname("info_player_team2");
+        // CS T side maps to RED.
+        cs_primary = "info_player_deathmatch";
+        cs_backup  = "info_player_start";
+    }
+    else
+    {
+        // Untagged player (spectator transitioning, pre-team-pick) —
+        // route them through the CT side's chain since info_player_start
+        // is the more universal "any spawn" classname in CS maps.
+        cs_primary = "info_player_start";
+        cs_backup  = "info_player_deathmatch";
     }
 
-    float fell_back_to_neutral = FALSE;
+    string cs_used = "";
     if (!spawnpoint)
     {
-        fell_back_to_neutral = is_team_player;
-        if (fell_back_to_neutral && cvar("developer"))
-        {
-            // Gated behind `developer` because FTE's dprint is unconditional
-            // (unlike vanilla QC's). Map authors want to see this; end users
-            // running vanilla-compat CS maps on the mod don't.
-            dprint(sprintf("[spawn] WARNING: no team-%s spawn points found on map %s — "
-                "falling back to neutral info_player_start. Mapper should add "
-                "info_player_%s / info_player_start_%s entities.\n",
-                (self.player_team == TEAM_BLUE) ? "blue" : "red",
-                serverkey("mapname"),
-                (self.player_team == TEAM_BLUE) ? "blue" : "red",
-                (self.player_team == TEAM_BLUE) ? "blue" : "red"));
-        }
-        spawnpoint = PlayerFindSpawnByClassname("info_player_start");
+        spawnpoint = PlayerFindSpawnByClassname(cs_primary);
+        if (spawnpoint)
+            cs_used = cs_primary;
+    }
+    if (!spawnpoint)
+    {
+        spawnpoint = PlayerFindSpawnByClassname(cs_backup);
+        if (spawnpoint)
+            cs_used = cs_backup;
+    }
+
+    if (cs_used != "" && cvar("developer"))
+    {
+        // Gated behind `developer` because FTE's dprint is unconditional
+        // (unlike vanilla QC's). Map authors want to see this; end users
+        // running vanilla-compat CS maps on the mod don't.
+        // Colour palette: ^3 yellow tag = "fallback fired", ^6 magenta =
+        // highlighted classname, ^4/^1 = team identity.
+        dprint(sprintf("^3[spawn]^7 resorting to cs spawns ^6[%s]^7 for team-%s on map %s\n",
+            cs_used,
+            (self.player_team == TEAM_BLUE) ? "^4blue^7"
+                : (self.player_team == TEAM_RED) ? "^1red^7" : "none",
+            serverkey("mapname")));
     }
 
     // Per-respawn diagnostic.
@@ -126,17 +215,20 @@ entity() PlayerGetSpawnPointEntity =
     float want_diag = cvar("sv_debug_spawns");
     if ((want_dev || want_diag) && spawnpoint)
     {
-        string team_str = (self.player_team == TEAM_BLUE) ? "BLUE"
-                        : (self.player_team == TEAM_RED)  ? "RED"
+        // Colour palette: ^4 blue / ^1 red for team identity, ^2 green
+        // for CLEAR (good), ^1 red for OCCUPIED (bad), ^3 yellow for
+        // CS-FALLBACK (degraded), ^6 magenta to highlight classnames.
+        string team_str = (self.player_team == TEAM_BLUE) ? "^4BLUE^7"
+                        : (self.player_team == TEAM_RED)  ? "^1RED^7"
                         : "NONE";
         string state_str;
-        if (fell_back_to_neutral)
-            state_str = "FALLBACK (no team spawns)";
+        if (cs_used != "")
+            state_str = sprintf("^3CS-FALLBACK^7 ^6[%s]^7", cs_used);
         else if (Spawn_IsClear(spawnpoint))
-            state_str = "CLEAR";
+            state_str = "^2CLEAR^7";
         else
-            state_str = "OCCUPIED (all spawns blocked)";
-        string line = sprintf("[spawn] slot %g team=%s picked %s at %v — %s\n",
+            state_str = "^1OCCUPIED^7 (all spawns blocked)";
+        string line = sprintf("^5[spawn]^7 slot %g team=%s picked ^6%s^7 at %v — %s\n",
             num_for_edict(self) - 1, team_str,
             spawnpoint.classname, spawnpoint.origin, state_str);
         // sv_debug_spawns takes precedence — if it's on, we want the
@@ -308,8 +400,18 @@ void(float new_team, float model_idx) PlayerJoinTeam =
 
     model_idx = bound(0, model_idx, 5); // 0-3 = team models, 5 = sini
 
-    // Same team, just changing model — swap instantly without respawn
-    if (self.player_team == new_team && !PlayerNeedsTeamSelection())
+    // Defensive: leaving spec ALWAYS needs a full PlayerSpawn pass.
+    // PlayerJoinSpectate sets is_dead=TRUE, modelindex=0, solid=NOT,
+    // movetype=NONE, alpha=-1 — none of which the same-team / model-only
+    // fast path below would undo. Without this guard, an intermittent
+    // bug let spec-rejoin land in the fast-path branch and the player
+    // stayed effectively dead/invisible. Latch first, gate later.
+    float was_spec = (self.player_team == TEAM_SPEC);
+
+    // Same team, just changing model — swap instantly without respawn.
+    // Skipped when leaving spec (see was_spec above) so the spec→team
+    // transition always reaches PlayerSpawn at the bottom.
+    if (!was_spec && self.player_team == new_team && !PlayerNeedsTeamSelection())
     {
         self.player_model_index = model_idx;
         PlayerApplyModel();
@@ -323,6 +425,41 @@ void(float new_team, float model_idx) PlayerJoinTeam =
     self.player_model_index = model_idx;
     PlayerApplyTeamColours();
     PlayerRefreshScoreboardInfo(self);
+
+    // Elimination mid-round join: stay invisible/non-colliding until the
+    // next RoundRestart. RoundRestart's teamed-player loop in sv_main.qc
+    // already clears is_dead/pending_round_join and calls PlayerSpawn,
+    // so we just have to mark the player here. FREEZE phase is treated
+    // as "round starting" — we let it spawn through normally.
+    // Spec-leavers also bypass this branch — they should fully spawn
+    // even mid-round (they were already a non-participant).
+    if (!was_spec
+        && cvar("sv_gamemode") == GAMEMODE_ELIMINATION
+        && (round_phase == ROUND_PHASE_ACTIVE
+            || round_phase == ROUND_PHASE_ROUND_END))
+    {
+        self.is_dead = TRUE;
+        self.death_time = -1;
+        self.solid = SOLID_NOT;
+        self.movetype = MOVETYPE_NONE;
+        self.pm_movetype = PM_MOVETYPE_DEAD;
+        self.health = 0;
+        self.velocity = '0 0 0';
+        self.weapon = WEP_NONE;
+        setmodel(self, "");
+        self.alpha = -1;
+        entity vis = self.player_visual_proxy;
+        if (vis)
+        {
+            remove(vis);
+            self.player_visual_proxy = world;
+        }
+        self.pending_round_join = TRUE;
+        PlayerRefreshScoreboardInfo(self);
+        PM_SyncPredictionProxy(self);
+        return;
+    }
+
     PlayerSpawn();
 
     // Start the first round when the first player joins a team
@@ -357,6 +494,11 @@ void() PlayerJoinSpectate =
     entity vis = self.player_visual_proxy;
     if (vis)
     {
+        // Voluntary spectate from an alive player — no corpse needed
+        // (their standing pose would look weird left in the world). For
+        // dead players, the proxy was already detached as a corpse in
+        // PlayerKilled, so player_visual_proxy is world here and we
+        // skip the remove. RoundRestart's sweep cleans up corpses.
         remove(vis);
         self.player_visual_proxy = world;
     }
@@ -487,6 +629,47 @@ void() CheckImpulses =
 .float  cmd_last_buttons;
 .vector cmd_last_angles;
 .float  cmd_last_time;
+
+// ---------------------------------------------------------------------------
+// Drift-trace ring buffer — captures the last 32 server pmove ticks so we
+// can dump the immediate pre-/post-switch context to console without
+// flooding the log. Append per real usercmd, dump on weapon switch.
+// ---------------------------------------------------------------------------
+const float DRIFT_RING_SIZE = 32;
+float  drift_t  [DRIFT_RING_SIZE];
+float  drift_msec[DRIFT_RING_SIZE];
+vector drift_mv [DRIFT_RING_SIZE];
+float  drift_btn[DRIFT_RING_SIZE];
+float  drift_wep[DRIFT_RING_SIZE];
+vector drift_org[DRIFT_RING_SIZE];
+vector drift_vel[DRIFT_RING_SIZE];
+float  drift_idx;
+
+void(float t_now, float msec, vector mv, float btn, float wep, vector org, vector vel) Drift_Append =
+{
+	drift_t  [drift_idx] = t_now;
+	drift_msec[drift_idx] = msec;
+	drift_mv [drift_idx] = mv;
+	drift_btn[drift_idx] = btn;
+	drift_wep[drift_idx] = wep;
+	drift_org[drift_idx] = org;
+	drift_vel[drift_idx] = vel;
+	drift_idx = (drift_idx + 1) % DRIFT_RING_SIZE;
+};
+
+void(string label) Drift_Dump =
+{
+	float i;
+	dprint(sprintf("--- %s drift ring (oldest first, %g entries) ---\n", label, DRIFT_RING_SIZE));
+	for (i = 0; i < DRIFT_RING_SIZE; i++)
+	{
+		float ix = (drift_idx + i) % DRIFT_RING_SIZE;
+		if (drift_t[ix] <= 0) continue;  // unfilled slot
+		dprint(sprintf("[%s] t=%.4f msec=%.2f mv=%v btn=%g wep=%g\n",
+			label, drift_t[ix], drift_msec[ix], drift_mv[ix], drift_btn[ix], drift_wep[ix]));
+		dprint(sprintf("[%s]   org=%v vel=%v\n", label, drift_org[ix], drift_vel[ix]));
+	}
+};
 
 // Run once per server tick from StartFrame. For each live, teamed player
 // whose last command arrived more than 1.5 × sv_mintic ago, replay their
@@ -735,15 +918,42 @@ const float VP_SF_IDENTITY = 4;  // weapon, skin, colormap, team_model byte, is_
 .float vps_last_weapon;
 .float vps_last_team_model;
 .float vps_last_is_dead;
+// Capped to 0..255 (single byte on the wire). Used by the CSQC predicted-
+// death helper to decide whether a hit is lethal — without it, the client
+// can't predict (would over-fire on every shot).
+.float vps_last_health;
 .float vis_last_pose_resync;
+
+// Marks a proxy as a corpse (orphaned by Player_VisualProxy_DetachAsCorpse,
+// called from PlayerKilled). Bypasses the owner-team check in
+// Player_Visual_SendEntity so the body keeps streaming to clients —
+// returning FALSE there causes the engine to drop the entity from
+// snapshots regardless of PVSF_NOREMOVE.  Cleared by RoundRestart's
+// corpse sweep when the round ends.
+.float vis_is_corpse;
 
 .entity player_visual_proxy;
 
+// Pointer back to the most recently detached corpse for THIS player.
+// Used by PlayerSpawn (gated on mp_deadbodys 0) to delete the lingering
+// body before spawning a fresh proxy — keeps at most one corpse per
+// player on the map.  When mp_deadbodys 1, this pointer is still
+// tracked but PlayerSpawn ignores it and the corpse persists until
+// the round-restart sweep.
+.entity last_corpse;
+
 float(entity playerent, float changedflags) Player_Visual_SendEntity =
 {
-	// Don't send if owner disconnected or has no team
-	if (!self.owner || self.owner.player_team < TEAM_BLUE)
-		return FALSE;
+	// Corpses (vis_is_corpse) bypass the owner-team check so the body
+	// keeps streaming to clients. The pose / anim / identity fields
+	// are frozen — Player_VisualProxy_Sync stops touching them once
+	// the proxy is detached from the (now-respawning) player.
+	if (!self.vis_is_corpse)
+	{
+		// Don't send if owner disconnected or has no team
+		if (!self.owner || self.owner.player_team < TEAM_BLUE)
+			return FALSE;
+	}
 
 	WriteByte(MSG_ENTITY, CSQC_ENT_PLAYER_VISUAL);
 	WriteByte(MSG_ENTITY, num_for_edict(self.owner));
@@ -780,6 +990,7 @@ float(entity playerent, float changedflags) Player_Visual_SendEntity =
 		WriteByte(MSG_ENTITY, self.colormap);
 		WriteByte(MSG_ENTITY, self.vps_last_team_model);
 		WriteByte(MSG_ENTITY, self.vps_last_is_dead);
+		WriteByte(MSG_ENTITY, self.vps_last_health);
 	}
 
 	return TRUE;
@@ -807,7 +1018,17 @@ void(entity player) Player_VisualProxy_Ensure =
 		vis.owner = player;
 		vis.movetype = MOVETYPE_NONE;
 		vis.solid = SOLID_NOT;
-		vis.pvsflags = PVSF_NOREMOVE;
+		// PVSF_USEPHS: send the proxy update over the broader PHS region
+		// instead of strict PVS — fixes the "ghost proxy" bug at round
+		// restart, where a teleport to a spawn point outside the viewer's
+		// PVS would never deliver the new origin (engine skips the snap
+		// for out-of-PVS entities, and PVSF_NOREMOVE keeps the client's
+		// last-cached state visible at the old position indefinitely).
+		// PHS typically covers the whole map on CS-style maps, so cross-
+		// map teleports propagate to every viewer in the next snapshot.
+		// PVSF_NOREMOVE retained so out-of-PHS edge cases still don't
+		// cause the proxy to disappear mid-fight.
+		vis.pvsflags = PVSF_USEPHS | PVSF_NOREMOVE;
 		setmodel(vis, "models/player/leet/leet.mdl"); // default until model applied
 		vis.SendEntity = Player_Visual_SendEntity;
 		player.player_visual_proxy = vis;
@@ -818,6 +1039,57 @@ void(entity player) Player_VisualProxy_Ensure =
 	self = player;
 	PlayerApplyModel();
 	self = oldself;
+};
+
+// Convert the dying player's visual proxy into a frozen corpse:
+//   1. push one final sync so the proxy carries the death-pose frame
+//      that PlayerKilled just set on the player (without this, the
+//      next PlayerPostThink sync would no-op because we detach below);
+//   2. flip vis_is_corpse so Player_Visual_SendEntity bypasses the
+//      owner-team check and keeps streaming;
+//   3. detach from the player so PlayerSpawn's Player_VisualProxy_Ensure
+//      spawns a fresh proxy on respawn instead of reusing the corpse.
+//
+// The corpse persists until RoundRestart's sweep removes it. Works
+// for both TDM (immediate auto-respawn) and Elimination (death-cam
+// then spectate) — neither path touches a detached proxy.
+void(entity player) Player_VisualProxy_DetachAsCorpse;
+void(entity player) Player_VisualProxy_Sync;
+void(entity player) Player_VisualProxy_DetachAsCorpse =
+{
+	entity vis = player.player_visual_proxy;
+	if (!vis || vis.classname != "player_visual_proxy")
+		return;
+
+	// Final sync — pushes the death frame / final origin / SendFlags
+	// dirty bit so all clients receive the death pose before we orphan.
+	Player_VisualProxy_Sync(player);
+
+	vis.vis_is_corpse = TRUE;
+
+	// Once detached, the corpse is fully passive on the server side:
+	//   - movetype MOVETYPE_NONE  → engine never ticks physics on it
+	//   - solid    SOLID_NOT      → no collision tracing against it
+	//   - .think   unset          → no QC think scheduled
+	//   - nextthink 0             → engine won't fire one
+	//   - SendFlags only dirties on field changes, and after detach
+	//     player.player_visual_proxy = world means Sync early-returns,
+	//     so nothing dirties the corpse — only the initial post-death
+	//     snapshot crosses the wire.
+	// PVSF_USEPHS is dropped here: the original setting widened the
+	// proxy's send region for live cross-PVS teleports — a frozen
+	// corpse never moves, so strict PVS is enough and saves bandwidth.
+	// PVSF_NOREMOVE retained so a viewer briefly out of PVS doesn't
+	// see the corpse blink out and back.
+	vis.pvsflags = PVSF_NOREMOVE;
+
+	// Track for mp_deadbodys 0 — PlayerSpawn removes this corpse
+	// before spawning a fresh proxy so the player has at most one
+	// body on the map.  When mp_deadbodys 1, this pointer is still
+	// kept but PlayerSpawn ignores it.
+	player.last_corpse = vis;
+
+	player.player_visual_proxy = world;
 };
 
 void(entity player) Player_VisualProxy_Sync =
@@ -873,10 +1145,9 @@ void(entity player) Player_VisualProxy_Sync =
 	// and above. Bandwidth cost: ~400 B/s per stationary player. Cheap.
 	//
 	// Tunable via sv_pose_keepalive_ticks (default 1 = every tick).
-	float ticks = cvar("sv_pose_keepalive_ticks");
-	if (ticks < 1) ticks = 1;
-	float keepalive_interval = cvar("sv_mintic") * ticks;
-	if (keepalive_interval < 0.005) keepalive_interval = 0.015;
+	// Computed once per tick in sv_main.qc StartFrame so this hot path
+	// doesn't re-read the cvars on every player.
+	float keepalive_interval = sv_cached_pose_keepalive_interval;
 
 	if (vis.origin != player.origin
 	    || vis.angles != next_angles
@@ -891,11 +1162,13 @@ void(entity player) Player_VisualProxy_Sync =
 	    || vis.vps_last_anim_top_gen != player.anim_top_gen)
 		bits |= VP_SF_ANIM;
 
+	float next_health = bound(0, player.health, 255);
 	if (vis.vps_last_weapon != player.weapon
 	    || vis.skin != player.skin
 	    || vis.colormap != player.colormap
 	    || vis.vps_last_team_model != next_tmbyte
-	    || vis.vps_last_is_dead != next_is_dead)
+	    || vis.vps_last_is_dead != next_is_dead
+	    || vis.vps_last_health != next_health)
 		bits |= VP_SF_IDENTITY;
 
 	// Apply new values to the proxy unconditionally — the cached
@@ -914,6 +1187,7 @@ void(entity player) Player_VisualProxy_Sync =
 	vis.vps_last_weapon       = player.weapon;
 	vis.vps_last_team_model   = next_tmbyte;
 	vis.vps_last_is_dead      = next_is_dead;
+	vis.vps_last_health       = next_health;
 
 	if (bits & VP_SF_POSE)
 		vis.vis_last_pose_resync = time;
@@ -934,26 +1208,53 @@ float(entity playerent, float changedflags) PM_PredictionProxy_SendEntity =
 
 	if (changedflags & PM_SF_MOVEMENT)
 	{
-		WriteCoord(MSG_ENTITY, self.origin_x);
-		WriteCoord(MSG_ENTITY, self.origin_y);
-		WriteCoord(MSG_ENTITY, self.origin_z);
+		// Full 32-bit float precision for origin and velocity — NOT
+		// WriteCoord (which quantizes to 1/8 qu).  Coord rounding was
+		// the dominant source of client-vs-server pmove disagreement:
+		// every reconcile, sv_confirmed_origin was the rounded value,
+		// replay ran from there, predicted_player drifted ~0.1-0.3 qu
+		// per reconcile from float-precision live.  Switching to float
+		// here makes the prediction proxy carry the exact server pmove
+		// state, eliminating the rounding-induced drift at its source.
+		// Cost: +6 bytes per movement section (3 axes × 2 fields × 2 B
+		// extra) — negligible.
+		//
+		// Paired CSQC reader: client/cl_player.qc CSQC_PlayerVisual_Update /
+		// proxy parser must use readfloat() for these same fields.
+		WriteFloat(MSG_ENTITY, self.origin_x);
+		WriteFloat(MSG_ENTITY, self.origin_y);
+		WriteFloat(MSG_ENTITY, self.origin_z);
 
-		WriteCoord(MSG_ENTITY, self.velocity_x);
-		WriteCoord(MSG_ENTITY, self.velocity_y);
-		WriteCoord(MSG_ENTITY, self.velocity_z);
+		WriteFloat(MSG_ENTITY, self.velocity_x);
+		WriteFloat(MSG_ENTITY, self.velocity_y);
+		WriteFloat(MSG_ENTITY, self.velocity_z);
 
+		// view_ofs stays at WriteCoord — it changes infrequently
+		// (duck/stand transitions) and 1/8 qu precision is well below
+		// the smallest meaningful change.
 		WriteCoord(MSG_ENTITY, self.view_ofs_x);
 		WriteCoord(MSG_ENTITY, self.view_ofs_y);
 		WriteCoord(MSG_ENTITY, self.view_ofs_z);
 
+		// `flags` kept as float — FTE's FL_* bitset can use bits above
+		// byte range (FL_DUCKING=0x4000, FL_NOTARGET=0x40000 on some
+		// builds) so float (same 4 B as long) retains full width.
 		WriteFloat(MSG_ENTITY, self.flags);
-		WriteFloat(MSG_ENTITY, self.pm_movetype);
-		WriteFloat(MSG_ENTITY, self.pm_jump_held);
-		WriteFloat(MSG_ENTITY, self.pm_jump_msec);
+		// Small-range integer / bitfield fields re-encoded to save wire:
+		//   pm_movetype    — enum, ≤ ~40           → byte
+		//   pm_jump_held   — 0/1                   → byte
+		//   pm_jump_msec   — 0..50  (clamp-reset)  → short (headroom for future)
+		//   pm_in_duck     — 0/1                   → byte
+		//   pm_duck_msec   — 0..1000               → short
+		//   pm_oldbuttons  — 8-bit button bitmask  → byte
+		// Saves 16 B per movement update vs the old WriteFloat-everything layout.
+		WriteByte (MSG_ENTITY, self.pm_movetype);
+		WriteByte (MSG_ENTITY, self.pm_jump_held);
+		WriteShort(MSG_ENTITY, self.pm_jump_msec);
 		WriteFloat(MSG_ENTITY, self.pm_waterjumptime);
-		WriteFloat(MSG_ENTITY, self.pm_in_duck);
-		WriteFloat(MSG_ENTITY, self.pm_duck_msec);
-		WriteFloat(MSG_ENTITY, self.pm_oldbuttons);
+		WriteByte (MSG_ENTITY, self.pm_in_duck);
+		WriteShort(MSG_ENTITY, self.pm_duck_msec);
+		WriteByte (MSG_ENTITY, self.pm_oldbuttons);
 		WriteFloat(MSG_ENTITY, self.pm_timecarry);
 		WriteFloat(MSG_ENTITY, self.pm_teleport_time);
 		WriteFloat(MSG_ENTITY, self.pm_ladder_detach_time);
@@ -981,57 +1282,102 @@ float(entity playerent, float changedflags) PM_PredictionProxy_SendEntity =
 		WriteFloat(MSG_ENTITY, max(0, self.attack_finished - time));
 		WriteFloat(MSG_ENTITY, (self.wep_anim_start > 0) ? max(0, time - self.wep_anim_start) : 0);
 		WriteByte(MSG_ENTITY, self.zoomstage);
+		// Speed-factor blend state — preserves in-flight transition
+		// across reconcile so client replay and server pmove stay
+		// synchronized through ping-window weapon switches.
+		WriteFloat(MSG_ENTITY, self.pm_weapon_blend_progress);
+		WriteFloat(MSG_ENTITY, self.pm_weapon_prev_factor);
 	}
 
 	if (changedflags & PM_SF_AMMO)
 	{
-		WriteByte(MSG_ENTITY, self.mag_deagle);
-		WriteByte(MSG_ENTITY, self.ammo_deagle);
-		WriteByte(MSG_ENTITY, self.mag_ak47);
-		WriteByte(MSG_ENTITY, self.ammo_ak47);
-		WriteByte(MSG_ENTITY, self.mag_m4a1);
-		WriteByte(MSG_ENTITY, self.ammo_m4a1);
-		WriteByte(MSG_ENTITY, self.m4a1_silenced);
-		WriteByte(MSG_ENTITY, self.mag_flakshotgun);
-		WriteByte(MSG_ENTITY, self.mag_pistol);
-		WriteByte(MSG_ENTITY, self.ammo_pistol);
-		WriteByte(MSG_ENTITY, self.mag_scout);
-		WriteByte(MSG_ENTITY, self.ammo_scout);
-		WriteByte(MSG_ENTITY, self.mag_357);
-		WriteByte(MSG_ENTITY, self.ammo_357);
-		WriteByte(MSG_ENTITY, self.mag_m249);
-		WriteByte(MSG_ENTITY, self.ammo_m249);
-		WriteByte(MSG_ENTITY, self.mag_awp);
-		WriteByte(MSG_ENTITY, self.ammo_awp);
-		WriteByte(MSG_ENTITY, self.mag_98k);
-		WriteByte(MSG_ENTITY, self.ammo_98k);
-		WriteByte(MSG_ENTITY, self.mag_shotgun);
-		WriteByte(MSG_ENTITY, self.ammo_shotgun);
-		WriteByte(MSG_ENTITY, self.mag_m3);
-		WriteByte(MSG_ENTITY, self.ammo_m3);
-		WriteByte(MSG_ENTITY, self.mag_mp5);
-		WriteByte(MSG_ENTITY, self.ammo_mp5);
-		WriteByte(MSG_ENTITY, self.mag_crossbow);
-		WriteByte(MSG_ENTITY, self.ammo_crossbow);
-		WriteByte(MSG_ENTITY, self.mag_grenadelauncher);
-		WriteByte(MSG_ENTITY, self.mag_rebar);
-		WriteByte(MSG_ENTITY, self.ammo_gauss);
-		WriteByte(MSG_ENTITY, self.mag_glock);
-		WriteByte(MSG_ENTITY, self.ammo_glock);
-		WriteByte(MSG_ENTITY, self.mag_g3sg1);
-		WriteByte(MSG_ENTITY, self.ammo_g3sg1);
-		WriteByte(MSG_ENTITY, self.mag_hlsmg);
-		WriteByte(MSG_ENTITY, self.ammo_hlsmg);
-		WriteByte(MSG_ENTITY, self.ammo_hlsmg_grenades);
-		WriteByte(MSG_ENTITY, self.mag_hlrpg);
-		WriteByte(MSG_ENTITY, self.ammo_hlrpg);
-		WriteByte(MSG_ENTITY, self.ammo_hlgrenade);
-		WriteByte(MSG_ENTITY, self.mag_hlglock);
-		WriteByte(MSG_ENTITY, self.ammo_hlglock);
-		WriteByte(MSG_ENTITY, self.ammo_hlegon);
-		WriteByte(MSG_ENTITY, self.mag_csusp);
-		WriteByte(MSG_ENTITY, self.ammo_csusp);
-		WriteByte(MSG_ENTITY, self.csusp_silenced);
+		// 6-byte bitmask first, then only the fields whose bit is set.
+		// Matches PM_SyncPredictionProxy's diff order exactly — bit N of
+		// mbK corresponds to the Nth field in byte K's block below.
+		float m0 = self.pm_ammo_mb0;
+		float m1 = self.pm_ammo_mb1;
+		float m2 = self.pm_ammo_mb2;
+		float m3 = self.pm_ammo_mb3;
+		float m4 = self.pm_ammo_mb4;
+		float m5 = self.pm_ammo_mb5;
+
+		WriteByte(MSG_ENTITY, m0);
+		WriteByte(MSG_ENTITY, m1);
+		WriteByte(MSG_ENTITY, m2);
+		WriteByte(MSG_ENTITY, m3);
+		WriteByte(MSG_ENTITY, m4);
+		WriteByte(MSG_ENTITY, m5);
+
+		// byte 0
+		if (m0 &   1) WriteByte(MSG_ENTITY, self.mag_deagle);
+		if (m0 &   2) WriteByte(MSG_ENTITY, self.ammo_deagle);
+		if (m0 &   4) WriteByte(MSG_ENTITY, self.mag_ak47);
+		if (m0 &   8) WriteByte(MSG_ENTITY, self.ammo_ak47);
+		if (m0 &  16) WriteByte(MSG_ENTITY, self.mag_m4a1);
+		if (m0 &  32) WriteByte(MSG_ENTITY, self.ammo_m4a1);
+		if (m0 &  64) WriteByte(MSG_ENTITY, self.m4a1_silenced);
+		if (m0 & 128) WriteByte(MSG_ENTITY, self.mag_flakshotgun);
+
+		// byte 1
+		if (m1 &   1) WriteByte(MSG_ENTITY, self.mag_pistol);
+		if (m1 &   2) WriteByte(MSG_ENTITY, self.ammo_pistol);
+		if (m1 &   4) WriteByte(MSG_ENTITY, self.mag_scout);
+		if (m1 &   8) WriteByte(MSG_ENTITY, self.ammo_scout);
+		if (m1 &  16) WriteByte(MSG_ENTITY, self.mag_357);
+		if (m1 &  32) WriteByte(MSG_ENTITY, self.ammo_357);
+		if (m1 &  64) WriteByte(MSG_ENTITY, self.mag_m249);
+		if (m1 & 128) WriteByte(MSG_ENTITY, self.ammo_m249);
+
+		// byte 2
+		if (m2 &   1) WriteByte(MSG_ENTITY, self.mag_awp);
+		if (m2 &   2) WriteByte(MSG_ENTITY, self.ammo_awp);
+		if (m2 &   4) WriteByte(MSG_ENTITY, self.mag_98k);
+		if (m2 &   8) WriteByte(MSG_ENTITY, self.ammo_98k);
+		if (m2 &  16) WriteByte(MSG_ENTITY, self.mag_shotgun);
+		if (m2 &  32) WriteByte(MSG_ENTITY, self.ammo_shotgun);
+		if (m2 &  64) WriteByte(MSG_ENTITY, self.mag_m3);
+		if (m2 & 128) WriteByte(MSG_ENTITY, self.ammo_m3);
+
+		// byte 3
+		if (m3 &   1) WriteByte(MSG_ENTITY, self.mag_mp5);
+		if (m3 &   2) WriteByte(MSG_ENTITY, self.ammo_mp5);
+		if (m3 &   4) WriteByte(MSG_ENTITY, self.mag_crossbow);
+		if (m3 &   8) WriteByte(MSG_ENTITY, self.ammo_crossbow);
+		if (m3 &  16) WriteByte(MSG_ENTITY, self.mag_grenadelauncher);
+		if (m3 &  32) WriteByte(MSG_ENTITY, self.mag_rebar);
+		if (m3 &  64) WriteByte(MSG_ENTITY, self.ammo_gauss);
+		if (m3 & 128) WriteByte(MSG_ENTITY, self.mag_glock);
+
+		// byte 4
+		if (m4 &   1) WriteByte(MSG_ENTITY, self.ammo_glock);
+		if (m4 &   2) WriteByte(MSG_ENTITY, self.mag_g3sg1);
+		if (m4 &   4) WriteByte(MSG_ENTITY, self.ammo_g3sg1);
+		if (m4 &   8) WriteByte(MSG_ENTITY, self.mag_hlsmg);
+		if (m4 &  16) WriteByte(MSG_ENTITY, self.ammo_hlsmg);
+		if (m4 &  32) WriteByte(MSG_ENTITY, self.ammo_hlsmg_grenades);
+		if (m4 &  64) WriteByte(MSG_ENTITY, self.mag_hlrpg);
+		if (m4 & 128) WriteByte(MSG_ENTITY, self.ammo_hlrpg);
+
+		// byte 5 (bit 7 unused — 47 fields total)
+		if (m5 &   1) WriteByte(MSG_ENTITY, self.ammo_hlgrenade);
+		if (m5 &   2) WriteByte(MSG_ENTITY, self.mag_hlglock);
+		if (m5 &   4) WriteByte(MSG_ENTITY, self.ammo_hlglock);
+		if (m5 &   8) WriteByte(MSG_ENTITY, self.ammo_hlegon);
+		if (m5 &  16) WriteByte(MSG_ENTITY, self.mag_csusp);
+		if (m5 &  32) WriteByte(MSG_ENTITY, self.ammo_csusp);
+		if (m5 &  64) WriteByte(MSG_ENTITY, self.csusp_silenced);
+
+		// Consume the mask now that we've written all pending fields —
+		// PM_SyncPredictionProxy accumulates bits with |= across multiple
+		// sync calls per tick, so without this clear the next delta would
+		// re-send the same fields.  Safe because SendEntity runs once per
+		// delta (pm_prediction_proxy uses drawonlytoclient = one player).
+		self.pm_ammo_mb0 = 0;
+		self.pm_ammo_mb1 = 0;
+		self.pm_ammo_mb2 = 0;
+		self.pm_ammo_mb3 = 0;
+		self.pm_ammo_mb4 = 0;
+		self.pm_ammo_mb5 = 0;
 	}
 
 	return TRUE;
@@ -1054,6 +1400,14 @@ float(entity playerent, float changedflags) dropped_weapon_SendEntity =
 	WriteCoord(MSG_ENTITY, self.origin_x);
 	WriteCoord(MSG_ENTITY, self.origin_y);
 	WriteCoord(MSG_ENTITY, self.origin_z);
+	// Velocity for CSQC extrap (cl_tosssmooth.qc). Lets the client
+	// project the entity forward between snapshots so the visual flight
+	// is smooth instead of snapping to the latest authoritative origin
+	// every send tick. Costs 12 B per send — trivial vs the bandwidth
+	// already used by the rest of the payload.
+	WriteCoord(MSG_ENTITY, self.velocity_x);
+	WriteCoord(MSG_ENTITY, self.velocity_y);
+	WriteCoord(MSG_ENTITY, self.velocity_z);
 	WriteString(MSG_ENTITY, self.model);
 
 	float mag = 0, ammo = 0, silencer = 0;
@@ -1151,60 +1505,100 @@ void(entity player) PM_SyncPredictionProxy =
 	    proxy.wep_action_id   != player.wep_action_id ||
 	    proxy.attack_finished != player.attack_finished ||
 	    proxy.wep_anim_start  != player.wep_anim_start ||
-	    proxy.zoomstage       != player.zoomstage)
+	    proxy.zoomstage       != player.zoomstage ||
+	    proxy.pm_weapon_blend_progress != player.pm_weapon_blend_progress ||
+	    proxy.pm_weapon_prev_factor    != player.pm_weapon_prev_factor)
 		bits |= PM_SF_WEAPON_STATE;
 
-	// Detect ammo changes
-	if (proxy.mag_deagle         != player.mag_deagle ||
-	    proxy.ammo_deagle        != player.ammo_deagle ||
-	    proxy.mag_ak47           != player.mag_ak47 ||
-	    proxy.ammo_ak47          != player.ammo_ak47 ||
-	    proxy.mag_m4a1           != player.mag_m4a1 ||
-	    proxy.ammo_m4a1          != player.ammo_m4a1 ||
-	    proxy.m4a1_silenced      != player.m4a1_silenced ||
-	    proxy.mag_flakshotgun    != player.mag_flakshotgun ||
-	    proxy.mag_pistol         != player.mag_pistol ||
-	    proxy.ammo_pistol        != player.ammo_pistol ||
-	    proxy.mag_scout          != player.mag_scout ||
-	    proxy.ammo_scout         != player.ammo_scout ||
-	    proxy.mag_357            != player.mag_357 ||
-	    proxy.ammo_357           != player.ammo_357 ||
-	    proxy.mag_m249           != player.mag_m249 ||
-	    proxy.ammo_m249          != player.ammo_m249 ||
-	    proxy.mag_awp            != player.mag_awp ||
-	    proxy.ammo_awp           != player.ammo_awp ||
-	    proxy.mag_98k            != player.mag_98k ||
-	    proxy.ammo_98k           != player.ammo_98k ||
-	    proxy.mag_shotgun        != player.mag_shotgun ||
-	    proxy.ammo_shotgun       != player.ammo_shotgun ||
-	    proxy.mag_m3             != player.mag_m3 ||
-	    proxy.ammo_m3            != player.ammo_m3 ||
-	    proxy.mag_mp5            != player.mag_mp5 ||
-	    proxy.ammo_mp5           != player.ammo_mp5 ||
-	    proxy.mag_crossbow       != player.mag_crossbow ||
-	    proxy.ammo_crossbow      != player.ammo_crossbow ||
-	    proxy.mag_grenadelauncher != player.mag_grenadelauncher ||
-	    proxy.mag_rebar          != player.mag_rebar ||
-	    proxy.ammo_gauss         != player.ammo_gauss ||
-	    proxy.mag_glock          != player.mag_glock ||
-	    proxy.ammo_glock         != player.ammo_glock ||
-	    proxy.mag_g3sg1          != player.mag_g3sg1 ||
-	    proxy.ammo_g3sg1         != player.ammo_g3sg1 ||
-	    proxy.mag_hlsmg          != player.mag_hlsmg ||
-	    proxy.ammo_hlsmg         != player.ammo_hlsmg ||
-	    proxy.ammo_hlsmg_grenades != player.ammo_hlsmg_grenades ||
-	    proxy.mag_hlrpg          != player.mag_hlrpg ||
-	    proxy.ammo_hlrpg         != player.ammo_hlrpg ||
-	    proxy.ammo_hlgrenade     != player.ammo_hlgrenade ||
-	    proxy.mag_hlglock        != player.mag_hlglock ||
-	    proxy.ammo_hlglock       != player.ammo_hlglock ||
-	    proxy.ammo_hlegon        != player.ammo_hlegon ||
-	    proxy.mag_csusp          != player.mag_csusp ||
-	    proxy.ammo_csusp         != player.ammo_csusp ||
-	    proxy.csusp_silenced     != player.csusp_silenced)
+	// Ammo per-field diff — builds a 47-bit mask (packed into 6 bytes
+	// on proxy.pm_ammo_mb0..mb5) so SendEntity can write only the
+	// fields that actually changed, plus the 6-byte mask itself.
+	// Worst case (all fields changed): 6 + 47 = 53 B vs old 48 B flat
+	// (+5 B).  Common case (one field changed): 6 + 1 = 7 B (−41 B).
+	//
+	// IMPORTANT: the order below MUST stay in lock-step with the write
+	// order in PM_PredictionProxy_SendEntity (PM_SF_AMMO section) and
+	// the client read order in cl_player.qc's prediction-proxy parser.
+	float mb0 = 0, mb1 = 0, mb2 = 0, mb3 = 0, mb4 = 0, mb5 = 0;
+
+	// byte 0 (bits 0-7)
+	if (proxy.mag_deagle          != player.mag_deagle)          mb0 |= 1;
+	if (proxy.ammo_deagle         != player.ammo_deagle)         mb0 |= 2;
+	if (proxy.mag_ak47            != player.mag_ak47)            mb0 |= 4;
+	if (proxy.ammo_ak47           != player.ammo_ak47)           mb0 |= 8;
+	if (proxy.mag_m4a1            != player.mag_m4a1)            mb0 |= 16;
+	if (proxy.ammo_m4a1           != player.ammo_m4a1)           mb0 |= 32;
+	if (proxy.m4a1_silenced       != player.m4a1_silenced)       mb0 |= 64;
+	if (proxy.mag_flakshotgun     != player.mag_flakshotgun)     mb0 |= 128;
+
+	// byte 1 (bits 8-15)
+	if (proxy.mag_pistol          != player.mag_pistol)          mb1 |= 1;
+	if (proxy.ammo_pistol         != player.ammo_pistol)         mb1 |= 2;
+	if (proxy.mag_scout           != player.mag_scout)           mb1 |= 4;
+	if (proxy.ammo_scout          != player.ammo_scout)          mb1 |= 8;
+	if (proxy.mag_357             != player.mag_357)             mb1 |= 16;
+	if (proxy.ammo_357            != player.ammo_357)            mb1 |= 32;
+	if (proxy.mag_m249            != player.mag_m249)            mb1 |= 64;
+	if (proxy.ammo_m249           != player.ammo_m249)           mb1 |= 128;
+
+	// byte 2 (bits 16-23)
+	if (proxy.mag_awp             != player.mag_awp)             mb2 |= 1;
+	if (proxy.ammo_awp            != player.ammo_awp)            mb2 |= 2;
+	if (proxy.mag_98k             != player.mag_98k)             mb2 |= 4;
+	if (proxy.ammo_98k            != player.ammo_98k)            mb2 |= 8;
+	if (proxy.mag_shotgun         != player.mag_shotgun)         mb2 |= 16;
+	if (proxy.ammo_shotgun        != player.ammo_shotgun)        mb2 |= 32;
+	if (proxy.mag_m3              != player.mag_m3)              mb2 |= 64;
+	if (proxy.ammo_m3             != player.ammo_m3)             mb2 |= 128;
+
+	// byte 3 (bits 24-31)
+	if (proxy.mag_mp5             != player.mag_mp5)             mb3 |= 1;
+	if (proxy.ammo_mp5            != player.ammo_mp5)            mb3 |= 2;
+	if (proxy.mag_crossbow        != player.mag_crossbow)        mb3 |= 4;
+	if (proxy.ammo_crossbow       != player.ammo_crossbow)       mb3 |= 8;
+	if (proxy.mag_grenadelauncher != player.mag_grenadelauncher) mb3 |= 16;
+	if (proxy.mag_rebar           != player.mag_rebar)           mb3 |= 32;
+	if (proxy.ammo_gauss          != player.ammo_gauss)          mb3 |= 64;
+	if (proxy.mag_glock           != player.mag_glock)           mb3 |= 128;
+
+	// byte 4 (bits 32-39)
+	if (proxy.ammo_glock          != player.ammo_glock)          mb4 |= 1;
+	if (proxy.mag_g3sg1           != player.mag_g3sg1)           mb4 |= 2;
+	if (proxy.ammo_g3sg1          != player.ammo_g3sg1)          mb4 |= 4;
+	if (proxy.mag_hlsmg           != player.mag_hlsmg)           mb4 |= 8;
+	if (proxy.ammo_hlsmg          != player.ammo_hlsmg)          mb4 |= 16;
+	if (proxy.ammo_hlsmg_grenades != player.ammo_hlsmg_grenades) mb4 |= 32;
+	if (proxy.mag_hlrpg           != player.mag_hlrpg)           mb4 |= 64;
+	if (proxy.ammo_hlrpg          != player.ammo_hlrpg)          mb4 |= 128;
+
+	// byte 5 (bits 40-46 — bit 7 unused, 47 total fields)
+	if (proxy.ammo_hlgrenade      != player.ammo_hlgrenade)      mb5 |= 1;
+	if (proxy.mag_hlglock         != player.mag_hlglock)         mb5 |= 2;
+	if (proxy.ammo_hlglock        != player.ammo_hlglock)        mb5 |= 4;
+	if (proxy.ammo_hlegon         != player.ammo_hlegon)         mb5 |= 8;
+	if (proxy.mag_csusp           != player.mag_csusp)           mb5 |= 16;
+	if (proxy.ammo_csusp          != player.ammo_csusp)          mb5 |= 32;
+	if (proxy.csusp_silenced      != player.csusp_silenced)      mb5 |= 64;
+
+	// OR (accumulate), don't overwrite.  PlayerSpawn can call
+	// PM_SyncPredictionProxy twice in one tick (once via
+	// PM_EnsurePredictionProxy, once directly right after); the second
+	// call sees zero diff — if we OVERWROTE the mask, the first call's
+	// pending bits would be lost before SendEntity could write them.
+	// The corresponding clear lives in SendEntity's ammo section, after
+	// the WriteBytes.
+	proxy.pm_ammo_mb0 |= mb0;
+	proxy.pm_ammo_mb1 |= mb1;
+	proxy.pm_ammo_mb2 |= mb2;
+	proxy.pm_ammo_mb3 |= mb3;
+	proxy.pm_ammo_mb4 |= mb4;
+	proxy.pm_ammo_mb5 |= mb5;
+
+	if (proxy.pm_ammo_mb0 || proxy.pm_ammo_mb1 || proxy.pm_ammo_mb2
+	 || proxy.pm_ammo_mb3 || proxy.pm_ammo_mb4 || proxy.pm_ammo_mb5)
 		bits |= PM_SF_AMMO;
 
-	// Copy player → proxy cache (so next call compares against this snapshot)
+	// Copy player → proxy cache (so next call compares against this snapshot).
 	proxy.origin = player.origin;
 	proxy.velocity = player.velocity;
 	proxy.view_ofs = player.view_ofs;
@@ -1235,6 +1629,8 @@ void(entity player) PM_SyncPredictionProxy =
 	proxy.attack_finished = player.attack_finished;
 	proxy.wep_anim_start  = player.wep_anim_start;
 	proxy.zoomstage       = player.zoomstage;
+	proxy.pm_weapon_blend_progress = player.pm_weapon_blend_progress;
+	proxy.pm_weapon_prev_factor    = player.pm_weapon_prev_factor;
 
 	proxy.mag_deagle      = player.mag_deagle;
 	proxy.ammo_deagle     = player.ammo_deagle;
@@ -1311,8 +1707,19 @@ void(entity player) PM_EnsurePredictionProxy =
 
 	// Force a full snapshot on first creation so the client definitely
 	// gets every section even if a player's field happens to match zero.
+	// For PM_SF_AMMO: also set every bit in the 6-byte mask so the
+	// per-field-gated SendEntity writes all 47 ammo values on baseline.
+	// Byte 5 only uses bits 0-6 (47 fields total); keep bit 7 clear.
 	if (was_new)
+	{
 		proxy.SendFlags = proxy.SendFlags | PM_SF_MOVEMENT | PM_SF_WEAPON_STATE | PM_SF_AMMO;
+		proxy.pm_ammo_mb0 = 255;
+		proxy.pm_ammo_mb1 = 255;
+		proxy.pm_ammo_mb2 = 255;
+		proxy.pm_ammo_mb3 = 255;
+		proxy.pm_ammo_mb4 = 255;
+		proxy.pm_ammo_mb5 = 127;
+	}
 };
 
 // ------------------------------------------------------------
@@ -1534,42 +1941,46 @@ void() W_GiveStartingAmmo =
 
 void() PlayerSpawn =
 {
+	// Always produce a live player. Without this, callers that reach
+	// PlayerSpawn from a dead state (notably PlayerJoinTeam on the
+	// spec→team path) leave is_dead=TRUE — STAT_IS_DEAD then keeps the
+	// client in spec UI, PlayerPreThink early-returns every tick, and
+	// the body sits frozen at the spawn point as a killable "ghost"
+	// with the proxy rendering vis_is_dead=1 corpse pose. The other
+	// respawn paths (RoundRestart sv_main.qc:82, auto-respawn :525,
+	// gamemode switch :355) already pre-clear these — this duplicates
+	// them harmlessly so PlayerSpawn alone is enough.
+	self.is_dead = FALSE;
+	self.death_time = 0;
+	self.pending_round_join = FALSE;
+	PlayerRefreshScoreboardInfo(self);
+
 	self.classname = "player";
 	self.solid = SOLID_SLIDEBOX;
 
-	// Reserve dimension bit 2 for physics props (sv_physprop.qc). Player pmove
-	// and tracelines must not see that bit, otherwise passthrough filter fails.
-	self.dimension_hit = self.dimension_hit & ~2;
-	self.dimension_solid = self.dimension_solid & ~2;
-
-	// Noblock: give each player a unique dimension_solid bit so they pass
-	// through each other but still collide with world geometry (dim_solid=255).
-	// Bit value 2 is reserved for physics props — excluded from the table.
-	//
-	// LIMIT: FTE's default world bitmask is 8 bits (dimension_default=255),
-	// minus bit 2 for props = 7 unique slots. Player 8+ can't get a unique
-	// bit without bumping world.dimension_solid to a wider mask AND
-	// refactoring every hitscan trace to save/restore dimension_hit. Until
-	// that refactor happens we cap noblock at 7 players: the 8th+ falls
-	// through to normal SOLID_SLIDEBOX collision (can push teammates) and
-	// logs once so the operator knows to either cap the server or take the
-	// bigger refactor.
-	if (cvar("mp_noblock"))
-	{
-		float pnum = num_for_edict(self) - 1;
-		float noblock_bits[7] = {1, 4, 8, 16, 32, 64, 128};
-		if (pnum < 7)
-		{
-			self.dimension_solid = noblock_bits[pnum];
-			self.dimension_hit = 253; // 255 & ~2, can trace-hit all players
-		}
-		else
-		{
-			bprint(PRINT_HIGH, sprintf("^1[noblock]^7 player slot %g exceeds 7-slot limit — collides normally.\n", pnum + 1));
-		}
-	}
+	// mp_noblock is handled by PM_NoblockStash/Restore in sh_pmove.qc:
+	// per-cmd, the move loop temporarily sets every OTHER live player to
+	// SOLID_NOT, runs the move (so pmove traces pass through them), and
+	// restores solidity before bullet traces in PreThink. No per-player
+	// dim bit, no 8-player cap, applies on the next tick when mp_noblock
+	// toggles.
 
 	PM_ReadMovevars();
+
+	// mp_deadbodys 0: at most one corpse per player.  Sweep the
+	// previous death's body before allocating a fresh proxy — this
+	// runs after DetachAsCorpse stashed the pointer at PlayerKilled
+	// time.  mp_deadbodys 1 (default) leaves the pointer alone and
+	// the corpse stays around for the round-end sweep.
+	if (self.last_corpse)
+	{
+		if (cvar("mp_deadbodys") == 0
+		    && self.last_corpse.classname == "player_visual_proxy"
+		    && self.last_corpse.vis_is_corpse)
+			remove(self.last_corpse);
+		self.last_corpse = world;
+	}
+
 	Player_VisualProxy_Ensure(self);
 
 	// Set the player entity's model to the same HLMDL as the visual proxy.
@@ -1633,22 +2044,31 @@ void() PlayerSpawn =
 
 	// Give starting weapons.
 	//  - If survived_round is set, the player was alive when the round ended:
-	//    keep their slot_* and mag_*/ammo_* fields from the previous life.
+	//    keep their slot_* fields, but refill mag/reserve ammo to max for
+	//    each weapon they're carrying. W_GiveStartingAmmo zeros every
+	//    ammo field then refills based on the current slot_* values, so
+	//    calling it with the preserved slots gives "respawn with full ammo
+	//    for whatever you kept".
 	//  - Otherwise, apply the server-configured default loadout from the
 	//    sv_default_* cvars and (re)populate starting ammo.
 	if (self.survived_round)
 	{
-		// Keep existing inventory.  Nothing to do.
+		W_GiveStartingAmmo();
 	}
 	else
 	{
-		self.slot_primary   = cvar("sv_default_primary");
-		self.slot_secondary = cvar("sv_default_secondary");
-		self.slot_melee     = cvar("sv_default_melee");
-		self.slot_utility   = cvar("sv_default_utility");
+		self.slot_primary   = Weapon_IdFromStringOrDefault(cvar_string("sv_default_primary"),   WEP_NONE);
+		self.slot_secondary = Weapon_IdFromStringOrDefault(cvar_string("sv_default_secondary"), WEP_NONE);
+		self.slot_melee     = Weapon_IdFromStringOrDefault(cvar_string("sv_default_melee"),     WEP_NONE);
+		self.slot_utility   = Weapon_IdFromStringOrDefault(cvar_string("sv_default_utility"),   WEP_NONE);
 		W_GiveStartingAmmo();
 	}
 	self.survived_round = 0;  // consume the flag so it doesn't leak to future spawns
+
+	// Wipe last life's damage report row + column so the next death-screen
+	// panel only shows damage dealt/taken THIS life. (See sv_weapons.qc
+	// DamageReport_Record / DamageReport_Send.)
+	DamageReport_ClearForPlayer(num_for_edict(self) - 1);
 
 	// Clear stale weapon state from previous life, then equip best available
 	W_ClearWeaponBindings();
@@ -1735,9 +2155,18 @@ void() PutClientInServer =
 	// Assign a unique dimension bit so we can exclude individual players
 	// from multicasts (e.g. shooter doesn't get their own impact effects).
 	// dimension_see = 255 means the player receives all dimensions.
-	// dimension_seen = unique bit means multicasts can exclude just this player.
+	// dimension_seen = unique bit means multicasts can exclude just this player
+	// via `dimension_send & ~target.dimension_seen`. Previously this was set
+	// to 255, which made the dedupe trick silently exclude every player
+	// (~255 == 0 → no recipients) — owner-exclude in W_GrenadeExplode /
+	// W_HLGrenadeExplode / etc. did nothing. Per-slot unique bits fix that
+	// (8 max; players past slot 7 fall back to 255 and can't be excluded).
 	float slot = num_for_edict(self) - 1;  // 0-based player slot
-	self.dimension_seen = 255;
+	float dim_bits[8] = {1, 2, 4, 8, 16, 32, 64, 128};
+	if (slot < 8)
+		self.dimension_seen = dim_bits[slot];
+	else
+		self.dimension_seen = 255;
 	self.dimension_see  = 255;
 
 	player_chain_add(self);
@@ -1827,26 +2256,64 @@ void(float elapsedtime) SV_PausedTic =
 //   2 = full trust (accept with minimal dedup only)
 float(string command_string) SV_HandleHitclaim =
 {
+	// Diagnostics gated on sv_debug_hitclaim — uses print() so output is
+	// visible without `developer 1`. Pairs with cl_debug_hitclaim on the
+	// client. Cheap to leave the cvar at 0 in production: a single cvar
+	// read per hit before any work happens.
+	float dbg = cvar("sv_debug_hitclaim");
+	if (dbg) print("[hitclaim] enter\n");
+
 	float mode = cvar("sv_trust_clienthits");
-	if (mode < 1) return 0;
+	if (mode < 1) {
+		if (dbg) print(sprintf("[hitclaim] reject: sv_trust_clienthits=%g (<1)\n", mode));
+		return 0;
+	}
 
 	// self is the attacker (engine-set before SV_ParseClientCommand).
-	if (!self || self.classname != "player") return 0;
-	if (self.is_dead) return 0;
-	if (self.player_team <= TEAM_NONE) return 0;
+	if (!self || self.classname != "player") {
+		if (dbg) print("[hitclaim] reject: self is not a player\n");
+		return 0;
+	}
+	if (self.is_dead) {
+		if (dbg) print(sprintf("[hitclaim] reject: %s is dead\n", self.netname));
+		return 0;
+	}
+	// No TEAM_NONE early-exit — FFA / warmup / non-teamplay modes have
+	// every player on TEAM_NONE, and rejecting those drops every claim
+	// silently (the "splash but no damage" symptom).  The friendly-fire
+	// branch below already enforces same-team-no-damage when applicable
+	// and short-circuits cleanly when both players are TEAM_NONE.
 
 	float target_slot = stof(argv(1));
 	float body_damage = stof(argv(2));
 	float bone_id     = stof(argv(3));
 
-	if (target_slot <= 0 || target_slot > 32) return 0;
-	if (body_damage <= 0) return 0;
+	if (target_slot <= 0 || target_slot > 32) {
+		if (dbg) print(sprintf("[hitclaim] reject: target_slot %g out of 1..32\n", target_slot));
+		return 0;
+	}
+	if (body_damage <= 0) {
+		if (dbg) print(sprintf("[hitclaim] reject: body_damage %g <= 0\n", body_damage));
+		return 0;
+	}
 
 	entity target = edict_num(target_slot);
-	if (!target || target == world) return 0;
-	if (target.classname != "player") return 0;
-	if (target.is_dead) return 0;
-	if (target == self) return 0;
+	if (!target || target == world) {
+		if (dbg) print(sprintf("[hitclaim] reject: edict_num(%g) returned world/null\n", target_slot));
+		return 0;
+	}
+	if (target.classname != "player") {
+		if (dbg) print(sprintf("[hitclaim] reject: target slot %g classname='%s' (not player)\n", target_slot, target.classname));
+		return 0;
+	}
+	if (target.is_dead) {
+		if (dbg) print(sprintf("[hitclaim] reject: target %s is dead\n", target.netname));
+		return 0;
+	}
+	if (target == self) {
+		if (dbg) print("[hitclaim] reject: self-hit\n");
+		return 0;
+	}
 
 	// Look up hitgroup from the bone_id. W_BoneToHitgroup reads the
 	// global `trace_ent` to resolve bone names; we haven't done a trace
@@ -1869,28 +2336,49 @@ float(string command_string) SV_HandleHitclaim =
 	{
 		if (body_damage > 200) damage = 200 * W_HitgroupDamageMultiplier(hitgroup);
 
-		if (self.player_team == target.player_team
+		// FF check — bypassed in unified-team modes (FFA + Bhop) where
+		// every player is fair game regardless of the backend team value.
+		// Without this gate, FFA players who happened to pick same-side
+		// models (both blue or both red) had their hitclaims silently
+		// dropped — bullets did zero damage even though tracelines
+		// landed. Mirrors the W_ApplyDamage FF gate in sv_weapons.qc.
+		if (!Gamemode_HasUnifiedTeams()
+		    && self.player_team == target.player_team
 		    && self.player_team != TEAM_NONE
 		    && !cvar("mp_friendlyfire"))
+		{
+			if (dbg) print(sprintf("[hitclaim] reject: friendly-fire (team=%g)\n", self.player_team));
 			return 0;
+		}
 
 		if (!checkpvs(self.origin + self.view_ofs, target))
+		{
+			if (dbg) print(sprintf("[hitclaim] reject: target %s not in PVS of attacker\n", target.netname));
 			return 0;
+		}
 	}
 
-	// Dedup: if the server's own trace already hit this target within
-	// the last 100 ms, the client's claim is a duplicate — skip.
-	if (self.last_damaged_target == target
-	    && (time - self.last_damaged_time) < 0.1)
-		return 0;
+	// No dedup: when sv_trust_clienthits >= 1, W_PenetratingHitscanShoot's
+	// player-damage path is gated off via W_ShouldDeferToClaim for shooters
+	// that push cl_predict_hits (default ON), so the claim is the SOLE
+	// source of player damage and can't double-up. The previous dedup
+	// check was rejecting visually-accurate claims because the server's
+	// lag-comped trace landed a sliver of damage on the same target ~ms
+	// earlier — the cause of the "blood particles, no damage" reports.
+
+	// Stamp the target's death_hitgroup BEFORE W_ApplyDamage so a lethal
+	// claim's gib-on-headshot path inside W_ApplyDamage sees the right
+	// hitgroup (hitscan paths set this directly; without this write the
+	// hitclaim path would always read whatever the previous shot stamped).
+	target.death_hitgroup = hitgroup;
 
 	float applied = W_ApplyDamage(self, target, damage);
 
-	if (cvar("sv_debug_clienthits"))
+	if (dbg)
 	{
-		dprint(sprintf("[hitclaim] %s -> slot %g body=%.0f bone=%g\n",
+		print(sprintf("[hitclaim] %s -> slot %g body=%.0f bone=%g\n",
 			self.netname, target_slot, body_damage, bone_id));
-		dprint(sprintf("[hitclaim]   hg=%g dmg=%.0f applied=%.0f mode=%g\n",
+		print(sprintf("[hitclaim]   hg=%g dmg=%.0f applied=%.0f mode=%g\n",
 			hitgroup, damage, applied, mode));
 	}
 
@@ -1907,6 +2395,7 @@ void(string command_string) SV_ParseClientCommand =
 		SV_HandleHitclaim(command_string);
 		return;
 	}
+
 
 	if (PlayerHandleTeamCommand(cmd))
 		return;
@@ -2030,6 +2519,29 @@ void(string command_string) SV_ParseClientCommand =
 		return;
 	}
 
+	if (cmd == "respawn")
+	{
+		if (!cvar("mp_cheats"))
+		{
+			sprint(self, PRINT_HIGH, "respawn requires mp_cheats 1\n");
+			return;
+		}
+		if (self.player_team <= TEAM_NONE || self.player_team == TEAM_SPEC)
+		{
+			sprint(self, PRINT_HIGH, "respawn requires joining a playing team first\n");
+			return;
+		}
+		if (!self.is_dead)
+		{
+			sprint(self, PRINT_HIGH, "respawn: you're already alive\n");
+			return;
+		}
+
+		PlayerSpawn();
+		sprint(self, PRINT_HIGH, "respawned\n");
+		return;
+	}
+
 	clientcommand(self, command_string);
 };
 
@@ -2070,6 +2582,14 @@ void() SV_RunClientCommand =
 		input_buttons = input_buttons & ~1;
 	}
 	PM_PlayerMove();
+
+	if (cvar("sv_debug_wepswap"))
+	{
+		vector dbg_mv = '0 0 0';
+		dbg_mv_x = input_movevalues_x; dbg_mv_y = input_movevalues_y;
+		Drift_Append(time, input_timelength * 1000, dbg_mv,
+			input_buttons, self.weapon, self.origin, self.velocity);
+	}
 	SV_CheckTouchTriggers();
 
 	// If a teleport angle snap fired this command, send an engine-level

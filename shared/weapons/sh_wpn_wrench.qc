@@ -22,7 +22,7 @@ const float WRENCH_IDLE_FRAME         = 0;
 
 // --- Balance ---
 const float WRENCH_DAMAGE             = 60;
-const float WRENCH_RANGE              = 64;
+const float WRENCH_RANGE              = 72;
 
 // --- Pre-computed state durations ---
 const float WRENCH_DRAW_DURATION     = (WRENCH_DRAW_END - WRENCH_DRAW_START) * WRENCH_FRAME_INTERVAL;
@@ -121,7 +121,10 @@ void() W_WrenchSwing =
         if (W_CanDamageTarget(trace_ent))
             W_ApplyDamage(self, trace_ent, WRENCH_DAMAGE);
         else
+        {
+            PhysProp_TryPushFromTrace(v_forward, WRENCH_DAMAGE);
             W_ImpactEffect(trace_endpos);
+        }
     }
     else
     {

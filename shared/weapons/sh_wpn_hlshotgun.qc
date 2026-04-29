@@ -193,15 +193,18 @@ void(float pellets, float spread_val) W_ShotgunFirePellets =
         if (trace_fraction < 1.0)
         {
             dist = vlen(trace_endpos - src);
+            damage = W_LinearDamageFalloff(dist, HLSG_PELLET_CLOSE_DAMAGE, HLSG_PELLET_MIN_DAMAGE, HLSG_PELLET_FALLOFF_RANGE);
             if (W_CanDamageTarget(trace_ent))
             {
-                damage = W_LinearDamageFalloff(dist, HLSG_PELLET_CLOSE_DAMAGE, HLSG_PELLET_MIN_DAMAGE, HLSG_PELLET_FALLOFF_RANGE);
                 W_ApplyDamage(self, trace_ent, damage);
             }
             else
+            {
+                PhysProp_TryPushFromTrace(dir, damage);
                 W_ImpactEffect(trace_endpos);
+            }
 
-            W_DebugImpact(trace_endpos, W_LinearDamageFalloff(dist, HLSG_PELLET_CLOSE_DAMAGE, HLSG_PELLET_MIN_DAMAGE, HLSG_PELLET_FALLOFF_RANGE), W_BoneToHitgroup(trace_bone_id));
+            W_DebugImpact(trace_endpos, damage, W_BoneToHitgroup(trace_bone_id));
         }
     }
 };

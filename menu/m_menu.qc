@@ -1,5 +1,11 @@
 float menu_font;
 
+// serverkey() isn't declared in the engine-generated menu defs. Pull it in
+// here (top of the first menu file in compile order — see m_progs.src) so
+// every later menu file can read serverinfo.  #354 = pr_menu.c PF_cl_serverkey.
+// m_loading.qc previously had a local copy; removed to avoid double-declare.
+string(string key) serverkey = #354;
+
 vector MENU_BG = '0.08 0.09 0.11';
 vector MENU_BG_DARK = '0.04 0.05 0.07';
 vector MENU_BORDER = '0.35 0.37 0.4';
@@ -16,16 +22,30 @@ vector MENU_TEXT_SMALL = '8 8 0';
 vector MENU_TEXT_MEDIUM = '16 16 0';
 vector MENU_TEXT_LARGE = '24 24 0';
 
+vector menu_root_size;
+
 void() m_close;
 void() settings_menu;
 void() create_server_load_maps;
 void() create_server_menu;
+void() server_browser_menu;
 
 float current_menu;
 const float MENU_MAIN = 1;
 const float MENU_SETTINGS = 2;
 const float MENU_HELP = 3;
 const float MENU_CREATE_SERVER = 4;
+const float MENU_SERVER_BROWSER = 5;
+
+vector(float max_width) menu_pick_main_title_font =
+{
+    return '60 60 0';
+};
+
+vector(float title_size) menu_pick_subtitle_font =
+{
+    return '16 16 0';
+};
 
 // =============================================
 //  UI Controls
@@ -81,6 +101,48 @@ void(string id, vector pos, vector size, float maxlen, __inout string text, __in
 	sui_pop_frame();
 
 	sui_pop_frame();
+};
+
+// Defined in m_main.qc (compiles after this file). Set TRUE when we
+// kick off the disconnect→backdrop map-load so m_draw's transition
+// handlers know to leave the menu open instead of force-closing it.
+float mm_returning_to_backdrop;
+
+// Full disconnect flow used by both the main-menu Disconnect button and
+// the loading-panel Disconnect button.  When `cl_menumap` is set, kicks
+// off the backdrop server so the user lands back on the menumap instead
+// of a black screen.  When unset, falls through to a plain `disconnect`
+// console command.
+//
+// We KEEP the menu open through the entire transition. Previously this
+// did m_close → ... → togglemenu, but the gap between disconnect and
+// map-finished left the engine in a "no menu, no connection" state
+// where it would briefly auto-show the console (con_stayhidden's
+// menu-fallback only fires under specific keydest+loading conditions
+// that don't hold during a `map` command). Setting
+// mm_returning_to_backdrop tells m_draw's transition handlers to skip
+// their default close-menu + toggleconsole behavior — they assume the
+// "menu was open during constate=connecting" pattern means console is
+// stacked over a menu opened from the console, which is wrong here.
+void() Menu_DisconnectAndReturnToMenuMap =
+{
+	string menumap = cvar_string("cl_menumap");
+	if (menumap != "" && menumap != "none")
+	{
+		mm_returning_to_backdrop = TRUE;
+		localcmd("set cl_menu_backdrop_active 1\n");
+		localcmd("set sv_backdrop 1\n");
+		// See m_main.qc backdrop launcher — keep the backdrop off
+		// the default 27500 port so other local servers can use it.
+		localcmd(sprintf("sv_port %g\n", 27501 + floor(random() * 100)));
+		localcmd("deathmatch 1\n");
+		localcmd("maxclients 2\n");
+		localcmd(sprintf("map %s\n", menumap));
+	}
+	else
+	{
+		localcmd("disconnect\n");
+	}
 };
 
 float(string id, vector pos, vector size, string text, vector button_color, vector border_color) my_button_colored =
@@ -412,10 +474,12 @@ string client_config_cvars[] =
     "cl_crosshairthickness",
     "cl_crosshairgap",
     "cl_crosshaircolour",
+    "cl_crosshairdynamic",
+    "cl_crosshairweapongap",
     "cl_teamcolours",
 };
 
-// Server-only cvars — persisted to data/server.cfg, exec'd by sv_main worldspawn.
+// Server-only cvars — persisted to data/server.cfg, applied by sv_main worldspawn.
 string server_config_cvars[] =
 {
     "hostname",
@@ -429,6 +493,7 @@ string server_config_cvars[] =
     "mp_maxrounds",
     "mp_friendlyfire",
     "mp_falldamage",
+    "mp_nomapweapons",
     "mp_freezetime",
     "mp_roundrestartdelay",
     "mp_respawndelay",
@@ -450,39 +515,32 @@ string server_config_cvars[] =
     "mp_cheats",
     "sv_cheats",
     "mp_noblock",
+    "sv_trust_clienthits",
 
     // Non-UI advanced server cvars (no menu control — edit data/server.cfg to change)
     "sv_lagcomp",
     "sv_lagcomp_maxrewind",
     "sv_hitbox_expand",
     "sv_anim_qu_per_sec",
+    "sv_anim_qu_per_sec_crouch",
     "sv_player_basebone",
     "sv_antilag",
     "sv_bigcoords",
     "sv_nqplayerphysics",
     "sv_wateraccelerate",
     "sv_waterfriction",
+    "sv_toss_tickrate",
     "pm_ramp_bumpcount",
 
     // Physics props
     "sv_physprop_hit_force",
-    "sv_physprop_push_force",
-    "sv_physprop_push_height",
-    "sv_physprop_passthrough",
     "sv_physprop_mass",
     "sv_physprop_erp",
     "sv_physprop_damp_lin",
     "sv_physprop_damp_ang",
-    "sv_physprop_player_bounce",
-    "sv_physprop_player_minkick",
-    "sv_physprop_player_kickback",
     "sv_physprop_friction",
-    "sv_physprop_shape",
-    "sv_physprop_axis",
-    "sv_physprop_push_radius",
     "sv_physprop_use_force",
     "sv_physprop_use_velmult",
-    "sv_physprop_qc_collide",
 
     // ODE engine cvars
     "physics_ode_iterationsperframe",
@@ -540,6 +598,52 @@ void() Menu_SaveClientConfig =
 
 void() Menu_FixupEmptyDefaults;  // forward
 
+string(string cfgpath, string target_name) Menu_ReadConfigValue =
+{
+    float f = fopen(cfgpath, FILE_READ);
+    if (f < 0)
+        return "";
+
+    string found = "";
+    string line = fgets(f);
+    while (line)
+    {
+        float n = strlen(line);
+        if (n > 0 && substring(line, n - 1, 1) == "\r")
+            line = substring(line, 0, n - 1);
+
+        float argc = tokenize(line);
+        if (argc <= 0)
+        {
+            line = fgets(f);
+            continue;
+        }
+
+        string cmd = argv(0);
+        if (cmd == "//" || substring(cmd, 0, 1) == "#")
+        {
+            line = fgets(f);
+            continue;
+        }
+
+        if ((cmd == "set" || cmd == "seta" || cmd == "setfl") && argc >= 3)
+        {
+            if (argv(1) == target_name)
+                found = argv(2);
+        }
+        else if (argc >= 2)
+        {
+            if (argv(0) == target_name)
+                found = argv(1);
+        }
+
+        line = fgets(f);
+    }
+
+    fclose(f);
+    return found;
+};
+
 void() Menu_SaveServerConfig =
 {
     // Restore intended defaults for any non-UI cvar that came back empty
@@ -567,7 +671,15 @@ void() Menu_SaveServerConfig =
         // Re-apply by reading the registered default and setting it live.
         if (val == "")
         {
-            val = cvar_defstring(name);
+            if (name == "rcon_password")
+                val = cvar_string("sv_rcon_password_shadow");
+
+            if (name == "rcon_password" && val == "")
+                val = Menu_ReadConfigValue("data/server.cfg", name);
+
+            if (val == "")
+                val = cvar_defstring(name);
+
             if (val != "")
             {
                 cvar_set(name, val);   // apply live so the next read works
@@ -608,14 +720,17 @@ void() Menu_FixupEmptyDefaults =
     if (cvar_string("sv_lagcomp_maxrewind") == "") cvar_set("sv_lagcomp_maxrewind", "0.5");
     if (cvar_string("sv_debug_lagcomp")     == "") cvar_set("sv_debug_lagcomp",     "0");
     if (cvar_string("sv_hitbox_expand")     == "") cvar_set("sv_hitbox_expand",     "32");
-    if (cvar_string("sv_anim_qu_per_sec")   == "") cvar_set("sv_anim_qu_per_sec",   "240");
+    if (cvar_string("sv_anim_qu_per_sec")        == "") cvar_set("sv_anim_qu_per_sec",        "240");
+    if (cvar_string("sv_anim_qu_per_sec_crouch") == "") cvar_set("sv_anim_qu_per_sec_crouch", "100");
     if (cvar_string("sv_player_basebone")   == "") cvar_set("sv_player_basebone",   "0");
     if (cvar_string("sv_antilag")           == "") cvar_set("sv_antilag",           "3");
     if (cvar_string("sv_bigcoords")         == "") cvar_set("sv_bigcoords",         "1");
     if (cvar_string("sv_nqplayerphysics")   == "") cvar_set("sv_nqplayerphysics",   "0");
     if (cvar_string("sv_wateraccelerate")   == "") cvar_set("sv_wateraccelerate",   "10");
     if (cvar_string("sv_waterfriction")     == "") cvar_set("sv_waterfriction",     "1");
+    if (cvar_string("sv_toss_tickrate")     == "") cvar_set("sv_toss_tickrate",     "20");
     if (cvar_string("pm_ramp_bumpcount")    == "") cvar_set("pm_ramp_bumpcount",    "8");
+    if (cvar_string("sv_trust_clienthits")  == "") cvar_set("sv_trust_clienthits",  "1");
 
     // Default starting loadout — match sv_main.qc's SV_FixupEmptyDefaults so
     // the menu VM sees the same values before a server is ever started.
@@ -634,6 +749,7 @@ void() Menu_RegisterCvars =
     // Ephemeral admin trigger — pre-register so `cvar("sv_roundrestart")`
     // in QC doesn't auto-create it.  Not persisted (not in save list).
     menu_register_default("sv_roundrestart", "0");
+    menu_register_default("sv_rcon_password_shadow", "");
     // Same story — these get registered by worldspawn (sv_main.qc) but
     // the menu VM reads them earlier (sv_info_push, SV_FixupEmptyDefaults
     // queued from data/server.cfg exec) and the auto-create path prints
@@ -644,22 +760,31 @@ void() Menu_RegisterCvars =
     // Gameplay toggles / settings that live in the save list.  Defaults
     // must be registered here so cvar_string doesn't return "".
     menu_register_default("mp_noblock",      "0");
+    menu_register_default("mp_nomapweapons", "0");
     menu_register_default("sv_shiftspeed",   "135");
+    // Crosshair behaviour toggles — defaults match the CSQC registration
+    // in HUD_EnsureCrosshairCVars so the menu doesn't spawn "Created QC
+    // Cvar" warnings on first open.
+    menu_register_default("cl_crosshairdynamic",    "1");
+    menu_register_default("cl_crosshairweapongap", "1");
 
     // Non-UI server cvars (saved to data/server.cfg, no menu control).
     menu_register_default("sv_lagcomp",           "1");
     menu_register_default("sv_lagcomp_maxrewind", "0.5");
     menu_register_default("sv_debug_lagcomp",     "0");
     menu_register_default("sv_hitbox_expand",     "32");
-    menu_register_default("sv_anim_qu_per_sec",   "240");
+    menu_register_default("sv_anim_qu_per_sec",         "240");
+    menu_register_default("sv_anim_qu_per_sec_crouch",  "100");
     menu_register_default("sv_player_basebone",   "0");
     menu_register_default("sv_antilag",           "3");
     menu_register_default("sv_bigcoords",         "1");
     menu_register_default("sv_nqplayerphysics",   "0");
     menu_register_default("sv_wateraccelerate",   "10");
     menu_register_default("sv_waterfriction",     "1");
+    menu_register_default("sv_toss_tickrate",     "20");
     menu_register_default("sv_ode_loaded",        "0");
     menu_register_default("pm_ramp_bumpcount",    "8");
+    menu_register_default("sv_trust_clienthits",  "1");
 
     // Default starting loadout cvars — stored as WEP_* integers.
     menu_register_default("sv_default_primary",   "0");
@@ -670,23 +795,13 @@ void() Menu_RegisterCvars =
     // Re-register physics cvars with proper defaults (the loop above registered
     // them with "" which would make first-open seed to fallback).
     registercvar("sv_physprop_hit_force",         "8000", 0);
-    registercvar("sv_physprop_push_force",        "8000", 0);
-    registercvar("sv_physprop_push_height",       "0.6",  0);
-    registercvar("sv_physprop_passthrough",       "1",    0);
     registercvar("sv_physprop_mass",              "20",   0);
     registercvar("sv_physprop_erp",               "0",    0);
-    registercvar("sv_physprop_damp_lin",          "0.2",  0);
-    registercvar("sv_physprop_damp_ang",          "0.2",  0);
-    registercvar("sv_physprop_player_bounce",     "0.4",  0);
-    registercvar("sv_physprop_player_minkick",    "100",  0);
-    registercvar("sv_physprop_player_kickback",   "0.005",0);
+    registercvar("sv_physprop_damp_lin",          "0.01", 0);
+    registercvar("sv_physprop_damp_ang",          "0.01", 0);
     registercvar("sv_physprop_friction",          "1.0",  0);
-    registercvar("sv_physprop_shape",             "cylinder", 0);
-    registercvar("sv_physprop_axis",              "y",    0);
-    registercvar("sv_physprop_push_radius",       "40",   0);
     registercvar("sv_physprop_use_force",         "800",  0);
     registercvar("sv_physprop_use_velmult",       "800",  0);
-    registercvar("sv_physprop_qc_collide",        "1",    0);
     registercvar("physics_ode_iterationsperframe","10",   0);
     registercvar("physics_ode_worldquickstep",    "0",    0);
     registercvar("physics_ode_autodisable",       "0",    0);
@@ -730,13 +845,36 @@ void() Menu_LoadConfig =
 //  Menus
 // =============================================
 
-// Player name — persists across all menu pages
+// Player name — persists across all menu pages. Committed to the `name`
+// cvar (and thus broadcast to the server) only on Enter or menu-close,
+// NOT on every keystroke — otherwise the server sees every character of
+// a rename as a separate `<user> changed name to "Pro"`, `"Prot"`,
+// `"Proto"`… spam.
 string mm_name_text;
 float mm_name_cursor;
 float mm_name_seeded;
 
+void() mm_flush_name =
+{
+	if (!mm_name_seeded) return;          // field never opened this session
+	if (mm_name_text == "") return;       // empty → ignore, keep current
+	if (mm_name_text == cvar_string("name")) return;   // unchanged, skip
+	cvar_set("name", mm_name_text);
+};
+
 void() main_menu =
 {
+	vector menu_box_size;
+	vector title_font;
+	vector subtitle_font;
+	float  title_block_y;
+	float  title_mid_y;
+	float  menu_stack_h;
+	float  menu_stack_bottom_y;
+	float  menu_stack_top_y;
+	float  subtitle_x;
+	float  subtitle_y;
+
 	// Floating player name island above the title
 	if (!mm_name_seeded)
 	{
@@ -747,13 +885,44 @@ void() main_menu =
 		mm_name_seeded = TRUE;
 	}
 
-	sui_set_align([SUI_ALIGN_CENTER, SUI_ALIGN_START]);
-	sui_text([1, 65], [36, 36, 0], "Proto's Quake", '0 0 0', 0.5, 0);
-	sui_text([0, 64], [36, 36, 0], "Proto's Quake", [1, 1, 1], 1, 0);
+	// Main menu box size depends on whether the backdrop-only localhost
+	// connect row is present. The full menu stack sits a little above
+	// the bottom of the screen, and the title centers in the space
+	// between the top of the screen and that stack.
+	menu_box_size = [148, (serverkey("sv_backdrop") == "1") ? 168 : 144];
+	menu_stack_h = menu_box_size_y + 26;  // 20 px name field + 6 px gap
+	menu_stack_bottom_y = max(menu_stack_h + 16, floor(menu_root_size_y * 0.85));
+	menu_stack_top_y = menu_stack_bottom_y - menu_stack_h;
 
-	vector pos = [0, -100];
-	vector size = [148, 120];
-	sui_set_align([SUI_ALIGN_CENTER, SUI_ALIGN_END]);
+	title_font = menu_pick_main_title_font(menu_root_size_x - 48);
+	subtitle_font = menu_pick_subtitle_font(title_font_y);
+	title_mid_y = floor(menu_stack_top_y * 0.5);
+	title_block_y = max(12, title_mid_y - floor(title_font_y * 0.5));
+	subtitle_x = max(8, floor(title_font_y * 0.80));
+	subtitle_y = title_block_y + floor(title_font_y * 0.85) - 3;
+
+	sui_set_align([SUI_ALIGN_CENTER, SUI_ALIGN_START]);
+	sui_text([2, title_block_y + 1], title_font, "Quakers", '0 0 0', 0.5, 0);
+	sui_text([0, title_block_y], title_font, "Quakers", [1, 1, 1], 1, 0);
+	sui_text([subtitle_x, subtitle_y], subtitle_font,
+	         "The Religious Society of Friends",
+	         '0.80 0.80 0.80', 1, 0);
+
+	// Build tag — bottom-right corner of the screen, dimmed.  Uses
+	// END align so the offset is from the right/bottom edge.
+	sui_set_align([SUI_ALIGN_END, SUI_ALIGN_END]);
+	sui_text([-6, -6], MENU_TEXT_SMALL,
+	         "Build: pre-nettest13",
+	         '0.80 0.80 0.80', 1, 0);
+
+	vector pos = [0, menu_stack_top_y + 26];
+	// Backdrop mode adds a Localhost button under Connect-to-Proto.bar, so
+	// the panel needs an extra row of height. Real-game mode (Disconnect)
+	// has no localhost row and is shorter.  Both heights bumped by 24 px
+	// over the original to fit the new Server Browser row between Create
+	// Server and Settings without clipping into the bottom-aligned Quit.
+	vector size = menu_box_size;
+	sui_set_align([SUI_ALIGN_CENTER, SUI_ALIGN_START]);
 
 	sui_push_frame(pos, size);
 
@@ -773,15 +942,20 @@ void() main_menu =
 		text_input_control("mm_name", [input_x, 0], [nw - input_x - 4, 14], 32, mm_name_text, mm_name_cursor);
 		sui_pop_frame();
 
-		if (mm_name_text != "")
-			cvar_set("name", mm_name_text);
+		// Do NOT cvar_set here — that would spam the server with a
+		// rename event per keystroke. mm_flush_name() commits on
+		// menu-close (m_close) and on Enter (Menu_InputEvent).
 	}
 
 	// Connect button is swapped for a Disconnect button once we've left the
 	// backdrop map (i.e. the user is in a real game / on a real server).
 	// Clicking Disconnect re-launches the backdrop map and re-arms the
 	// suppress-HUD flag, exactly like the engine-startup path in m_init.
-	if (cvar("cl_menu_backdrop_active"))
+	//
+	// Reads server-authoritative sv_backdrop instead of the local cvar so
+	// console-driven connects (e.g. `connect localhost`) flip the button
+	// correctly — the local cvar wouldn't update on those code paths.
+	if (serverkey("sv_backdrop") == "1")
 	{
 		if (my_button_colored("mm_connect", [0, 8], [size_x - 16, 20], "Connect to Proto.bar", '0.6 0.55 0.1', '0.75 0.7 0.2'))
 		{
@@ -791,41 +965,52 @@ void() main_menu =
 			// and the main menu flashes with a stale Disconnect button.
 			m_close();
 			localcmd("set cl_menu_backdrop_active 0\n");
+			// Clear the server-side flag too — the local listen server may
+			// still be running, and `connect` will tear it down, but we set
+			// it explicitly so any future listen-server launch defaults to
+			// "real game" instead of inheriting the stale backdrop value.
+			localcmd("set sv_backdrop 0\n");
+			// Restore the default listen-server port (backdrop launchers
+			// move it off 27500 to avoid colliding with other local servers).
+			localcmd("sv_port 27500\n");
 			localcmd("connect proto.bar\n");
+		}
+
+		// Localhost connect — same teardown as the Proto.bar Connect, but
+		// connects to 127.0.0.1:27500 (a sibling nettest instance the user
+		// is hosting locally). Stacked beneath Proto.bar at the standard
+		// 24px row pitch.
+		if (my_button_colored("mm_connect_local", [0, 8 + 24], [size_x - 16, 20], "Connect to Localhost", '0.18 0.45 0.18', '0.30 0.65 0.30'))
+		{
+			m_close();
+			localcmd("set cl_menu_backdrop_active 0\n");
+			localcmd("set sv_backdrop 0\n");
+			localcmd("sv_port 27500\n");
+			localcmd("connect localhost\n");
 		}
 	}
 	else
 	{
 		if (my_button_colored("mm_disconnect", [0, 8], [size_x - 16, 20], "Disconnect", '0.55 0.2 0.2', '0.75 0.3 0.3'))
 		{
-			string menumap = cvar_string("cl_menumap");
-			if (menumap != "" && menumap != "none")
-			{
-				// Explicit m_close() so menu_active is known-FALSE before the
-				// map swap; the trailing togglemenu then reliably re-opens the
-				// menu after the backdrop finishes loading (same pattern as
-				// the engine-startup path in m_init).
-				m_close();
-				localcmd("set cl_menu_backdrop_active 1\n");
-				localcmd("deathmatch 1\n");
-				localcmd("maxclients 2\n");
-				localcmd(sprintf("map %s\n", menumap));
-				localcmd("togglemenu\n");
-			}
-			else
-			{
-				localcmd("disconnect\n");
-			}
+			Menu_DisconnectAndReturnToMenuMap();
 		}
 	}
-	if (my_button("mm_create", [0, 8 + 24], [size_x - 16, 20], "Create Server"))
+	// Backdrop mode shows two top buttons (Proto.bar + Localhost), real-game
+	// mode shows one (Disconnect). Push Create Server / Settings down by an
+	// extra row when the localhost row is visible so the layout doesn't
+	// collide with it.
+	float extra_row = (serverkey("sv_backdrop") == "1") ? 24 : 0;
+
+	if (my_button("mm_create", [0, 8 + 24 + extra_row], [size_x - 16, 20], "Create Server"))
 	{
 		create_server_load_maps();
 		current_menu = MENU_CREATE_SERVER;
 	}
-	my_button("mm_settings", [0, 8 + 48], [size_x - 16, 20], "Settings") ? current_menu = MENU_SETTINGS : 0;
+	my_button("mm_browser",  [0, 8 + 48 + extra_row], [size_x - 16, 20], "Server Browser") ? current_menu = MENU_SERVER_BROWSER : 0;
+	my_button("mm_settings", [0, 8 + 72 + extra_row], [size_x - 16, 20], "Settings") ? current_menu = MENU_SETTINGS : 0;
 	sui_set_align([SUI_ALIGN_CENTER, SUI_ALIGN_END]);
-	my_button("mm_quit", [0, -8], [size_x - 16, 20], "Quit") ? localcmd("quit\n") : 0;
+	my_button_colored("mm_quit", [0, -8], [size_x - 16, 20], "Quit", '0.55 0.2 0.2', '0.75 0.3 0.3') ? localcmd("quit\n") : 0;
 	sui_pop_frame();
 
 	sui_set_default_kb_focus("mm_return");
@@ -833,15 +1018,17 @@ void() main_menu =
 
 void(vector size) root_menu =
 {
+	menu_root_size = size;
 	sui_set_align([SUI_ALIGN_CENTER, SUI_ALIGN_CENTER]);
 	// Full-screen dim behind the main menu (gated on cl_menu_backdrop).
 	if (cvar("cl_menu_backdrop"))
 		sui_fill([0, 0], size, '0.01 0.01 0.02', 0.64, 0);
 	switch (current_menu)
 	{
-		case MENU_MAIN: main_menu(); break;
-		case MENU_CREATE_SERVER: create_server_menu(); break;
-		case MENU_SETTINGS: settings_menu(); 
+		case MENU_MAIN:            main_menu();            break;
+		case MENU_CREATE_SERVER:   create_server_menu();   break;
+		case MENU_SERVER_BROWSER:  server_browser_menu();  break;
+		case MENU_SETTINGS:        settings_menu();
 		default: break;
 	}
 };

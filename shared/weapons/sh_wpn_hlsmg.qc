@@ -475,8 +475,8 @@ void() CSQC_PredictHLSMGCommand =
                 else
                     sound(self, CHAN_WEAPON, "sounds/weapons/wpn_hlsmg/fire3.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(HLSMG_BASE_SPREAD, HLSMG_MOVE_SPREAD, HLSMG_FULL_SPREAD_SPEED,
-                    HLSMG_CLOSE_DAMAGE, HLSMG_MIN_DAMAGE, HLSMG_DAMAGE_FALLOFF_RANGE);
+                CSQC_PredictedPenetratingImpact(HLSMG_BASE_SPREAD, HLSMG_MOVE_SPREAD, HLSMG_FULL_SPREAD_SPEED,
+                    HLSMG_CLOSE_DAMAGE, HLSMG_MIN_DAMAGE, HLSMG_DAMAGE_FALLOFF_RANGE, 24, 0.95);
                 CSQC_SpawnCasing("models/weapons/9mmcasing.mdl",
                     '8 4 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }

@@ -378,6 +378,7 @@ vector input_angles;	/* +x=DOWN */
 vector input_movevalues;
 float input_buttons;
 float input_impulse;
+float input_servertime;	/* Server's timestamp of the client's interpolation state — set per usercmd by the engine in SV_RunCmd. Used by sv_lagcomp to rewind players to the exact server-time the shooter was viewing. */
 int trace_endcontents;
 int trace_surfaceflags;
 int trace_brush_id;

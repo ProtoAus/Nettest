@@ -145,17 +145,21 @@ void() W_M3FirePellets =
         if (trace_fraction < 1.0)
         {
             dist = vlen(trace_endpos - src);
+            damage = W_LinearDamageFalloff(dist, M3_PELLET_CLOSE_DAMAGE, M3_PELLET_MIN_DAMAGE, M3_PELLET_FALLOFF_RANGE);
             if (W_CanDamageTarget(trace_ent))
             {
-                damage = W_LinearDamageFalloff(dist, M3_PELLET_CLOSE_DAMAGE, M3_PELLET_MIN_DAMAGE, M3_PELLET_FALLOFF_RANGE);
+                if (trace_ent.classname == "player")
+                {
+                    // Stamp hitgroup before W_ApplyDamage so the gib-on-
+                    // headshot path inside it sees this pellet's hitgroup.
+                    trace_ent.death_hitgroup = W_BoneToHitgroup(trace_bone_id);
+                }
                 W_ApplyDamage(self, trace_ent, damage);
                 if (trace_ent.classname == "player")
                 {
-                    float pelletmat = IMPACT_MAT_FLESH;
-                    float pellet_hg = W_BoneToHitgroup(trace_bone_id);
-                    if (pellet_hg == HITGROUP_HEAD || trace_ent.health <= 0)
-                        pelletmat = IMPACT_MAT_FLESH_LETHAL;
-                    W_ImpactEffectAllMat(trace_endpos, trace_plane_normal, pelletmat);
+                    // All player hits use the lethal spark-splash variant —
+                    // matches the cool head-pop look on every body shot.
+                    W_ImpactEffectAllMat(trace_endpos, trace_plane_normal, IMPACT_MAT_FLESH_LETHAL);
                 }
                 else
                 {
@@ -168,9 +172,12 @@ void() W_M3FirePellets =
                 }
             }
             else
+            {
+                PhysProp_TryPushFromTrace(dir, damage);
                 W_ImpactEffect(trace_endpos);
+            }
 
-            W_DebugImpact(trace_endpos, W_LinearDamageFalloff(dist, M3_PELLET_CLOSE_DAMAGE, M3_PELLET_MIN_DAMAGE, M3_PELLET_FALLOFF_RANGE), W_BoneToHitgroup(trace_bone_id));
+            W_DebugImpact(trace_endpos, damage, W_BoneToHitgroup(trace_bone_id));
         }
     }
 };

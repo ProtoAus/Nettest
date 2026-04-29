@@ -2,18 +2,21 @@
 //  shared/weapons/sh_wpn_hlgrenade.qc  -  HL Hand Grenade
 //
 //  Slot  : SLOT_UTILITY  (impulse 1 / key 1)
-//  Stats : ammo_hlgrenade (no magazine, direct ammo pool, max 15)
-//  Fire  : hold +attack to pull pin, release to throw grenade
-//         Throw velocity scales with hold time (max 500)
-//         Grenade explodes after 3s fuse (not on contact)
+//  Stats : ammo_hlgrenade (direct ammo pool, max 5)
+//  Fire  : hold +attack to pull pin → starts a 5 s absolute fuse from
+//         the moment the pin is pulled.  Release at any time to throw
+//         with a fixed velocity (forward + up + player velocity).  The
+//         grenade's airborne fuse = max(0, 5 − hold_time), so cooking
+//         past 5 s detonates the grenade essentially on release.
 //
 //  This file is compiled by BOTH sv_progs and cl_progs.
 // ============================================================
 
 // --- Ammo fields ---
 .float ammo_hlgrenade;
-.float hlgren_throw_vel;      // stored throw velocity (set on release, grenade spawns after delay)
+.float hlgren_throw_vel;      // pending-spawn flag (1 = grenade entity needs to spawn after THROW_DELAY)
 .float hlgren_spawn_time;     // time when the grenade entity should actually spawn
+.float hlgren_fake_spawned_serial; // CSQC: wep_action_id of the throw whose fake gren is currently in flight. Each unack'd throw cmd replays every tick under high ping; without this guard the live frame after each replay re-fires the spawn block (because SH_HLGrenadeThrow keeps re-setting hlgren_throw_vel=1) and pumps out a duplicate fake every reconcile tick.
 
 // --- Animation frames ---
 const float HLGREN_FRAME_INTERVAL         = 0.05;    // 1/20
@@ -24,19 +27,17 @@ const float HLGREN_DRAW_END               = 10;
 const float HLGREN_PIN_START              = 11;
 const float HLGREN_PIN_END                = 22;
 
-const float HLGREN_THROW1_START           = 23;
-const float HLGREN_THROW1_END             = 41;
-const float HLGREN_THROW1_INTERVAL        = 0.077;   // ~13fps — low velocity
+// Single throw animation — used for every release regardless of cook time.
+const float HLGREN_THROW_START            = 61;
+const float HLGREN_THROW_END              = 79;
+const float HLGREN_THROW_INTERVAL         = 0.033;   // ~30fps
 
-const float HLGREN_THROW2_START           = 42;
-const float HLGREN_THROW2_END             = 60;
-const float HLGREN_THROW2_INTERVAL        = 0.05;    // 20fps — medium velocity
-
-const float HLGREN_THROW3_START           = 61;
-const float HLGREN_THROW3_END             = 79;
-const float HLGREN_THROW3_INTERVAL        = 0.033;   // ~30fps — high velocity
-
-const float HLGREN_IDLE_FRAME             = 80;
+// Idle is a looping animation (Quake MDL — manual frame stepping in the
+// CSQC display function, since this format has no built-in sequence
+// playback). Frames 80..125 = "no arms / empty hand" rest pose.
+const float HLGREN_IDLE_START             = 80;
+const float HLGREN_IDLE_END               = 125;
+const float HLGREN_IDLE_FRAME             = 80;   // first idle frame (server seed)
 
 const float MAX_AMMO_HLGRENADE            = 5;
 
@@ -44,24 +45,23 @@ const float MAX_AMMO_HLGRENADE            = 5;
 const float HLGREN_EXPLOSION_DAMAGE       = 100;
 const float HLGREN_EXPLOSION_RADIUS       = 250;
 const float HLGREN_EXPLOSION_MIN_DAMAGE   = 10;
-const float HLGREN_FUSE_TIME              = 3.0;
-const float HLGREN_MAX_THROW_SPEED        = 800;
-const float HLGREN_THROW_CHARGE_RATE      = 400;   // velocity per second of hold
+// Total fuse from pin pull to detonation.  The grenade's nextthink is
+// anchored to (pin_pull_time + HLGREN_FUSE_TIME), so cooking eats into
+// the airborne portion of the fuse.
+const float HLGREN_FUSE_TIME              = 3.5;   // tight "live" feel
+// Fixed throw velocity (no charge mechanic).  Player velocity is added
+// on top in W_HLGrenadeFrame.
+const float HLGREN_THROW_FORWARD          = 336;   // 480 × 0.7 — additional 30% reduction
+const float HLGREN_THROW_UPWARD           = 160;   // halved from 320 — flatter arc
 const float HLGREN_DRYFIRE_DELAY          = 0.2;
-const float HLGREN_THROW_DELAY           = 0.1;  // delay after release before grenade spawns
+const float HLGREN_THROW_DELAY            = 0.1;  // delay after release before grenade spawns
 const float HLGREN_KNOCKBACK_PUSH         = 800;
 const float HLGREN_KNOCKBACK_UPLIFT       = 350;
 
 // --- Pre-computed durations ---
 const float HLGREN_DRAW_DURATION          = (HLGREN_DRAW_END - HLGREN_DRAW_START) * HLGREN_FRAME_INTERVAL;
 const float HLGREN_PIN_DURATION           = (HLGREN_PIN_END - HLGREN_PIN_START) * HLGREN_FRAME_INTERVAL;
-const float HLGREN_THROW1_DURATION        = (HLGREN_THROW1_END - HLGREN_THROW1_START) * HLGREN_THROW1_INTERVAL;
-const float HLGREN_THROW2_DURATION        = (HLGREN_THROW2_END - HLGREN_THROW2_START) * HLGREN_THROW2_INTERVAL;
-const float HLGREN_THROW3_DURATION        = (HLGREN_THROW3_END - HLGREN_THROW3_START) * HLGREN_THROW3_INTERVAL;
-
-// Throw velocity thresholds for choosing animation
-const float HLGREN_THROW1_MAX_VEL        = 166;    // ~0.83s hold
-const float HLGREN_THROW2_MAX_VEL        = 333;    // ~1.66s hold
+const float HLGREN_THROW_DURATION         = (HLGREN_THROW_END - HLGREN_THROW_START) * HLGREN_THROW_INTERVAL;
 
 const string HLGREN_VIEWMODEL    = "models/weapons/wpn_hlgrenade/v_grenade.mdl";
 const string HLGREN_WORLDMODEL   = "models/weapons/wpn_hlgrenade/w_grenade.mdl";
@@ -91,23 +91,16 @@ float(float now) SH_HLGrenadeTickState =
         return 0;
     }
 
-    // WS_SPECIAL (pin pull) doesn't auto-transition — ended by button release
+    // WS_SPECIAL (pin pull) doesn't auto-transition — the cook can run
+    // indefinitely.  The fuse is anchored to the pin-pull moment via
+    // .altfire_finished, so over-cooking just shortens the airborne
+    // portion of the fuse on release (down to zero).
     if (self.weaponstate == WS_SPECIAL)
         return 0;
 
     if (self.weaponstate == WS_FIRE)
     {
-        // Determine throw duration based on throw velocity stored in attack_finished timing
-        float throw_vel = min(HLGREN_MAX_THROW_SPEED, (self.wep_anim_start - self.altfire_finished) * HLGREN_THROW_CHARGE_RATE);
-        float throw_dur;
-        if (throw_vel <= HLGREN_THROW1_MAX_VEL)
-            throw_dur = HLGREN_THROW1_DURATION;
-        else if (throw_vel <= HLGREN_THROW2_MAX_VEL)
-            throw_dur = HLGREN_THROW2_DURATION;
-        else
-            throw_dur = HLGREN_THROW3_DURATION;
-
-        if (elapsed >= throw_dur)
+        if (elapsed >= HLGREN_THROW_DURATION)
         { SH_WeaponEnterIdle(); return 1; }
         return 0;
     }
@@ -133,16 +126,14 @@ float(float now) SH_HLGrenadeTryPinPull =
     return 1;
 };
 
-// +attack released: throw grenade (enter WS_FIRE)
-// Returns: throw velocity (>0), or 0 if not in pin-pull state
+// +attack released: throw grenade (enter WS_FIRE).  Returns 1 on a
+// successful release, 0 if not in pin-pull state.  Velocity is fixed
+// in W_HLGrenadeFrame's spawn branch so no value needs to flow forward
+// from here — the pin-pull timestamp lives on .altfire_finished and is
+// read at spawn time to anchor the grenade's detonation.
 float(float now) SH_HLGrenadeThrow =
 {
-    float hold_time, throw_vel;
-
     if (self.weaponstate != WS_SPECIAL) return 0;
-
-    hold_time = now - self.altfire_finished;
-    throw_vel = max(200, min(HLGREN_MAX_THROW_SPEED, hold_time * HLGREN_THROW_CHARGE_RATE));
 
     self.ammo_hlgrenade  -= 1;
     self.weaponstate      = WS_FIRE;
@@ -150,7 +141,16 @@ float(float now) SH_HLGrenadeThrow =
     self.wep_anim_start   = now;
     self.attack_finished  = now + 1.5;   // prevent re-pull while button held
 
-    return throw_vel;
+    // If that was the last grenade, clear the utility slot NOW (not at
+    // throw-anim end) so a death mid-throw can't leak an empty-grenade
+    // pickup. The actual weapon-switch to whatever's next happens at
+    // throw-anim end — see W_HLGrenadeFrame (SSQC) / the equivalent
+    // tail in CSQC_PredictHLGrenadeCommand. Until then the player
+    // continues the throw anim with weapon == WEP_HLGRENADE.
+    if (self.ammo_hlgrenade <= 0)
+        self.slot_utility = WEP_NONE;
+
+    return 1;
 };
 
 // ============================================================
@@ -168,15 +168,25 @@ void() W_HLGrenadeExplode =
     float dist, damage;
     entity e;
 
-    // Explosion visual + sound
-    te_explosion(self.origin + '0 0 8');
+    // Sole FX source for non-shooter clients: sprite + particles +
+    // light + boom. Server no longer calls te_explosion or sound() —
+    // dimension_send doesn't actually filter multicasts/temp-entities
+    // for an owner-exclude in this codebase, so anything routed that
+    // way leaked to the shooter ~ping ms after their predicted boom.
+    // Instead we write the shooter's entnum as an exclude byte and the
+    // CSQC handler skips itself when it matches player_localentnum
+    // (matches CSQC_EVENT_WEAPON_PICKUP_SOUND / BREAKABLE_*_SOUND
+    // pattern). Shooter handles FX via CSQC_FakeHLGrenadeExplode.
     float snd = random();
-    if (snd < 0.333)
-        sound(self, CHAN_VOICE, "sounds/weapons/wpn_hlgrenade/explode1.wav", 1, ATTN_NORM);
-    else if (snd < 0.666)
-        sound(self, CHAN_VOICE, "sounds/weapons/wpn_hlgrenade/explode2.wav", 1, ATTN_NORM);
-    else
-        sound(self, CHAN_VOICE, "sounds/weapons/wpn_hlgrenade/explode3.wav", 1, ATTN_NORM);
+    float snd_idx = (snd < 0.333) ? 0 : (snd < 0.666 ? 1 : 2);
+    WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
+    WriteByte(MSG_MULTICAST, CSQC_EVENT_GRENADE_EXPLODE);
+    WriteByte(MSG_MULTICAST, self.owner ? num_for_edict(self.owner) : 0);
+    WriteCoord(MSG_MULTICAST, self.origin_x);
+    WriteCoord(MSG_MULTICAST, self.origin_y);
+    WriteCoord(MSG_MULTICAST, self.origin_z + 8);
+    WriteByte(MSG_MULTICAST, snd_idx);
+    multicast(self.origin, MULTICAST_PVS);
 
     // Radius damage + push-back
     e = findradius(self.origin, HLGREN_EXPLOSION_RADIUS);
@@ -210,18 +220,43 @@ void() W_HLGrenadeThink =
     W_HLGrenadeExplode();   // fuse expired
 };
 
+// Periodic tick wrapper — runs at sv_toss_tickrate during the entire
+// grenade lifetime to (a) drive CSQC SendFlags pulses for smooth flight
+// and (b) trigger detonation when the absolute fuse time hits. Replaces
+// the one-shot W_HLGrenadeThink/nextthink pattern at the spawn site.
+void() W_HLGrenadeProjectileTick =
+{
+    self.SendFlags |= 1;
+    if (time >= self.proj_fuse_end)
+    {
+        W_HLGrenadeExplode();   // removes self
+        return;
+    }
+    self.nextthink = time + Toss_NextThinkInterval();
+};
+
 void() W_HLGrenadeBounce =
 {
-    // Bounce sound — only on world/bsp (not on players)
+    // Bounce sound — only on world/bsp (not on players). Routed through
+    // CSQC_EVENT_GRENADE_BOUNCE with the shooter's entnum as exclude
+    // byte (matches CSQC_EVENT_WEAPON_PICKUP_SOUND / BREAKABLE_*_SOUND
+    // pattern in this codebase — dimension_send doesn't actually filter
+    // multicasts the way you'd expect, so an explicit entnum compare on
+    // the CSQC side is the only thing that reliably hides the bounce
+    // from the shooter). Shooter plays their own bounces locally via
+    // CSQC_FakeHLGrenadeBounce.
     if (other.classname != "player")
     {
         float snd = random();
-        if (snd < 0.333)
-            sound(self, CHAN_VOICE, "sounds/weapons/wpn_hlgrenade/hit1.wav", 1, ATTN_NORM);
-        else if (snd < 0.666)
-            sound(self, CHAN_VOICE, "sounds/weapons/wpn_hlgrenade/hit2.wav", 1, ATTN_NORM);
-        else
-            sound(self, CHAN_VOICE, "sounds/weapons/wpn_hlgrenade/hit3.wav", 1, ATTN_NORM);
+        float snd_idx = (snd < 0.333) ? 0 : (snd < 0.666 ? 1 : 2);
+        WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
+        WriteByte(MSG_MULTICAST, CSQC_EVENT_GRENADE_BOUNCE);
+        WriteByte(MSG_MULTICAST, self.owner ? num_for_edict(self.owner) : 0);
+        WriteCoord(MSG_MULTICAST, self.origin_x);
+        WriteCoord(MSG_MULTICAST, self.origin_y);
+        WriteCoord(MSG_MULTICAST, self.origin_z);
+        WriteByte(MSG_MULTICAST, snd_idx);
+        multicast(self.origin, MULTICAST_PVS);
     }
 };
 
@@ -241,31 +276,16 @@ void() W_HLGrenadeFire =
 
 void() W_HLGrenadeRelease =
 {
-    float throw_vel;
-    entity gren;
+    if (!SH_HLGrenadeThrow(time)) return;
 
-    throw_vel = SH_HLGrenadeThrow(time);
-    if (throw_vel <= 0) return;
+    self.weaponframe   = HLGREN_THROW_START;
+    self.wep_nextframe = time + HLGREN_THROW_INTERVAL;
 
-    // Choose throw animation based on velocity
-    if (throw_vel <= HLGREN_THROW1_MAX_VEL)
-    {
-        self.weaponframe = HLGREN_THROW1_START;
-        self.wep_nextframe = time + HLGREN_THROW1_INTERVAL;
-    }
-    else if (throw_vel <= HLGREN_THROW2_MAX_VEL)
-    {
-        self.weaponframe = HLGREN_THROW2_START;
-        self.wep_nextframe = time + HLGREN_THROW2_INTERVAL;
-    }
-    else
-    {
-        self.weaponframe = HLGREN_THROW3_START;
-        self.wep_nextframe = time + HLGREN_THROW3_INTERVAL;
-    }
-
-    // Store throw velocity — grenade entity spawns after HLGREN_THROW_DELAY in W_HLGrenadeFrame
-    self.hlgren_throw_vel = throw_vel;
+    // Mark the grenade entity as pending — W_HLGrenadeFrame's WS_FIRE
+    // branch spawns it after HLGREN_THROW_DELAY.  The actual fuse is
+    // derived at spawn time from self.altfire_finished (pin-pull time)
+    // so no hold-time value needs to be stashed here.
+    self.hlgren_throw_vel  = 1;
     self.hlgren_spawn_time = time + HLGREN_THROW_DELAY;
 };
 
@@ -293,7 +313,6 @@ void() W_HLGrenadeFrame =
         if (self.hlgren_throw_vel > 0 && time >= self.hlgren_spawn_time)
         {
             entity gren;
-            float tv = self.hlgren_throw_vel;
             self.hlgren_throw_vel = 0;  // only spawn once
 
             makevectors(self.v_angle);
@@ -305,25 +324,40 @@ void() W_HLGrenadeFrame =
             setmodel(gren, HLGREN_GRENADE_MODEL);
             setsize(gren, '-2 -2 -2', '2 2 2');
             setorigin(gren, self.origin + self.view_ofs + v_forward * 16);
-            gren.velocity = self.velocity + v_forward * tv + v_up * (tv * 0.4);
+            gren.velocity = self.velocity
+                          + v_forward * HLGREN_THROW_FORWARD
+                          + v_up      * HLGREN_THROW_UPWARD;
             gren.avelocity = '180 360 120';
             gren.gravity = 0.5;
             gren.touch = W_HLGrenadeBounce;
-            gren.think = W_HLGrenadeThink;
-            gren.nextthink = time + HLGREN_FUSE_TIME;
-            // No nodrawtoclient — grenade is fully server-driven, shooter sees server entity
+            // CSQC replication via projectile_SendEntity (sv_weapons.qc):
+            // shooter is hidden by SendEntity returning FALSE, others get
+            // origin+velocity+avelocity at sv_toss_tickrate for smooth
+            // flight via cl_tosssmooth.qc extrap+smooth.
+            gren.proj_type   = PROJ_TYPE_HLGRENADE;
+            gren.SendEntity  = projectile_SendEntity;
+            gren.SendFlags   = 1;
+            // Absolute fuse anchor (pin-pull moment + HLGREN_FUSE_TIME).
+            // The periodic-tick wrapper detonates when time >= proj_fuse_end,
+            // so cooking the grenade eats into airborne fuse exactly the
+            // same way the previous one-shot nextthink did.
+            gren.proj_fuse_end = self.altfire_finished + HLGREN_FUSE_TIME;
+            // "Favor the thrower": subtract owner ping so the explosion
+            // arrives at the shooter's screen at the same wall-clock
+            // moment their CSQC_FakeHLGrenadeExplode prediction detonates.
+            // Other PVS clients see the explosion ~ping ms earlier than
+            // they would naturally — small artifact, big win for the
+            // high-ping thrower's sense of agency.
+            gren.proj_fuse_end -= stof(infokey(self, "ping")) * 0.001;
+            if (gren.proj_fuse_end <= time + 0.01)
+                gren.proj_fuse_end = time + 0.01;
+            gren.think     = W_HLGrenadeProjectileTick;
+            gren.nextthink = time + Toss_NextThinkInterval();
         }
 
         // Throw animation frame advance
-        float tv2 = self.hlgren_throw_vel > 0 ? self.hlgren_throw_vel : max(200, min(HLGREN_MAX_THROW_SPEED, (self.wep_anim_start - self.altfire_finished) * HLGREN_THROW_CHARGE_RATE));
-        if (tv2 <= HLGREN_THROW1_MAX_VEL)
-            self.wep_nextframe += HLGREN_THROW1_INTERVAL;
-        else if (tv2 <= HLGREN_THROW2_MAX_VEL)
-            self.wep_nextframe += HLGREN_THROW2_INTERVAL;
-        else
-            self.wep_nextframe += HLGREN_THROW3_INTERVAL;
-
-        self.weaponframe += 1;
+        self.wep_nextframe += HLGREN_THROW_INTERVAL;
+        self.weaponframe   += 1;
     }
     else
     {
@@ -336,6 +370,18 @@ void() W_HLGrenadeFrame =
     {
         self.weaponframe   = HLGREN_IDLE_FRAME;
         self.wep_nextframe = 0;
+
+        // Throw anim ended with the slot already cleared by the empty-
+        // ammo branch in SH_HLGrenadeThrow — wipe the SSQC-only equip /
+        // drop function pointers and switch the player to whatever's next
+        // in their loadout. Without this they'd be left "holding" an
+        // invisible grenade until another weapon is selected manually.
+        if (self.ammo_hlgrenade <= 0 && self.slot_utility == WEP_NONE)
+        {
+            self.slot_utility_equip = __NULL__;
+            self.slot_utility_drop  = __NULL__;
+            W_SelectNextWeapon();
+        }
     }
 };
 
@@ -398,14 +444,183 @@ void() weapon_hlgrenade =
 
 #ifdef CSQC
 
-// Grenade is fully server-driven — no client prediction for state or projectiles.
-// The server handles pin pull, throw, and grenade entity spawning.
-// Client only provides display frame and equip registration.
+// Forward — CSQC_PredictSelectWeapon lives in client/cl_weapons.qc which
+// compiles AFTER this file. Used by the auto-switch tail in
+// CSQC_PredictHLGrenadeCommand to drop the grenade slot once the last
+// throw completes.
+void(float new_weapon) CSQC_PredictSelectWeapon;
+
+// --- Fake grenade projectile (CSQC-only, shooter visual) ---
+//
+// The server's W_HLGrenadeFrame spawns the real projectile with
+// nodrawtoclient = self, so the shooter never sees it. This fake mirrors
+// the same physics (MOVETYPE_TOSS, gravity 0.5, avelocity, bbox) and the
+// fuse-anchored-to-pin-pull behavior so the predicted explosion lands at
+// the same time + place the server's truth will. Other players see only
+// the server entity; the shooter sees only this fake.
+
+void() CSQC_FakeHLGrenadeExplode =
+{
+    // Randomized explosion sound — matches the SSQC W_HLGrenadeExplode
+    // sample variety so the predicted boom on the shooter and the
+    // server's broadcast on everyone else feel like the same weapon.
+    string s;
+    float r = random();
+    if      (r < 0.333) s = "sounds/weapons/wpn_hlgrenade/explode1.wav";
+    else if (r < 0.666) s = "sounds/weapons/wpn_hlgrenade/explode2.wav";
+    else                s = "sounds/weapons/wpn_hlgrenade/explode3.wav";
+    pointsound(self.origin, s, 1, ATTN_NORM);
+
+    // te_explosion in CSQC only emits particles + sound — the classic
+    // Quake explode sprite has to be spawned explicitly.
+    vector epos = self.origin + '0 0 8';
+    te_explosion(epos);
+    CSQC_SpawnExplodeSprite(epos);
+    // Brighter dynamic light — same call the CSQC_EVENT_GRENADE_EXPLODE
+    // handler runs for non-shooters, so every viewer (shooter via this
+    // predict path, others via the server multicast) sees the identical
+    // light pulse.
+    CSQC_AddExplosionLight(epos);
+    remove(self);
+};
+
+void() CSQC_FakeHLGrenadeBounce =
+{
+    // Bounce sound on world / brush only. Skip the shooter (== owner)
+    // and any player ent — server's W_HLGrenadeBounce uses the same
+    // "not on player" gate. Randomized to match SSQC variety.
+    if (other == self.owner) return;
+    if (other.entnum >= 1 && other.entnum <= maxclients) return;
+    string s;
+    float r = random();
+    if      (r < 0.333) s = "sounds/weapons/wpn_hlgrenade/hit1.wav";
+    else if (r < 0.666) s = "sounds/weapons/wpn_hlgrenade/hit2.wav";
+    else                s = "sounds/weapons/wpn_hlgrenade/hit3.wav";
+    pointsound(self.origin, s, 1, ATTN_NORM);
+};
+
+// --- Pin-pull / throw / spawn prediction ---
 
 void() CSQC_PredictHLGrenadeCommand =
 {
-    // No client prediction — server handles everything
+    float r;
+
+    // +attack: pin pull (or dry-fire if no ammo). attack_finished gating
+    // inside SH_HLGrenadeTryPinPull stops replay re-firing.
+    if (input_buttons & 1)
+    {
+        r = SH_HLGrenadeTryPinPull(csqc_pred_time);
+        if (r == 1)
+        {
+            CSQC_MarkPendingWeaponAck();
+            // Server's W_HLGrenadeFire plays no pin-pull sound, so we
+            // don't predict one either. Animation alone signals the pull.
+        }
+        else if (r == -1)
+        {
+            CSQC_MarkPendingWeaponAck();
+            if (!pm_suppress_sounds)
+            {
+                sound(self, CHAN_WEAPON, "sounds/weapons/dryfire1.wav", 1, ATTN_NONE);
+                CSQC_RecordPredictedWeaponSound();
+            }
+        }
+    }
+
+    // +attack release while in WS_SPECIAL: throw. Mirrors W_HLGrenadeFrame's
+    // !self.button0 check. SH_HLGrenadeThrow decrements ammo on both sides
+    // through the shared code path so no separate predict-decrement is
+    // needed (reset-and-replay restores authoritative count each reconcile).
+    if (self.weaponstate == WS_SPECIAL && !(input_buttons & 1))
+    {
+        if (SH_HLGrenadeThrow(csqc_pred_time))
+        {
+            CSQC_MarkPendingWeaponAck();
+            // Stamp the same spawn-delay clock the server uses so the
+            // fake projectile appears at the same elapsed moment.
+            self.hlgren_throw_vel  = 1;
+            self.hlgren_spawn_time = csqc_pred_time + HLGREN_THROW_DELAY;
+        }
+    }
+
+    // Spawn the fake projectile after the throw delay — mirrors the SSQC
+    // W_HLGrenadeFrame WS_FIRE branch.
+    //
+    // Two stacked single-spawn guards needed:
+    //   1. hlgren_throw_vel = 0 after spawn — blocks re-spawn within the
+    //      same tick.
+    //   2. hlgren_fake_spawned_serial == wep_action_id — blocks re-spawn
+    //      across ticks once a fake for THIS throw exists. Under high
+    //      ping the unack'd throw cmd replays every reconcile tick, and
+    //      each replay's SH_HLGrenadeThrow re-sets hlgren_throw_vel=1.
+    //      Without the serial check, the live frame after each replay
+    //      would pump out another fake — visibly two-or-more grenades
+    //      bouncing for the thrower until the throw acks.
+    //
+    // pm_suppress_sounds also gates this so replay frames themselves
+    // never spawn (only the live frame should). wep_action_id is bumped
+    // exactly once in SH_HLGrenadeThrow per throw and is preserved
+    // across reconcile (not in the confirmed-state buffers), so it's
+    // a stable per-throw identity.
+    if (self.weaponstate == WS_FIRE
+        && self.hlgren_throw_vel > 0
+        && csqc_pred_time >= self.hlgren_spawn_time
+        && !pm_suppress_sounds
+        && self.hlgren_fake_spawned_serial != self.wep_action_id)
+    {
+        self.hlgren_throw_vel = 0;
+        self.hlgren_fake_spawned_serial = self.wep_action_id;
+
+        entity gren = spawn();
+        makevectors(input_angles);
+        setmodel(gren, HLGREN_GRENADE_MODEL);
+        setsize(gren, '-2 -2 -2', '2 2 2');
+        setorigin(gren, self.origin + self.view_ofs + v_forward * 16);
+        gren.owner     = self;
+        gren.velocity  = self.velocity
+                       + v_forward * HLGREN_THROW_FORWARD
+                       + v_up      * HLGREN_THROW_UPWARD;
+        gren.avelocity = '180 360 120';
+        gren.movetype  = MOVETYPE_TOSS;
+        gren.solid     = SOLID_BBOX;
+        gren.gravity   = 0.5;
+        gren.drawmask  = MASK_ENGINE;
+        gren.touch     = CSQC_FakeHLGrenadeBounce;
+        gren.think     = CSQC_FakeHLGrenadeExplode;
+        // Anchor detonation to the pin-pull moment — matches the SSQC
+        // W_HLGrenadeFrame anchor (gren.nextthink = altfire_finished + 5).
+        //
+        // CRITICAL: nextthink must be in engine `time` units (the domain
+        // FTE uses to tick CSQC entity thinks). altfire_finished was
+        // stamped from csqc_pred_time (= cltime) which can drift ahead
+        // of `time` by a frame's worth at high client framerate — using
+        // it directly made the fake explode ~1s after the server at
+        // zero ping. Compute remaining fuse in the cltime domain (same
+        // anchor) then add to `time`.
+        float remaining_fuse = HLGREN_FUSE_TIME - (csqc_pred_time - self.altfire_finished);
+        if (remaining_fuse < 0.01) remaining_fuse = 0.01;
+        gren.nextthink = time + remaining_fuse;
+    }
+
+    float was_fire = (self.weaponstate == WS_FIRE);
     SH_HLGrenadeTickState(csqc_pred_time);
+
+    // Mirror the SSQC W_HLGrenadeFrame's auto-switch tail. SH_HLGrenadeThrow
+    // already cleared slot_utility on the ammo→0 transition; once the throw
+    // animation rolls over to WS_IDLE we switch to the next available
+    // weapon so the predicted viewmodel doesn't briefly hold an empty
+    // grenade. Gate on was_fire so we don't fire this every idle tick —
+    // only on the FIRE→IDLE transition. weapon == WEP_HLGRENADE blocks
+    // re-fires once we've already switched.
+    if (was_fire && self.weaponstate == WS_IDLE
+        && self.ammo_hlgrenade <= 0
+        && self.weapon == WEP_HLGRENADE
+        && self.slot_utility == WEP_NONE)
+    {
+        if      (self.slot_primary)   CSQC_PredictSelectWeapon(self.slot_primary);
+        else if (self.slot_secondary) CSQC_PredictSelectWeapon(self.slot_secondary);
+        else if (self.slot_melee)     CSQC_PredictSelectWeapon(self.slot_melee);
+    }
 };
 
 float(float elapsed) CSQC_HLGrenadeDisplayFrame =
@@ -425,27 +640,23 @@ float(float elapsed) CSQC_HLGrenadeDisplayFrame =
     }
     if (predicted_player.weaponstate == WS_FIRE)
     {
-        // Determine which throw animation based on hold time
-        float hold_time = predicted_player.wep_anim_start - predicted_player.altfire_finished;
-        float throw_vel = min(HLGREN_MAX_THROW_SPEED, hold_time * HLGREN_THROW_CHARGE_RATE);
-
-        if (throw_vel <= HLGREN_THROW1_MAX_VEL)
-        {
-            frame = HLGREN_THROW1_START + elapsed / HLGREN_THROW1_INTERVAL;
-            return bound(HLGREN_THROW1_START, frame, HLGREN_THROW1_END - 1);
-        }
-        else if (throw_vel <= HLGREN_THROW2_MAX_VEL)
-        {
-            frame = HLGREN_THROW2_START + elapsed / HLGREN_THROW2_INTERVAL;
-            return bound(HLGREN_THROW2_START, frame, HLGREN_THROW2_END - 1);
-        }
-        else
-        {
-            frame = HLGREN_THROW3_START + elapsed / HLGREN_THROW3_INTERVAL;
-            return bound(HLGREN_THROW3_START, frame, HLGREN_THROW3_END - 1);
-        }
+        // Single throw animation — no charge tiers any more.
+        frame = HLGREN_THROW_START + elapsed / HLGREN_THROW_INTERVAL;
+        return bound(HLGREN_THROW_START, frame, HLGREN_THROW_END - 1);
     }
-    return HLGREN_IDLE_FRAME;
+
+    // Idle: loop frames 80..125 so the empty-hand viewmodel gently
+    // animates instead of freezing on a single frame (csknife's idle
+    // does this via GoldSrc sequence playback; Quake MDL has no built-in
+    // looping so we step the frame manually here). Use cltime as the
+    // anchor — wep_anim_start gets reset to 0 on entering idle so
+    // `elapsed` would jump to a huge number on first idle tick anyway,
+    // and cltime never resets so the loop stays continuous across
+    // weapon-state changes.
+    float idle_count = HLGREN_IDLE_END - HLGREN_IDLE_START + 1;
+    float idle_step  = floor(cltime * (1.0 / HLGREN_FRAME_INTERVAL));
+    float idle_idx   = idle_step - floor(idle_step / idle_count) * idle_count;
+    return HLGREN_IDLE_START + idle_idx;
 };
 
 void() CSQC_HLGrenadeDropClear =

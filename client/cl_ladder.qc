@@ -46,13 +46,19 @@ void(entity trig) ladder_list_remove_csqc =
 void() CSQC_LadderTrigger_Update =
 {
     vector org, emins, emaxs;
+    float  mi;
 
     org      = readvector();
     emins    = readvector();
     emaxs    = readvector();
     self.movedir = readvector();
+    mi       = readshort();
 
     setorigin(self, org);
+    // Bind the BSP submodel before setsize so PM_BoxInTriggerBrush
+    // tests against the actual angled brush. See cl_push.qc.
+    if (mi)
+        setmodelindex(self, mi);
     setsize(self, emins, emaxs);
 
     if (ladder_trigger_list != self)

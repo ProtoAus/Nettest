@@ -41,8 +41,8 @@ const float MAX_AMMO_AWP              = 20;
 const float AWP_BASE_SPREAD           = 0.03;
 const float AWP_MOVE_SPREAD           = 0.10;
 const float AWP_FULL_SPREAD_SPEED     = 320;
-const float AWP_CLOSE_DAMAGE          = 120;
-const float AWP_MIN_DAMAGE            = 90;
+const float AWP_CLOSE_DAMAGE          = 140;
+const float AWP_MIN_DAMAGE            = 140;
 const float AWP_DAMAGE_FALLOFF_RANGE  = 4096;
 const float AWP_DRYFIRE_DELAY         = 0.2;
 
@@ -273,8 +273,8 @@ void() CSQC_PredictAWPCommand =
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csawp/fire.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(self.zoomstage > 0 ? 0 : AWP_BASE_SPREAD, AWP_MOVE_SPREAD, AWP_FULL_SPREAD_SPEED,
-                    AWP_CLOSE_DAMAGE, AWP_MIN_DAMAGE, AWP_DAMAGE_FALLOFF_RANGE);
+                CSQC_PredictedPenetratingImpact(self.zoomstage > 0 ? 0 : AWP_BASE_SPREAD, AWP_MOVE_SPREAD, AWP_FULL_SPREAD_SPEED,
+                    AWP_CLOSE_DAMAGE, AWP_MIN_DAMAGE, AWP_DAMAGE_FALLOFF_RANGE, 128, 0.985);
                 CSQC_SpawnCasing("models/weapons/riflecasingbig.mdl",
                     '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }

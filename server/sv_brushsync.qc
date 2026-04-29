@@ -20,7 +20,12 @@ float(entity playerent, float changedflags) solid_brush_SendEntity =
     }
 
     WriteByte(MSG_ENTITY, CSQC_ENT_SOLID_BRUSH);
-    WriteString(MSG_ENTITY, self.model);
+    // Send the precached modelindex instead of the model string — CSQC
+    // uses setmodelindex() to resolve it back.  Saves ~14-24 B per send
+    // (brush names are typically "*N" for inline BSP submodels).  FTE
+    // docs on modelnameforindex explicitly call this out as a net-traffic
+    // reduction pattern.
+    WriteShort(MSG_ENTITY, self.modelindex);
 
     WriteCoord(MSG_ENTITY, self.origin_x);
     WriteCoord(MSG_ENTITY, self.origin_y);
@@ -38,8 +43,11 @@ float(entity playerent, float changedflags) solid_brush_SendEntity =
     WriteCoord(MSG_ENTITY, self.maxs_y);
     WriteCoord(MSG_ENTITY, self.maxs_z);
 
-    WriteFloat(MSG_ENTITY, self.alpha);
-    WriteFloat(MSG_ENTITY, self.effects);
+    // alpha quantised to byte (0..255); effects is a bitfield but only the
+    // low 16 bits are realistically used on brushes (EF_NODRAW, EF_FULLBRIGHT,
+    // EF_NOSHADOW etc), so WriteShort is enough headroom.
+    WriteByte(MSG_ENTITY,  bound(0, rint(self.alpha * 255), 255));
+    WriteShort(MSG_ENTITY, self.effects);
 
     WriteCoord(MSG_ENTITY, self.velocity_x);
     WriteCoord(MSG_ENTITY, self.velocity_y);

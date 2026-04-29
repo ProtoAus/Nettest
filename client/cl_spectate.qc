@@ -58,10 +58,29 @@ float() Spectate_InDeathCam =
 //  Target finding — cycle through alive players
 // ============================================================
 
+// Returns TRUE if the given 1-based slot is a live, spectatable player
+// (visual proxy exists for them and isn't a corpse). Walking the proxy
+// chain is more reliable than (INFOKEY_P_NAME != "") + GE_ACTIVE: that
+// pair filters out alive players who are out of the local PVS or whose
+// userinfo briefly blanks during a team-select transition.
+float(float slot1) Spectate_SlotIsAliveTarget =
+{
+    if (slot1 <= 0 || slot1 > maxclients) return FALSE;
+    if (slot1 == player_localentnum)      return FALSE;
+
+    entity vp = findchain(classname, "player_visual_proxy");
+    while (vp)
+    {
+        if (vp.vis_owner_entnum == slot1 && !vp.vis_is_dead)
+            return TRUE;
+        vp = vp.chain;
+    }
+    return FALSE;
+};
+
 float(float dir) Spectate_FindTarget =
 {
     float start, n, i;
-    string name;
 
     start = spec_target;
     if (start < 1 || start > maxclients)
@@ -74,15 +93,7 @@ float(float dir) Spectate_FindTarget =
         if (n > maxclients) n = 1;
         if (n < 1) n = maxclients;
 
-        if (n == player_localentnum)
-            continue;
-
-        name = getplayerkeyvalue(n - 1, INFOKEY_P_NAME);
-        if (name == "")
-            continue;
-
-        // Check entity is active and visible (has a model)
-        if (!(float)getentity(n, GE_ACTIVE))
+        if (!Spectate_SlotIsAliveTarget(n))
             continue;
 
         spec_target = n;
@@ -110,6 +121,14 @@ void() Spectate_CycleMode =
         return;
     spec_last_cycle_time = cltime;
 
+    // Latch the pre-cycle mode so we can detect whether the cycle actually
+    // changed mode. Without this, the velocity reset below fires every
+    // press — including when CycleMode silently reverts to FREECAM
+    // because Spectate_FindTarget couldn't find a valid target — which
+    // showed up to the user as a single-frame "speed dip" with no mode
+    // change.
+    float old_mode = spec_mode;
+
     spec_mode = spec_mode + 1;
     if (spec_mode > SPEC_MODE_FREECAM)
         spec_mode = SPEC_MODE_FIRSTPERSON;
@@ -123,7 +142,11 @@ void() Spectate_CycleMode =
             spec_mode = SPEC_MODE_FREECAM;
     }
 
-    if (spec_mode == SPEC_MODE_FREECAM)
+    // Only seed freecam state on a TRUE transition into freecam from a
+    // different mode. The "stayed in freecam" case (cycle reverted because
+    // no spectate target was available) leaves the existing momentum
+    // intact — no speed dip.
+    if (spec_mode == SPEC_MODE_FREECAM && old_mode != SPEC_MODE_FREECAM)
     {
         spec_freecam_origin = campos;
         spec_freecam_angles = camang;
@@ -189,25 +212,14 @@ void() Spectate_CheckTargetAlive =
     if (spec_mode == SPEC_MODE_FREECAM)
         return;
 
-    if (spec_target <= 0)
+    // Use the proxy-walk check (same one Spectate_FindTarget uses) so a
+    // momentarily-out-of-PVS target doesn't get marked invalid and snap
+    // us back to FREECAM. The proxy persists on the client even when the
+    // player is far away.
+    if (spec_target <= 0 || !Spectate_SlotIsAliveTarget(spec_target))
     {
         Spectate_FindTarget(1);
-        if (spec_target <= 0)
-        {
-            spec_mode = SPEC_MODE_FREECAM;
-            spec_freecam_origin = campos;
-            spec_freecam_angles = camang;
-            spec_freecam_velocity = '0 0 0';
-        }
-        return;
-    }
-
-    // Check target is still valid
-    string name = getplayerkeyvalue(spec_target - 1, INFOKEY_P_NAME);
-    if (name == "" || !(float)getentity(spec_target, GE_ACTIVE))
-    {
-        Spectate_FindTarget(1);
-        if (spec_target <= 0)
+        if (spec_target <= 0 || !Spectate_SlotIsAliveTarget(spec_target))
         {
             spec_mode = SPEC_MODE_FREECAM;
             spec_freecam_origin = campos;
@@ -268,10 +280,14 @@ void() Spectate_UpdateCamera =
         if (csqc_live_buttons & PM_BTN_DUCK)
             factor *= SPEC_FREECAM_DUCK;
 
-        // Build wish velocity from smoothed input + vertical from live buttons
+        // Build wish velocity from smoothed input + optional descent.
+        // SPACE (PM_BTN_JUMP) is reserved for Spectate_HandleInput's
+        // mode cycle — using it for vertical thrust here let it crowd
+        // out the horizontal wishspeed cap on the same press, producing
+        // the "freecam slows down for a frame on jump" feel. DUCK still
+        // descends (matches the existing CTRL bind); ascent isn't a
+        // freecam operation users actually need (look up + W works).
         float vert = 0;
-        if (csqc_live_buttons & PM_BTN_JUMP)
-            vert += 1;
         if (csqc_live_buttons & PM_BTN_DUCK)
             vert -= 1;
 
@@ -326,33 +342,51 @@ void() Spectate_UpdateCamera =
     if (spec_target <= 0)
         return;
 
-    target_origin = (vector)getentity(spec_target, GE_ORIGIN);
-
-    // Add eye offset (standing player view height)
-    target_origin_z = target_origin_z + PM_VIEW_OFS_z;
-
-    // Get the target's actual angles.
-    // The engine entity's angles_x is 0 (set by SH_PlayerAnim_Update to
-    // keep the body upright). The real view pitch is in the visual proxy's
-    // vis_pitch field (the player's v_angle_x sent via SendEntity).
-    vector target_angles = (vector)getentity(spec_target, GE_ANGLES);
-    target_angles_z = 0;
-
-    // Find the visual proxy for this player and read vis_pitch
+    // Read origin + angles from the visual proxy when available — its
+    // pose is networked via PVSF_USEPHS|PVSF_NOREMOVE so the data stays
+    // fresh even when the target is out of the local PVS.  The engine
+    // player slot (getentity GE_ORIGIN/GE_ANGLES) only updates from PVS
+    // snapshots, which left the camera stuck near world origin whenever
+    // we picked an out-of-sight target.
     entity vis = findfloat(world, vis_owner_entnum, spec_target);
+    vector target_angles;
+
     if (vis)
+    {
+        target_origin   = vis.origin;
+        target_angles   = vis.angles;
         target_angles_x = vis.vis_pitch;
+    }
     else
     {
-        // Fallback: undo QW pitch compression
+        // Fallback: engine slot. May be stale if target is out of PVS.
+        target_origin   = (vector)getentity(spec_target, GE_ORIGIN);
+        target_angles   = (vector)getentity(spec_target, GE_ANGLES);
+        // Undo QW pitch compression on the engine-slot path.
         target_angles_x = 0 - target_angles_x * 3;
         target_angles_x = bound(-90, target_angles_x, 90);
     }
 
+    // Add eye offset (standing player view height)
+    target_origin_z = target_origin_z + PM_VIEW_OFS_z;
+    target_angles_z = 0;
+
     // Smooth interpolation toward server-sent position/angles
     float follow_lerp = bound(0, frametime * 30, 1);
     spec_follow_origin += (target_origin - spec_follow_origin) * follow_lerp;
-    spec_follow_angles += (target_angles - spec_follow_angles) * follow_lerp;
+
+    // Pitch is bounded to ±90 — straight lerp is fine, no wrap to worry about.
+    spec_follow_angles_x += (target_angles_x - spec_follow_angles_x) * follow_lerp;
+
+    // Yaw must take the short way around the 0/360 boundary. The naive
+    // (target - current) delta gives ~±360 when the target crosses the
+    // seam, which the lerp then drives the camera the long way through —
+    // looks like the view snaps a full spin the wrong direction.
+    float dyaw = target_angles_y - spec_follow_angles_y;
+    while (dyaw >  180) dyaw -= 360;
+    while (dyaw < -180) dyaw += 360;
+    spec_follow_angles_y = anglemod(spec_follow_angles_y + dyaw * follow_lerp);
+
     spec_follow_angles_z = 0;   // kill roll
 
     if (spec_mode == SPEC_MODE_FIRSTPERSON)
@@ -410,9 +444,15 @@ float(float evtype, float scanx, float chary, float devid) Spectate_HandleInput 
         return TRUE;
     }
 
-    // +jump: cycle camera mode
+    // +jump: cycle camera mode. Match by bind string OR raw SPACE
+    // scancode — the bind-string check fails for users with non-default
+    // SPACE binds (custom alias, scripted wrappers, empty during menu
+    // transitions). Without the K_SPACE fallback, the event falls through
+    // to CSQC_UpdateLiveInputFromBind and PM_BTN_JUMP gets latched into
+    // csqc_live_buttons, which the freecam camera then reads as vertical
+    // thrust — visible as the "freecam slows down for a frame" symptom.
     cmd = getkeybind(scanx);
-    if (cmd == "+jump")
+    if (cmd == "+jump" || scanx == K_SPACE)
     {
         Spectate_CycleMode();
         return TRUE;

@@ -176,6 +176,11 @@ void() W_RPGRocketTouch =
 
 void() W_RPGRocketThink =
 {
+    // Pulse CSQC SendFlags so cl_tosssmooth.qc gets a fresh sample
+    // every think tick — projectile_SendEntity (sv_weapons.qc) writes
+    // origin+velocity for the smoothing extrap.
+    self.SendFlags |= 1;
+
     float spd = vlen(self.velocity);
     vector dir = normalize(self.velocity);
 
@@ -188,14 +193,18 @@ void() W_RPGRocketThink =
         dir = normalize(trace_endpos - self.origin);
     }
 
-    // Always accelerate toward max speed (aggressive ramp-up)
-    spd = spd + RPG_ACCEL_PER_THINK;
+    // Always accelerate toward max speed (aggressive ramp-up). Scale by
+    // actual think interval (sv_toss_tickrate-derived) so per-second
+    // acceleration is invariant — RPG_ACCEL_PER_THINK was tuned for the
+    // legacy 0.05 s (20 Hz) tick and we now run at 1 / sv_toss_tickrate.
+    float interval = Toss_NextThinkInterval();
+    spd = spd + RPG_ACCEL_PER_THINK * (interval / 0.05);
     if (spd > RPG_MAX_GUIDED_SPEED)
         spd = RPG_MAX_GUIDED_SPEED;
     self.velocity = dir * spd;
     self.angles = vectoangles(self.velocity);
 
-    self.nextthink = time + 0.05;
+    self.nextthink = time + interval;
 };
 
 void() W_RPGFire =
@@ -222,9 +231,16 @@ void() W_RPGFire =
         rocket.velocity = v_forward * RPG_INITIAL_SPEED;
         rocket.angles = vectoangles(rocket.velocity);
         rocket.touch = W_RPGRocketTouch;
-        rocket.think = W_RPGRocketThink;
-        rocket.nextthink = time + 0.05;
-        rocket.nodrawtoclient = self;   // shooter sees client-predicted rocket instead
+        // CSQC replication via projectile_SendEntity — shooter is hidden
+        // by SendEntity FALSE-return (their CSQC fake covers the visual);
+        // others get smooth flight via cl_tosssmooth.qc extrap+smooth.
+        // Rocket has no fuse-expire (only W_RPGRocketTouch removes it),
+        // so proj_fuse_end stays unset and the think loops indefinitely.
+        rocket.proj_type   = PROJ_TYPE_RPG_ROCKET;
+        rocket.SendEntity  = projectile_SendEntity;
+        rocket.SendFlags   = 1;
+        rocket.think       = W_RPGRocketThink;
+        rocket.nextthink   = time + Toss_NextThinkInterval();
 
         // Looping fly sound attached to the rocket, unicast to everyone
         // except the shooter.  SOUNDFLAG_FOLLOW makes the engine update the

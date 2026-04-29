@@ -10,6 +10,10 @@
 
 float PLAYER_USE_TRACE_LENGTH = 96;
 
+// Forward decl from sv_weapons.qc — used by SV_TryWeaponPickup to identify
+// pickable weapon entities (both map-placed and player-dropped wear it).
+void() weapon_touch;
+
 // Activate a usable entity on behalf of self (the player).
 // Returns TRUE if the entity accepted the use.
 float(entity use_target) SV_UseTarget =
@@ -29,13 +33,43 @@ float(entity use_target) SV_UseTarget =
     return TRUE;
 };
 
+// Returns TRUE if `e` is a settled, pickable weapon (map or dropped).
+// Dropped weapons are SOLID_NOT for ~0.7s after the toss so they can't
+// be re-grabbed mid-throw — gate on solid != SOLID_NOT to honour that.
+float(entity e) SV_IsPickableWeapon =
+{
+    if (!e || e == world) return FALSE;
+    if (e.touch != weapon_touch) return FALSE;
+    if (e.solid == SOLID_NOT) return FALSE;
+    return TRUE;
+};
+
+// Pick up a weapon on behalf of the player. weapon_touch reads `other` as
+// the receiving player and `self` as the pickup entity, so swap context
+// before invoking.
+float(entity weap) SV_TryWeaponPickup =
+{
+    if (!SV_IsPickableWeapon(weap)) return FALSE;
+
+    entity oldself  = self;
+    entity oldother = other;
+    other = self;     // player becomes other
+    self  = weap;
+    self.touch();      // weapon_touch — slot/ammo/equip/cleanup
+    self  = oldself;
+    other = oldother;
+    return TRUE;
+};
+
 // Trace forward from the player's eye; try the hit entity first, then fall
-// back to a cone search so slightly off-center aims still register.
+// back to a cone search so slightly off-center aims still register. Dispatches
+// to use targets (buttons/doors) OR weapon pickups, whichever is in front.
 void() SV_PlayerTryUse =
 {
     vector use_start, use_end;
     entity best, e;
     float  best_dot, dot;
+    float  best_is_weapon;
 
     makevectors(self.v_angle);
     use_start = self.origin + self.view_ofs;
@@ -49,26 +83,46 @@ void() SV_PlayerTryUse =
         sv_use_is_player_direct = FALSE;
         return;
     }
+    // Direct hit on a weapon — tracebox MOVE_NORMAL skips SOLID_TRIGGER
+    // weapons so this rarely fires, but covers the case where a weapon
+    // sits on a clip-brush or other SOLID_BBOX surface that bumps it
+    // into the trace's collision set.
+    if (SV_TryWeaponPickup(trace_ent))
+    {
+        sv_use_is_player_direct = FALSE;
+        return;
+    }
 
     // Radius fallback: pick the entity within the cone that is most aligned
-    // with the player's view direction.
-    best     = world;
-    best_dot = 0.7;   // ~45-degree half-cone
+    // with the player's view direction. Combines use-targets and weapon
+    // pickups in one pass so whichever is more centered wins.
+    best           = world;
+    best_dot       = 0.7;   // ~45-degree half-cone
+    best_is_weapon = FALSE;
     e = findradius(use_start, PLAYER_USE_TRACE_LENGTH);
     while (e)
     {
-        if (e.use && e != self)
+        if (e == self) { e = e.chain; continue; }
+
+        float is_weap = SV_IsPickableWeapon(e);
+        if (e.use || is_weap)
         {
             dot = normalize(e.origin - use_start) * v_forward;
             if (dot > best_dot)
             {
-                best_dot = dot;
-                best     = e;
+                best_dot       = dot;
+                best           = e;
+                best_is_weapon = is_weap;
             }
         }
         e = e.chain;
     }
-    SV_UseTarget(best);
+
+    if (best_is_weapon)
+        SV_TryWeaponPickup(best);
+    else
+        SV_UseTarget(best);
+
     sv_use_is_player_direct = FALSE;
 };
 

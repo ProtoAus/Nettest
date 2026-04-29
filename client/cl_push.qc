@@ -52,6 +52,7 @@ void(entity trig) push_list_remove_csqc =
 void() CSQC_PushTrigger_Update =
 {
 	vector org, emins, emaxs;
+	float  mi;
 
 	org   = readvector();
 	emins = readvector();
@@ -59,8 +60,15 @@ void() CSQC_PushTrigger_Update =
 	self.movedir    = readvector();
 	self.speed      = readfloat();
 	self.spawnflags = readfloat();
+	mi              = readshort();
 
 	setorigin(self, org);
+	// Bind the BSP submodel BEFORE setsize so PM_BoxInTriggerBrush's
+	// tracebox tests against the actual angled brush. setmodelindex
+	// would otherwise overwrite mins/maxs with the model's natural
+	// bounds, so re-apply the wire AABB after.
+	if (mi)
+		setmodelindex(self, mi);
 	setsize(self, emins, emaxs);
 
 	// Only add if not already in the list.  Walk the whole list to

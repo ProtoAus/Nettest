@@ -249,8 +249,8 @@ void() CSQC_PredictDeagleCommand =
                 else
                     localsound("sounds/weapons/wpn_csdeagle/fire2.wav");
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(DEAGLE_BASE_SPREAD, DEAGLE_MOVE_SPREAD, DEAGLE_FULL_SPREAD_SPEED,
-                    DEAGLE_CLOSE_DAMAGE, DEAGLE_MIN_DAMAGE, DEAGLE_DAMAGE_FALLOFF_RANGE);
+                CSQC_PredictedPenetratingImpact(DEAGLE_BASE_SPREAD, DEAGLE_MOVE_SPREAD, DEAGLE_FULL_SPREAD_SPEED,
+                    DEAGLE_CLOSE_DAMAGE, DEAGLE_MIN_DAMAGE, DEAGLE_DAMAGE_FALLOFF_RANGE, 32, 0.96);
                 CSQC_SpawnCasing("models/weapons/9mmcasing.mdl",
                     '8 -6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }

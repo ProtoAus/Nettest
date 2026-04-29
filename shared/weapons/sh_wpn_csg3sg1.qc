@@ -276,8 +276,8 @@ void() CSQC_PredictG3SG1Command =
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csg3sg1/fire.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(self.zoomstage > 0 ? 0 : G3SG1_BASE_SPREAD, G3SG1_MOVE_SPREAD, G3SG1_FULL_SPREAD_SPEED,
-                    G3SG1_CLOSE_DAMAGE, G3SG1_MIN_DAMAGE, G3SG1_DAMAGE_FALLOFF_RANGE);
+                CSQC_PredictedPenetratingImpact(self.zoomstage > 0 ? 0 : G3SG1_BASE_SPREAD, G3SG1_MOVE_SPREAD, G3SG1_FULL_SPREAD_SPEED,
+                    G3SG1_CLOSE_DAMAGE, G3SG1_MIN_DAMAGE, G3SG1_DAMAGE_FALLOFF_RANGE, 96, 0.98);
                 CSQC_SpawnCasing("models/weapons/riflecasing.mdl",
                     '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }

@@ -77,6 +77,12 @@ float(entity playerent, float changedflags) trigger_push_SendEntity =
     WriteFloat(MSG_ENTITY, self.speed);
     WriteFloat(MSG_ENTITY, self.spawnflags);
 
+    // BSP submodel index — CSQC binds this with setmodelindex so its
+    // PM_BoxInTriggerBrush probe tests against the actual angled brush
+    // geometry (matching the server). Without it, CSQC predicts using
+    // only the AABB pre-filter and disagrees with the server on cuts.
+    WriteShort(MSG_ENTITY, self.modelindex);
+
     return TRUE;
 };
 
@@ -124,8 +130,14 @@ void() trigger_push =
     if (!(self.spawnflags & PUSH_SILENT) && self.noise)
         precache_sound(self.noise);
 
+    // setmodel binds the BSP submodel ("*N") and gives us BOTH the AABB
+    // (for the cheap pre-filter) AND the actual angled brush geometry (for
+    // the per-trigger BSP probe in PM_BoxInTriggerBrush). Previously this
+    // line was followed by `self.modelindex = 0;` to hide the brush, which
+    // also threw away the BSP geometry — every angled trigger collapsed
+    // to its AABB. EF_NODRAW keeps it invisible while preserving the BSP.
     setmodel(self, self.model);
-    self.modelindex  = 0;           // invisible brush, keep collision bounds
+    self.effects    |= EF_NODRAW;
     self.movetype    = MOVETYPE_NONE;
     self.solid       = SOLID_TRIGGER;
     self.touch       = trigger_push_touch;

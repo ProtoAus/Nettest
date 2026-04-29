@@ -1,6 +1,7 @@
 ../qwprogs.dat
 sv_defs.qc
 shared/sh_customdefs.qc
+shared/sh_cvar_table.qc
 shared/sh_weapons.qc
 shared/sh_player_sini.qc
 shared/sh_player_anims.qc

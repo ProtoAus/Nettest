@@ -122,6 +122,15 @@ const float CSANIM_DIE_BACK                = 107;  // hit from front, fall backw
 const float CSANIM_DIE_RIGHT               = 108;  // hit from left, fall right
 const float CSANIM_DIE_FORWARD             = 109;  // hit from behind, fall forward
 const float CSANIM_CROUCH_DIE              = 110;  // die while crouching
+// Custom: single-frame static-leg poses used by the legs-side anim slot
+// during idle/crouch-idle. Replace CSANIM_IDLE / CSANIM_IDLE_CROUCH on
+// the legs side because idle1 / crouch_idle have internal IK that fights
+// FTE's basebone split (the legs counter-rotate against root translation
+// that the split severs from them, producing the "feet drift" symptom).
+// All 8 player models append both sequences in the same order after the
+// stock 0..110 list, so the indices match across every model.
+const float CSANIM_LEGS_IDLE_STATIC        = 111;
+const float CSANIM_LEGS_CROUCH_STATIC      = 112;
 
 // --- Animation sequence lookup by weapon family + crouch state ---
 // These take a modelindex for frameforname-based models (sini).
@@ -319,7 +328,15 @@ void() SH_PlayerAnim_Update =
         if (!onground)
             self.anim_bottom = CSANIM_JUMP;
         else if (speed < 1)
-            self.anim_bottom = crouching ? CSANIM_IDLE_CROUCH : CSANIM_IDLE;
+            // Standing/crouching idle: use single-frame static leg
+            // sequences instead of CSANIM_IDLE / CSANIM_IDLE_CROUCH.
+            // The stock CSANIM_IDLE* are full-body anims whose leg
+            // keyframes contain root-translation IK that the basebone
+            // split severs (root is in torso group), causing the legs
+            // to counter-rotate against translation that no longer
+            // happens — the "feet drift / swim" symptom. The static
+            // variants are one frozen leg pose, no root motion, no IK.
+            self.anim_bottom = crouching ? CSANIM_LEGS_CROUCH_STATIC : CSANIM_LEGS_IDLE_STATIC;
         else
             self.anim_bottom = crouching ? CSANIM_RUN_CROUCH : CSANIM_RUN;
     }
@@ -407,8 +424,28 @@ void() SH_PlayerAnim_Update =
 
     if (is_locomotion && speed2d > 1)
     {
-        float qu_per_sec = cvar("sv_anim_qu_per_sec");
-        if (qu_per_sec <= 0) qu_per_sec = 240;
+        // Crouch uses its own qu_per_sec since crouch movement is slower.
+        // See cl_player.qc for the matching CSQC-side branch.
+        float qu_per_sec;
+        if (self.anim_bottom == CSANIM_RUN_CROUCH)
+        {
+#ifdef SSQC
+            // Cached once per tick in sv_main.qc StartFrame.
+            qu_per_sec = sv_cached_anim_qu_per_sec_crouch;
+#else
+            qu_per_sec = cvar("sv_anim_qu_per_sec_crouch");
+            if (qu_per_sec <= 0) qu_per_sec = 100;
+#endif
+        }
+        else
+        {
+#ifdef SSQC
+            qu_per_sec = sv_cached_anim_qu_per_sec;
+#else
+            qu_per_sec = cvar("sv_anim_qu_per_sec");
+            if (qu_per_sec <= 0) qu_per_sec = 240;
+#endif
+        }
 
         vector delta = self.origin - self.pm_anim_prev_origin;
         delta_z = 0;

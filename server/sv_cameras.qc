@@ -32,9 +32,15 @@ const float CAMERA_CYCLE_SECONDS = 7;
 
 .entity camera_next;   // linked-list chain
 .float  cam_resolved;  // per-camera: 1 once .target resolution has been attempted
+.float  cam_target_warned;  // per-camera: 1 once we've bprint'd a "really missing" warning
 .vector cam_target_origin;  // resolved .target info_notnull origin, else zero
 entity camera_list_head;
 float  camera_count;
+float  cam_synth_done;    // one-shot guard for Camera_SynthesizeFromSpawns
+float  cam_synth_active;  // 1 if synth spawned at least one camera (gates the
+                          // cross-phase last-resort fallback so authored maps
+                          // never have their team-pick view land on a player-
+                          // preview camera the mapper hid inside a wall).
 
 // Per-phase random-cycle state.  Replaces the old sequential
 // `floor(time / CAMERA_CYCLE_SECONDS) % count` march with a fresh
@@ -102,10 +108,13 @@ void(entity cam) Camera_ResolveTarget =
     entity tgt = find(world, targetname, cam.target);
     if (!tgt)
     {
-        // Log with developer dprint AND a one-shot bprint so the mapper
-        // sees the failure without needing developer 1.
-        bprint(PRINT_HIGH, sprintf("^1[camera]^7 target '%s' not found. Use info_notnull (info_null is stripped by most BSP compilers).\n",
-                                   cam.target));
+        // Missing target is expected on the first few resolve attempts
+        // — info_notnulls may spawn after this camera in entity order.
+        // Camera_EnsureTargetsResolved keeps retrying each StartFrame;
+        // only warn if the retry is still failing after the grace period,
+        // which means the target genuinely doesn't exist in the map.
+        if (cvar("sv_debug_camera"))
+            dprint(sprintf("[camera] target '%s' not found (may retry)\n", cam.target));
         return;
     }
     // vectoangles returns angles directly compatible with the player
@@ -156,9 +165,13 @@ float(float p) Camera_CountForPhase =
 };
 
 // Pick the nth matching camera for a phase (cycling by time).  Falls back
-// to neutral cameras if no camera matches the requested phase.  Returns
-// world if NOTHING matches (caller should skip placement instead of
-// teleporting the player to 0,0,0).
+// to neutral cameras if no camera matches the requested phase.  As a last
+// resort, returns ANY camera regardless of team flags — covers the case
+// where the map has only synthesised team-flagged cameras (see
+// Camera_SynthesizeFromSpawns) and the requesting player is in the
+// neutral phase, which would otherwise return world.  Returns world only
+// when there are NO cameras at all (caller skips placement instead of
+// teleporting to 0,0,0).
 //
 // Implementation note: uses a local `effective_phase` instead of mutating
 // the parameter, because some QC call conventions can stub parameter
@@ -173,7 +186,34 @@ entity(float req_phase) Camera_GetCurrentForPhase =
         count = Camera_CountForPhase(effective_phase);
     }
     if (count == 0)
-        return world;  // no placement — caller handles
+    {
+        // Last-resort fallback: any camera, regardless of team flags.
+        // Gated on cam_synth_active so this ONLY applies to maps that
+        // got synth cameras (where every camera origin is pointcontents-
+        // validated and safe to land on).  On AUTHORED maps the mapper
+        // is the authority on which cameras serve which phase — falling
+        // back across phases there could place the player at a hidden
+        // BLUE_PLAYER / RED_PLAYER camera the mapper deliberately
+        // tucked inside a wall ("viewing pocket" trick), giving a
+        // full-screen void overlay when their view lands inside solid.
+        // For authored maps with partial flag coverage, return world
+        // and let the caller skip placement (player keeps last position).
+        if (!cam_synth_active) return world;
+        if (!camera_list_head) return world;
+
+        float any_idx;
+        if (camera_count <= 1) any_idx = 0;
+        else                   any_idx = Camera_RandomIdxForPhase(req_phase, camera_count);
+        entity any_c = camera_list_head;
+        float any_i = 0;
+        while (any_c)
+        {
+            if (any_i == any_idx) return any_c;
+            any_i = any_i + 1;
+            any_c = any_c.camera_next;
+        }
+        return camera_list_head;
+    }
 
     float idx;
     if (count <= 1) idx = 0;
@@ -281,6 +321,361 @@ void() Camera_UpdateCyclingSpectators =
     }
 };
 
+// Forward decl — defined further down.  Synthesised cameras need to
+// wire SendEntity at spawn (just like authored preview cameras do).
+float(entity playerent, float changedflags) camera_SendEntity;
+
+// Reset all camera-system state.  Called from worldspawn so each map
+// load starts clean — without this, FTE's QC progs keep file-scope
+// globals across map changes, so the previous map's cam_synth_done
+// flag and camera_list_head pointer leak into the new map.  The
+// existing code "happened to work" because entity reuse zeroes
+// fields (the stale list-head's .camera_next becomes world when
+// the slot is reclaimed by another entity), but synth bails on
+// `if (camera_list_head)` so a stale non-zero head silently
+// suppresses synthesis on every map after the first.
+// TRUE once Camera_EnsureTargetsResolved has walked the chain and found
+// nothing left to do (synth ran, every preview camera is either resolved
+// or has fired its grace-period warning).  Lets the per-tick StartFrame
+// call early-out instead of iterating the camera list every frame for
+// the entire match.  Cleared by any mutation that adds a new camera.
+float cam_targets_stable;
+
+void() Camera_ResetState =
+{
+    camera_list_head         = world;
+    camera_count             = 0;
+    cam_synth_done           = 0;
+    cam_synth_active         = 0;
+    camera_cycle_initialized = 0;
+    cam_targets_stable       = 0;
+};
+
+// =============================================================
+//  Synthesised cameras — fallback for maps with no `camera` ents
+// =============================================================
+//
+// CS-style maps (no authored team-select cameras) get one runtime
+// camera per spawn point so the team-pick UI + character-preview
+// viewport have something to render.  Each synth camera carries
+// both the team-pick AND the player-preview flag, so the existing
+// 7-second cycling code drives both UIs from the same set.
+//
+// Real authored cameras override entirely — synthesis bails on
+// the first `if (camera_list_head)` if anything is already in the
+// list when this fires.
+
+// Side preview camera (for the player-pick model viewport).  Tiered
+// radii — the algorithm tries the largest first and falls back to
+// shorter distances if the candidate position is in solid or the LOS
+// to the spawn is blocked.  Strict full-LOS required (fraction == 1)
+// since the menu's preview viewport renders FROM the camera, so being
+// "behind a wall" gives the player a water-overlay-like full-screen
+// solid colour.
+const float CAM_SYNTH_BACK_125 = 125;
+const float CAM_SYNTH_BACK_96  = 96;
+const float CAM_SYNTH_BACK_64  = 64;
+const float CAM_SYNTH_BACK_48  = 48;
+const float CAM_SYNTH_UP       = 36;   // half player height above spawn
+
+// Overhead team-pick camera (used when the player is choosing BLUE/RED).
+// Camera is offset BOTH horizontally and vertically from the spawn so
+// the resulting look angle is ~45° downward — not straight down.
+// Reasoning: a straight-down camera produces pitch ±90 from
+// vectoangles, which is the singularity in the view-pitch convention.
+// Engine clamping at ±89 oscillates between adjacent values and
+// causes a per-frame up/down flicker.  Equal H/V offset (45° look)
+// keeps the pitch well inside the clamp range.
+//
+// Tiered fallback — descends through three offset sizes if the larger
+// candidate is in solid or has its LOS to the spawn blocked.
+const float CAM_SYNTH_OVER_FAR  = 150;
+const float CAM_SYNTH_OVER_MED  = 100;
+const float CAM_SYNTH_OVER_NEAR = 64;
+
+// Map a spawn classname to the camera flags that team would use.
+// Returns 0 for unknown classes (callers skip those spawns).  CS
+// fallbacks (info_player_start / info_player_deathmatch) inherit
+// the same BLUE/RED side mapping as PlayerGetSpawnPointEntity.
+float(string cls) Camera_SynthFlagsForSpawnClass =
+{
+    if (cls == "info_player_blue"
+     || cls == "info_player_start_blue"
+     || cls == "info_player_team1"
+     || cls == "info_player_start")
+        return CAM_FLAG_TEAM_BLUE | CAM_FLAG_TEAM_BLUE_PLAYER;
+
+    if (cls == "info_player_red"
+     || cls == "info_player_start_red"
+     || cls == "info_player_team2"
+     || cls == "info_player_deathmatch")
+        return CAM_FLAG_TEAM_RED | CAM_FLAG_TEAM_RED_PLAYER;
+
+    return 0;
+};
+
+// Pick a side-preview camera placement around the spawn.  Tries 8
+// angles at 45° intervals; for each angle, descends through 4 radii
+// (125, 96, 64, 48) and uses the first that's both in empty space
+// (`pointcontents == CONTENT_EMPTY`) AND has full LOS to the model
+// torso (trace_fraction == 1).  Across all angles, picks the one
+// whose best valid radius is largest — gives the longest possible
+// camera distance while guaranteeing the camera isn't inside a wall
+// and can actually see the model.  Returns radius (0 = no valid).
+float pp_synth_side_radius;
+float pp_synth_side_idx;
+float(entity sp, vector look_at) Camera_SynthPickSidePlacement =
+{
+    pp_synth_side_radius = 0;
+    pp_synth_side_idx    = 0;
+
+    float i;
+    for (i = 0; i < 8; i++)
+    {
+        float rad = i * 45 * (3.14159265 / 180);
+        vector dir = '0 0 0';
+        dir_x = cos(rad);
+        dir_y = sin(rad);
+
+        float r;
+        for (r = 0; r < 4; r++)
+        {
+            float radius;
+            if      (r == 0) radius = CAM_SYNTH_BACK_125;
+            else if (r == 1) radius = CAM_SYNTH_BACK_96;
+            else if (r == 2) radius = CAM_SYNTH_BACK_64;
+            else             radius = CAM_SYNTH_BACK_48;
+
+            vector cand = sp.origin + dir * radius
+                                    + '0 0 1' * CAM_SYNTH_UP;
+
+            if (pointcontents(cand) != CONTENT_EMPTY)
+                continue;
+            traceline(cand, look_at, MOVE_NORMAL, world);
+            if (trace_fraction < 1.0)
+                continue;
+
+            // Valid placement at this radius.  Score by radius — keep
+            // the angle whose best valid radius is largest globally.
+            if (radius > pp_synth_side_radius)
+            {
+                pp_synth_side_radius = radius;
+                pp_synth_side_idx    = i;
+            }
+            break;   // try next angle
+        }
+    }
+
+    return pp_synth_side_radius;
+};
+
+// Pick an overhead team-pick camera placement.  Same 8-angle / tiered-
+// radius search as the side-preview placement, but the candidate is
+// offset BOTH horizontally AND vertically by the same amount — so the
+// final look angle to the spawn is a clean 45° down, avoiding the
+// pitch ±90 singularity that causes the per-frame up/down flicker.
+//
+// Returns offset distance on success (0 = no valid).
+float pp_synth_over_dist;
+float pp_synth_over_idx;
+float(entity sp, vector look_at) Camera_SynthPickOverheadPlacement =
+{
+    pp_synth_over_dist = 0;
+    pp_synth_over_idx  = 0;
+
+    float i;
+    for (i = 0; i < 8; i++)
+    {
+        float rad = i * 45 * (3.14159265 / 180);
+        vector dir = '0 0 0';
+        dir_x = cos(rad);
+        dir_y = sin(rad);
+
+        float r;
+        for (r = 0; r < 3; r++)
+        {
+            float dist;
+            if      (r == 0) dist = CAM_SYNTH_OVER_FAR;
+            else if (r == 1) dist = CAM_SYNTH_OVER_MED;
+            else             dist = CAM_SYNTH_OVER_NEAR;
+
+            // Equal H / V offset → 45° pitch when looking back at the
+            // spawn.  Far clear of the ±90 singularity.
+            vector cand = sp.origin + dir * dist + '0 0 1' * dist;
+
+            if (pointcontents(cand) != CONTENT_EMPTY)
+                continue;
+            traceline(cand, look_at, MOVE_NORMAL, world);
+            if (trace_fraction < 1.0)
+                continue;
+
+            if (dist > pp_synth_over_dist)
+            {
+                pp_synth_over_dist = dist;
+                pp_synth_over_idx  = i;
+            }
+            break;   // try next angle
+        }
+    }
+
+    return pp_synth_over_dist;
+};
+
+// Spawn one side-preview camera + (optionally) one overhead team-pick
+// camera per spawn point.  The two carry disjoint flag sets so the
+// player-pick phase only sees side cameras and the team-pick phase
+// only sees overhead cameras.  When the overhead can't fit (low
+// ceiling), the side camera adopts the team-pick flag so the
+// team-pick phase still has SOMETHING to cycle through.
+void(entity sp) Camera_SynthOneFromSpawn =
+{
+    float combined = Camera_SynthFlagsForSpawnClass(sp.classname);
+    if (!combined) return;
+
+    float team_flag   = combined & (CAM_FLAG_TEAM_BLUE | CAM_FLAG_TEAM_RED);
+    float player_flag = combined & (CAM_FLAG_TEAM_BLUE_PLAYER | CAM_FLAG_TEAM_RED_PLAYER);
+
+    vector look_at = sp.origin + '0 0 32';
+
+    float side_radius = Camera_SynthPickSidePlacement(sp, look_at);
+    if (side_radius <= 0)
+    {
+        if (cvar("developer"))
+            dprint(sprintf("^3[cam-synth]^7 ^1skip^7 ^6%s^7 at %v — no valid side placement\n",
+                           sp.classname, sp.origin));
+        return;
+    }
+
+    float deg = pp_synth_side_idx * 45;
+    float rad2 = deg * (3.14159265 / 180);
+    vector dir2 = '0 0 0';
+    dir2_x = cos(rad2);
+    dir2_y = sin(rad2);
+    vector side_origin = sp.origin + dir2 * side_radius
+                                   + '0 0 1' * CAM_SYNTH_UP;
+    vector side_angles = vectoangles(look_at - side_origin);
+    side_angles_z = 0;
+
+    // Try to place an overhead camera for the team-pick phase.  If
+    // it fits, side camera carries ONLY the player_flag; otherwise
+    // it adopts the team_flag too so team-pick still has coverage.
+    float overhead_dist = Camera_SynthPickOverheadPlacement(sp, look_at);
+    float side_flags = player_flag;
+    if (overhead_dist <= 0)
+        side_flags = side_flags | team_flag;   // fallback: side covers both
+
+    // ---- Side preview camera ----
+    entity side_cam = spawn();
+    side_cam.classname  = "camera";
+    side_cam.spawnflags = side_flags;
+    setorigin(side_cam, side_origin);
+    side_cam.angles     = side_angles;
+    side_cam.solid      = SOLID_NOT;
+    side_cam.movetype   = MOVETYPE_NONE;
+    side_cam.modelindex = 0;
+    // Model placement target — menu's DrawCharacterPreview reads this
+    // and renders the player model at cam_target_origin + (0, 0, 32).
+    side_cam.cam_target_origin = sp.origin;
+    side_cam.cam_resolved      = 1;   // synth; no .target lookup needed
+
+    side_cam.camera_next = camera_list_head;
+    camera_list_head     = side_cam;
+    camera_count         = camera_count + 1;
+    cam_targets_stable   = 0;
+
+    // Side cameras carry the *_PLAYER flag → CSQC replication wired
+    // (menu's preview viewport reads cam.origin / cam_target_origin).
+    side_cam.pvsflags   = PVSF_IGNOREPVS;
+    side_cam.SendEntity = camera_SendEntity;
+    side_cam.SendFlags  = 1;
+
+    if (cvar("developer"))
+        dprint(sprintf("^3[cam-synth]^7 side ^6%s^7 yaw=%g radius=%g\n",
+                       sp.classname, deg, side_radius));
+
+    // ---- Overhead team-pick camera ----
+    if (overhead_dist <= 0)
+    {
+        if (cvar("developer"))
+            dprint(sprintf("^3[cam-synth]^7 overhead ^1skip^7 ^6%s^7 — no clearance\n",
+                           sp.classname));
+        return;
+    }
+
+    float over_deg = pp_synth_over_idx * 45;
+    float over_rad = over_deg * (3.14159265 / 180);
+    vector over_dir = '0 0 0';
+    over_dir_x = cos(over_rad);
+    over_dir_y = sin(over_rad);
+    vector overhead_origin = sp.origin + over_dir * overhead_dist
+                                       + '0 0 1' * overhead_dist;
+    vector overhead_angles = vectoangles(sp.origin - overhead_origin);
+    overhead_angles_z = 0;
+
+    entity over_cam = spawn();
+    over_cam.classname  = "camera";
+    over_cam.spawnflags = team_flag;   // team-pick only, no _PLAYER
+    setorigin(over_cam, overhead_origin);
+    over_cam.angles     = overhead_angles;
+    over_cam.solid      = SOLID_NOT;
+    over_cam.movetype   = MOVETYPE_NONE;
+    over_cam.modelindex = 0;
+    over_cam.cam_resolved = 1;
+
+    over_cam.camera_next = camera_list_head;
+    camera_list_head     = over_cam;
+    camera_count         = camera_count + 1;
+    cam_targets_stable   = 0;
+
+    // Team-pick cameras stay server-side — the player view is moved to
+    // cam.origin via Camera_PlacePlayerAtCurrent, no menu replication
+    // needed.  Skip SendEntity wiring.
+
+    if (cvar("developer"))
+        dprint(sprintf("^3[cam-synth]^7 overhead ^6%s^7 yaw=%g dist=%g\n",
+                       sp.classname, over_deg, overhead_dist));
+};
+
+void(string cls) Camera_SynthChainByClass =
+{
+    entity sp = find(world, classname, cls);
+    while (sp)
+    {
+        Camera_SynthOneFromSpawn(sp);
+        sp = find(sp, classname, cls);
+    }
+};
+
+void() Camera_SynthesizeFromSpawns =
+{
+    if (cam_synth_done) return;
+    cam_synth_done = 1;
+
+    // Real authored cameras win — no synthesis when the map already
+    // has cameras (even partial coverage).  Mapper intent respected.
+    if (camera_list_head)
+        return;
+
+    Camera_SynthChainByClass("info_player_blue");
+    Camera_SynthChainByClass("info_player_start_blue");
+    Camera_SynthChainByClass("info_player_team1");
+    Camera_SynthChainByClass("info_player_red");
+    Camera_SynthChainByClass("info_player_start_red");
+    Camera_SynthChainByClass("info_player_team2");
+    Camera_SynthChainByClass("info_player_start");
+    Camera_SynthChainByClass("info_player_deathmatch");
+
+    // Mark synth-active so the cross-phase last-resort fallback in
+    // Camera_GetCurrentForPhase only applies to this map.  Authored
+    // maps (which bailed at the early return above) leave this 0.
+    if (camera_count > 0)
+        cam_synth_active = 1;
+
+    if (cvar("developer") && camera_count > 0)
+        dprint(sprintf("^3[cam-synth]^7 created ^6%g^7 synth cameras (no map cameras found)\n",
+                       camera_count));
+};
+
 // Called every StartFrame.  For neutral cameras the lazy per-use resolve in
 // Camera_PlacePlayerAtCurrent is enough, but preview-flagged cameras are
 // networked to CSQC and need their .target resolved BEFORE the first
@@ -291,7 +686,26 @@ void() Camera_UpdateCyclingSpectators =
 // each tick until cam_target_origin is non-zero (success).
 void() Camera_EnsureTargetsResolved =
 {
+    // Early-out once everything has settled (synth done, every preview
+    // camera either resolved or warned).  Cleared by any mutation that
+    // adds a new camera (synth helpers + map `camera` spawnfunc).
+    if (cam_targets_stable)
+        return;
+
+    // First-tick synthesis — runs once per map.  By the time StartFrame
+    // first fires, every map entity (including spawn points) has been
+    // parsed, so find() reliably reaches every candidate.
+    Camera_SynthesizeFromSpawns();
+
+    // Grace period: info_notnulls may take a few ticks to spawn relative
+    // to cameras. After this many seconds of uptime, if a camera's target
+    // is STILL unresolved, it really doesn't exist in the map — warn once
+    // so the mapper sees the typo (without needing sv_debug_camera).
+    const float GRACE_SEC = 2.0;
+    float map_uptime = time - map_start_time;
+
     float preview_flag = CAM_FLAG_TEAM_BLUE_PLAYER | CAM_FLAG_TEAM_RED_PLAYER;
+    float still_pending = 0;
     entity c = camera_list_head;
     while (c)
     {
@@ -304,9 +718,24 @@ void() Camera_EnsureTargetsResolved =
             // updated angles/cam_target_origin.
             if (c.cam_target_origin_x || c.cam_target_origin_y || c.cam_target_origin_z)
                 c.SendFlags |= 1;
+            // Still unresolved after grace period → genuine map error,
+            // print once so the mapper sees it without needing debug.
+            else if (map_uptime > GRACE_SEC && !c.cam_target_warned)
+            {
+                c.cam_target_warned = 1;
+                bprint(PRINT_HIGH, sprintf("^1[camera]^7 target '%s' not found in map. Use info_notnull (info_null is stripped by most BSP compilers).\n",
+                                           c.target));
+            }
+            // Within grace period and still unresolved — try again next
+            // tick, don't latch stable yet.
+            else if (!c.cam_target_warned)
+                still_pending = 1;
         }
         c = c.camera_next;
     }
+
+    if (!still_pending)
+        cam_targets_stable = 1;
 };
 
 // Self-target resolver — used as a .think so preview cameras can defer
@@ -355,6 +784,7 @@ void() camera =
     self.camera_next = camera_list_head;
     camera_list_head = self;
     camera_count = camera_count + 1;
+    cam_targets_stable = 0;
 
     // Network preview-flagged cameras to CSQC for the menu's character
     // preview viewport.  Non-preview cameras stay server-only.

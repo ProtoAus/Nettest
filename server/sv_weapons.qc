@@ -5,6 +5,7 @@
 
 // Forward declarations
 void(entity player) PM_SyncPredictionProxy;  // defined in sv_player.qc
+void(entity player) Player_VisualProxy_DetachAsCorpse;  // defined in sv_player.qc
 void() W_DeagleEquip;         // defined in wpn_deagle.qc
 void() W_DeagleDrop;          // defined in wpn_deagle.qc
 void() W_KnifeEquip;
@@ -124,7 +125,12 @@ void(void() spawn_func) W_RegisterMapWeapon =
     if (sv_debug_weapon_spawning)
         return;
 
-    // Only save origin on first spawn (not on round reset re-runs)
+    // Record the spec (origin, angles, spawn function) on the entity up
+    // front — even if mp_nomapweapons is currently on.  Keeping the
+    // entity alive (just hidden) means flipping the cvar off later can
+    // re-run map_weapon_spawn to bring the weapon back exactly where the
+    // mapper placed it.  If we instead remove()'d, the spawn_func pointer
+    // would be lost and the weapon could never respawn until a map change.
     if (!self.map_weapon)
     {
         self.map_weapon_origin = self.origin;
@@ -133,6 +139,23 @@ void(void() spawn_func) W_RegisterMapWeapon =
 
     self.map_weapon = TRUE;
     self.map_weapon_spawn = spawn_func;
+
+    // mp_nomapweapons: hide the entity (no model, no collision, no
+    // CSQC replication, no think).  The bookkeeping above still stands
+    // so W_RespawnMapWeapons can revive us on round restart when the
+    // cvar is off.
+    if (cvar("mp_nomapweapons") > 0)
+    {
+        setmodel(self, "");
+        self.modelindex = 0;
+        self.solid      = SOLID_NOT;
+        self.movetype   = MOVETYPE_NONE;
+        self.SendEntity = __NULL__;
+        self.SendFlags  = 0;
+        self.think      = __NULL__;
+        self.nextthink  = 0;
+        return;
+    }
 
     // Snap to the floor at spawn time. W_RespawnMapWeapons does the
     // same on round restart, which is why round-2+ weapons appeared
@@ -163,6 +186,7 @@ void(void() spawn_func) W_RegisterMapWeapon =
 void() W_RespawnMapWeapons =
 {
     entity e, next, saved;
+    float  strip_map_weapons = (cvar("mp_nomapweapons") > 0);
 
     e = nextent(world);
     while (e)
@@ -174,18 +198,40 @@ void() W_RespawnMapWeapons =
         {
             if (e.map_weapon)
             {
-                // Reset map weapon to its original state
                 saved = self;
                 self = e;
-                setorigin(self, self.map_weapon_origin);
-                self.angles = self.map_weapon_angles;
-                self.map_weapon_spawn();     // re-runs weapon_ak47() etc.
-                // Ensure weapon falls to the ground after respawn.
-                // The spawn sets MOVETYPE_TOSS; give it a real downward
-                // velocity so it visibly drops and settles.
-                self.velocity = '0 0 -100';
-                if (!droptofloor())
-                    self.velocity = '0 0 -200';
+                if (strip_map_weapons)
+                {
+                    // mp_nomapweapons on — hide the entity but keep all
+                    // map_weapon bookkeeping (origin/angles/spawn_func)
+                    // intact so a later round can revive it verbatim.
+                    // Mirrors the hide path in W_RegisterMapWeapon.
+                    setmodel(self, "");
+                    self.modelindex = 0;
+                    self.solid      = SOLID_NOT;
+                    self.movetype   = MOVETYPE_NONE;
+                    self.SendEntity = __NULL__;
+                    self.SendFlags  = 0;
+                    self.think      = __NULL__;
+                    self.nextthink  = 0;
+                }
+                else
+                {
+                    // Reset to original state.  Works for both "was live"
+                    // and "was hidden last round" — the nested
+                    // W_RegisterMapWeapon call inside map_weapon_spawn
+                    // sees the cvar is off and re-wires model/SendEntity/
+                    // think exactly like first-time spawn.
+                    setorigin(self, self.map_weapon_origin);
+                    self.angles = self.map_weapon_angles;
+                    self.map_weapon_spawn();     // re-runs weapon_ak47() etc.
+                    // Ensure weapon falls to the ground after respawn.
+                    // The spawn sets MOVETYPE_TOSS; give it a real downward
+                    // velocity so it visibly drops and settles.
+                    self.velocity = '0 0 -100';
+                    if (!droptofloor())
+                        self.velocity = '0 0 -200';
+                }
                 self = saved;
             }
             else
@@ -230,81 +276,9 @@ void(float basespread, float movespread, float fullspeed,
 //  trace_bone_id is 1-based (0 = unknown).
 // ============================================================
 
-// Map trace_bone_id (1-based) to hitgroup using bone names on the hit entity.
-// Works with any model regardless of bone index layout.
-float(float bone_id) W_BoneToHitgroup =
-{
-    if (bone_id <= 0 || !trace_ent)
-        return HITGROUP_GENERIC;
-
-    // Check bone name against known hitbox bones.
-    // gettagindex returns 1-based, so compare directly with trace_bone_id.
-    entity ent = trace_ent;
-
-    // Head
-    if (bone_id == gettagindex(ent, "Bip01 Head"))
-        return HITGROUP_HEAD;
-
-    // Chest: Spine1, Spine2, Spine3, Neck
-    if (bone_id == gettagindex(ent, "Bip01 Spine1")
-     || bone_id == gettagindex(ent, "Bip01 Spine2")
-     || bone_id == gettagindex(ent, "Bip01 Spine3")
-     || bone_id == gettagindex(ent, "Bip01 Neck"))
-        return HITGROUP_CHEST;
-
-    // Stomach: Pelvis, Spine
-    if (bone_id == gettagindex(ent, "Bip01 Pelvis")
-     || bone_id == gettagindex(ent, "Bip01 Spine"))
-        return HITGROUP_STOMACH;
-
-    // Left Arm
-    if (bone_id == gettagindex(ent, "Bip01 L Clavicle")
-     || bone_id == gettagindex(ent, "Bip01 L UpperArm")
-     || bone_id == gettagindex(ent, "Bip01 L Forearm")
-     || bone_id == gettagindex(ent, "Bip01 L Hand"))
-        return HITGROUP_LEFTARM;
-
-    // Right Arm
-    if (bone_id == gettagindex(ent, "Bip01 R Clavicle")
-     || bone_id == gettagindex(ent, "Bip01 R UpperArm")
-     || bone_id == gettagindex(ent, "Bip01 R Forearm")
-     || bone_id == gettagindex(ent, "Bip01 R Hand"))
-        return HITGROUP_RIGHTARM;
-
-    // Left Leg (check both naming conventions)
-    if (bone_id == gettagindex(ent, "Bip01 L Thigh")
-     || bone_id == gettagindex(ent, "Bip01 L Calf")
-     || bone_id == gettagindex(ent, "Bip01 L Foot")
-     || bone_id == gettagindex(ent, "Bip01 L Leg")
-     || bone_id == gettagindex(ent, "Bip01 L Leg1"))
-        return HITGROUP_LEFTLEG;
-
-    // Right Leg
-    if (bone_id == gettagindex(ent, "Bip01 R Thigh")
-     || bone_id == gettagindex(ent, "Bip01 R Calf")
-     || bone_id == gettagindex(ent, "Bip01 R Foot")
-     || bone_id == gettagindex(ent, "Bip01 R Leg")
-     || bone_id == gettagindex(ent, "Bip01 R Leg1"))
-        return HITGROUP_RIGHTLEG;
-
-    return HITGROUP_GENERIC;
-};
-
-// Damage multiplier per hitgroup (CS 1.6 style).
-float(float hitgroup) W_HitgroupDamageMultiplier =
-{
-    switch (hitgroup)
-    {
-    case HITGROUP_HEAD:     return 4.0;
-    case HITGROUP_CHEST:    return 1.0;
-    case HITGROUP_STOMACH:  return 1.25;
-    case HITGROUP_LEFTARM:  return 0.75;
-    case HITGROUP_RIGHTARM: return 0.75;
-    case HITGROUP_LEFTLEG:  return 0.75;
-    case HITGROUP_RIGHTLEG: return 0.75;
-    default:                return 1.0;
-    }
-};
+// W_BoneToHitgroup + W_HitgroupDamageMultiplier moved to shared/sh_weapon_logic.qc
+// so CSQC can call them too (needed for predicted-death's lethality math).
+// They're pure functions of trace_ent + bone_id — work identically on either side.
 
 string(float hitgroup) W_HitgroupName =
 {
@@ -327,6 +301,14 @@ string(float hitgroup) W_HitgroupName =
 // self.mins/self.maxs — so player-vs-player collision stays at the
 // true movement hull.
 //
+// Z is expanded too (was X+Y only).  Without it, ducking players —
+// whose duck-hull caps at PM_DUCK_MAXS_z = 18u above origin — had any
+// head-bone above that height culled before MOVE_HITMODEL even reached
+// the per-bone test.  cl_debug_hbexpand 1 made this visible.  Bigger
+// bbox is purely an early-out / cull volume; the actual hit decision
+// is per-bone, so expanding can only add forgiveness, never produce
+// false hits above/below the real hitboxes.
+//
 // Must be paired with W_PlayersRestoreHitboxes after the trace(s).
 // Lag comp still works because we're expanding the real player entity
 // (not a separate proxy); MOVE_LAGGED rewinds origin and the expanded
@@ -346,8 +328,8 @@ void() W_PlayersExpandHitboxes =
         {
             vector mn = p.mins;
             vector mx = p.maxs;
-            mn_x -= expand; mn_y -= expand;
-            mx_x += expand; mx_y += expand;
+            mn_x -= expand; mn_y -= expand; mn_z -= expand;
+            mx_x += expand; mx_y += expand; mx_z += expand;
             setsize(p, mn, mx);
         }
         p = p.player_chain_next;
@@ -366,8 +348,8 @@ void() W_PlayersRestoreHitboxes =
         {
             vector mn = p.mins;
             vector mx = p.maxs;
-            mn_x += expand; mn_y += expand;
-            mx_x -= expand; mx_y -= expand;
+            mn_x += expand; mn_y += expand; mn_z += expand;
+            mx_x -= expand; mx_y -= expand; mx_z -= expand;
             setsize(p, mn, mx);
         }
         p = p.player_chain_next;
@@ -376,11 +358,13 @@ void() W_PlayersRestoreHitboxes =
 
 // Send the server's view of a target's hitbox state to the shooter.
 // The client creates a ghost entity from this and draws orange hitbox wireframes.
+// Mode 1 = per-shot snapshot (this function). Mode 2 = continuous, handled
+// in sv_main.qc's StartFrame. Wire format is identical so the client parser
+// is a single path.
 void(entity target) W_SendServerHitboxes =
 {
-    float dbg = cvar("sv_debug_hitboxes");
-    if (!dbg || dbg >= 3)
-        return; // mode 3 is handled continuously in StartFrame
+    if (cvar("sv_debug_hitboxes") != 1)
+        return;
     if (!target || target.classname != "player")
         return;
 
@@ -398,13 +382,15 @@ void(entity target) W_SendServerHitboxes =
     WriteByte(MSG_ONE, target.frame);
     WriteByte(MSG_ONE, target.baseframe);
     WriteByte(MSG_ONE, target.basebone);
+    WriteFloat(MSG_ONE, target.frame1time);
+    WriteFloat(MSG_ONE, target.baseframe1time);
     WriteFloat(MSG_ONE, target.subblendfrac);
     WriteFloat(MSG_ONE, target.subblend2frac);
     WriteFloat(MSG_ONE, target.bonecontrol1);
     WriteFloat(MSG_ONE, target.bonecontrol2);
     WriteFloat(MSG_ONE, target.bonecontrol3);
     WriteFloat(MSG_ONE, target.bonecontrol4);
-    WriteByte(MSG_ONE, dbg); // 1=normal, 2=include shield
+    WriteByte(MSG_ONE, 1); // mode: 1 = per-shot snapshot
 };
 
 // ============================================================
@@ -414,7 +400,11 @@ void(entity target) W_SendServerHitboxes =
 
 void(vector src, vector end) W_WeaponTraceLine =
 {
-    Lagcomp_TraceLine(src, end, MOVE_NORMAL | MOVE_LAGGED, self);
+    // No MOVE_LAGGED: our QC ring buffer (sv_lagcomp.qc) has already
+    // rewound every other player to the shooter's view-time before
+    // this trace runs. Passing the engine flag would trigger a second,
+    // independent rewind on top of ours.
+    Lagcomp_TraceLine(src, end, MOVE_NORMAL | MOVE_HITMODEL, self);
 };
 
 // ============================================================
@@ -444,6 +434,11 @@ float(entity hit) W_ClassifyImpactMaterial =
         if (s == BREAKABLE_METAL || s == BREAKABLE_MACHINE
                                  || s == BREAKABLE_CIRCUIT)               return IMPACT_MAT_METAL;
     }
+    // Physics props — sparks + metal ric, no hole decal. The hole
+    // spawn is already blocked by CSQC_SpawnBulletHole's
+    // `solid != SOLID_BSP` guard (phys props are SOLID_PHYSICS_BOX).
+    if (hit && (hit.classname == "phys_barrel" || hit.classname == "phys_can"))
+        return IMPACT_MAT_METAL;
     return IMPACT_MAT_DEFAULT;
 };
 
@@ -467,10 +462,17 @@ void(vector pos) W_ImpactEffect =
             WriteCoord(MSG_ONE, pos_x);
             WriteCoord(MSG_ONE, pos_y);
             WriteCoord(MSG_ONE, pos_z);
-            WriteCoord(MSG_ONE, trace_plane_normal_x);
-            WriteCoord(MSG_ONE, trace_plane_normal_y);
-            WriteCoord(MSG_ONE, trace_plane_normal_z);
+            // Normal is a unit vector (components in [-1,+1]); quantise to
+            // a signed byte biased by 127 to save 9 B/event over WriteCoord.
+            WriteByte(MSG_ONE, bound(0, rint(127 + trace_plane_normal_x * 127), 255));
+            WriteByte(MSG_ONE, bound(0, rint(127 + trace_plane_normal_y * 127), 255));
+            WriteByte(MSG_ONE, bound(0, rint(127 + trace_plane_normal_z * 127), 255));
             WriteByte(MSG_ONE, mat);
+            // Target entnum so remote clients can attach bullet-hole
+            // decals to the correct func_breakable / BSP entity and
+            // remove them on CSQC_EVENT_BRUSH_DESTROY. 0 = world /
+            // non-BSP hit (client treats as stationary world decal).
+            WriteShort(MSG_ONE, num_for_edict(trace_ent));
         }
         p = p.player_chain_next;
     }
@@ -500,10 +502,11 @@ void(vector pos, vector normal) W_ImpactEffectAll =
             WriteCoord(MSG_ONE, pos_x);
             WriteCoord(MSG_ONE, pos_y);
             WriteCoord(MSG_ONE, pos_z);
-            WriteCoord(MSG_ONE, normal_x);
-            WriteCoord(MSG_ONE, normal_y);
-            WriteCoord(MSG_ONE, normal_z);
+            WriteByte(MSG_ONE, bound(0, rint(127 + normal_x * 127), 255));
+            WriteByte(MSG_ONE, bound(0, rint(127 + normal_y * 127), 255));
+            WriteByte(MSG_ONE, bound(0, rint(127 + normal_z * 127), 255));
             WriteByte(MSG_ONE, mat);
+            WriteShort(MSG_ONE, num_for_edict(trace_ent));   // target entnum for decal attach
         }
         p = p.player_chain_next;
     }
@@ -531,10 +534,11 @@ void(vector pos, vector normal, float mat) W_ImpactEffectAllMat =
             WriteCoord(MSG_ONE, pos_x);
             WriteCoord(MSG_ONE, pos_y);
             WriteCoord(MSG_ONE, pos_z);
-            WriteCoord(MSG_ONE, normal_x);
-            WriteCoord(MSG_ONE, normal_y);
-            WriteCoord(MSG_ONE, normal_z);
+            WriteByte(MSG_ONE, bound(0, rint(127 + normal_x * 127), 255));
+            WriteByte(MSG_ONE, bound(0, rint(127 + normal_y * 127), 255));
+            WriteByte(MSG_ONE, bound(0, rint(127 + normal_z * 127), 255));
             WriteByte(MSG_ONE, mat);
+            WriteShort(MSG_ONE, num_for_edict(trace_ent));   // target entnum for decal attach
         }
         p = p.player_chain_next;
     }
@@ -686,7 +690,8 @@ void(entity attacker, entity victim) PlayerKilled =
     float kf_vic_slot = num_for_edict(victim) - 1;
     if (attacker == victim || attacker.classname != "player")
         kf_cause = KILL_CAUSE_SUICIDE;
-    else if (attacker.player_team != TEAM_NONE
+    else if (!Gamemode_HasUnifiedTeams()
+             && attacker.player_team != TEAM_NONE
              && attacker.player_team == victim.player_team)
         kf_cause = KILL_CAUSE_FRIENDLYFIRE;
     else
@@ -733,6 +738,124 @@ void(entity attacker, entity victim) PlayerKilled =
     // Stop any looping weapon sounds (e.g. gauss charge)
     sound(victim, CHAN_WEAPON, "sounds/null.wav", 1, ATTN_NORM);
     victim.weaponstate = WS_IDLE;
+
+    // Detach the visual proxy as a corpse — the body persists on the
+    // ground for the rest of the round (cleaned up by RoundRestart's
+    // corpse sweep). Works in both TDM (PlayerSpawn's Ensure spawns a
+    // fresh proxy at the respawn point) and Elimination (PlayerJoinSpectate
+    // sees player_visual_proxy == world and skips its remove).
+    Player_VisualProxy_DetachAsCorpse(victim);
+};
+
+// ============================================================
+//  Damage report (cl_playerdamage death-screen panel)
+//
+//  32×32 sparse matrix of (attacker, target) damage totals + hit
+//  counts, accumulated per-life. On death we walk the victim's row
+//  (Given) and column (Taken) and ship the result as a single
+//  CSQC_EVENT_DAMAGE_REPORT to the dying player only. Cleared
+//  per-player on PlayerSpawn so each life starts fresh.
+//
+//  Index = attacker_slot0 * 32 + target_slot0  (slot0 = 0..31).
+// ============================================================
+const float DR_MAX_PLAYERS = 32;
+const float DR_REPORT_CAP  = 16;   // entries per side on the wire
+
+float dr_dmg [DR_MAX_PLAYERS * DR_MAX_PLAYERS];
+float dr_hits[DR_MAX_PLAYERS * DR_MAX_PLAYERS];
+
+void(float slot0) DamageReport_ClearForPlayer =
+{
+    if (slot0 < 0 || slot0 >= DR_MAX_PLAYERS) return;
+    float i;
+    for (i = 0; i < DR_MAX_PLAYERS; i = i + 1)
+    {
+        // row: damage this player dealt to others
+        dr_dmg [slot0 * DR_MAX_PLAYERS + i] = 0;
+        dr_hits[slot0 * DR_MAX_PLAYERS + i] = 0;
+        // column: damage this player received from others
+        dr_dmg [i * DR_MAX_PLAYERS + slot0] = 0;
+        dr_hits[i * DR_MAX_PLAYERS + slot0] = 0;
+    }
+};
+
+void(entity attacker, entity target, float damage) DamageReport_Record =
+{
+    if (!attacker || !target) return;
+    if (attacker == target) return;
+    if (attacker.classname != "player") return;
+    if (target.classname   != "player") return;
+
+    float a = num_for_edict(attacker) - 1;
+    float t = num_for_edict(target)   - 1;
+    if (a < 0 || a >= DR_MAX_PLAYERS) return;
+    if (t < 0 || t >= DR_MAX_PLAYERS) return;
+
+    float idx = a * DR_MAX_PLAYERS + t;
+    dr_dmg [idx] = dr_dmg [idx] + damage;
+    dr_hits[idx] = dr_hits[idx] + 1;
+};
+
+// Walk the victim's row (Given) and column (Taken) and ship the
+// report as a single CSQC event to the victim.
+void(entity victim) DamageReport_Send =
+{
+    if (!victim || victim.classname != "player") return;
+    float v = num_for_edict(victim) - 1;
+    if (v < 0 || v >= DR_MAX_PLAYERS) return;
+
+    msg_entity = victim;
+    WriteByte(MSG_ONE, SVC_CGAMEPACKET);
+    WriteByte(MSG_ONE, CSQC_EVENT_DAMAGE_REPORT);
+
+    // ---- Given list (victim damaged whom) ----
+    float given_count = 0;
+    float i;
+    for (i = 0; i < DR_MAX_PLAYERS; i = i + 1)
+    {
+        if (dr_dmg[v * DR_MAX_PLAYERS + i] > 0)
+            given_count = given_count + 1;
+    }
+    if (given_count > DR_REPORT_CAP) given_count = DR_REPORT_CAP;
+    WriteByte(MSG_ONE, given_count);
+
+    float written = 0;
+    for (i = 0; i < DR_MAX_PLAYERS && written < given_count; i = i + 1)
+    {
+        float idx = v * DR_MAX_PLAYERS + i;
+        if (dr_dmg[idx] <= 0) continue;
+        entity tgt = edict_num(i + 1);
+        float hp   = (tgt && tgt.classname == "player") ? tgt.health : 0;
+        WriteByte (MSG_ONE, i + 1);                                // 1-based slot
+        WriteShort(MSG_ONE, bound(0, rint(dr_dmg[idx]), 32767));
+        WriteByte (MSG_ONE, bound(0, dr_hits[idx], 255));
+        WriteByte (MSG_ONE, bound(0, rint(hp), 255));
+        written = written + 1;
+    }
+
+    // ---- Taken list (who damaged victim) ----
+    float taken_count = 0;
+    for (i = 0; i < DR_MAX_PLAYERS; i = i + 1)
+    {
+        if (dr_dmg[i * DR_MAX_PLAYERS + v] > 0)
+            taken_count = taken_count + 1;
+    }
+    if (taken_count > DR_REPORT_CAP) taken_count = DR_REPORT_CAP;
+    WriteByte(MSG_ONE, taken_count);
+
+    written = 0;
+    for (i = 0; i < DR_MAX_PLAYERS && written < taken_count; i = i + 1)
+    {
+        float idx = i * DR_MAX_PLAYERS + v;
+        if (dr_dmg[idx] <= 0) continue;
+        entity atk = edict_num(i + 1);
+        float hp   = (atk && atk.classname == "player") ? atk.health : 0;
+        WriteByte (MSG_ONE, i + 1);
+        WriteShort(MSG_ONE, bound(0, rint(dr_dmg[idx]), 32767));
+        WriteByte (MSG_ONE, bound(0, dr_hits[idx], 255));
+        WriteByte (MSG_ONE, bound(0, rint(hp), 255));
+        written = written + 1;
+    }
 };
 
 float(entity attacker, entity target, float damage) W_ApplyDamage =
@@ -743,8 +866,13 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
     if (!W_CanDamageTarget(target))
         return 0;
 
-    // Friendlyfire check: block teammate damage if disabled
-    if (attacker.classname == "player" && target.classname == "player"
+    // Friendlyfire check: block teammate damage if disabled.
+    // Unified-team modes (FFA + Bhop) bypass entirely — every player
+    // is fair game regardless of the backend team value (which exists
+    // only so admin-switching back to a team mode lands players on a
+    // valid team).
+    if (!Gamemode_HasUnifiedTeams()
+        && attacker.classname == "player" && target.classname == "player"
         && attacker != target
         && attacker.player_team == target.player_team
         && attacker.player_team != TEAM_NONE
@@ -756,6 +884,11 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
 
     target.health       = target.health - damage;
     target.dmg_inflictor = attacker;
+
+    // Damage report — record (attacker, target, damage) for the
+    // death-screen "Given/Taken" panel. Skips self-damage and
+    // non-player attackers (world / fall damage) inside the helper.
+    DamageReport_Record(attacker, target, damage);
 
     // Dedup anchor for sv_trust_clienthits — the hitclaim handler checks
     // these fields to avoid double-damaging the same target when both
@@ -775,22 +908,39 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
         WriteByte(MSG_ONE, bound(1, damage, 255));
     }
 
-    // Hitmarker: server-confirmed hit on any damageable
+    // Hitmarker: server-confirmed hit on any damageable.
+    // When sv_trust_clienthits >= 1 AND target is a player, the
+    // attacker's CSQC already played the marker locally on the
+    // predicted hit (sh_weapon_logic.qc), so suppress the server-side
+    // emit to avoid the marker firing twice — once on the predicted
+    // trace, again when the server's confirmation packet round-trips
+    // back ~ping ms later.  Breakable / phys-prop / world hits keep
+    // firing the server marker because the client doesn't predict
+    // hitmarkers for non-player targets.
     if (attacker.classname == "player")
     {
-        msg_entity = attacker;
-        WriteByte(MSG_ONE, SVC_CGAMEPACKET);
-        WriteByte(MSG_ONE, CSQC_EVENT_HITMARKER);
+        float trust = cvar("sv_trust_clienthits");
+        float client_owns_marker = (target.classname == "player" && trust >= 1);
+        if (!client_owns_marker)
+        {
+            msg_entity = attacker;
+            WriteByte(MSG_ONE, SVC_CGAMEPACKET);
+            WriteByte(MSG_ONE, CSQC_EVENT_HITMARKER);
+        }
     }
 
     if (target.health <= 0 && target.classname == "player")
     {
-        // Overkill gib: if the killing blow cleared sv_gib_threshold, broadcast
-        // a CSQC_EVENT_PLAYER_GIBS so every client spawns flesh chunks + blood.
-        // Direction hint = attacker-to-target so gibs fly along the shot line.
-        float gib_threshold = cvar("sv_gib_threshold");
-        if (gib_threshold <= 0) gib_threshold = 70;
-        if (damage >= gib_threshold && attacker)
+        // Headshot kill → broadcast CSQC_EVENT_PLAYER_GIBS so every client
+        // spawns flesh chunks + blood ("the head explodes").  Trigger is
+        // hitgroup-based, not damage-based: any lethal headshot gibs,
+        // regardless of weapon power.  Body-shot kills, even with high
+        // damage, do not gib — they play the standard death animation.
+        // death_hitgroup is set by every damage source before this
+        // function is called (hitscan paths, hitclaim handler, shotgun
+        // pellet paths) so the hitgroup of the actual killing blow is
+        // available here.
+        if (target.death_hitgroup == HITGROUP_HEAD && attacker)
         {
             vector gib_dir = target.origin - attacker.origin;
             if (vlen(gib_dir) > 0)
@@ -798,8 +948,9 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
             else
                 gib_dir = '0 0 1';
 
-            // Gib count scales with overkill: 4 at threshold, +1 per ~20 dmg over, capped 12.
-            float gib_count = bound(4, 4 + (damage - gib_threshold) / 20, 12);
+            // Gib count scales with damage so a tiny pistol headshot gibs
+            // less dramatically than an AWP headshot. 4 minimum, 12 cap.
+            float gib_count = bound(4, 4 + damage / 25, 12);
 
             WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
             WriteByte(MSG_MULTICAST, CSQC_EVENT_PLAYER_GIBS);
@@ -811,6 +962,12 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
             WriteCoord(MSG_MULTICAST, gib_dir_z);
             WriteByte(MSG_MULTICAST, gib_count);
             WriteShort(MSG_MULTICAST, bound(0, damage, 32767));
+            // Victim slot — lets the attacker's CSQC suppress this gib
+            // spawn when cl_predict_death already fired for that proxy
+            // (vis_pred_gibs_at_time within the staleness window).
+            // Without this, the predicted gibs and the server's authoritative
+            // gibs visibly double up at high ping.
+            WriteByte(MSG_MULTICAST, num_for_edict(target));
             multicast(target.origin, MULTICAST_PVS);
 
             // Suppress the corpse visual — the player exploded, there's no body.
@@ -820,6 +977,12 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
         }
 
         PlayerKilled(attacker, target);
+
+        // Death-screen damage report — send to the dying player
+        // before their slot resets on respawn. Sent via MSG_ONE
+        // (victim only). cl_playerdamage gates client display.
+        DamageReport_Send(target);
+
         return damage;
     }
 
@@ -866,19 +1029,59 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
 // the sh_wpn_*.qc files, which compile AFTER this file). Forward
 // declaration is at the top of this file near weapon_become_solid.
 
+// Shared in-flight send interval for dropped weapons + projectiles.
+// Reads sv_toss_tickrate (Hz, default 20, clamped 5..100) and returns
+// the seconds-per-tick value used as nextthink offsets. Centralised so
+// admins tune one cvar to control every airborne entity's send rate.
+float() Toss_NextThinkInterval =
+{
+    return 1.0 / bound(5, cvar("sv_toss_tickrate"), 100);
+};
+
+// Shared CSQC SendEntity for every server-spawned projectile (HL grenade,
+// GL grenade, RPG rocket, crossbow bolt). Returning FALSE for the shooter
+// hides the entity from them — they see only their CSQC-predicted fake.
+// Other PVS clients receive origin + velocity + avelocity; the CSQC
+// parser (cl_projectiles.qc) routes through cl_tosssmooth.qc for extrap +
+// smooth, so visible flight stays smooth between server samples.
+//
+// Model + gravity factor are derived from proj_type via
+// Projectile_TypeModel / Projectile_TypeGravity (shared/sh_weapons.qc),
+// so we don't burn bytes on the wire for either.
+float(entity playerent, float changedflags) projectile_SendEntity =
+{
+    if (playerent == self.owner)
+        return FALSE;
+
+    WriteByte(MSG_ENTITY, CSQC_ENT_PROJECTILE);
+    WriteByte(MSG_ENTITY, self.proj_type);
+    WriteCoord(MSG_ENTITY, self.origin_x);
+    WriteCoord(MSG_ENTITY, self.origin_y);
+    WriteCoord(MSG_ENTITY, self.origin_z);
+    WriteCoord(MSG_ENTITY, self.velocity_x);
+    WriteCoord(MSG_ENTITY, self.velocity_y);
+    WriteCoord(MSG_ENTITY, self.velocity_z);
+    WriteCoord(MSG_ENTITY, self.avelocity_x);
+    WriteCoord(MSG_ENTITY, self.avelocity_y);
+    WriteCoord(MSG_ENTITY, self.avelocity_z);
+    return TRUE;
+};
+
 void() weapon_become_solid =
 {
     // Bump SendFlags on every call regardless of phase.  During the toss
-    // phase this drives 20 Hz CSQC position updates so observers see
-    // smooth physics instead of the weapon freezing in place until
-    // weapon_settle_think starts pulsing.
+    // phase this drives the CSQC position update — rate is sv_toss_tickrate
+    // (default 40 Hz) so observers see smooth physics instead of the
+    // weapon freezing until weapon_settle_think starts pulsing.
     self.SendFlags |= 1;
 
     if (time < self.weapon_solid_time)
     {
-        // Toss phase — keep polling every 50 ms so CSQC gets a fresh
-        // origin as the TOSS physics carries the drop through the air.
-        self.nextthink = time + 0.05;
+        // Toss phase — poll at sv_toss_tickrate so CSQC gets a fresh
+        // origin + velocity as the TOSS physics carries the drop through
+        // the air. Faster send rate → less per-snapshot snap to absorb in
+        // the CSQC smoothing layer.
+        self.nextthink = time + Toss_NextThinkInterval();
         return;
     }
 
@@ -891,9 +1094,15 @@ void() weapon_become_solid =
     self.pvsflags = PVSF_NOREMOVE;
     self.SendEntity = dropped_weapon_SendEntity;  // idempotent; safe re-assert
 
-    self.weapon_settle_deadline = time + 10;
+    // 3 s deadline (was 10 s). Most weapons settle below the 30 qu/s
+    // threshold within a second of landing; the rest used to ride out
+    // a 10 s deadline rolling on slight inclines, leaving them visibly
+    // "alive" long after they should have stopped. weapon_settle_think
+    // also damps residual motion below 100 qu/s to encourage faster
+    // convergence within this window.
+    self.weapon_settle_deadline = time + 3;
     self.think = weapon_settle_think;
-    self.nextthink = time + 0.05;
+    self.nextthink = time + Toss_NextThinkInterval();
 };
 
 // Polled every 0.2s once the weapon is solid.  Waits until motion drops
@@ -918,7 +1127,19 @@ void() weapon_settle_think =
     if ((fabs(self.velocity_z) > 30 || vlen(flat_vel) > 30)
         && time < self.weapon_settle_deadline)
     {
-        self.nextthink = time + 0.05;
+        // Strong damping once motion is moderate — encourages a fast
+        // final settle so the weapon doesn't ride out the 3 s deadline
+        // rolling/sliding at low speed. Skipped while still actively
+        // bouncing (|vel| > 200) so the natural arc isn't squashed.
+        if (vlen(self.velocity) < 200)
+        {
+            self.velocity  = self.velocity  * 0.65;
+            self.avelocity = self.avelocity * 0.65;
+        }
+
+        // Still moving — keep ticking at sv_toss_tickrate so the CSQC
+        // smoothing layer always has fresh samples to extrapolate from.
+        self.nextthink = time + Toss_NextThinkInterval();
         return;
     }
 
@@ -1126,6 +1347,19 @@ void(float new_weapon) W_SelectWeapon =
     if (cur != WEP_NONE)
         self.previous_weapon = cur;
 
+    if (cvar("sv_debug_wepswap"))
+    {
+        dprint(sprintf("[SV wepswap] frame=%g  %g→%g  origin=%v  velocity=%v  speed=%.1f\n",
+            time, cur, new_weapon, self.origin, self.velocity, vlen(self.velocity)));
+        Drift_Dump("SV");
+    }
+
+    // Snapshot current effective speed factor before the weapon change,
+    // then reset blend progress to 0 — PM_ReadMovevars advances it per
+    // pmove tick.  Mirrors CSQC_PredictSelectWeapon.
+    self.pm_weapon_prev_factor    = Weapon_SpeedFactor_Smooth();
+    self.pm_weapon_blend_progress = 0;
+
     self.weapon = new_weapon;
     W_ChangeWeapon();
 };
@@ -1257,6 +1491,20 @@ void() W_DropCurrentWeapon =
     weapon_drop_target = drop_ent;
     drop_func();          // populates drop_ent (ammo, model, solid, touch, etc.)
     weapon_drop_target = world;
+
+    // Wire CSQC replication IMMEDIATELY rather than waiting for
+    // weapon_become_solid at +0.7s.  If we let the engine do
+    // standard replication during the toss phase and then bolt
+    // SendEntity on at +0.7s, observers see BOTH the engine-side
+    // flying entity AND the new CSQC entity simultaneously — the
+    // "double drop" bug.  Map weapons avoid this by wiring
+    // SendEntity at spawn (W_RegisterMapWeapon); death drops do
+    // the same in W_DropAllWeaponsOnDeath; this matches.
+    // weapon_become_solid at +0.7s still fires to flip solidity
+    // (the re-wiring of SendEntity it does is idempotent).
+    drop_ent.pvsflags = PVSF_NOREMOVE;
+    drop_ent.SendEntity = dropped_weapon_SendEntity;
+    drop_ent.SendFlags = 1;
 
     // Hide from dropper — their client-side fake drop covers the visual.
     // weapon_become_solid fires at +0.7s; we unhide at +1.5s after that.

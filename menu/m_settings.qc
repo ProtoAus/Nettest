@@ -193,7 +193,22 @@ void() settings_menu =
 		settings_rgb_slider([xpos, ypos], [left_width, 28], [0, 1, 10], "Green", "%.1f", crosshair_cx_g);
 		ypos += 30;
 		settings_rgb_slider([xpos, ypos], [left_width, 28], [0, 1, 10], "Blue",  "%.1f", crosshair_cx_b);
-		ypos += 30;
+		ypos += 34;
+
+		// Dynamic inaccuracy toggle — when off, the crosshair stops
+		// expanding on jump/fire/move (the per-weapon baseline can still
+		// differ unless the next toggle is also off).
+		float settings_cx_dynamic = cvar("cl_crosshairdynamic") > 0;
+		if (menu_toggle_button("cx_dyn_btn", [xpos, ypos], [left_width, 20], "Dynamic Inaccuracy", settings_cx_dynamic))
+			cvar_set("cl_crosshairdynamic", settings_cx_dynamic ? "1" : "0");
+		ypos += 24;
+
+		// Per-weapon gap toggle — when off, the gap stays uniform across
+		// weapons (hlshotgun won't visibly widen compared to the glock).
+		float settings_cx_weapon_gap = cvar("cl_crosshairweapongap") > 0;
+		if (menu_toggle_button("cx_wep_btn", [xpos, ypos], [left_width, 20], "Per-Weapon Gap", settings_cx_weapon_gap))
+			cvar_set("cl_crosshairweapongap", settings_cx_weapon_gap ? "1" : "0");
+		ypos += 24;
 	}
 
 	// --- Right panel: Controls (General) or Preview (Crosshair) ---

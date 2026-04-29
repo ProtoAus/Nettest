@@ -61,6 +61,10 @@ float(entity playerent, float changedflags) trigger_ladder_SendEntity =
     WriteCoord(MSG_ENTITY, self.movedir_y);
     WriteCoord(MSG_ENTITY, self.movedir_z);
 
+    // BSP submodel index — CSQC binds via setmodelindex so prediction's
+    // PM_BoxInTriggerBrush hits the same angled brush as the server.
+    WriteShort(MSG_ENTITY, self.modelindex);
+
     return TRUE;
 };
 
@@ -87,8 +91,13 @@ void() func_ladder =
     else
         self.movedir = '0 0 0';
 
+    // Keep BSP submodel bound (don't zero modelindex) so angled ladder
+    // brushes use their actual BSP geometry in PM_BoxInTriggerBrush, not
+    // just the AABB. EF_NODRAW hides the brush visually. SOLID_NOT keeps
+    // the engine's normal traces from hitting it; the BSP probe flips
+    // .solid to SOLID_BSP for the duration of its single tracebox.
     setmodel(self, self.model);
-    self.modelindex = 0;
+    self.effects   |= EF_NODRAW;
     self.movetype   = MOVETYPE_NONE;
     self.solid      = SOLID_NOT;
 

@@ -4,7 +4,6 @@
 
 // Forward declarations
 void() BreakableResetAll;
-void() PhysProp_RunPlayerPush;
 
 void() main =
 {
@@ -15,6 +14,284 @@ void() main =
 // ============================================================
 
 void() PlayerSpawn;  // forward declaration (defined in sv_player.qc)
+
+// Keep in sync with menu/m_menu.qc server_config_cvars[] so the
+// in-game save path writes the same data/server.cfg shape as Create
+// Server / menu-side saves.
+string sv_servercfg_cvars[] =
+{
+	"hostname",
+	"maxclients",
+	"password",
+	"rcon_password",
+	"sv_pure",
+	"fraglimit",
+	"mp_roundtime",
+	"mp_timelimit",
+	"mp_maxrounds",
+	"mp_friendlyfire",
+	"mp_falldamage",
+	"mp_nomapweapons",
+	"mp_freezetime",
+	"mp_roundrestartdelay",
+	"mp_respawndelay",
+	"sv_autohop",
+	"sv_stamina",
+	"sv_gamemode",
+	"sv_maxvelocity",
+	"sv_hull_height",
+	"sv_eye_height",
+	"sv_maxspeed",
+	"sv_accelerate",
+	"sv_airaccelerate",
+	"sv_friction",
+	"sv_shiftspeed",
+	"sv_mintic",
+	"sv_maxtic",
+	"sv_minpitch",
+	"sv_maxpitch",
+	"mp_cheats",
+	"sv_cheats",
+	"mp_noblock",
+	"sv_trust_clienthits",
+	"sv_lagcomp",
+	"sv_lagcomp_maxrewind",
+	"sv_hitbox_expand",
+	"sv_anim_qu_per_sec",
+	"sv_anim_qu_per_sec_crouch",
+	"sv_player_basebone",
+	"sv_antilag",
+	"sv_bigcoords",
+	"sv_nqplayerphysics",
+	"sv_wateraccelerate",
+	"sv_waterfriction",
+	"sv_toss_tickrate",
+	"pm_ramp_bumpcount",
+	"sv_physprop_hit_force",
+	"sv_physprop_mass",
+	"sv_physprop_erp",
+	"sv_physprop_damp_lin",
+	"sv_physprop_damp_ang",
+	"sv_physprop_friction",
+	"sv_physprop_use_force",
+	"sv_physprop_use_velmult",
+	"physics_ode_iterationsperframe",
+	"physics_ode_worldquickstep",
+	"physics_ode_autodisable",
+	"sv_default_primary",
+	"sv_default_secondary",
+	"sv_default_melee",
+	"sv_default_utility",
+};
+
+string(string line) SV_MapListEntryFromLine =
+{
+	float argc = tokenize(line);
+	if (argc <= 0)
+		return "";
+
+	string token = argv(0);
+	if (token == "//" || substring(token, 0, 1) == "#")
+		return "";
+
+	string lower = strtolower(token);
+	float len = strlen(token);
+
+	if (len > 5 && substring(lower, 0, 5) == "maps/")
+	{
+		token = substring(token, 5, len - 5);
+		lower = strtolower(token);
+		len = strlen(token);
+	}
+
+	if (len > 4 && substring(lower, len - 4, 4) == ".bsp")
+		token = substring(token, 0, len - 4);
+
+	return token;
+};
+
+string() SV_NextMapFromCycleFile =
+{
+	filestream f = fopen("data/maps.txt", FILE_READ);
+	if (f < 0)
+		f = fopen("maps.txt", FILE_READ);
+	if (f < 0)
+		return "";
+
+	string first = "";
+	string current = strtolower(mapname);
+	float found_current = FALSE;
+
+	string line = fgets(f);
+	while (line)
+	{
+		string entry = SV_MapListEntryFromLine(line);
+		if (entry != "")
+		{
+			string entry_lower = strtolower(entry);
+
+			if (first == "")
+				first = entry;
+
+			if (found_current)
+			{
+				fclose(f);
+				return entry;
+			}
+
+			if (entry_lower == current)
+				found_current = TRUE;
+		}
+
+		line = fgets(f);
+	}
+
+	fclose(f);
+	return first;
+};
+
+string(string cfgpath, string target_name) SV_ReadConfigValue =
+{
+	filestream f = fopen(cfgpath, FILE_READ);
+	if (f < 0)
+		return "";
+
+	string found = "";
+	string line = fgets(f);
+	while (line)
+	{
+		float n = strlen(line);
+		if (n > 0 && substring(line, n - 1, 1) == "\r")
+			line = substring(line, 0, n - 1);
+
+		float argc = tokenize(line);
+		if (argc <= 0)
+		{
+			line = fgets(f);
+			continue;
+		}
+
+		string cmd = argv(0);
+		if (cmd == "//" || substring(cmd, 0, 1) == "#")
+		{
+			line = fgets(f);
+			continue;
+		}
+
+		if ((cmd == "set" || cmd == "seta" || cmd == "setfl") && argc >= 3)
+		{
+			if (argv(1) == target_name)
+				found = argv(2);
+		}
+		else if (argc >= 2)
+		{
+			if (argv(0) == target_name)
+				found = argv(1);
+		}
+
+		line = fgets(f);
+	}
+
+	fclose(f);
+	return found;
+};
+
+// Apply a cfg-style cvar snapshot directly during worldspawn. Relying on
+// an engine-side `exec` here proved unreliable on the first map in normal
+// SSQC, while these files are simple cvar-assignment lists.
+void(string cfgpath) SV_ApplyConfigFile =
+{
+	filestream f = fopen(cfgpath, FILE_READ);
+	if (f < 0)
+		return;
+
+	print(sprintf("applying %s\n", cfgpath));
+
+	string line = fgets(f);
+	while (line)
+	{
+		float n = strlen(line);
+		if (n > 0 && substring(line, n - 1, 1) == "\r")
+			line = substring(line, 0, n - 1);
+
+		float argc = tokenize(line);
+		if (argc <= 0)
+		{
+			line = fgets(f);
+			continue;
+		}
+
+		string cmd = argv(0);
+		if (cmd == "//" || substring(cmd, 0, 1) == "#")
+		{
+			line = fgets(f);
+			continue;
+		}
+
+		// These cfg files are intended for cvar assignments, not general
+		// console scripting. Ignore command-only lines instead of creating
+		// accidental user cvars named `exec`, `wait`, etc.
+		if (cmd == "exec" || cmd == "alias" || cmd == "wait")
+		{
+			line = fgets(f);
+			continue;
+		}
+
+		if ((cmd == "set" || cmd == "seta" || cmd == "setfl") && argc >= 3)
+		{
+			cvar_set(argv(1), argv(2));
+			if (argv(1) == "rcon_password")
+				cvar_set("sv_rcon_password_shadow", argv(2));
+		}
+		else if (argc >= 2)
+		{
+			cvar_set(argv(0), argv(1));
+			if (argv(0) == "rcon_password")
+				cvar_set("sv_rcon_password_shadow", argv(1));
+		}
+
+		line = fgets(f);
+	}
+
+	fclose(f);
+};
+
+void() SV_ApplyServerConfigFile =
+{
+	SV_ApplyConfigFile("data/server.cfg");
+};
+
+void() SV_WriteServerConfigFile =
+{
+	filestream f = fopen("data/server.cfg", FILE_WRITE);
+	if (f < 0)
+	{
+		print("sv_saveconfig: fopen data/server.cfg FAILED\n");
+		return;
+	}
+
+	fputs(f, "// data/server.cfg — server settings (auto-generated)\n\n");
+
+	float i;
+	for (i = 0; i < sv_servercfg_cvars.length; i = i + 1)
+	{
+		string name = sv_servercfg_cvars[i];
+		string val = cvar_string(name);
+		if (name == "rcon_password" && val == "")
+			val = cvar_string("sv_rcon_password_shadow");
+		if (name == "rcon_password" && val == "")
+			val = SV_ReadConfigValue("data/server.cfg", name);
+		fputs(f, sprintf("set %s \"%s\"\n", name, val));
+	}
+
+	fclose(f);
+	print("sv_saveconfig: wrote data/server.cfg\n");
+};
+
+void() SV_ApplyMapConfigFile =
+{
+	SV_ApplyConfigFile(sprintf("maps/%s.cfg", mapname));
+};
 
 void() RoundStart =
 {
@@ -52,6 +329,25 @@ void() RoundRestart =
 	WriteByte(MSG_MULTICAST, CSQC_EVENT_ROUND_CLEANUP);
 	multicast('0 0 0', MULTICAST_ALL);
 
+	// Sweep corpses (proxies detached by Player_VisualProxy_DetachAsCorpse
+	// in PlayerKilled). remove() during a find() walk is unsafe in QC,
+	// so collect first then bulk-remove. Cap at 32 (MAX_PLAYERS) — corpses
+	// are 1:1 with kills so this comfortably covers any sane round.
+	{
+		entity corpses[32];
+		float ccount = 0;
+		entity ce = find(world, classname, "player_visual_proxy");
+		while (ce && ccount < 32)
+		{
+			if (ce.vis_is_corpse)
+				corpses[ccount++] = ce;
+			ce = find(ce, classname, "player_visual_proxy");
+		}
+		float i;
+		for (i = 0; i < ccount; i = i + 1)
+			remove(corpses[i]);
+	}
+
 	// Respawn all players who have a playing team (not spectators)
 	e = player_chain_head;
 	while (e)
@@ -63,6 +359,7 @@ void() RoundRestart =
 			e.survived_round = !e.is_dead;
 			e.is_dead = FALSE;
 			e.death_time = 0;
+			e.pending_round_join = FALSE;
 			PlayerRefreshScoreboardInfo(e);  // clear 'dead' flag on scoreboard
 			saved = self;
 			self = e;
@@ -88,17 +385,22 @@ float() CheckTeamEliminated =
 	e = player_chain_head;
 	while (e)
 	{
-		if (e.player_team == TEAM_BLUE)
+		// Skip mid-round joiners — they're queued for the next RoundRestart
+		// and shouldn't flip a 0→1 team-total transition into instant elim.
+		if (!e.pending_round_join)
 		{
-			blue_total = blue_total + 1;
-			if (!e.is_dead)
-				blue_alive = blue_alive + 1;
-		}
-		else if (e.player_team == TEAM_RED)
-		{
-			red_total = red_total + 1;
-			if (!e.is_dead)
-				red_alive = red_alive + 1;
+			if (e.player_team == TEAM_BLUE)
+			{
+				blue_total = blue_total + 1;
+				if (!e.is_dead)
+					blue_alive = blue_alive + 1;
+			}
+			else if (e.player_team == TEAM_RED)
+			{
+				red_total = red_total + 1;
+				if (!e.is_dead)
+					red_alive = red_alive + 1;
+			}
 		}
 		e = e.player_chain_next;
 	}
@@ -131,11 +433,20 @@ float() MapTimeExpired =
 // Cached last-pushed serverinfo values so we only emit when a cvar changes.
 // CSQC prediction reads these via serverkeyfloat — if they don't update live,
 // the client uses a stale value (or the default).
+// Tracks the previous tick's sv_gamemode value so StartFrame can detect a
+// switch and respawn all players (handles admin live-switching between
+// TDM / Bhop / FFA). _inited gates the first-tick comparison so we don't
+// trigger a spurious respawn on map load.
+float sv_prev_gamemode;
+float sv_gamemode_inited;
+
 string sv_info_last_shiftspeed;
 string sv_info_last_maxspeed;
 string sv_info_last_accelerate;
 string sv_info_last_airaccelerate;
 string sv_info_last_friction;
+string sv_info_last_waterfriction;
+string sv_info_last_wateraccelerate;
 string sv_info_last_gravity;
 string sv_info_last_stopspeed;
 string sv_info_last_hull_height;
@@ -144,7 +455,33 @@ string sv_info_last_autohop;
 string sv_info_last_stamina;
 string sv_info_last_snipersway;
 string sv_info_last_mp_cheats;
+string sv_info_last_mp_noblock;
 string sv_info_last_mintic;
+string sv_info_last_wepswap_speed_transition;
+string sv_info_last_weaponweight;
+string sv_info_last_backdrop;
+string sv_info_last_toss_tickrate;
+string sv_info_last_default_primary;
+string sv_info_last_default_secondary;
+string sv_info_last_default_melee;
+string sv_info_last_default_utility;
+// Pushed so the server-browser hostcache (menu/m_serverbrowser.qc)
+// can read the gamemode value via gethostcachestring(.., "sv_gamemode")
+// without parsing it from the hostname.
+string sv_info_last_gamemode;
+// Pushed so client-side hitmarker prediction (sh_weapon_logic.qc) can
+// gate on the server's authoritative trust mode.  trust>=1 → client
+// predicts hitmarker locally and server suppresses its own; trust=0 →
+// server is the sole source.  Without serverinfo push, the client
+// has no way to know which side owns the marker and double-fires.
+string sv_info_last_trust_clienthits;
+
+// Per-frame cvar cache globals (sv_cached_*) live in shared/sh_customdefs.qc
+// inside #ifdef SSQC, because sh_player_anims.qc references them and
+// compiles earlier in sv_progs.src than this file.
+
+// Phase counter for SV_UpdateMovementServerInfo throttle (every 8 ticks).
+float sv_info_push_phase;
 
 void(string key, __inout string last) sv_info_push_if_changed =
 {
@@ -163,6 +500,15 @@ void() SV_UpdateMovementServerInfo =
 	sv_info_push_if_changed("sv_accelerate",    sv_info_last_accelerate);
 	sv_info_push_if_changed("sv_airaccelerate", sv_info_last_airaccelerate);
 	sv_info_push_if_changed("sv_friction",      sv_info_last_friction);
+	// FTE engine registers sv_waterfriction with default "4" (sv_phys.c).
+	// Without publishing it, CSQC's PM_ReadMovevar falls back to 1, while
+	// the server-side QC reads the engine value (4) directly via cvar() —
+	// at high ping the per-tick water deceleration mismatch accumulates
+	// over the unacked prediction window and pops as a "whiplash" snap on
+	// reconcile after the player exits a push trigger underwater. Pushing
+	// it (and sv_wateraccelerate) keeps both sides on the same value.
+	sv_info_push_if_changed("sv_waterfriction", sv_info_last_waterfriction);
+	sv_info_push_if_changed("sv_wateraccelerate", sv_info_last_wateraccelerate);
 	sv_info_push_if_changed("sv_gravity",       sv_info_last_gravity);
 	sv_info_push_if_changed("sv_stopspeed",     sv_info_last_stopspeed);
 	sv_info_push_if_changed("sv_hull_height",   sv_info_last_hull_height);
@@ -171,6 +517,14 @@ void() SV_UpdateMovementServerInfo =
 	sv_info_push_if_changed("sv_stamina",       sv_info_last_stamina);
 	sv_info_push_if_changed("sv_snipersway",    sv_info_last_snipersway);
 	sv_info_push_if_changed("mp_cheats",        sv_info_last_mp_cheats);
+	// CSQC pmove reads this via serverkey to gate PM_NoblockStash on the
+	// client side (sh_pmove.qc).  Without it the client uses a local-only
+	// cvar() lookup that returns 0, predicts solid collision against
+	// other players, and the player visually rubber-bands when the server
+	// reconciles to the no-block trace result.  Server-auth for this
+	// value also prevents clients from forcing noblock prediction
+	// against a server that has it disabled.
+	sv_info_push_if_changed("mp_noblock",       sv_info_last_mp_noblock);
 	// Publish the server's authoritative tick interval (seconds per
 	// server frame) so CSQC debug panels can read the exact configured
 	// value rather than measuring it empirically from snapshot-arrival
@@ -178,58 +532,48 @@ void() SV_UpdateMovementServerInfo =
 	// sv_mintic always, and in a properly configured server both are
 	// identical.  Pushes only on change, so zero overhead steady-state.
 	sv_info_push_if_changed("sv_mintic",        sv_info_last_mintic);
+	// Weapon-switch speed transition window — read by Weapon_SpeedFactor_Smooth
+	// on both client and server. Pushed via serverinfo so the client always
+	// uses the server's authoritative value (no local drift).
+	sv_info_push_if_changed("sv_wepswap_speed_transition", sv_info_last_wepswap_speed_transition);
+	// Per-weapon movement penalty toggle — Weapon_SpeedFactor_Smooth on
+	// CSQC reads this via serverkeyfloat so prediction matches the server.
+	sv_info_push_if_changed("mp_weaponweight",  sv_info_last_weaponweight);
+	// Backdrop flag — CSQC reads this to suppress HUD / team-select while
+	// the listen server is just rendering the menu's background map. Set
+	// to 1 by the menu's backdrop launcher, 0 by any real-game launcher.
+	// Server-authoritative so console `connect` paths also work correctly.
+	sv_info_push_if_changed("sv_backdrop",      sv_info_last_backdrop);
+	// Default loadout cvars — pushed so the in-game rcon panel can render
+	// human-readable dropdowns that reflect the remote server's current
+	// values instead of falling back to local client-side defaults.
+	sv_info_push_if_changed("sv_default_primary",   sv_info_last_default_primary);
+	sv_info_push_if_changed("sv_default_secondary", sv_info_last_default_secondary);
+	sv_info_push_if_changed("sv_default_melee",     sv_info_last_default_melee);
+	sv_info_push_if_changed("sv_default_utility",   sv_info_last_default_utility);
+	// Send rate (Hz) for in-flight items — dropped weapons + projectiles.
+	// Read by Toss_NextThinkInterval (sv_weapons.qc) and the CSQC predraw
+	// helper (cl_tosssmooth.qc) for matching dt-cap math.
+	sv_info_push_if_changed("sv_toss_tickrate", sv_info_last_toss_tickrate);
+	// Server browser column: gamemode (TDM / Elim / Bhop / FFA).
+	sv_info_push_if_changed("sv_gamemode",      sv_info_last_gamemode);
+	// Hitmarker ownership: client-side hitmarker prediction reads this
+	// to decide whether to fire locally (trust>=1) or wait for the
+	// server's CSQC_EVENT_HITMARKER (trust=0).  Server's own marker
+	// emit is gated on the same value so the two don't double up.
+	sv_info_push_if_changed("sv_trust_clienthits", sv_info_last_trust_clienthits);
 };
 
-// Post-exec fixup: if data/server.cfg (now processed, since localcmd is
-// queued) wrote empty strings for cvars that need real defaults, restore
-// them here.  Mirrors Menu_FixupEmptyDefaults but runs server-side for
-// dedicated servers where the menu VM never loads.  Runs once.
+// Post-config fixup: if the persisted data/server.cfg snapshot leaves any
+// registered cvar empty when it should have a real default, restore it
+// from the shared cvar table. Runs once.
 float sv_cfg_fixed_up;
 void() SV_FixupEmptyDefaults =
 {
 	if (sv_cfg_fixed_up)
 		return;
 	sv_cfg_fixed_up = TRUE;
-
-	if (cvar_string("sv_lagcomp")           == "") cvar_set("sv_lagcomp",           "1");
-	if (cvar_string("sv_lagcomp_maxrewind") == "") cvar_set("sv_lagcomp_maxrewind", "0.5");
-	if (cvar_string("sv_debug_lagcomp")     == "") cvar_set("sv_debug_lagcomp",     "0");
-	if (cvar_string("sv_hitbox_expand")     == "") cvar_set("sv_hitbox_expand",     "32");
-	if (cvar_string("sv_anim_qu_per_sec")   == "") cvar_set("sv_anim_qu_per_sec",   "240");
-	if (cvar_string("sv_player_basebone")   == "") cvar_set("sv_player_basebone",   "0");
-	if (cvar_string("sv_antilag")           == "") cvar_set("sv_antilag",           "3");
-	if (cvar_string("sv_bigcoords")         == "") cvar_set("sv_bigcoords",         "1");
-	if (cvar_string("sv_nqplayerphysics")   == "") cvar_set("sv_nqplayerphysics",   "0");
-	if (cvar_string("sv_wateraccelerate")   == "") cvar_set("sv_wateraccelerate",   "10");
-	if (cvar_string("sv_waterfriction")     == "") cvar_set("sv_waterfriction",     "1");
-	if (cvar_string("pm_ramp_bumpcount")    == "") cvar_set("pm_ramp_bumpcount",    "8");
-	if (cvar_string("sv_shiftspeed")        == "") cvar_set("sv_shiftspeed",        "135");
-	if (cvar_string("sv_maxspeed")          == "") cvar_set("sv_maxspeed",          "270");
-	if (cvar_string("sv_accelerate")        == "") cvar_set("sv_accelerate",        "5");
-	if (cvar_string("sv_airaccelerate")     == "") cvar_set("sv_airaccelerate",     "150");
-	if (cvar_string("sv_friction")          == "") cvar_set("sv_friction",          "4");
-	if (cvar_string("sv_gravity")           == "") cvar_set("sv_gravity",           "800");
-	if (cvar_string("sv_stopspeed")         == "") cvar_set("sv_stopspeed",         "100");
-	if (cvar_string("sv_hull_height")       == "") cvar_set("sv_hull_height",       "72");
-	if (cvar_string("sv_eye_height")        == "") cvar_set("sv_eye_height",        "56");
-	if (cvar_string("sv_autohop")           == "") cvar_set("sv_autohop",           "0");
-	if (cvar_string("sv_stamina")           == "") cvar_set("sv_stamina",           "0");
-	if (cvar_string("sv_snipersway")        == "") cvar_set("sv_snipersway",        "0");
-	if (cvar_string("mp_roundtime")         == "") cvar_set("mp_roundtime",         "5");
-	if (cvar_string("mp_timelimit")         == "") cvar_set("mp_timelimit",         "25");
-	if (cvar_string("mp_maxrounds")         == "") cvar_set("mp_maxrounds",         "12");
-	if (cvar_string("mp_freezetime")        == "") cvar_set("mp_freezetime",        "3");
-	if (cvar_string("mp_roundrestartdelay") == "") cvar_set("mp_roundrestartdelay", "5");
-	if (cvar_string("mp_respawndelay")      == "") cvar_set("mp_respawndelay",      "3");
-	if (cvar_string("mp_friendlyfire")      == "") cvar_set("mp_friendlyfire",      "0");
-	if (cvar_string("mp_falldamage")        == "") cvar_set("mp_falldamage",        "1");
-	if (cvar_string("mp_noblock")           == "") cvar_set("mp_noblock",           "0");
-	if (cvar_string("mp_cheats")            == "") cvar_set("mp_cheats",            "0");
-	if (cvar_string("sv_gamemode")          == "") cvar_set("sv_gamemode",          "0");
-	if (cvar_string("sv_default_primary")   == "") cvar_set("sv_default_primary",   "0");
-	if (cvar_string("sv_default_secondary") == "") cvar_set("sv_default_secondary", "28");
-	if (cvar_string("sv_default_melee")     == "") cvar_set("sv_default_melee",     "20");
-	if (cvar_string("sv_default_utility")   == "") cvar_set("sv_default_utility",   "0");
+	CVar_ForceDefaults();
 };
 
 void() StartFrame =
@@ -261,9 +605,100 @@ void() StartFrame =
 
 	SV_FixupEmptyDefaults();
 
+	// Refresh per-frame cvar cache — single read per tick for constants
+	// that hot-path code (Player_VisualProxy_Sync, SH_PlayerAnim_Update)
+	// would otherwise re-read on every call.
+	{
+		float ticks = cvar("sv_pose_keepalive_ticks");
+		if (ticks < 1) ticks = 1;
+		sv_cached_pose_keepalive_interval = cvar("sv_mintic") * ticks;
+		if (sv_cached_pose_keepalive_interval < 0.005)
+			sv_cached_pose_keepalive_interval = 0.015;
+
+		sv_cached_anim_qu_per_sec        = cvar("sv_anim_qu_per_sec");
+		if (sv_cached_anim_qu_per_sec        <= 0) sv_cached_anim_qu_per_sec        = 240;
+		sv_cached_anim_qu_per_sec_crouch = cvar("sv_anim_qu_per_sec_crouch");
+		if (sv_cached_anim_qu_per_sec_crouch <= 0) sv_cached_anim_qu_per_sec_crouch = 100;
+	}
+
 	gamemode = cvar("sv_gamemode");
 
-	SV_UpdateMovementServerInfo();
+	// Detect sv_gamemode change.  Two things happen on (init OR transition):
+	//   1. Per-gamemode cvar enforcement — toggles (mp_respawn, mp_falldamage,
+	//      mp_noblock, mp_disabledoors) snap to the new mode's defaults.
+	//   2. On transition into a respawn-friendly mode (TDM / Bhop / FFA),
+	//      respawn every teamed player so they land at the new mode's
+	//      spawn pool with clean state.
+	//
+	// Previously the enforcement ran every tick (4× cvar_set every server
+	// frame) — that dominated StartFrame self-time in profiling.  Since
+	// the only thing that should change these cvars is a gamemode flip,
+	// running once per transition is functionally identical and ~128× cheaper.
+	float gamemode_changed = (!sv_gamemode_inited) || (gamemode != sv_prev_gamemode);
+	if (gamemode_changed)
+	{
+		float was_inited = sv_gamemode_inited;
+		sv_prev_gamemode  = gamemode;
+		sv_gamemode_inited = TRUE;
+
+		if (gamemode == GAMEMODE_BHOP)
+		{
+			cvar_set("mp_falldamage",   "0");
+			cvar_set("mp_noblock",      "1");
+			cvar_set("mp_respawn",      "1");
+			cvar_set("mp_disabledoors", "1");
+		}
+		else if (gamemode == GAMEMODE_FFA)
+		{
+			cvar_set("mp_respawn",      "1");
+			cvar_set("mp_disabledoors", "0");
+		}
+		else if (gamemode == GAMEMODE_ELIMINATION)
+		{
+			cvar_set("mp_respawn",      "0");
+			cvar_set("mp_disabledoors", "0");
+		}
+		else  // TDM
+		{
+			cvar_set("mp_respawn",      "1");
+			cvar_set("mp_disabledoors", "0");
+		}
+
+		// Respawn-friendly mass-respawn — only on a real transition, not
+		// the first-tick init (no players yet at that point).
+		if (was_inited
+			&& (gamemode == GAMEMODE_TDM
+				|| gamemode == GAMEMODE_BHOP
+				|| gamemode == GAMEMODE_FFA))
+		{
+			entity ge_e, ge_saved;
+			ge_e = player_chain_head;
+			while (ge_e)
+			{
+				if (ge_e.player_team == TEAM_BLUE
+					|| ge_e.player_team == TEAM_RED)
+				{
+					ge_e.is_dead    = FALSE;
+					ge_e.death_time = 0;
+					PlayerRefreshScoreboardInfo(ge_e);
+					ge_saved = self;
+					self     = ge_e;
+					PlayerSpawn();
+					self     = ge_saved;
+				}
+				ge_e = ge_e.player_chain_next;
+			}
+			bprint(PRINT_HIGH, "Gamemode changed — respawning all players.\n");
+		}
+	}
+
+	// Movement-cvar serverinfo push: rate-limit to ~16 Hz.  These cvars
+	// only change on admin commands; 23 cvar_string() compares per tick
+	// at 128 Hz dominated SSQC self-time in profiling.  At 8-tick stride
+	// the publish latency is at most 62 ms — invisible to clients.
+	sv_info_push_phase = (sv_info_push_phase + 1) & 7;
+	if (sv_info_push_phase == 0)
+		SV_UpdateMovementServerInfo();
 
 	// Resolve any "camera .target" strings on the first tick (after all
 	// info_null entities have spawned) and rotate the active team-select
@@ -271,16 +706,15 @@ void() StartFrame =
 	Camera_EnsureTargetsResolved();
 	Camera_UpdateCyclingSpectators();
 
-	PhysProp_RunPlayerPush();
-
 	// Synthesize missed input ticks for low-cl_netfps players so other
 	// clients see them move smoothly instead of freeze-then-jump.
 	SV_RunCommandContinuation();
 
-	// Admin trigger: "sv_roundrestart 1" in the server console queues a
-	// round restart after mp_roundrestartdelay seconds. Resets itself to 0.
-	// SSQC has no registercommand, so this cvar-toggle pattern is the
-	// standard way to expose an admin-only server action.
+	// Admin trigger: `sv_roundrestart 1` (or alias command
+	// `restartround`) queues a round restart after
+	// mp_roundrestartdelay seconds. Resets itself to 0. SSQC has no
+	// registercommand, so this cvar-toggle pattern is still the
+	// underlying implementation.
 	if (cvar("sv_roundrestart"))
 	{
 		cvar_set("sv_roundrestart", "0");
@@ -289,6 +723,24 @@ void() StartFrame =
 		round_phase = ROUND_PHASE_ROUND_END;
 		round_restart_time = time + delay;
 		bprint(PRINT_HIGH, sprintf("Round restarting in %g seconds...\n", delay));
+	}
+
+	// Admin trigger: "sv_saveconfig 1" snapshots the current live server
+	// settings into data/server.cfg, mirroring the menu-side save path.
+	if (cvar("sv_saveconfig"))
+	{
+		cvar_set("sv_saveconfig", "0");
+		SV_WriteServerConfigFile();
+	}
+
+	// Admin trigger: `sv_writecvars 1` (or alias command `writecvars`)
+	// overwrites data/allcommands.cfg from the shared cvar table
+	// (shared/sh_cvar_table.qc CVar_Init). Same self-resetting
+	// cvar-toggle pattern as sv_roundrestart.
+	if (cvar("sv_writecvars"))
+	{
+		cvar_set("sv_writecvars", "0");
+		CVar_WriteAllCommandsCfg();
 	}
 
 	// --- Phase transitions ---
@@ -373,7 +825,10 @@ void() StartFrame =
 	{
 		if (time >= map_restart_time)
 		{
-			localcmd(sprintf("changelevel %s\n", serverkey("mapname")));
+			string nextmap = SV_NextMapFromCycleFile();
+			if (nextmap == "")
+				nextmap = mapname;
+			localcmd(sprintf("changelevel %s\n", nextmap));
 		}
 	}
 
@@ -406,9 +861,12 @@ void() StartFrame =
 			else
 			{
 				e.sv_death_delay_left = 0;
-				if (gamemode == GAMEMODE_TDM)
+				if (cvar("mp_respawn"))
 				{
-					// Auto-respawn after delay
+					// Auto-respawn after delay. mp_respawn is the universal
+					// gate now (was hardcoded to gamemode == TDM); TDM /
+					// Bhop / FFA force it on per-mode in the StartFrame
+					// gamemode-force block below, Elimination forces it off.
 					e.is_dead = FALSE;
 					e.death_time = 0;
 					PlayerRefreshScoreboardInfo(e);
@@ -417,12 +875,14 @@ void() StartFrame =
 					PlayerSpawn();
 					self = saved;
 				}
-				else
+				else if (gamemode == GAMEMODE_ELIMINATION)
 				{
 					// Elimination: hide body, enter spectator phase
 					e.modelindex = 0;
 					e.death_time = -1;  // prevent re-triggering
 				}
+				// (mp_respawn=0 in any other mode just leaves the body in
+				// place — admin choice, no special handling needed.)
 			}
 		}
 		else
@@ -450,8 +910,8 @@ void() StartFrame =
 	// at this point.
 	Lagcomp_RecordAllAlive();
 
-	// sv_debug_hitboxes 3: continuously send all player hitbox states
-	if (cvar("sv_debug_hitboxes") >= 3)
+	// sv_debug_hitboxes 2: continuously send all player hitbox states
+	if (cvar("sv_debug_hitboxes") == 2)
 	{
 		e = player_chain_head;
 		while (e)
@@ -480,7 +940,7 @@ void() StartFrame =
 				WriteFloat(MSG_MULTICAST, e.bonecontrol2);
 				WriteFloat(MSG_MULTICAST, e.bonecontrol3);
 				WriteFloat(MSG_MULTICAST, e.bonecontrol4);
-				WriteByte(MSG_MULTICAST, 3);
+				WriteByte(MSG_MULTICAST, 2); // mode: 2 = continuous
 				multicast(center, MULTICAST_PVS);
 			}
 			e = e.player_chain_next;
@@ -490,12 +950,56 @@ void() StartFrame =
 
 void() worldspawn =
 {
+	// Reset per-map state that's held in QC file-scope globals — FTE
+	// doesn't reload progs between map loads, so any global that
+	// accumulates across a map (camera linked-list head, one-shot
+	// flags, cycling RNG state) needs an explicit clear here.
+	Camera_ResetState();
+
+	// Mod-identity beacon for clients.  Our CSQC drives spawn flow
+	// through STAT_PLAYERTEAM + the team-select menu — vanilla QW
+	// servers don't push those stats, so when our client connects
+	// to a vanilla server the team menu hijacks the cursor forever
+	// waiting for STAT_PLAYERTEAM to flip.  Publishing this key
+	// lets the menu detect "this is our mod's server" and skip
+	// itself entirely on anything else (m_teamselect.qc
+	// TeamMenuIsOpen).
+	localcmd("serverinfo modname nettest\n");
+
+	// Lift the per-client packet-rate cap. cls.maxfps defaults to 72
+	// (cl_main.c:3172-3174 — falls back if serverinfo "maxfps" is unset
+	// or <20), which is the ceiling cl_netfps gets clamped against in
+	// cl_pred.c:936. Without this push, our cl_netfps 100 in
+	// engine_tweaks.cfg silently runs at 72. 1000 is just "uncapped" —
+	// the actual send rate stays bounded by each client's own
+	// cl_netfps. Live-configurable: clients re-read on next userinfo
+	// parse so no reconnect needed if this value ever changes.
+	localcmd("serverinfo maxfps 1000\n");
+
+	// Lift the per-client byte/s caps to "no limit". Engine defaults
+	// are sv_maxrate 50000 (caps client `rate` userinfo to 50 KB/s) and
+	// sv_maxdrate 500000 (caps download bandwidth to 500 KB/s); both
+	// applied per-client in SV_RateForClient (sv_main.c:5354). Setting
+	// them to 0 disables the clamp entirely, so each client's own
+	// `rate` userinfo (default.cfg pushes 100000) is what actually
+	// applies. data/engine_tweaks.cfg has these listed too but that
+	// file isn't auto-exec'd anywhere — pushing from QC is the only
+	// reliable place that survives across map loads + server.cfg
+	// reloads.
+	localcmd("sv_maxrate 0\n");
+	localcmd("sv_maxdrate 0\n");
+
 	// Load the ODE physics plugin before precache_everything() so that
 	// phys_barrel_precache()'s physics_supported(TRUE) call sees it.
 	// data/default.cfg used to handle this, but that file is client-only
 	// now, so dedicated servers rely on this localcmd instead.
 	// plug_load is idempotent — loading a plugin already loaded is a no-op.
 	localcmd("plug_load ode\n");
+	localcmd("alias roundrestart \"sv_roundrestart 1\"\n");
+	localcmd("alias roundreset \"sv_roundrestart 1\"\n");
+	localcmd("alias resetround \"sv_roundrestart 1\"\n");
+	localcmd("alias restartround \"sv_roundrestart 1\"\n");
+	localcmd("alias writecvars \"sv_writecvars 1\"\n");
 
 	precache_everything();
 
@@ -523,113 +1027,62 @@ void() worldspawn =
 	clientstat(STAT_BLUE_SCORE, EV_FLOAT, sv_blue_score);
 	clientstat(STAT_RED_SCORE, EV_FLOAT, sv_red_score);
 
-	// Register ALL server cvars with their defaults FIRST, then exec
-	// data/server.cfg to apply any persisted overrides.  If exec ran before
-	// register, `set sv_X` lines in the cfg would auto-create cvars and
-	// print "Created QC Cvar" warnings.
-	registercvar("sv_gamemode", "0");
-	registercvar("mp_roundtime", "5");
-	registercvar("mp_timelimit", "25");
-	registercvar("mp_maxrounds", "12");
-	registercvar("mp_freezetime", "3");
-	registercvar("mp_roundrestartdelay", "5");
-	registercvar("mp_maprestartdelay", "10");
-	registercvar("mp_respawndelay", "3");
-	registercvar("mp_respawn", "1");
-	registercvar("sv_debug_weapons", "0");
-	registercvar("mp_cheats", "0");
-	registercvar("sv_debug_physprops", "0");
-	registercvar("sv_hitbox_expand", "8");
-	registercvar("mp_noblock", "0");
-	registercvar("mp_falldamage", "1");
-	registercvar("mp_friendlyfire", "0");
-	registercvar("sv_roundrestart", "0");
+	// All custom cvars are registered from a single shared table —
+	// edit shared/sh_cvar_table.qc CVar_Init() to change defaults or
+	// add new cvars. The table is the source of truth for the auto-
+	// generated data/allcommands.cfg too.
+	CVar_Init();
+	CVar_RegisterMine();
 
-	// Netcode — replays a player's last input when no fresh command
-	// arrives this tick, so low-cl_netfps players don't freeze in
-	// snapshots sent to other clients (see PlayerPreThink in sv_player.qc).
-	registercvar("sv_command_continuation", "1");
-	registercvar("sv_debug_continuation",   "0");
-
-	// Client-sided hit registration. 0=server-auth only (lagcomp trace
-	// decides), 1=soft trust (accept client's claim with sanity caps),
-	// 2=full trust (accept as-is, minimal dedup only). See
-	// SV_HandleHitclaim in sv_player.qc.
-	registercvar("sv_trust_clienthits",  "0");
-	registercvar("sv_debug_clienthits",  "0");
-
-	// How often (in server ticks) the pose keepalive resends a
-	// stationary player's pose. 1 = every tick (safest for interp).
-	// Raise to save bandwidth at the cost of looser interp bracket.
-	registercvar("sv_pose_keepalive_ticks", "1");
-
-	// Movement physics — mirrors pmove defaults so these no longer spam
-	// "Created QC Cvar" on first read.
-	registercvar("sv_autohop",         "0");
-	registercvar("sv_stamina",         "1");
-	registercvar("sv_snipersway",      "0");
-	registercvar("sv_shiftspeed",      "135");
-	registercvar("sv_maxspeed",        "270");
-	registercvar("sv_accelerate",      "5");
-	registercvar("sv_airaccelerate",   "150");
-	registercvar("sv_friction",        "4");
-	registercvar("sv_gravity",         "800");
-	registercvar("sv_stopspeed",       "100");
-	registercvar("sv_hull_height",     "72");
-	registercvar("sv_eye_height",      "56");
-	registercvar("pm_ramp_bumpcount",  "8");
-
-	// FTE engine pre-registers sv_accelerate with "10" (see fteqw/engine/
-	// server/sv_phys.c), which overrides our registercvar above. Force-set
-	// the mod's intended default; data/server.cfg execs immediately after
-	// this block so admins who want a different value still get their
-	// override applied. Same reason for force-setting sv_stamina (not
-	// engine-pre-registered, but upgrading installs may have 0 cached in
-	// config.cfg from the previous default — we want the new default to
-	// take effect).
+	// FTE engine pre-registers a few cvars with values that disagree
+	// with the mod's intended defaults (e.g., sv_accelerate "10",
+	// sv_maxspeed "320"). registercvar() above can't override an
+	// already-registered cvar, so force-set the mod's defaults here.
+	// data/server.cfg is applied immediately after this block, so admins
+	// who want to override still get their value applied.
 	cvar_set("sv_accelerate",    "5");
 	cvar_set("sv_airaccelerate", "150");
 	cvar_set("sv_maxspeed",      "270");
 	cvar_set("sv_eye_height",    "56");
 	cvar_set("sv_stamina",       "1");
 
+	// mp_weaponweight + sv_wepswap_speed_transition: feed the speed-factor
+	// blend in PM_ReadMovevars.  registercvar's default isn't reliably
+	// reflected in cvar_string() across all FTE engine versions — if
+	// cvar_string returns "" while client serverkeyfloat falls back to 1,
+	// the two sides compute different mv_maxspeed and walk-speed diverges
+	// (e.g. AK47 + weight=1 produced ~14 qu overshoot when stopping at
+	// 850 ms ping until the user manually flipped the cvar).  Force-set
+	// here so cvar_string is definitive before SV_UpdateMovementServerInfo
+	// pushes via serverinfo.
+	cvar_set("mp_weaponweight",            "1");
+	cvar_set("sv_wepswap_speed_transition","0.15");
+
+	// FTE engine clamps player v_angle[0] to [sv_minpitch, sv_maxpitch] in
+	// sv_user.c; default range is [-70, 80] which feels limited for a
+	// modern shooter (can't look at your feet, can't aim at high targets
+	// from below). Open it up to the full ±90.  Empty string also works
+	// — sv_user.c falls back to the -70/80 defaults — so we set the cvar
+	// explicitly. Admins can still override via data/server.cfg.
+	cvar_set("sv_minpitch",      "-90");
+	cvar_set("sv_maxpitch",      "90");
+
 	// Tickrate default — 64 Hz (CS-standard). FTE's engine baseline is
 	// 60 Hz and older install configs may have 100 Hz cached from
-	// prior defaults. data/server.cfg execs immediately after this
+	// prior defaults. data/server.cfg is applied immediately after this
 	// block so admins can still override.
 	cvar_set("sv_mintic",        "0.015625");
 	cvar_set("sv_maxtic",        "0.015625");
 
-	// Animation tuning + debug
-	registercvar("sv_anim_qu_per_sec", "240");
-	registercvar("sv_player_basebone", "0");
-	registercvar("sv_debug_blendfracs","0");
-	registercvar("sv_debug_hitboxes",  "0");
-	registercvar("sv_debug_camera",    "0");
-	registercvar("sv_debug_ent_types", "0");
-	registercvar("sv_debug_spawns",    "0");
-
-	// Lag compensation pose history (see server/sv_lagcomp.qc)
-	registercvar("sv_lagcomp",           "1");
-	registercvar("sv_lagcomp_maxrewind", "0.5");
-	registercvar("sv_debug_lagcomp",     "0");
-	registercvar("sv_ode_loaded",        "0");
-
-	// Overkill gib threshold — killing blows >= this many damage spawn
-	// flesh gibs + blood instead of leaving a corpse. 0 disables.
-	registercvar("sv_gib_threshold",     "70");
-
-	// Default starting loadout — WEP_* integer per slot.  Read by PlayerSpawn
-	// when the player didn't survive the previous round (survivors keep their
-	// inventory via .survived_round).  Defaults match the previously
-	// hardcoded values so existing installs see no behaviour change.
-	registercvar("sv_default_primary",   "0");   // WEP_NONE
-	registercvar("sv_default_secondary", "28");  // WEP_CSUSP
-	registercvar("sv_default_melee",     "20");  // WEP_WRENCH
-	registercvar("sv_default_utility",   "0");   // WEP_NONE (no utility slot)
-
-	// Now apply persisted overrides from data/server.cfg.
-	localcmd("exec data/server.cfg\n");
+	// Now apply persisted overrides from data/server.cfg directly.
+	// The menu-generated file is a cvar snapshot, so reading it here
+	// avoids relying on an engine-side `exec` path that may be deferred
+	// or unavailable during first-map worldspawn.
+	//
+	// Note: engine CVAR_MAPLATCH vars like sv_cheats still cannot affect
+	// the already-spawning first map from here; they need to be set
+	// before the initial `map` command to apply immediately.
+	SV_ApplyServerConfigFile();
 
 	// Bhop gamemode — force bhop-specific settings before entities spawn.
 	// Door/button inertness is read directly from sv_gamemode in
@@ -640,13 +1093,16 @@ void() worldspawn =
 		cvar_set("mp_noblock", "1");
 	}
 
+	// Optional per-map overrides: maps/<mapname>.cfg sits next to the BSP
+	// and is applied after the shared server snapshot, so map-specific
+	// settings can override the pool-wide defaults.
+	SV_ApplyMapConfigFile();
+
 	// Force mapname serverinfo to the current map (engine may cache a stale value)
 	localcmd(sprintf("serverinfo mapname \"%s\"\n", mapname));
 
-	// NOTE: we previously pushed movement cvars to serverinfo here, but that
-	// ran with stale pre-exec defaults (since exec is queued).  The real push
-	// is done by SV_UpdateMovementServerInfo() each StartFrame with live
-	// values, which correctly reflects whatever data/server.cfg set.
+	// NOTE: movement cvars are pushed by SV_UpdateMovementServerInfo() each
+	// StartFrame rather than here, so the serverinfo path stays centralized.
 
 	map_start_time = time;
 	round_number = 1;
@@ -658,4 +1114,3 @@ void() worldspawn =
 void() SpectatorConnect =
 {	
 };
-

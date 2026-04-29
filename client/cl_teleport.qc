@@ -48,6 +48,7 @@ void(entity trig) tele_list_remove_csqc =
 void() CSQC_TeleportTrigger_Update =
 {
 	vector org, emins, emaxs;
+	float  mi;
 
 	org   = readvector();
 	emins = readvector();
@@ -56,8 +57,13 @@ void() CSQC_TeleportTrigger_Update =
 	self.tele_dest_angles = readvector();
 	self.spawnflags       = readfloat();
 	self.tele_resolved    = readfloat();
+	mi                    = readshort();
 
 	setorigin(self, org);
+	// Bind the BSP submodel before setsize so PM_BoxInTriggerBrush
+	// tests against the actual angled brush. See cl_push.qc.
+	if (mi)
+		setmodelindex(self, mi);
 	setsize(self, emins, emaxs);
 
 	if (teleport_trigger_list != self)

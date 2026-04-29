@@ -81,64 +81,23 @@ noref void(float apiver, string enginename, float enginever) CSQC_Init =
 	precache_pic("gfx/scope.png");
 	registercommand("spectate");
 	registercommand("spec");
+	registercommand("firstperson");
+	registercommand("thirdperson");
 	registercommand("probe");
 	registercommand("edicts_near");
 	registercommand("cl_edicts_near");
+	registercommand("csqc_dump_player_bones");
+	registercommand("sv_defaultprimary");
+	registercommand("sv_defaultsecondary");
+	registercommand("sv_defaultmelee");
+	registercommand("sv_defaultutility");
 
-	// Gameplay toggles
-	registercvar("cl_autohop",           "0");
-	registercvar("cl_hitmarker",         "1");
-	registercvar("cl_speedometer",       "0");
-	// 1 = dim the world behind the scoreboard / team menu (original look).
-	// 0 = no dimming, world stays fully visible behind menu panels.
-	registercvar("cl_menu_backdrop",     "1");
-	// 1 = tint remote player models with their team colour (faint wash).
-	// Persisted to data/settings.cfg via client_config_cvars in m_menu.qc.
-	registercvar("cl_teamcolours",       "1");
-	// Driven by HUD_DrawPainFlash — read by glsl/damageflash.glsl via
-	// `!!cvarf r_damageflash_intensity`.  Intensity 0 = no visible effect.
-	registercvar("r_damageflash_intensity", "0");
-
-	// Debug overlays
-	registercvar("cl_debug_impacts",     "0");
-	registercvar("cl_debug_hitboxes",    "0");
-	registercvar("cl_debug_net",         "0");
-	registercvar("cl_debug_bandwidth",   "0");
-	registercvar("cl_debug_weapon",      "0");
-	registercvar("cl_debug_move",        "0");
-	registercvar("cl_debug_game",        "0");
-	registercvar("cl_debug_playermodel", "0");
-	registercvar("sv_debug_ent_types",   "0");
-	registercvar("sv_debug_pickups",     "0");
-	// Rolling-jitter diagnostic panel — min/avg/max/stddev over 60 samples
-	// for frametime, presentation step, speed-normalised step regularity,
-	// forward-projected step, snapshot arrival dt, reconcile correction,
-	// and unacked command backlog.  See CSQC_DrawDebugSmoothing.
-	registercvar("cl_debug_smoothing",   "0");
-	// Footstep-prediction diagnostics. cl_debug_footsteps gates CSQC
-	// predict/replay/recv logs; sv_debug_footsteps is registered here
-	// for menu discoverability but is read by the server via cvar(),
-	// so setting it in a listen-server console enables the server log.
-	registercvar("cl_debug_footsteps",   "0");
-	registercvar("sv_debug_footsteps",   "0");
-
-	// Remote-player extrapolation + interpolation controls (see
-	// CSQC_ExtrapolateRemotePlayers in cl_player.qc).
-	registercvar("cl_extrap",                   "1");   // master on/off
-	registercvar("cl_extrap_grounded",          "0");   // extrap grounded players too
-	registercvar("cl_extrap_grounded_minspeed", "0");   // speed gate for grounded extrap
-	registercvar("cl_extrap_max",               "3");   // max extrap window in ticrate multiples
-	registercvar("cl_debug_extrap",             "0");   // console spam
-	registercvar("cl_interp_time",              "0");   // lerp-behind window in seconds (0 = off)
-
-	// net_graph HUD toggle (see HUD_DrawNetGraph in cl_hud.qc).
-	registercvar("net_graph",                   "0");
-
-	// Send predicted player hits to the server as a claim (see
-	// CSQC_SendHitclaim in sh_weapon_logic.qc). Server gates acceptance
-	// via sv_trust_clienthits — default 0 means claims are ignored, so
-	// sending by default costs only a few bytes and does nothing.
-	registercvar("cl_predict_hits",             "1");
+	// All custom cvars are registered from a single shared table —
+	// edit shared/sh_cvar_table.qc CVar_Init() to change defaults or
+	// add new cvars. The table is the source of truth for the auto-
+	// generated data/allcommands.cfg too.
+	CVar_Init();
+	CVar_RegisterMine();
 };
 
 noref void() CSQC_WorldLoaded =
@@ -153,13 +112,61 @@ noref void() CSQC_WorldLoaded =
 
 	// Clear any stale kill-feed entries carried over from the previous map.
 	KillFeed_Clear();
+
+	// Suppress the scoreboard's player rows for a brief grace window so
+	// stale userinfo (frags / deaths / team / dead-flag) carried over
+	// from the previous map doesn't render until the new server pushes
+	// fresh SETINFO updates.  Scoreboard_PlayerName returns "" for every
+	// slot during this window, which makes both the count and the row-
+	// draw loops act as if the map has zero players.
+	scoreboard_grace_until = cltime + SCOREBOARD_GRACE_AFTER_LOAD;
 };
 
 // CSQC_Ent_Update is implemented in cl_player.qc
 
-// CALLED EVERY CLIENT RENDER FRAME
-void(float width, float height, float menushown) CSQC_UpdateView =
+// Tracks the previous frame's STAT_GAMEMODE so CSQC_UpdateView can
+// detect a gamemode switch and react once-per-transition. Currently
+// drives the Bhop auto-enable of cl_speedometer; reusable for any
+// future "do X when entering mode Y" client-side hook.
+float cl_last_gamemode;
+
+// Track the last-applied serverkey("sv_mintic") value so we only stuff
+// `cl_netfps` into the local console when the server's tickrate
+// actually changes (or first arrives on connect).  See
+// Sync_NetFPS_To_Tickrate just below.
+float cl_netfps_synced_mintic;
+
+// Auto-align the client's outgoing usercmd rate (cl_netfps) to the
+// server's tick rate.  Server pushes sv_mintic (= seconds per tick) via
+// serverinfo.  Reading it back as serverkeyfloat lets the client
+// compute hz = 1 / mintic and stuff `cl_netfps <hz>` into the console.
+//
+// Why: cl_netfps decoupled from the server tick rate produces uneven
+// usercmd-to-tick alignment — the engine bunches multiple usercmds into
+// one server tick or splits one client frame across multiple ticks,
+// which jitters pmove input_timelength on both sides.  Matching them
+// keeps one usercmd per server tick.
+//
+// Fires on:
+//   - first sv_mintic arrival after connect (tracker is 0 → triggers).
+//   - any subsequent server-side tickrate change (cvar pushed via the
+//     existing serverinfo plumbing in sv_main.qc).
+void() Sync_NetFPS_To_Tickrate =
 {
+	float mintic = serverkeyfloat("sv_mintic", 0);
+	if (mintic <= 0.0001) return;   // not pushed yet
+
+	if (mintic != cl_netfps_synced_mintic)
+	{
+		float hz = floor(1.0 / mintic + 0.5);
+		localcmd(sprintf("cl_netfps %g\n", hz));
+		cl_netfps_synced_mintic = mintic;
+	}
+};
+
+float(float width, float height) CSQC_UpdateViewFrameBegin =
+{
+	Sync_NetFPS_To_Tickrate();
 	//clear and update our global screen resolution vars
 	clearscene();
 	g_width = width;
@@ -178,74 +185,115 @@ void(float width, float height, float menushown) CSQC_UpdateView =
 	Smooth_Push(SMOOTH_M_UNACK, pred_cmd_latest_sequence - sv_confirmed_cmdframe);
 
 	// Backdrop mode: we're running the cl_menumap listen server purely as a
-	// render backdrop for the main menu.  MenuQC sets cl_menu_backdrop_active
-	// when launching the backdrop map and clears it when transitioning to a
-	// real server (Connect / Create Server).  The flag is persistent across
-	// menu open/close so ESC-closing the main menu leaves a clean view with
-	// NO HUD, NO team-select overlay, NO scoreboard — just the cameras.
-	float in_menu_backdrop = cvar("cl_menu_backdrop_active") > 0;
+	// render backdrop for the main menu.  Server-authoritative — the backdrop
+	// listen server publishes sv_backdrop=1 via serverinfo (see sv_main.qc),
+	// and any real game (including console `connect localhost`) reports 0.
+	// Reading from serverinfo instead of a local cvar means HUD/team-select
+	// suppression follows the actual server identity, not a menu flag that
+	// can desync if the user joins a server through the console.
+	float in_menu_backdrop = serverkeyfloat("sv_backdrop", 0) > 0;
 
-	CSQC_BuildPresentationView();
-
-	// --- Spectator / death cam ---
-	Spectate_UpdateState();
-
-	if (Spectate_IsActive())
+	// Bhop quality-of-life: auto-enable cl_speedometer when the gamemode
+	// switches INTO Bhop, so movement-focused players get the readout
+	// without having to remember the cvar. Latched on transition only —
+	// we don't keep forcing it, so the user can disable it manually if
+	// they want. Tracked locally; compared to the server-pushed
+	// STAT_GAMEMODE each frame. cl_last_gamemode is a static-style
+	// file-scope float declared just above CSQC_UpdateView's prototype
+	// chain — see the declaration block near top of this file.
+	float gm_now = getstatf(STAT_GAMEMODE);
+	if (gm_now != cl_last_gamemode)
 	{
-		Spectate_CheckTargetAlive();
-		Spectate_UpdateCamera();
-
-		CSQC_SampleRemotePlayersForInterp();
-		CSQC_ExtrapolateRemotePlayers();
-		if (spec_mode == SPEC_MODE_FIRSTPERSON && spec_target > 0 && !Spectate_InDeathCam())
-		{
-			setproperty(VF_VIEWENTITY, spec_target);
-			// Lock mouse — the target's view drives angles, the local mouse
-			// delta would just accumulate as phantom drift to be resolved on
-			// detach / freecam swap.
-			setsensitivityscaler(0);
-		}
-		else
-		{
-			setproperty(VF_VIEWENTITY, 0);
-			setsensitivityscaler(1);
-		}
-		addentities(MASK_ENGINE);
-		CSQC_DrawMuzzleFlash();
-		CSQC_DrawImpactLights();
-		CSQC_DrawDebugHitboxes();
-	CSQC_DrawServerHitboxes();
-	CSQC_DrawContinuousHitboxes();
-		renderscene();
-
-		if (!in_menu_backdrop)
-		{
-			float spec_prev_font = drawfont;
-			drawfont = hud_font;
-			Spectate_DrawHUD();
-			HUD_DrawCenterMessage();
-			HUD_DrawRoundTimer();
-			HUD_DrawKillFeed();
-			drawfont = spec_prev_font;
-
-			// Still allow scoreboard/team menu while spectating
-			TeamMenuUpdateCursorState();
-			if (HUD_ScoreboardVisible())
-				HUD_DrawScoreboard();
-			if (TeamMenuIsOpen())
-			{
-				float spec_team_font = drawfont;
-				drawfont = hud_font;
-				sui_begin(g_width, g_height);
-				TeamMenuDraw();
-				sui_menu_nav();
-				sui_end();
-				drawfont = spec_team_font;
-			}
-		}
-		return;
+		if (gm_now == GAMEMODE_BHOP)
+			cvar_set("cl_speedometer", "1");
+		cl_last_gamemode = gm_now;
 	}
 
+	return in_menu_backdrop;
+};
+
+void() CSQC_DrawTeamDebugServerPanels =
+{
+	if (TeamMenuIsOpen() || Debug_PanelOpen() || Server_PanelOpen())
+	{
+		float prev_font = drawfont;
+		drawfont = hud_font;
+		sui_begin(g_width, g_height);
+		if (TeamMenuIsOpen())
+		{
+			TeamMenuDraw();
+			sui_menu_nav();
+		}
+		if (Debug_PanelOpen())
+		{
+			Debug_PanelDraw();
+		}
+		if (Server_PanelOpen())
+		{
+			Server_PanelDraw();
+		}
+		sui_end();
+		drawfont = prev_font;
+	}
+};
+
+void(float in_menu_backdrop) CSQC_UpdateViewSpectator =
+{
+	Spectate_CheckTargetAlive();
+	Spectate_UpdateCamera();
+
+	CSQC_SampleRemotePlayersForInterp();
+	CSQC_ExtrapolateRemotePlayers();
+	if (spec_mode == SPEC_MODE_FIRSTPERSON && spec_target > 0 && !Spectate_InDeathCam())
+	{
+		setproperty(VF_VIEWENTITY, spec_target);
+		// Lock mouse — the target's view drives angles, the local mouse
+		// delta would just accumulate as phantom drift to be resolved on
+		// detach / freecam swap.
+		setsensitivityscaler(0);
+	}
+	else
+	{
+		setproperty(VF_VIEWENTITY, 0);
+		setsensitivityscaler(1);
+	}
+	addentities(MASK_ENGINE);
+	CSQC_DrawMuzzleFlash();
+	CSQC_DrawImpactLights();
+	CSQC_DrawDebugHitboxes();
+	CSQC_DrawDebugHitboxExpand();
+	CSQC_DrawDebugPhysProps();
+	CSQC_DrawServerHitboxes();
+	CSQC_DrawContinuousHitboxes();
+	renderscene();
+
+	if (!in_menu_backdrop)
+	{
+		float spec_prev_font = drawfont;
+		drawfont = hud_font;
+		Spectate_DrawHUD();
+		HUD_DrawCenterMessage();
+		HUD_DrawRoundTimer();
+		HUD_DrawKillFeed();
+		// Also draw the death-screen damage report here — when you
+		// die you immediately enter the spectate / death-cam branch
+		// (Spectate_IsActive() is true), and this `return` below
+		// short-circuits the alive-camera HUD path. Without this
+		// call you'd only see the panel after respawning.
+		HUD_DrawDamageReport();
+		drawfont = spec_prev_font;
+
+		// Still allow scoreboard, team menu, and the F1/F2 panels
+		// while spectating / dead.
+		TeamMenuUpdateCursorState();
+		if (HUD_ScoreboardVisible())
+			HUD_DrawScoreboard();
+		CSQC_DrawTeamDebugServerPanels();
+	}
+};
+
+float() CSQC_UpdateViewAliveCamera =
+{
 	// --- Normal alive camera ---
 	// While the local player is still in team-select (player_team <= TEAM_NONE),
 	// the server is driving their origin every tick via Camera_PlacePlayerAtCurrent.
@@ -323,18 +371,6 @@ void(float width, float height, float menushown) CSQC_UpdateView =
 		float cr = cvar("chase_right");
 		float cu = cvar("chase_up");     if (!cu) cu = 16;
 
-		// chase_angle rotates the camera around the player (0 = behind, 180 = front)
-		float ca = cvar("chase_angle");
-		if (ca)
-		{
-			vector orbit_ang = camang;
-			orbit_ang_y += ca;
-			makevectors(orbit_ang);
-			chase_fwd = v_forward;
-			chase_rt = v_right;
-			chase_up = v_up;
-		}
-
 		vector chase_pos = campos
 			- chase_fwd * cb
 			+ chase_rt * cr
@@ -345,28 +381,21 @@ void(float width, float height, float menushown) CSQC_UpdateView =
 		if (trace_fraction < 1)
 			chase_pos = trace_endpos + trace_plane_normal * 2;
 
-		// Point camera at the player from the chase position
-		vector player_eye = campos;
+		// Camera angles stay parallel to the player's view — the offset
+		// just shifts what's on screen (over-the-shoulder feel for
+		// chase_right). Aiming the camera AT the player would tilt the
+		// view inward whenever chase_right/up are non-zero, which is
+		// not what users expect from the cvar's name.
 		campos = chase_pos;
-		vector look_ang = vectoangles(normalize(player_eye - campos));
-		look_ang_x = -look_ang_x;  // Quake pitch flip
-		look_ang_z = 0;             // Never roll
-
 		setproperty(VF_ORIGIN, campos);
-		setproperty(VF_ANGLES, look_ang);
+		setproperty(VF_ANGLES, camang);
 	}
 
-	// Record the current server snapshot into the interp ring buffer
-	// (no-op unless a new snapshot has arrived since last call), then
-	// either lerp-behind (cl_interp_time > 0) or extrap.
-	CSQC_PushInterpUserInfo();
-	CSQC_SampleRemotePlayersForInterp();
-	CSQC_ExtrapolateRemotePlayers();
+	return in_team_select;
+};
 
-	// CSQC submits its own predicted viewmodel, so keep the engine's
-	// authoritative weaponmodel hidden to avoid double-rendering.
-	setproperty(VF_VIEWENTITY, 0);
-
+void(float in_team_select) CSQC_UpdateViewAliveSensitivity =
+{
 	// Zoom FOV override + sensitivity scaling for scoped weapons.
 	// In team-select (TEAM_NONE) the server drives origin + angles through
 	// the camera system via fixangle — zero the mouse scaler so the user's
@@ -396,7 +425,10 @@ void(float width, float height, float menushown) CSQC_UpdateView =
 	{
 		setsensitivityscaler(1);
 	}
+};
 
+void() CSQC_UpdateViewAliveScene =
+{
 	// Paint team-colour tints on player entities BEFORE the engine adds
 	// them for this frame — .colormod reaches the shader as e_colourident.
 	CSQC_ApplyTeamTints();
@@ -409,13 +441,18 @@ void(float width, float height, float menushown) CSQC_UpdateView =
 	CSQC_DrawImpactLights();
 	CSQC_DrawDebugImpacts();
 	CSQC_DrawDebugHitboxes();
+	CSQC_DrawDebugHitboxExpand();
+	CSQC_DrawDebugPhysProps();
 	CSQC_DrawServerHitboxes();
 	CSQC_DrawContinuousHitboxes();
 
 	//does what you think it does
 	renderscene();
 	CSQC_DrawDebugImpactText();
+};
 
+void(float in_menu_backdrop) CSQC_UpdateViewAliveHud =
+{
 	if (!in_menu_backdrop)
 	{
 		HUD_DrawPainFlash();
@@ -424,6 +461,7 @@ void(float width, float height, float menushown) CSQC_UpdateView =
 		HUD_DrawSpeedometer();
 		HUD_DrawNetGraph();
 		HUD_DrawKillFeed();
+		HUD_DrawDamageReport();
 		CSQC_DrawDebugPanels();
 
 		// Update team menu cursor state every frame
@@ -433,18 +471,49 @@ void(float width, float height, float menushown) CSQC_UpdateView =
 		if (HUD_ScoreboardVisible())
 			HUD_DrawScoreboard();
 
-		// Draw team select (needs SUI)
-		if (TeamMenuIsOpen())
-		{
-			float team_prev_font = drawfont;
-			drawfont = hud_font;
-			sui_begin(g_width, g_height);
-			TeamMenuDraw();
-			sui_menu_nav();
-			sui_end();
-			drawfont = team_prev_font;
-		}
+		// Draw team select and/or the F1/F2 panels — all need SUI, share
+		// a single sui_begin/end pair per frame so the input queue
+		// isn't double-pumped.
+		CSQC_DrawTeamDebugServerPanels();
 	}
+};
+
+// CALLED EVERY CLIENT RENDER FRAME
+void(float width, float height, float menushown) CSQC_UpdateView =
+{
+	float in_menu_backdrop;
+	float in_team_select;
+
+	in_menu_backdrop = CSQC_UpdateViewFrameBegin(width, height);
+
+	CSQC_BuildPresentationView();
+
+	// --- Spectator / death cam ---
+	Spectate_UpdateState();
+
+	if (Spectate_IsActive())
+	{
+		CSQC_UpdateViewSpectator(in_menu_backdrop);
+		return;
+	}
+
+	in_team_select = CSQC_UpdateViewAliveCamera();
+
+	// Record the current server snapshot into the interp ring buffer
+	// (no-op unless a new snapshot has arrived since last call), then
+	// either lerp-behind (cl_interp_time > 0) or extrap.
+	CSQC_PushInterpUserInfo();
+	CSQC_PushPredictHitsUserInfo();
+	CSQC_SampleRemotePlayersForInterp();
+	CSQC_ExtrapolateRemotePlayers();
+
+	// CSQC submits its own predicted viewmodel, so keep the engine's
+	// authoritative weaponmodel hidden to avoid double-rendering.
+	setproperty(VF_VIEWENTITY, 0);
+
+	CSQC_UpdateViewAliveSensitivity(in_team_select);
+	CSQC_UpdateViewAliveScene();
+	CSQC_UpdateViewAliveHud(in_menu_backdrop);
 };
 
 // Suppress the server echo of the local player's footstep and weapon sounds
@@ -493,14 +562,50 @@ CSQC_Event_Sound =
     return FALSE;
 };
 
+void(string alias_name, string cvarname) CSQC_SetDefaultWeaponAlias =
+{
+	string weapon = argv(1);
+	if (weapon == "")
+	{
+		string current = Server_GetString(cvarname);
+		print(sprintf("%s usage: %s <weapon>\n", alias_name, alias_name));
+		print(sprintf("%s current: %s\n", alias_name, current != "" ? current : "0"));
+		return;
+	}
+
+	Server_SetQuoted(cvarname, weapon);
+};
+
 float(string cmd) CSQC_ConsoleCommand =
 {
 	tokenize(cmd);
 	switch(argv(0))
 	{
+		case "sv_defaultprimary":
+			CSQC_SetDefaultWeaponAlias("sv_defaultprimary", "sv_default_primary");
+			return TRUE;
+		case "sv_defaultsecondary":
+			CSQC_SetDefaultWeaponAlias("sv_defaultsecondary", "sv_default_secondary");
+			return TRUE;
+		case "sv_defaultmelee":
+			CSQC_SetDefaultWeaponAlias("sv_defaultmelee", "sv_default_melee");
+			return TRUE;
+		case "sv_defaultutility":
+			CSQC_SetDefaultWeaponAlias("sv_defaultutility", "sv_default_utility");
+			return TRUE;
 		case "spectate":
 		case "spec":
 			localcmd("cmd spectate\n");
+			return TRUE;
+		case "firstperson":
+		case "thirdperson":
+			// Both names toggle chase_active — they're aliases, picked
+			// for binding-readability ("bind b thirdperson" reads as
+			// the user's intent even though it's a flip-flop).
+			cvar_set("chase_active", cvar("chase_active") ? "0" : "1");
+			return TRUE;
+		case "csqc_dump_player_bones":
+			CSQC_DumpPlayerBones();
 			return TRUE;
 		case "probe":
 		{
@@ -613,7 +718,40 @@ float(string cmd) CSQC_ConsoleCommand =
 
 float(float evtype, float scanx, float chary, float devid) CSQC_InputEvent =
 {
-	// Team menu takes priority when open
+	// Debug panel: when open it absorbs all input (clicks, mouse,
+	// scroll, ESC + F1 internally close).  Must run BEFORE the F1
+	// open-toggle below so F1 inside the panel hits the close path
+	// in Debug_PanelInputEvent rather than re-toggling open here.
+	if (Debug_PanelOpen())
+	{
+		if (Debug_PanelInputEvent(evtype, scanx, chary, devid))
+			return TRUE;
+	}
+
+	// Server panel: same shape as debug panel but on F2.
+	if (Server_PanelOpen())
+	{
+		if (Server_PanelInputEvent(evtype, scanx, chary, devid))
+			return TRUE;
+	}
+
+	// F1 opens the debug panel from gameplay.
+	if (evtype == IE_KEYDOWN && scanx == K_F1)
+	{
+		Debug_PanelToggle();
+		return TRUE;
+	}
+
+	// F2 opens the server panel from gameplay.
+	if (evtype == IE_KEYDOWN && scanx == K_F2)
+	{
+		Server_PanelToggle();
+		return TRUE;
+	}
+
+	// Team menu gets the remaining input when either panel didn't
+	// consume it. This lets F1/F2 open on top of team selection, and
+	// keeps the panels interactive while the team menu stays visible.
 	if (TeamMenuIsOpen())
 		return TeamMenuInputEvent(evtype, scanx, chary, devid);
 
@@ -651,7 +789,7 @@ float(float evtype, float scanx, float chary, float devid) CSQC_InputEvent =
 // POINTSOUND is a string → rough average. Use for the debug bandwidth HUD.
 float(float ev) _net_event_bytes =
 {
-	if (ev == CSQC_EVENT_IMPACT)          return 27;  // svc+ev+pos[3]+normal[3]+mat byte
+	if (ev == CSQC_EVENT_IMPACT)          return 20;  // svc+ev+pos[3 coord]+normal[3 byte]+mat byte+target entnum (short)
 	if (ev == CSQC_EVENT_SHELL)           return 39;
 	if (ev == CSQC_EVENT_MAGDROP)         return 27;
 	if (ev == CSQC_EVENT_POINTSOUND)      return 34;
@@ -660,16 +798,18 @@ float(float ev) _net_event_bytes =
 	if (ev == CSQC_EVENT_DAMAGE_FLASH)    return 3;
 	if (ev == CSQC_EVENT_HITMARKER)       return 2;
 	if (ev == CSQC_EVENT_BRUSH_DESTROY)   return 6;
-	if (ev == CSQC_EVENT_SERVER_HITBOXES) return 55;
+	if (ev == CSQC_EVENT_SERVER_HITBOXES) return 63;  // 2 svc hdr + 55 fixed payload + 8 (f1t+bf1t)
 	if (ev == CSQC_EVENT_GLASS_GIBS)      return 30;  // +1 exclude byte vs prior
-	if (ev == CSQC_EVENT_PLAYER_GIBS)     return 31;  // 2 + 12 + 12 + 1 + 2 + 2 svc/event hdr
+	if (ev == CSQC_EVENT_PLAYER_GIBS)     return 32;  // 2 + 12 + 12 + 1 + 2 + 1 + 2 svc/event hdr
 	if (ev == CSQC_EVENT_DEBRIS_GIBS)     return 34;  // +1 exclude byte vs prior
 	if (ev == CSQC_EVENT_KILLFEED)        return 7;   // 2 svc hdr + 5 kill-feed bytes
 	if (ev == CSQC_EVENT_WEAPON_PICKUP_SOUND) return 15;  // 2 svc hdr + 1 exclude + 12 origin
 	if (ev == CSQC_EVENT_BREAKABLE_IMPACT_SOUND) return 16;  // 2 svc hdr + 1 exclude + 1 style + 12 origin
 	if (ev == CSQC_EVENT_BREAKABLE_BREAK_SOUND)  return 16;  // same wire layout as impact sound
-	if (ev == CSQC_EVENT_FOOTSTEP_SOUND)         return 40;  // 2 svc hdr + 1 exclude + 1 vol + ~24 string + 12 origin (estimate; string length varies by file path)
+	if (ev == CSQC_EVENT_FOOTSTEP_SOUND)         return 17;  // 2 svc hdr + 1 exclude + 1 vol + 1 snd_idx + 12 origin
 	if (ev == CSQC_EVENT_DEATH_DROP)             return 61;  // 2 svc hdr + 1 weapon + 1 slot + 24 origin/vel + ~32 model path (variable)
+	if (ev == CSQC_EVENT_GRENADE_EXPLODE)        return 16;  // 2 svc hdr + 1 exclude + 12 origin + 1 sample byte
+	if (ev == CSQC_EVENT_GRENADE_BOUNCE)         return 16;  // 2 svc hdr + 1 exclude + 12 origin + 1 sample byte
 	return 2;
 };
 
@@ -696,11 +836,24 @@ void() CSQC_Parse_Event =
 			pos_x = readcoord();
 			pos_y = readcoord();
 			pos_z = readcoord();
-			normal_x = readcoord();
-			normal_y = readcoord();
-			normal_z = readcoord();
+			// Normal is a biased signed byte (127 = 0, 0 = -1, 254 = +1);
+			// server quantises it to 3 bytes to save 9 B/event. Decode
+			// back to the unit-vector range [-1, +1].
+			normal_x = (readbyte() - 127) * (1.0 / 127.0);
+			normal_y = (readbyte() - 127) * (1.0 / 127.0);
+			normal_z = (readbyte() - 127) * (1.0 / 127.0);
 			float rem_mat = readbyte();
-			CSQC_BulletImpactRemote(pos, normal, rem_mat);
+			// Target entnum for decal attach — 0 = world (static decal).
+			// findfloat resolves to the CSQC-replicated brush entity so
+			// bullet-hole ownership is preserved across clients.
+			float rem_entnum = readshort();
+			entity rem_target = world;
+			if (rem_entnum > 0)
+			{
+				entity found = findfloat(world, entnum, rem_entnum);
+				if (found) rem_target = found;
+			}
+			CSQC_BulletImpactRemote(pos, normal, rem_mat, rem_target);
 			break;
 		}
 		case CSQC_EVENT_SHELL:
@@ -781,6 +934,36 @@ void() CSQC_Parse_Event =
 				localsound("sounds/player/bullethit2.wav");
 			break;
 		}
+		case CSQC_EVENT_DAMAGE_REPORT:
+		{
+			// Death-screen Given/Taken report. Server caps each list at
+			// DR_HUD_CAP entries (matches the client storage). Slot is
+			// 1-based on the wire (edict-num convention); HUD_DrawDamageReport
+			// subtracts 1 for getplayerkeyvalue lookups.
+			float n, i;
+			n = readbyte();
+			if (n > DR_HUD_CAP) n = DR_HUD_CAP;
+			dr_g_count = n;
+			for (i = 0; i < n; i = i + 1)
+			{
+				dr_g_slot [i] = readbyte();
+				dr_g_dmg  [i] = readshort();
+				dr_g_hits [i] = readbyte();
+				dr_g_hp   [i] = readbyte();
+			}
+			n = readbyte();
+			if (n > DR_HUD_CAP) n = DR_HUD_CAP;
+			dr_t_count = n;
+			for (i = 0; i < n; i = i + 1)
+			{
+				dr_t_slot [i] = readbyte();
+				dr_t_dmg  [i] = readshort();
+				dr_t_hits [i] = readbyte();
+				dr_t_hp   [i] = readbyte();
+			}
+			dr_show_until = cltime + DR_HUD_DURATION;
+			break;
+		}
 		case CSQC_EVENT_DEATH_DROP:
 		{
 			// Server-authoritative scatter visual for the dying local
@@ -800,6 +983,56 @@ void() CSQC_Parse_Event =
 			float dd_ping = getplayerkeyfloat(player_localnum, INFOKEY_P_PING, 0) * 0.001;
 			dd_ping = bound(0.05, dd_ping, 1.0);
 			CSQC_SpawnFakeDropAt(dd_weapon, dd_slot, dd_mdl, dd_org, dd_vel, dd_ping + 0.75);
+			break;
+		}
+		case CSQC_EVENT_GRENADE_EXPLODE:
+		{
+			// Grenade detonation FX (sprite + particles + light + boom).
+			// Server multicasts to all PVS clients with the shooter's
+			// entnum as the exclude byte; the shooter skips because
+			// they already played everything locally via
+			// CSQC_FakeHLGrenadeExplode's predict path. (CSQC-side
+			// entnum compare is the actual working owner-exclude
+			// pattern in this codebase — dimension_send doesn't filter
+			// multicasts the way you'd expect, so the explicit byte is
+			// load-bearing.)
+			float ge_exclude = readbyte();
+			vector ge_pos;
+			ge_pos_x = readcoord();
+			ge_pos_y = readcoord();
+			ge_pos_z = readcoord();
+			float ge_snd = readbyte();
+			if (ge_exclude == player_localentnum)
+				break;
+			te_explosion(ge_pos);            // particles
+			CSQC_SpawnExplodeSprite(ge_pos); // classic Quake explode sprite
+			CSQC_AddExplosionLight(ge_pos);
+			string es;
+			if      (ge_snd == 0) es = "sounds/weapons/wpn_hlgrenade/explode1.wav";
+			else if (ge_snd == 1) es = "sounds/weapons/wpn_hlgrenade/explode2.wav";
+			else                  es = "sounds/weapons/wpn_hlgrenade/explode3.wav";
+			pointsound(ge_pos, es, 1, ATTN_NORM);
+			break;
+		}
+		case CSQC_EVENT_GRENADE_BOUNCE:
+		{
+			// Grenade surface bounce sound. Same exclude-byte pattern as
+			// CSQC_EVENT_GRENADE_EXPLODE — shooter skips because the
+			// CSQC fake's CSQC_FakeHLGrenadeBounce already played the
+			// bounce locally.
+			float gbn_exclude = readbyte();
+			vector gbn_pos;
+			gbn_pos_x = readcoord();
+			gbn_pos_y = readcoord();
+			gbn_pos_z = readcoord();
+			float gbn_snd = readbyte();
+			if (gbn_exclude == player_localentnum)
+				break;
+			string bs;
+			if      (gbn_snd == 0) bs = "sounds/weapons/wpn_hlgrenade/hit1.wav";
+			else if (gbn_snd == 1) bs = "sounds/weapons/wpn_hlgrenade/hit2.wav";
+			else                   bs = "sounds/weapons/wpn_hlgrenade/hit3.wav";
+			pointsound(gbn_pos, bs, 1, ATTN_NORM);
 			break;
 		}
 		case CSQC_EVENT_GLASS_GIBS:
@@ -832,7 +1065,29 @@ void() CSQC_Parse_Event =
 			pg_dir_z = readcoord();
 			float pg_count = readbyte();
 			float pg_dmg = readshort();
-			CSQC_SpawnPlayerGibs(pg_pos, pg_dir, pg_count, pg_dmg);
+			float pg_target_slot = readbyte();
+
+			// Dedupe against cl_predict_death: if this client already
+			// fired gibs for the same victim within the staleness
+			// window, skip the server's authoritative spawn so the
+			// gibs/sound/particles don't visibly double up at high
+			// ping.  Look up the proxy by entnum; if no proxy or no
+			// recent predicted-gib latch, fall through and play.
+			float pg_skip = 0;
+			if (pg_target_slot > 0)
+			{
+				entity vis = findfloat(world, vis_owner_entnum, pg_target_slot);
+				if (vis && vis.classname == "player_visual_proxy"
+				    && vis.vis_pred_gibs_at_time > 0)
+				{
+					float ping_s = getplayerkeyfloat(player_localnum, INFOKEY_P_PING, 0) * 0.001;
+					float window = bound(0.05, ping_s + 0.20, 3.0);
+					if (time - vis.vis_pred_gibs_at_time <= window)
+						pg_skip = 1;
+				}
+			}
+			if (!pg_skip)
+				CSQC_SpawnPlayerGibs(pg_pos, pg_dir, pg_count, pg_dmg);
 			break;
 		}
 		case CSQC_EVENT_DEBRIS_GIBS:
@@ -927,9 +1182,12 @@ void() CSQC_Parse_Event =
 			// Stepper's CSQC already played this via localsound in
 			// PM_EmitStepSound on the non-replay prediction tick. Remote
 			// clients receive it here via the normal PVS multicast path.
+			// Sound is a byte enum (FS_SOUND_*); FS_SoundName rebuilds
+			// the path string.
 			float fs_exclude = readbyte();
 			float fs_vol     = readbyte() / 255;
-			string fs_snd    = readstring();
+			float fs_snd_idx = readbyte();
+			string fs_snd    = FS_SoundName(fs_snd_idx);
 			vector fs_pos;
 			fs_pos_x = readcoord();
 			fs_pos_y = readcoord();
@@ -1045,11 +1303,11 @@ void() CSQC_Parse_Event =
 			float sv_bc2 = readfloat();
 			float sv_bc3 = readfloat();
 			float sv_bc4 = readfloat();
-			float sv_show_shield = readbyte();
-			if (sv_show_shield >= 3)
+			float sv_mode = readbyte();  // 1 = per-shot snapshot, 2 = continuous
+			if (sv_mode == 2)
 				CSQC_UpdateContinuousHitbox(hb_entnum, sv_mdlidx, sv_org, sv_ang, sv_fr, sv_bfr, sv_bb, sv_f1t, sv_bf1t, sv_sbf, sv_sb2f, sv_bc1, sv_bc2, sv_bc3, sv_bc4);
 			else
-				CSQC_AddServerHitbox(sv_mdlidx, sv_org, sv_ang, sv_fr, sv_bfr, sv_bb, sv_show_shield, sv_sbf, sv_sb2f, sv_bc1, sv_bc2, sv_bc3, sv_bc4);
+				CSQC_AddServerHitbox(sv_mdlidx, sv_org, sv_ang, sv_fr, sv_bfr, sv_bb, sv_f1t, sv_bf1t, sv_sbf, sv_sb2f, sv_bc1, sv_bc2, sv_bc3, sv_bc4);
 			break;
 		}
 		default:

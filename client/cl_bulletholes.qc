@@ -20,17 +20,33 @@ string BULLETHOLE_SPRITE               = "gfx/s_bullet.spr";
 // --- Linked list fields ---
 .entity bh_next;
 .entity bh_prev;
+.entity bh_dyn_next;
+.entity bh_dyn_prev;
 .float  bh_dynamic;        // TRUE if attached to a moving BSP entity
 .vector bh_local_offset;   // offset from owner.absmin for dynamic holes
 
 entity bh_head;
 entity bh_tail;
+entity bh_dyn_head;
+entity bh_dyn_tail;
 float  bh_count;
 float  bh_frame_count;     // per-frame spawn cap
 
 // --- Remove a hole from the linked list ---
 void(entity hole) CSQC_BulletHoleRemove =
 {
+    if (hole.bh_dynamic)
+    {
+        if (hole == bh_dyn_head)
+            bh_dyn_head = hole.bh_dyn_next;
+        if (hole == bh_dyn_tail)
+            bh_dyn_tail = hole.bh_dyn_prev;
+        if (hole.bh_dyn_prev)
+            hole.bh_dyn_prev.bh_dyn_next = hole.bh_dyn_next;
+        if (hole.bh_dyn_next)
+            hole.bh_dyn_next.bh_dyn_prev = hole.bh_dyn_prev;
+    }
+
     if (hole == bh_head)
         bh_head = hole.bh_next;
     if (hole == bh_tail)
@@ -49,9 +65,14 @@ void() CSQC_BulletHolesInit =
 {
     bh_head = world;
     bh_tail = world;
+    bh_dyn_head = world;
+    bh_dyn_tail = world;
     bh_count = 0;
     bh_frame_count = 0;
     precache_model(BULLETHOLE_SPRITE);
+    precache_model("models/props/barrel.iqm");
+    precache_model("models/props/can.mdl");
+    precache_model("progs/s_explod.spr");   // CSQC_SpawnExplodeSprite (cl_bulletimpact.qc)
 };
 
 // --- Wipe all bullet holes (round restart) ---
@@ -67,6 +88,8 @@ void() CSQC_BulletHolesWipeAll =
     }
     bh_head = world;
     bh_tail = world;
+    bh_dyn_head = world;
+    bh_dyn_tail = world;
     bh_count = 0;
 };
 
@@ -91,19 +114,16 @@ void() CSQC_BulletHolesStartFrame =
     entity hole, next;
 
     bh_frame_count = 0;
-    hole = bh_head;
+    hole = bh_dyn_head;
 
     while (hole)
     {
-        next = hole.bh_next;
+        next = hole.bh_dyn_next;
 
-        if (hole.bh_dynamic)
-        {
-            if (hole.owner && hole.owner.solid == SOLID_BSP)
-                setorigin(hole, hole.owner.absmin + hole.bh_local_offset);
-            else
-                CSQC_BulletHoleRemove(hole);
-        }
+        if (hole.owner && hole.owner.solid == SOLID_BSP)
+            setorigin(hole, hole.owner.absmin + hole.bh_local_offset);
+        else
+            CSQC_BulletHoleRemove(hole);
 
         hole = next;
     }
@@ -116,9 +136,18 @@ void(vector hit_pos, vector hit_normal, entity hit_target) CSQC_SpawnBulletHole 
     vector hole_normal, hole_angles, hole_origin;
     float hole_offset;
 
-    // Only on world or BSP entities
+    // Reject: phys props move + rotate under ODE so a decal would
+    // visibly slide off the surface as soon as the prop tipped or
+    // rolled.  Phys props are CSQC-replicated via SendEntity (see
+    // cl_physprop.qc) so they arrive with classname set; the trace
+    // also hits them since the CSQC update sets SOLID_BBOX.  Static
+    // breakable brushes (SOLID_BSP) and world get decals normally.
     if (hit_target != world && (!hit_target || hit_target.solid != SOLID_BSP))
-        return;
+    {
+        if (hit_target.classname == "phys_barrel" || hit_target.classname == "phys_can")
+            return;   // phys prop hit — sparks still play, no decal
+        return;       // any other non-BSP target (player, projectile, etc.)
+    }
 
     // No bullet holes on sky
     if (pointcontents(hit_pos - hit_normal * 2) == CONTENT_SKY)
@@ -179,6 +208,20 @@ void(vector hit_pos, vector hit_normal, entity hit_target) CSQC_SpawnBulletHole 
         bh_head = hole;
 
     bh_tail = hole;
+
+    if (hole.bh_dynamic)
+    {
+        hole.bh_dyn_prev = bh_dyn_tail;
+        hole.bh_dyn_next = world;
+
+        if (bh_dyn_tail)
+            bh_dyn_tail.bh_dyn_next = hole;
+        else
+            bh_dyn_head = hole;
+
+        bh_dyn_tail = hole;
+    }
+
     bh_count += 1;
     bh_frame_count += 1;
 };

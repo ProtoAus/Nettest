@@ -438,10 +438,10 @@ void() CSQC_PredictCSUSPCommand =
                 else
                     localsound("sounds/weapons/wpn_csusp/fire.wav");
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(CSUSP_BASE_SPREAD, CSUSP_MOVE_SPREAD, CSUSP_FULL_SPREAD_SPEED,
+                CSQC_PredictedPenetratingImpact(CSUSP_BASE_SPREAD, CSUSP_MOVE_SPREAD, CSUSP_FULL_SPREAD_SPEED,
                     self.csusp_silenced ? CSUSP_SILENCED_CLOSE_DAMAGE : CSUSP_CLOSE_DAMAGE,
                     self.csusp_silenced ? CSUSP_SILENCED_MIN_DAMAGE   : CSUSP_MIN_DAMAGE,
-                    CSUSP_DAMAGE_FALLOFF_RANGE);
+                    CSUSP_DAMAGE_FALLOFF_RANGE, 16, 0.95);
                 CSQC_SpawnCasing("models/weapons/9mmcasing.mdl",
                     '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }

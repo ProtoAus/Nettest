@@ -1,6 +1,26 @@
 float hud_scoreboard_held;
 float hud_scoreboard_teamselect;   // TRUE when drawing as team select screen
 
+// Set by CSQC_WorldLoaded to (cltime + grace) on every map load.  While
+// cltime < this timestamp, Scoreboard_PlayerName returns "" for every
+// slot — the row-counting and row-drawing loops then act as if the map
+// has zero players, which suppresses the stale userinfo carried over
+// from the previous map until the new server pushes fresh SETINFO
+// updates (frags/deaths/topcolor/etc.).
+float scoreboard_grace_until;
+const float SCOREBOARD_GRACE_AFTER_LOAD = 0.5;
+
+// Wrapped getplayerkeyvalue(.., INFOKEY_P_NAME) — the single chokepoint
+// every count + draw site uses to decide whether a slot has a player.
+// Returning "" during the grace period filters out every row + spectator
+// without touching the loop bodies themselves.
+string(float slot) Scoreboard_PlayerName =
+{
+    if (cltime < scoreboard_grace_until)
+        return "";
+    return getplayerkeyvalue(slot, INFOKEY_P_NAME);
+};
+
 float HUD_SCOREBOARD_ROW_HEIGHT = 24;
 float HUD_SCOREBOARD_HEADER_HEIGHT = 22;
 float HUD_SCOREBOARD_TITLE_SIZE = 18;
@@ -79,7 +99,7 @@ float(float team_id) HUD_ScoreboardCountTeamPlayers =
     currentindex = 0;
     while (currentindex <= maxclients)
     {
-        player_name = getplayerkeyvalue(currentindex, INFOKEY_P_NAME);
+        player_name = Scoreboard_PlayerName(currentindex);
         if (player_name != "" && HUD_ScoreboardPlayerTeam(currentindex) == team_id)
             count = count + 1;
 
@@ -87,6 +107,104 @@ float(float team_id) HUD_ScoreboardCountTeamPlayers =
     }
 
     return count;
+};
+
+// FFA single-column draw: same row layout as HUD_DrawScoreboardColumn but
+// includes every player whose backend team is BLUE or RED (skipping SPEC /
+// NONE), draws their actual team's picture (so blue-model and red-model
+// players still render with their matching icon), and uses one shared
+// header. No team filter — FFA presents everyone as one pool.
+void(string label, vector pos, vector size, vector fill_colour, vector border_colour) HUD_DrawScoreboardColumnFFA =
+{
+    float currentindex;
+    float row_index;
+    float row_is_even;
+    float row_y;
+    float text_y;
+    float pic_y;
+    string player_name;
+    float frags;
+    float deaths;
+    float ping;
+    float kills_x;
+    float deaths_x;
+    float ping_x;
+    float header_text_y;
+    float is_local;
+    float pteam;
+    vector text_sz;
+
+    text_sz = [HUD_SCOREBOARD_TEXT_SIZE, HUD_SCOREBOARD_TEXT_SIZE, 0];
+
+    kills_x = pos_x + size_x - 90;
+    deaths_x = pos_x + size_x - 62;
+    ping_x = pos_x + size_x - 34;
+
+    drawfill(pos, size, '0.08 0.09 0.11', 0.94, 0);
+    drawfill(pos, [size_x, HUD_SCOREBOARD_HEADER_HEIGHT, 0], fill_colour, 0.94, 0);
+    drawfill(pos, [size_x, 2, 0], border_colour, 1.0, 0);
+    drawfill([pos_x, pos_y + size_y - 2, 0], [size_x, 2, 0], border_colour, 1.0, 0);
+    drawfill(pos, [2, size_y, 0], border_colour, 1.0, 0);
+    drawfill([pos_x + size_x - 2, pos_y, 0], [2, size_y, 0], border_colour, 1.0, 0);
+
+    drawfont = hud_font;
+    header_text_y = pos_y + (HUD_SCOREBOARD_HEADER_HEIGHT - HUD_SCOREBOARD_TEXT_SIZE) * 0.5 + 3;
+
+    HUD_ShadowString([pos_x + 12, header_text_y, 0], label, text_sz, '1 1 1', 1.0);
+    HUD_ShadowString([kills_x, header_text_y, 0], "K", text_sz, '1 1 1', 1.0);
+    HUD_ShadowString([deaths_x, header_text_y, 0], "D", text_sz, '1 1 1', 1.0);
+    HUD_ShadowString([ping_x, header_text_y, 0], "P", text_sz, '1 1 1', 1.0);
+
+    drawfont = hud_font_regular;
+
+    row_index = 0;
+    row_is_even = TRUE;
+    currentindex = 0;
+    while (currentindex <= maxclients)
+    {
+        player_name = Scoreboard_PlayerName(currentindex);
+        pteam = HUD_ScoreboardPlayerTeam(currentindex);
+        if (player_name != "" && (pteam == TEAM_BLUE || pteam == TEAM_RED))
+        {
+            row_y = pos_y + HUD_SCOREBOARD_HEADER_HEIGHT + (row_index * HUD_SCOREBOARD_ROW_HEIGHT);
+            text_y = row_y + (HUD_SCOREBOARD_ROW_HEIGHT - HUD_SCOREBOARD_TEXT_SIZE) * 0.5;
+            pic_y = row_y + (HUD_SCOREBOARD_ROW_HEIGHT - HUD_SCOREBOARD_PICTURE_SIZE) * 0.5 - 1;
+
+            is_local = (currentindex + 1 == player_localentnum);
+            float is_dead = getplayerkeyfloat(currentindex, "dead", 0);
+
+            if (is_dead)
+                drawfill([pos_x + 2, row_y, 0], [size_x - 4, HUD_SCOREBOARD_ROW_HEIGHT, 0], '0.18 0.05 0.05', 0.55, 0);
+            else if (is_local)
+                drawfill([pos_x + 2, row_y, 0], [size_x - 4, HUD_SCOREBOARD_ROW_HEIGHT, 0], '0.08 0.22 0.08', 0.6, 0);
+            else if (row_is_even)
+                drawfill([pos_x + 2, row_y, 0], [size_x - 4, HUD_SCOREBOARD_ROW_HEIGHT, 0], '0.12 0.13 0.16', 0.48, 0);
+
+            float row_alpha = is_dead ? 0.4 : 1.0;
+
+            // Use the player's actual team picture so the row visually
+            // matches the model they picked. FFA doesn't unify the icon
+            // — it just unifies the layout.
+            drawpic([pos_x + 10, pic_y, 0], HUD_ScoreboardPicturePath(pteam),
+                [HUD_SCOREBOARD_PICTURE_SIZE, HUD_SCOREBOARD_PICTURE_SIZE, 0], '1 1 1', row_alpha, 0);
+
+            vector name_col = is_local ? '0.7 1 0.7' : '1 1 1';
+            HUD_ShadowString([pos_x + 34, text_y, 0], player_name, text_sz, name_col, row_alpha);
+
+            frags = getplayerkeyfloat(currentindex, INFOKEY_P_FRAGS, 0);
+            deaths = getplayerkeyfloat(currentindex, "deaths", 0);
+            ping = getplayerkeyfloat(currentindex, INFOKEY_P_PING, 0);
+
+            HUD_ShadowString([kills_x, text_y, 0], ftos(frags), text_sz, '1 1 1', row_alpha);
+            HUD_ShadowString([deaths_x, text_y, 0], ftos(deaths), text_sz, '1 1 1', row_alpha);
+            HUD_ShadowString([ping_x, text_y, 0], ftos(ping), text_sz, '1 1 1', row_alpha);
+
+            row_index = row_index + 1;
+            row_is_even = !row_is_even;
+        }
+
+        currentindex = currentindex + 1;
+    }
 };
 
 void(string label, vector pos, vector size, vector fill_colour, vector border_colour, float team_id) HUD_DrawScoreboardColumn =
@@ -140,7 +258,7 @@ void(string label, vector pos, vector size, vector fill_colour, vector border_co
     currentindex = 0;
     while (currentindex <= maxclients)
     {
-        player_name = getplayerkeyvalue(currentindex, INFOKEY_P_NAME);
+        player_name = Scoreboard_PlayerName(currentindex);
         if (player_name != "" && HUD_ScoreboardPlayerTeam(currentindex) == team_id)
         {
             row_y = pos_y + HUD_SCOREBOARD_HEADER_HEIGHT + (row_index * HUD_SCOREBOARD_ROW_HEIGHT);
@@ -226,9 +344,21 @@ void() HUD_DrawScoreboard =
     prev_font = drawfont;
     drawfont = hud_font;
 
+    // FFA collapses both teams into a single scoreboard column. Detected
+    // via the engine clientstat (server-pushed authoritative gamemode).
+    // Unified-team modes (FFA + Bhop) collapse to a single scoreboard
+    // column with no team-score badges and no Join-Blue/Join-Red buttons.
+    // The variable is still named ffa_mode for git-blame readability;
+    // the helper covers both modes.
+    float gamemode_now = getstatf(STAT_GAMEMODE);
+    float ffa_mode = Gamemode_HasUnifiedTeams();
+
     blue_count = HUD_ScoreboardCountTeamPlayers(TEAM_BLUE);
     red_count = HUD_ScoreboardCountTeamPlayers(TEAM_RED);
-    row_count = max(1, max(blue_count, red_count));
+    if (ffa_mode)
+        row_count = max(1, blue_count + red_count);
+    else
+        row_count = max(1, max(blue_count, red_count));
 
     header_height = 40;
     join_btn_height = 0;   // buttons go outside the board now
@@ -242,14 +372,22 @@ void() HUD_DrawScoreboard =
     {
         if (HUD_ScoreboardPlayerTeam(si) == TEAM_SPEC)
         {
-            string sn = getplayerkeyvalue(si, INFOKEY_P_NAME);
+            string sn = Scoreboard_PlayerName(si);
             if (sn != "")
                 spec_count++;
         }
     }
     float spec_section_height = (spec_count > 0) ? 14 : 0;
 
-    board_width = (HUD_SCOREBOARD_COLUMN_WIDTH * 2) + HUD_SCOREBOARD_COLUMN_GAP + (HUD_SCOREBOARD_OUTER_PADDING * 2);
+    // FFA uses a single column ~1.5x the team-column width — narrower than
+    // the 2-team layout (which had wasteful center padding per row), but
+    // wider than a plain single column (which felt squished for FFA's
+    // longer name + frag listings).
+    float ffa_col_w = floor(HUD_SCOREBOARD_COLUMN_WIDTH * 1.5);
+    if (ffa_mode)
+        board_width = ffa_col_w + (HUD_SCOREBOARD_OUTER_PADDING * 2);
+    else
+        board_width = (HUD_SCOREBOARD_COLUMN_WIDTH * 2) + HUD_SCOREBOARD_COLUMN_GAP + (HUD_SCOREBOARD_OUTER_PADDING * 2);
     board_height = header_height + column_height + top_pad + join_btn_height + spec_section_height;
     outer_x = (g_width - board_width) * 0.5;
     outer_y = (g_height - board_height) * 0.5;
@@ -285,9 +423,12 @@ void() HUD_DrawScoreboard =
 
     // Gamemode label
     string gamemode_str;
-    float gamemode_val = getstatf(STAT_GAMEMODE);
-    if (gamemode_val == GAMEMODE_ELIMINATION)
+    if (gamemode_now == GAMEMODE_ELIMINATION)
         gamemode_str = "Elimination";
+    else if (gamemode_now == GAMEMODE_BHOP)
+        gamemode_str = "Bhop";
+    else if (gamemode_now == GAMEMODE_FFA)
+        gamemode_str = "Free For All";
     else
         gamemode_str = "Team Deathmatch";
     text_w = stringwidth(gamemode_str, 1, [HUD_SCOREBOARD_TEXT_SIZE, HUD_SCOREBOARD_TEXT_SIZE, 0]);
@@ -330,6 +471,16 @@ void() HUD_DrawScoreboard =
     float blue_col_x = outer_x + HUD_SCOREBOARD_OUTER_PADDING;
     float red_col_x = outer_x + HUD_SCOREBOARD_OUTER_PADDING + HUD_SCOREBOARD_COLUMN_WIDTH + HUD_SCOREBOARD_COLUMN_GAP;
 
+    if (ffa_mode)
+    {
+        // Single column at 1.5× team-column width. Width computed once at
+        // the top so the column matches the board (see board_width branch).
+        HUD_DrawScoreboardColumnFFA("PLAYERS",
+            [blue_col_x, columns_y, 0],
+            [ffa_col_w, column_height, 0],
+            '0.18 0.18 0.22', '0.55 0.55 0.6');
+    }
+    else
     {
         float bs = getstatf(STAT_BLUE_SCORE);
         float rs = getstatf(STAT_RED_SCORE);
@@ -356,7 +507,7 @@ void() HUD_DrawScoreboard =
         {
             if (HUD_ScoreboardPlayerTeam(n) == TEAM_SPEC)
             {
-                string pname = getplayerkeyvalue(n, INFOKEY_P_NAME);
+                string pname = Scoreboard_PlayerName(n);
                 if (pname != "")
                 {
                     if (spec_names != "")
@@ -374,8 +525,10 @@ void() HUD_DrawScoreboard =
         drawstring([spec_x, spec_y], spec_line, spec_sz, '0.6 0.6 0.6', 0.75, 0);
     }
 
-    // Team select join buttons — placed UNDER the scoreboard board
-    if (hud_scoreboard_teamselect)
+    // Team select join buttons — placed UNDER the scoreboard board.
+    // Skipped in FFA: the team-select panel is the only entry path and
+    // there's no Join Blue / Join Red split for the user to make.
+    if (hud_scoreboard_teamselect && !ffa_mode)
     {
         float btn_y = outer_y + board_height + 8;
         float btn_h = 30;

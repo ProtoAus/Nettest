@@ -352,6 +352,20 @@ float smooth_count[7];
 vector smooth_last_present_origin;
 float  smooth_last_snap_cltime;
 vector smooth_pre_reset_origin;
+// Trailing post-replay origin from the previous reconcile.  Used by the
+// smooth-local lock to gate on per-snapshot server motion (catch-up tail
+// vs sudden push) rather than cumulative live-vs-server divergence.
+vector smooth_prev_post_origin;
+
+// Live values exposed by CSQC_ReconcilePrediction's smoother block so
+// the cl_debug_drift overlay (CSQC_DrawDebugDrift below) can show them.
+// Updated once per reconcile, read every render frame.
+float  smooth_local_dbg_elen;            // |pre - post| this reconcile
+float  smooth_local_dbg_dpost;           // |post - prev_post| this reconcile
+float  smooth_local_dbg_wants_motion;    // live input had movement / jump
+float  smooth_local_dbg_lock_active;     // lock branch fired this reconcile
+float  smooth_local_dbg_last_reconcile;  // cltime of most recent reconcile
+float  smooth_local_dbg_last_snap;       // cltime of most recent teleport-snap branch fire
 
 // Flush all metric rings and persistent reference points.  Called from
 // CSQC_WorldLoaded on map change so stale menu-phase / previous-map
@@ -369,6 +383,7 @@ void() Smooth_Reset =
     smooth_last_present_origin = '0 0 0';
     smooth_last_snap_cltime    = 0;
     smooth_pre_reset_origin    = '0 0 0';
+    smooth_prev_post_origin    = '0 0 0';
 };
 
 void(float metric, float sample) Smooth_Push =
@@ -962,9 +977,7 @@ float(float x, float y) CSQC_DrawDebugPlayerModel =
 
 // Hitbox definitions: bone name, hitgroup, mins, maxs.
 // Bone names looked up via gettagindex at runtime — works with any model.
-// First 20 = normal hitboxes. Index 20 = shield (only shown with cl_debug_hitboxes 2).
-const float HITBOX_COUNT = 20;       // normal hitboxes
-const float HITBOX_COUNT_SHIELD = 21; // includes shield
+const float HITBOX_COUNT = 20;
 
 string hitbox_bonename[] = {
     "Bip01 Pelvis",       // group 3 stomach
@@ -986,12 +999,11 @@ string hitbox_bonename[] = {
     "Bip01 R Clavicle",   // group 5 right arm
     "Bip01 R UpperArm",   // group 5
     "Bip01 R Forearm",    // group 5
-    "Bip01 R Hand",       // group 5
-    "Bip01 L Hand"        // group 8 shield (index 20)
+    "Bip01 R Hand"        // group 5
 };
 
 float hitbox_group[] = {
-    3, 6, 6, 6, 7, 7, 7, 3, 2, 2, 2, 1, 4, 4, 4, 4, 5, 5, 5, 5, 8
+    3, 6, 6, 6, 7, 7, 7, 3, 2, 2, 2, 1, 4, 4, 4, 4, 5, 5, 5, 5
 };
 
 vector hitbox_mins[] = {
@@ -1014,8 +1026,7 @@ vector hitbox_mins[] = {
     '1.38 -2.84 -3.56',
     '-1.88 -2.47 -2.16',
     '0.44 -1.97 -2.34',
-    '-0.13 -1.9 -2.24',
-    '-16.1 -6.5 -19'    // shield (hitbox 21)
+    '-0.13 -1.9 -2.24'
 };
 
 vector hitbox_maxs[] = {
@@ -1038,8 +1049,7 @@ vector hitbox_maxs[] = {
     '5.69 4.31 4.31',
     '11.81 3.28 2.81',
     '10.59 2.72 2.22',
-    '4.86 2.08 2.37',
-    '10.6 1.5 33'       // shield (hitbox 21)
+    '4.86 2.08 2.37'
 };
 
 // Color per hitgroup for visualization
@@ -1052,7 +1062,6 @@ vector(float hg) dbg_hitbox_colour =
     if (hg == HITGROUP_RIGHTARM) return '0 1 0.3';    // green
     if (hg == HITGROUP_LEFTLEG)  return '0.3 0.5 1';  // blue
     if (hg == HITGROUP_RIGHTLEG) return '0.3 0.5 1';  // blue
-    if (hg == 8)                return '1 0 1';      // magenta = shield
     return '1 1 1';
 };
 
@@ -1066,12 +1075,8 @@ void(vector p1, vector p2, vector col, float alpha) dbg_hitbox_line =
 // Call BEFORE renderscene (adds to the polygon batch).
 void() CSQC_DrawDebugHitboxes =
 {
-    float dbg_hb = cvar("cl_debug_hitboxes");
-    if (!dbg_hb)
+    if (!cvar("cl_debug_hitboxes"))
         return;
-
-    // cl_debug_hitboxes 1 = normal hitboxes, 2 = include shield
-    float count = (dbg_hb >= 2) ? HITBOX_COUNT_SHIELD : HITBOX_COUNT;
 
     float chase = cvar("chase_active");
     entity vis = findchain(classname, "player_visual_proxy");
@@ -1086,7 +1091,7 @@ void() CSQC_DrawDebugHitboxes =
         if (vis.modelindex)
         {
             float i;
-            for (i = 0; i < count; i++)
+            for (i = 0; i < HITBOX_COUNT; i++)
             {
                 float bone = gettagindex(vis, hitbox_bonename[i]);
                 if (bone <= 0) continue;  // bone not found in this model
@@ -1131,6 +1136,105 @@ void() CSQC_DrawDebugHitboxes =
 };
 
 // ============================================================
+//  cl_debug_hbexpand — Draw expanded server trace-bbox wireframe
+//
+//  Server-side, W_PlayersExpandHitboxes inflates each alive player's
+//  bounding box by sv_hitbox_expand on X and Y (Z untouched) just before
+//  weapon traces fire, so MOVE_HITMODEL can reach outstretched limbs.
+//  This visualises the expanded box as a wireframe at each remote
+//  player's predicted origin so you can see exactly what bullets are
+//  testing against.
+//
+//  Source of truth for the box dimensions:
+//    * standing  → PM_MINS / PM_MAXS  (sh_pmove.qc, set by PM_ReadMovevars)
+//    * ducking   → PM_DUCK_MINS / PM_DUCK_MAXS
+//    * inflation → cvar("sv_hitbox_expand") on X, Y, AND Z
+//  Z expansion is critical for ducking — duck cap is +18u above origin,
+//  the head bone often sits above that, and without Z forgiveness the
+//  bbox cull rejects head shots before MOVE_HITMODEL's per-bone test.
+//  Duck state per remote = vis.flags & FL_DUCKING (received via VP_SF_ANIM).
+//  sv_hitbox_expand is read locally; on a remote (non-listen) server you'll
+//  see your own configured value, not the server's authoritative value —
+//  good enough for development against your own listen instance.
+// ============================================================
+
+void() CSQC_DrawDebugHitboxExpand =
+{
+    if (!cvar("cl_debug_hbexpand"))
+        return;
+
+    float expand = cvar("sv_hitbox_expand");
+    if (expand < 0) expand = 0;
+
+    float chase = cvar("chase_active");
+    vector col   = '0 1 1';   // cyan — distinct from cl_debug_hitboxes' per-group palette
+    float  alpha = 0.7;
+
+    entity vis = findchain(classname, "player_visual_proxy");
+    while (vis)
+    {
+        // Skip own hitbox unless in chase cam — same convention as
+        // CSQC_DrawDebugHitboxes; in first-person you'd be inside the
+        // box and the lines would just clutter the centre of the view.
+        if (vis.vis_owner_entnum == player_localentnum && !chase)
+        {
+            vis = vis.chain;
+            continue;
+        }
+        if (!vis.modelindex || vis.vis_is_dead)
+        {
+            vis = vis.chain;
+            continue;
+        }
+
+        vector mn, mx;
+        if (vis.flags & FL_DUCKING)
+        {
+            mn = PM_DUCK_MINS;
+            mx = PM_DUCK_MAXS;
+        }
+        else
+        {
+            mn = PM_MINS;
+            mx = PM_MAXS;
+        }
+
+        // Inflate all three axes — mirrors W_PlayersExpandHitboxes.
+        mn_x -= expand; mn_y -= expand; mn_z -= expand;
+        mx_x += expand; mx_y += expand; mx_z += expand;
+
+        vector o = vis.origin;
+        // 8 axis-aligned corners
+        vector c0 = o + [mn_x, mn_y, mn_z];
+        vector c1 = o + [mx_x, mn_y, mn_z];
+        vector c2 = o + [mx_x, mx_y, mn_z];
+        vector c3 = o + [mn_x, mx_y, mn_z];
+        vector c4 = o + [mn_x, mn_y, mx_z];
+        vector c5 = o + [mx_x, mn_y, mx_z];
+        vector c6 = o + [mx_x, mx_y, mx_z];
+        vector c7 = o + [mn_x, mx_y, mx_z];
+
+        // 12 edges: bottom rect, top rect, four verticals
+        dbg_hitbox_line(c0, c1, col, alpha);
+        dbg_hitbox_line(c1, c2, col, alpha);
+        dbg_hitbox_line(c2, c3, col, alpha);
+        dbg_hitbox_line(c3, c0, col, alpha);
+
+        dbg_hitbox_line(c4, c5, col, alpha);
+        dbg_hitbox_line(c5, c6, col, alpha);
+        dbg_hitbox_line(c6, c7, col, alpha);
+        dbg_hitbox_line(c7, c4, col, alpha);
+
+        dbg_hitbox_line(c0, c4, col, alpha);
+        dbg_hitbox_line(c1, c5, col, alpha);
+        dbg_hitbox_line(c2, c6, col, alpha);
+        dbg_hitbox_line(c3, c7, col, alpha);
+
+        vis = vis.chain;
+    }
+};
+
+// ============================================================
 //  sv_debug_hitboxes — Server-side hitbox snapshots
 //
 //  When the server sends CSQC_EVENT_SERVER_HITBOXES, we create
@@ -1142,10 +1246,9 @@ const float SV_HITBOX_MAX = 4;
 const float SV_HITBOX_LIFETIME = 10;
 entity sv_hitbox_ghost[SV_HITBOX_MAX];
 float sv_hitbox_time[SV_HITBOX_MAX];
-float sv_hitbox_show_shield[SV_HITBOX_MAX];
 float sv_hitbox_count;
 
-void(float mdlidx, vector org, vector ang, float fr, float bfr, float bb, float show_shield, float sbf, float sb2f, float bc1, float bc2, float bc3, float bc4) CSQC_AddServerHitbox =
+void(float mdlidx, vector org, vector ang, float fr, float bfr, float bb, float f1t, float bf1t, float sbf, float sb2f, float bc1, float bc2, float bc3, float bc4) CSQC_AddServerHitbox =
 {
     float idx = sv_hitbox_count % SV_HITBOX_MAX;
 
@@ -1162,7 +1265,12 @@ void(float mdlidx, vector org, vector ang, float fr, float bfr, float bb, float 
     setorigin(g, org);
     g.angles = ang;
     g.frame = fr;
+    g.frame1time = f1t;
     g.baseframe = bfr;
+    g.baseframe1time = bf1t;
+    // lerpfrac=1 makes gettaginfo use .frame/.baseframe; default 0 would use .frame2 (idle).
+    g.lerpfrac = 1;
+    g.baselerpfrac = 1;
     g.basebone = bb;
     g.subblendfrac = sbf;
     g.subblend2frac = sb2f;
@@ -1171,7 +1279,6 @@ void(float mdlidx, vector org, vector ang, float fr, float bfr, float bb, float 
     g.bonecontrol3 = bc3;
     g.bonecontrol4 = bc4;
     sv_hitbox_time[idx] = time;
-    sv_hitbox_show_shield[idx] = show_shield;
     sv_hitbox_count += 1;
 };
 
@@ -1195,18 +1302,14 @@ void() CSQC_DrawServerHitboxes =
         if (age > SV_HITBOX_LIFETIME - 1)
             alpha = 0.7 * (SV_HITBOX_LIFETIME - age);
 
-        // sv_debug_hitboxes 2 on server → show shield on this snapshot
-        float sv_count = (sv_hitbox_show_shield[i] >= 2) ? HITBOX_COUNT_SHIELD : HITBOX_COUNT;
+        vector col = '1 0.5 0'; // orange
 
-        for (j = 0; j < sv_count; j++)
+        for (j = 0; j < HITBOX_COUNT; j++)
         {
             float bone = gettagindex(g, hitbox_bonename[j]);
             if (bone <= 0) continue;
             vector bmins = hitbox_mins[j];
             vector bmaxs = hitbox_maxs[j];
-
-            // Orange for normal hitboxes, magenta for shield
-            vector col = (hitbox_group[j] == 8) ? '1 0 1' : '1 0.5 0';
 
             vector bpos = gettaginfo(g, bone);
 
@@ -1236,7 +1339,7 @@ void() CSQC_DrawServerHitboxes =
 };
 
 // ============================================================
-//  Continuous server hitbox tracking (sv_debug_hitboxes 3)
+//  Continuous server hitbox tracking (sv_debug_hitboxes 2)
 //  One persistent ghost per player slot, updated every frame.
 // ============================================================
 
@@ -1298,6 +1401,9 @@ void() CSQC_DrawContinuousHitboxes =
         if (!cont_hitbox_ghost[i])
             continue;
         if (time - cont_hitbox_time[i] > CONT_HITBOX_STALE)
+            continue;
+        // Skip own hitboxes unless in chase cam — mirrors CSQC_DrawDebugHitboxes
+        if (i == player_localentnum && !cvar("chase_active"))
             continue;
 
         entity g = cont_hitbox_ghost[i];
@@ -1449,6 +1555,153 @@ float(float x, float y) CSQC_DrawDebugBandwidth =
 };
 
 // ============================================================
+//  cl_debug_drift — live local-prediction-drift overlay
+//
+//  Summarises the state the cl_driftlock lock cares about:
+//
+//    Smoother on/off       — is cl_driftlock active.
+//    Wants motion          — is the user pressing a movement / jump
+//                            key on the live tick.  Drives the lock
+//                            gate.  When 0 + smoother on, the camera
+//                            is held at the live trajectory.
+//    Lock                  — did the lock branch fire on the most
+//                            recent reconcile.  ACTIVE = camera is
+//                            being held; OFF = pass-through (smoother
+//                            or snap path).
+//    Drift (elen)          — |pre - post| this reconcile.  Cumulative
+//                            divergence between live (camera) and
+//                            post-replay (server view).  Grows while
+//                            locked; resets when smoother absorbs.
+//    dpost                 — |post - prev_post| this reconcile.  How
+//                            much the server's authoritative origin
+//                            advanced this snapshot.  Diagnostic only;
+//                            no longer gates the lock.
+//    Smooth offset         — magnitude of the in-flight smoother
+//                            offset (decaying toward 0 over fade
+//                            time).  Non-zero when smoother is fading.
+//    Snap @                — teleport / respawn threshold.  Above this,
+//                            the smoother branch is skipped and the
+//                            camera snaps instantly.
+// ============================================================
+
+float(float x, float y) CSQC_DrawDebugDrift =
+{
+    y = dbg_text(x, y, "--- DRIFT ---", '0.5 0.8 1');
+
+    // --- Smoother on/off ---
+    float smooth_on = (cvar_string("cl_driftlock") == ""
+                       || cvar("cl_driftlock"));
+    y = dbg_line(x, y, "Smoother",
+                 smooth_on ? "ON" : "OFF",
+                 smooth_on ? DBG_GOOD_COL : DBG_WARN_COL);
+
+    // --- Wants motion (live input) ---
+    y = dbg_line(x, y, "Input",
+                 smooth_local_dbg_wants_motion ? "MOVING" : "released",
+                 smooth_local_dbg_wants_motion ? DBG_VALUE_COL : DBG_LABEL_COL);
+
+    // --- Lock state ---
+    string lock_str;
+    vector lock_col;
+    if (!smooth_on)
+    {
+        lock_str = "disabled";
+        lock_col = DBG_LABEL_COL;
+    }
+    else if (smooth_local_dbg_lock_active)
+    {
+        lock_str = "ACTIVE";
+        lock_col = DBG_GOOD_COL;
+    }
+    else
+    {
+        lock_str = "off";
+        lock_col = DBG_LABEL_COL;
+    }
+    y = dbg_line(x, y, "Lock", lock_str, lock_col);
+
+    // --- Drift (elen): |live - server| ---
+    // Below 0.05 = noise floor; up to ~2 = decel-tail noise; up to ~10
+    // = active-motion lag or short lock; > 10 = lock has accumulated
+    // significant drift; near 32 = approaching snap threshold.
+    vector elen_col;
+    if (smooth_local_dbg_elen < 1)       elen_col = DBG_GOOD_COL;
+    else if (smooth_local_dbg_elen < 8)  elen_col = DBG_VALUE_COL;
+    else if (smooth_local_dbg_elen < 24) elen_col = DBG_WARN_COL;
+    else                                 elen_col = DBG_BAD_COL;
+    y = dbg_line(x, y, "Drift",
+                 sprintf("%.2f qu", smooth_local_dbg_elen), elen_col);
+
+    // --- Per-snapshot server motion (dpost) ---
+    vector dpost_col;
+    if (smooth_local_dbg_dpost < 0.5)    dpost_col = DBG_GOOD_COL;
+    else if (smooth_local_dbg_dpost < 4) dpost_col = DBG_VALUE_COL;
+    else                                 dpost_col = DBG_WARN_COL;
+    y = dbg_line(x, y, "Server step",
+                 sprintf("%.2f qu", smooth_local_dbg_dpost), dpost_col);
+
+    // --- In-flight smoother offset ---
+    float ofs_mag = 0;
+    float ofs_age_ms = 0;
+    float fade_ms    = 0;
+    if (predicted_player && predicted_player.extrap_error_cltime > 0)
+    {
+        ofs_mag = vlen(predicted_player.extrap_error_offset);
+        ofs_age_ms = (cltime - predicted_player.extrap_error_cltime) * 1000;
+        // Mirror the smooth_time choice in CSQC_ApplyLocalSmoothOffset.
+        float smooth_time;
+        if (ofs_mag >= 1.0)
+            smooth_time = 0.2;
+        else
+        {
+            smooth_time = cvar("cl_extrap_smooth_time");
+            if (smooth_time <= 0) smooth_time = 0.1;
+        }
+        fade_ms = smooth_time * 1000;
+    }
+    if (ofs_mag > 0.001)
+    {
+        y = dbg_line(x, y, "Smooth offset",
+                     sprintf("%.2f qu", ofs_mag), DBG_VALUE_COL);
+        y = dbg_line(x, y, "Fade",
+                     sprintf("%.0f / %.0f ms", ofs_age_ms, fade_ms),
+                     DBG_VALUE_COL);
+    }
+    else
+    {
+        y = dbg_line(x, y, "Smooth offset", "(idle)", DBG_LABEL_COL);
+    }
+
+    // --- Snap threshold ---
+    y = dbg_line(x, y, "Snap @", "32 qu (teleport)", DBG_LABEL_COL);
+
+    // --- Time since last reconcile (sanity: should be tens of ms) ---
+    float since_ms = 0;
+    if (smooth_local_dbg_last_reconcile > 0)
+        since_ms = (cltime - smooth_local_dbg_last_reconcile) * 1000;
+    y = dbg_line(x, y, "Last reconcile",
+                 sprintf("%.0f ms ago", since_ms), DBG_LABEL_COL);
+
+    // --- Time since last teleport-snap branch fired ---
+    // Recent (< 500 ms) is amber so the user notices a fresh snap;
+    // anything older fades back to the label colour.  "(none)" until
+    // the first snap of the session.
+    if (smooth_local_dbg_last_snap > 0)
+    {
+        float snap_ago_ms = (cltime - smooth_local_dbg_last_snap) * 1000;
+        vector snap_col = (snap_ago_ms < 500) ? DBG_WARN_COL : DBG_LABEL_COL;
+        y = dbg_line(x, y, "Last snap",
+                     sprintf("%.0f ms ago", snap_ago_ms), snap_col);
+    }
+    else
+    {
+        y = dbg_line(x, y, "Last snap", "(none)", DBG_LABEL_COL);
+    }
+
+    return y + 6;
+};
+
+// ============================================================
 //  Master debug panel draw — called from CSQC_UpdateView
 // ============================================================
 
@@ -1478,6 +1731,8 @@ void() CSQC_DrawDebugPanels =
         y = CSQC_DrawDebugSmoothing(x, y);
     if (cvar("cl_debug_playermodel"))
         y = CSQC_DrawDebugPlayerModel(x, y);
+    if (cvar("cl_debug_drift"))
+        y = CSQC_DrawDebugDrift(x, y);
 
     drawfont = prev_font;
 };

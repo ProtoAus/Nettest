@@ -7,6 +7,59 @@ float csqc_pain_flash_time;
 float csqc_pain_flash_alpha;
 const float PAIN_FLASH_DURATION = 0.4;
 
+// --- Death-screen damage report (cl_playerdamage panel) ---
+//
+// Filled by the CSQC_EVENT_DAMAGE_REPORT handler in cl_main.qc when the
+// local player dies; consumed by HUD_DrawDamageReport.  Same parallel-
+// array shape as the killfeed.  Slot is 1-based on the wire to match
+// edict-num convention; the helpers subtract 1 for getplayerkeyvalue.
+const float DR_HUD_CAP        = 16;
+const float DR_HUD_DURATION   = 7.0;     // total seconds visible
+const float DR_HUD_FADE_TAIL  = 1.0;     // last second fades alpha to 0
+
+float dr_show_until;
+
+float dr_g_count;
+float dr_g_slot [DR_HUD_CAP];
+float dr_g_dmg  [DR_HUD_CAP];
+float dr_g_hits [DR_HUD_CAP];
+float dr_g_hp   [DR_HUD_CAP];
+
+float dr_t_count;
+float dr_t_slot [DR_HUD_CAP];
+float dr_t_dmg  [DR_HUD_CAP];
+float dr_t_hits [DR_HUD_CAP];
+float dr_t_hp   [DR_HUD_CAP];
+
+// Helper — returns the name to display for a 1-based player slot.
+// Mirrors KillFeed_PlayerName so unknown/disconnected slots still
+// render as "player" rather than blank.
+string DR_PlayerName(float slot1)
+{
+    if (slot1 <= 0) return "player";
+    string n = getplayerkeyvalue(slot1 - 1, INFOKEY_P_NAME);
+    if (n == "") n = "player";
+    return n;
+}
+
+// Team tint for a 1-based slot. Returns a neutral colour when the
+// active gamemode isn't team-based (Bhop / FFA), so the panel doesn't
+// fake teams the user can't see anywhere else in the HUD.
+vector DR_PlayerColour(float slot1)
+{
+    float gm = getstatf(STAT_GAMEMODE);
+    if (gm != GAMEMODE_TDM && gm != GAMEMODE_ELIMINATION)
+        return '0.85 0.85 0.85';
+    if (slot1 <= 0)
+        return '0.85 0.85 0.85';
+
+    string team_value = getplayerkeyvalue(slot1 - 1, "modteam");
+    float team_id = (team_value != "") ? stof(team_value) : TEAM_NONE;
+    if (team_id == TEAM_BLUE) return '0.45 0.7 1';
+    if (team_id == TEAM_RED)  return '1 0.42 0.42';
+    return '0.85 0.85 0.85';
+}
+
 // --- Hitmarker X ---
 float csqc_hitmarker_time;
 const float HITMARKER_DURATION = 0.25;
@@ -109,6 +162,130 @@ void() HUD_DrawPainFlash =
     }
 };
 
+// ============================================================
+//  HUD_DrawDamageReport — death-screen Given/Taken panel
+//
+//  Filled by CSQC_EVENT_DAMAGE_REPORT.  Visible for DR_HUD_DURATION
+//  seconds, fading over the last DR_HUD_FADE_TAIL seconds.  Gated by
+//  cl_playerdamage so admins/players can hide it.
+//
+//  Each line: "<dmg> in <hits> [<name> - <hp>hp]" with the name
+//  team-tinted in TDM/Elimination, neutral grey in Bhop / FFA.  Low-HP
+//  opponents (<= 30) get a reddish HP suffix so it's obvious you nearly
+//  killed them.
+// ============================================================
+void() HUD_DrawDamageReport =
+{
+    if (dr_show_until <= 0)
+        return;
+    if (cltime >= dr_show_until)
+    {
+        dr_show_until = 0;
+        dr_g_count = 0;
+        dr_t_count = 0;
+        return;
+    }
+    if (!cvar("cl_playerdamage"))
+        return;
+    if (dr_g_count <= 0 && dr_t_count <= 0)
+        return;
+
+    float remaining = dr_show_until - cltime;
+    float alpha = (remaining < DR_HUD_FADE_TAIL) ? (remaining / DR_HUD_FADE_TAIL) : 1.0;
+
+    // Smallest native size in GoogleMed's load list (cl_main.qc CSQC_Init:
+    //   "8 12 16 18 24 32 36 48 60 72").  Using a non-native size forces
+    //   the engine to scale the bitmap font and the result looks blurry.
+    float prev_font = drawfont;
+    drawfont = hud_font_mono;
+
+    vector header_size = '8 8 0';
+    vector line_size   = '8 8 0';
+    vector colour_white = '1 1 1';
+    vector colour_dim   = '0.65 0.65 0.65';
+    vector colour_low   = '1 0.55 0.55';   // dim red, used for HP <= 30
+
+    float x = 20;
+    float y = g_height * 0.35;
+    float i;
+    string txt;
+    float w;
+
+    // ---- Given ----
+    if (dr_g_count > 0)
+    {
+        drawstring([x, y], "Given:", header_size, colour_white, alpha, 0);
+        y = y + header_size_y + 2;
+        for (i = 0; i < dr_g_count; i = i + 1)
+        {
+            float cx = x;
+
+            // damage number
+            txt = sprintf("%g", dr_g_dmg[i]);
+            drawstring([cx, y], txt, line_size, colour_white, alpha, 0);
+            cx = cx + stringwidth(txt, 0, line_size);
+
+            // " in N "
+            txt = sprintf(" in %g ", dr_g_hits[i]);
+            drawstring([cx, y], txt, line_size, colour_dim, alpha, 0);
+            cx = cx + stringwidth(txt, 0, line_size);
+
+            // "["
+            drawstring([cx, y], "[", line_size, colour_dim, alpha, 0);
+            cx = cx + stringwidth("[", 0, line_size);
+
+            // name (team-tinted)
+            string name = DR_PlayerName(dr_g_slot[i]);
+            vector ncol = DR_PlayerColour(dr_g_slot[i]);
+            drawstring([cx, y], name, line_size, ncol, alpha, 0);
+            cx = cx + stringwidth(name, 0, line_size);
+
+            // " - Xhp]"
+            vector hp_col = (dr_g_hp[i] <= 30) ? colour_low : colour_dim;
+            txt = sprintf(" - %ghp]", dr_g_hp[i]);
+            drawstring([cx, y], txt, line_size, hp_col, alpha, 0);
+
+            y = y + line_size_y + 2;
+        }
+        y = y + 6;   // gap before Taken header
+    }
+
+    // ---- Taken ----
+    if (dr_t_count > 0)
+    {
+        drawstring([x, y], "Taken:", header_size, colour_white, alpha, 0);
+        y = y + header_size_y + 2;
+        for (i = 0; i < dr_t_count; i = i + 1)
+        {
+            float cx = x;
+
+            txt = sprintf("%g", dr_t_dmg[i]);
+            drawstring([cx, y], txt, line_size, colour_white, alpha, 0);
+            cx = cx + stringwidth(txt, 0, line_size);
+
+            txt = sprintf(" in %g ", dr_t_hits[i]);
+            drawstring([cx, y], txt, line_size, colour_dim, alpha, 0);
+            cx = cx + stringwidth(txt, 0, line_size);
+
+            drawstring([cx, y], "[", line_size, colour_dim, alpha, 0);
+            cx = cx + stringwidth("[", 0, line_size);
+
+            string name = DR_PlayerName(dr_t_slot[i]);
+            vector ncol = DR_PlayerColour(dr_t_slot[i]);
+            drawstring([cx, y], name, line_size, ncol, alpha, 0);
+            cx = cx + stringwidth(name, 0, line_size);
+
+            vector hp_col = (dr_t_hp[i] <= 30) ? colour_low : colour_dim;
+            txt = sprintf(" - %ghp]", dr_t_hp[i]);
+            drawstring([cx, y], txt, line_size, hp_col, alpha, 0);
+
+            y = y + line_size_y + 2;
+        }
+    }
+
+    drawfont = prev_font;
+};
+
 void() HUD_DrawScope =
 {
     float cx, cy, radius, diameter;
@@ -188,14 +365,195 @@ float HUD_SLOT_PADDING = 6;
 
 float HUD_SLOT_FONT    = 12;
 float HUD_SLOT_SHADOW  = 1;
+float HUD_SLOT_FULL_HOLD = 1.25;
 
-void(float slot_num, string label, string name, float is_active, vector pos) HUD_DrawWeaponSlot =
+float  hud_slot_cache_valid;
+float  hud_slot_cache_primary;
+float  hud_slot_cache_secondary;
+float  hud_slot_cache_melee;
+float  hud_slot_cache_utility;
+string hud_slot_cache_text1;
+string hud_slot_cache_text2;
+string hud_slot_cache_text3;
+string hud_slot_cache_text4;
+float  hud_slot_cache_active;
+float  hud_slot_full_until;
+
+float  hud_health_cache_valid;
+float  hud_health_cache_value;
+string hud_health_cache_text;
+
+float  hud_ammo_cache_valid;
+float  hud_ammo_cache_weapon;
+float  hud_ammo_cache_format;
+float  hud_ammo_cache_a;
+float  hud_ammo_cache_b;
+string hud_ammo_cache_text;
+float  hud_ammo_cache_width;
+
+float  hud_hlsmg_gren_cache_valid;
+float  hud_hlsmg_gren_cache_value;
+string hud_hlsmg_gren_cache_text;
+float  hud_hlsmg_gren_cache_width;
+
+string(float slot_num, float weapon_id) HUD_BuildWeaponSlotText =
+{
+    string name;
+
+    name = HUD_WeaponName(weapon_id);
+    if (name == "")
+        return "";
+
+    return sprintf("%g %s", slot_num, name);
+};
+
+void() HUD_UpdateWeaponSlotCache =
+{
+    float changed;
+
+    if (hud_slot_cache_valid
+        && hud_slot_cache_primary == predicted_player.slot_primary
+        && hud_slot_cache_secondary == predicted_player.slot_secondary
+        && hud_slot_cache_melee == predicted_player.slot_melee
+        && hud_slot_cache_utility == predicted_player.slot_utility
+        && hud_slot_cache_active == predicted_player.weapon)
+        return;
+
+    changed = hud_slot_cache_valid;
+    hud_slot_cache_valid = TRUE;
+    hud_slot_cache_primary = predicted_player.slot_primary;
+    hud_slot_cache_secondary = predicted_player.slot_secondary;
+    hud_slot_cache_melee = predicted_player.slot_melee;
+    hud_slot_cache_utility = predicted_player.slot_utility;
+    hud_slot_cache_active = predicted_player.weapon;
+
+    hud_slot_cache_text1 = HUD_BuildWeaponSlotText(1, hud_slot_cache_primary);
+    hud_slot_cache_text2 = HUD_BuildWeaponSlotText(2, hud_slot_cache_secondary);
+    hud_slot_cache_text3 = HUD_BuildWeaponSlotText(3, hud_slot_cache_melee);
+    hud_slot_cache_text4 = HUD_BuildWeaponSlotText(4, hud_slot_cache_utility);
+
+    if (changed)
+        hud_slot_full_until = cltime + HUD_SLOT_FULL_HOLD;
+    else
+        hud_slot_full_until = cltime + 0.25;
+};
+
+string() HUD_GetHealthString =
+{
+    float hp;
+
+    hp = (float)getstati(STAT_HEALTH);
+    if (!hud_health_cache_valid || hud_health_cache_value != hp)
+    {
+        hud_health_cache_valid = TRUE;
+        hud_health_cache_value = hp;
+        hud_health_cache_text = sprintf("%.0f", hp);
+    }
+
+    return hud_health_cache_text;
+};
+
+string(float weapon_id, float format_id, float value_a, float value_b) HUD_CacheAmmoString =
+{
+    if (!hud_ammo_cache_valid
+        || hud_ammo_cache_weapon != weapon_id
+        || hud_ammo_cache_format != format_id
+        || hud_ammo_cache_a != value_a
+        || hud_ammo_cache_b != value_b)
+    {
+        hud_ammo_cache_valid = TRUE;
+        hud_ammo_cache_weapon = weapon_id;
+        hud_ammo_cache_format = format_id;
+        hud_ammo_cache_a = value_a;
+        hud_ammo_cache_b = value_b;
+
+        if (format_id == 1)
+            hud_ammo_cache_text = sprintf("%g / %g", value_a, value_b);
+        else
+            hud_ammo_cache_text = sprintf("%g", value_a);
+
+        hud_ammo_cache_width = stringwidth(hud_ammo_cache_text, 1, [32, 32]);
+    }
+
+    return hud_ammo_cache_text;
+};
+
+string() HUD_GetAmmoString =
+{
+    if (predicted_player.weapon == WEP_DEAGLE)
+        return HUD_CacheAmmoString(WEP_DEAGLE, 1, predicted_player.mag_deagle, predicted_player.ammo_deagle);
+    else if (predicted_player.weapon == WEP_AK47)
+        return HUD_CacheAmmoString(WEP_AK47, 1, predicted_player.mag_ak47, predicted_player.ammo_ak47);
+    else if (predicted_player.weapon == WEP_M4A1)
+        return HUD_CacheAmmoString(WEP_M4A1, 1, predicted_player.mag_m4a1, predicted_player.ammo_m4a1);
+    else if (predicted_player.weapon == WEP_FLAKSHOTGUN)
+        return HUD_CacheAmmoString(WEP_FLAKSHOTGUN, 2, predicted_player.mag_flakshotgun, 0);
+    else if (predicted_player.weapon == WEP_PISTOL)
+        return HUD_CacheAmmoString(WEP_PISTOL, 1, predicted_player.mag_pistol, predicted_player.ammo_pistol);
+    else if (predicted_player.weapon == WEP_SCOUT)
+        return HUD_CacheAmmoString(WEP_SCOUT, 1, predicted_player.mag_scout, predicted_player.ammo_scout);
+    else if (predicted_player.weapon == WEP_357)
+        return HUD_CacheAmmoString(WEP_357, 1, predicted_player.mag_357, predicted_player.ammo_357);
+    else if (predicted_player.weapon == WEP_M249)
+        return HUD_CacheAmmoString(WEP_M249, 1, predicted_player.mag_m249, predicted_player.ammo_m249);
+    else if (predicted_player.weapon == WEP_CSAWP)
+        return HUD_CacheAmmoString(WEP_CSAWP, 1, predicted_player.mag_awp, predicted_player.ammo_awp);
+    else if (predicted_player.weapon == WEP_DOD98K)
+        return HUD_CacheAmmoString(WEP_DOD98K, 1, predicted_player.mag_98k, predicted_player.ammo_98k);
+    else if (predicted_player.weapon == WEP_HLSHOTGUN)
+        return HUD_CacheAmmoString(WEP_HLSHOTGUN, 1, predicted_player.mag_shotgun, predicted_player.ammo_shotgun);
+    else if (predicted_player.weapon == WEP_CSM3)
+        return HUD_CacheAmmoString(WEP_CSM3, 1, predicted_player.mag_m3, predicted_player.ammo_m3);
+    else if (predicted_player.weapon == WEP_CSMP5)
+        return HUD_CacheAmmoString(WEP_CSMP5, 1, predicted_player.mag_mp5, predicted_player.ammo_mp5);
+    else if (predicted_player.weapon == WEP_CROSSBOW)
+        return HUD_CacheAmmoString(WEP_CROSSBOW, 1, predicted_player.mag_crossbow, predicted_player.ammo_crossbow);
+    else if (predicted_player.weapon == WEP_GRENADELAUNCHER)
+        return HUD_CacheAmmoString(WEP_GRENADELAUNCHER, 2, predicted_player.mag_grenadelauncher, 0);
+    else if (predicted_player.weapon == WEP_REBAR)
+        return HUD_CacheAmmoString(WEP_REBAR, 2, predicted_player.mag_rebar, 0);
+    else if (predicted_player.weapon == WEP_GAUSS)
+        return HUD_CacheAmmoString(WEP_GAUSS, 2, predicted_player.ammo_gauss, 0);
+    else if (predicted_player.weapon == WEP_GLOCK)
+        return HUD_CacheAmmoString(WEP_GLOCK, 1, predicted_player.mag_glock, predicted_player.ammo_glock);
+    else if (predicted_player.weapon == WEP_G3SG1)
+        return HUD_CacheAmmoString(WEP_G3SG1, 1, predicted_player.mag_g3sg1, predicted_player.ammo_g3sg1);
+    else if (predicted_player.weapon == WEP_HLSMG)
+        return HUD_CacheAmmoString(WEP_HLSMG, 1, predicted_player.mag_hlsmg, predicted_player.ammo_hlsmg);
+    else if (predicted_player.weapon == WEP_HLRPG)
+        return HUD_CacheAmmoString(WEP_HLRPG, 1, predicted_player.mag_hlrpg, predicted_player.ammo_hlrpg);
+    else if (predicted_player.weapon == WEP_HLGRENADE)
+        return HUD_CacheAmmoString(WEP_HLGRENADE, 2, predicted_player.ammo_hlgrenade, 0);
+    else if (predicted_player.weapon == WEP_HLGLOCK)
+        return HUD_CacheAmmoString(WEP_HLGLOCK, 1, predicted_player.mag_hlglock, predicted_player.ammo_hlglock);
+    else if (predicted_player.weapon == WEP_HLEGON)
+        return HUD_CacheAmmoString(WEP_HLEGON, 2, predicted_player.ammo_hlegon, 0);
+    else if (predicted_player.weapon == WEP_CSUSP)
+        return HUD_CacheAmmoString(WEP_CSUSP, 1, predicted_player.mag_csusp, predicted_player.ammo_csusp);
+
+    return "";
+};
+
+string() HUD_GetHLSMGGrenadeString =
+{
+    if (!hud_hlsmg_gren_cache_valid
+        || hud_hlsmg_gren_cache_value != predicted_player.ammo_hlsmg_grenades)
+    {
+        hud_hlsmg_gren_cache_valid = TRUE;
+        hud_hlsmg_gren_cache_value = predicted_player.ammo_hlsmg_grenades;
+        hud_hlsmg_gren_cache_text = sprintf("Grenade Launcher: %g", predicted_player.ammo_hlsmg_grenades);
+        hud_hlsmg_gren_cache_width = stringwidth(hud_hlsmg_gren_cache_text, 1, [16, 16]);
+    }
+
+    return hud_hlsmg_gren_cache_text;
+};
+
+void(string slot_text, float is_active, vector pos) HUD_DrawWeaponSlot =
 {
     vector bg_color;
     float  bg_alpha;
     vector text_color;
     float  text_alpha;
-    string slot_text;
     vector text_pos;
     vector text_size;
 
@@ -219,7 +577,6 @@ void(float slot_num, string label, string name, float is_active, vector pos) HUD
     if (is_active)
         drawfill([pos_x + HUD_SLOT_WIDTH - 2, pos_y], [2, HUD_SLOT_HEIGHT], '0.4 0.7 1', 1.0, 0);
 
-    slot_text = sprintf("%s %s", label, name);
     text_size = [HUD_SLOT_FONT, HUD_SLOT_FONT];
     text_pos_x = pos_x + HUD_SLOT_PADDING;
     text_pos_y = pos_y + (HUD_SLOT_HEIGHT - HUD_SLOT_FONT) * 0.5;
@@ -235,30 +592,59 @@ void() HUD_DrawWeaponSlots =
 {
     float  active;
     float  slot_x, slot_y;
-    string name1, name2, name3, name4;
-    float  slot_count;
+    string active_text = "";
 
     active = predicted_player.weapon;
-
-    name1 = HUD_WeaponName(predicted_player.slot_primary);
-    name2 = HUD_WeaponName(predicted_player.slot_secondary);
-    name3 = HUD_WeaponName(predicted_player.slot_melee);
-    name4 = HUD_WeaponName(predicted_player.slot_utility);
+    HUD_UpdateWeaponSlotCache();
 
     slot_x = g_width - HUD_SLOT_WIDTH - 12;
     slot_y = g_height * 0.5 - ((HUD_SLOT_HEIGHT * 4 + HUD_SLOT_GAP * 3) * 0.5);
 
-    if (name1 != "")
-        HUD_DrawWeaponSlot(1, "1", name1, active == predicted_player.slot_primary, [slot_x, slot_y]);
+    if (cltime > hud_slot_full_until)
+    {
+        // Auto-hide branch: keep the active row at its OWN slot's Y so
+        // the panel feels stationary — only the active row remains
+        // visible, the others vanish in place. Previously this branch
+        // re-centered the row vertically, which made the active label
+        // jump to the middle of the screen whenever auto-hide kicked in.
+        float active_y = slot_y;
+        if (active == predicted_player.slot_primary)
+        {
+            active_text = hud_slot_cache_text1;
+            active_y = slot_y;
+        }
+        else if (active == predicted_player.slot_secondary)
+        {
+            active_text = hud_slot_cache_text2;
+            active_y = slot_y + (HUD_SLOT_HEIGHT + HUD_SLOT_GAP);
+        }
+        else if (active == predicted_player.slot_melee)
+        {
+            active_text = hud_slot_cache_text3;
+            active_y = slot_y + (HUD_SLOT_HEIGHT + HUD_SLOT_GAP) * 2;
+        }
+        else if (active == predicted_player.slot_utility)
+        {
+            active_text = hud_slot_cache_text4;
+            active_y = slot_y + (HUD_SLOT_HEIGHT + HUD_SLOT_GAP) * 3;
+        }
 
-    if (name2 != "")
-        HUD_DrawWeaponSlot(2, "2", name2, active == predicted_player.slot_secondary, [slot_x, slot_y + (HUD_SLOT_HEIGHT + HUD_SLOT_GAP)]);
+        if (active_text != "")
+            HUD_DrawWeaponSlot(active_text, TRUE, [slot_x, active_y]);
+        return;
+    }
 
-    if (name3 != "")
-        HUD_DrawWeaponSlot(3, "3", name3, active == predicted_player.slot_melee, [slot_x, slot_y + (HUD_SLOT_HEIGHT + HUD_SLOT_GAP) * 2]);
+    if (hud_slot_cache_text1 != "")
+        HUD_DrawWeaponSlot(hud_slot_cache_text1, active == predicted_player.slot_primary, [slot_x, slot_y]);
 
-    if (name4 != "")
-        HUD_DrawWeaponSlot(4, "4", name4, active == predicted_player.slot_utility, [slot_x, slot_y + (HUD_SLOT_HEIGHT + HUD_SLOT_GAP) * 3]);
+    if (hud_slot_cache_text2 != "")
+        HUD_DrawWeaponSlot(hud_slot_cache_text2, active == predicted_player.slot_secondary, [slot_x, slot_y + (HUD_SLOT_HEIGHT + HUD_SLOT_GAP)]);
+
+    if (hud_slot_cache_text3 != "")
+        HUD_DrawWeaponSlot(hud_slot_cache_text3, active == predicted_player.slot_melee, [slot_x, slot_y + (HUD_SLOT_HEIGHT + HUD_SLOT_GAP) * 2]);
+
+    if (hud_slot_cache_text4 != "")
+        HUD_DrawWeaponSlot(hud_slot_cache_text4, active == predicted_player.slot_utility, [slot_x, slot_y + (HUD_SLOT_HEIGHT + HUD_SLOT_GAP) * 3]);
 };
 
 void() HUD_DrawRoundTimer =
@@ -411,7 +797,7 @@ void() CSQC_DrawWeaponHUD =
     drawfont = hud_font;
 
     // Health — bottom left
-    hp_str = sprintf("%.0f", (float)getstati(STAT_HEALTH));
+    hp_str = HUD_GetHealthString();
     drawstring([20 + HUD_SLOT_SHADOW, g_height - 52 + HUD_SLOT_SHADOW], hp_str, [36, 36], '0 0 0', 0.5, 0);
     drawstring([20, g_height - 52], hp_str, [36, 36], '1 1 1', 0.9, 0);
 
@@ -436,69 +822,23 @@ void() CSQC_DrawWeaponHUD =
 
     y = g_height - 52;
 
-    if (predicted_player.weapon == WEP_DEAGLE)
-        mag_str = sprintf("%g / %g", predicted_player.mag_deagle, predicted_player.ammo_deagle);
-    else if (predicted_player.weapon == WEP_AK47)
-        mag_str = sprintf("%g / %g", predicted_player.mag_ak47, predicted_player.ammo_ak47);
-    else if (predicted_player.weapon == WEP_M4A1)
-        mag_str = sprintf("%g / %g", predicted_player.mag_m4a1, predicted_player.ammo_m4a1);
-    else if (predicted_player.weapon == WEP_FLAKSHOTGUN)
-        mag_str = sprintf("%g", predicted_player.mag_flakshotgun);
-    else if (predicted_player.weapon == WEP_PISTOL)
-        mag_str = sprintf("%g / %g", predicted_player.mag_pistol, predicted_player.ammo_pistol);
-    else if (predicted_player.weapon == WEP_SCOUT)
-        mag_str = sprintf("%g / %g", predicted_player.mag_scout, predicted_player.ammo_scout);
-    else if (predicted_player.weapon == WEP_357)
-        mag_str = sprintf("%g / %g", predicted_player.mag_357, predicted_player.ammo_357);
-    else if (predicted_player.weapon == WEP_M249)
-        mag_str = sprintf("%g / %g", predicted_player.mag_m249, predicted_player.ammo_m249);
-    else if (predicted_player.weapon == WEP_CSAWP)
-        mag_str = sprintf("%g / %g", predicted_player.mag_awp, predicted_player.ammo_awp);
-    else if (predicted_player.weapon == WEP_DOD98K)
-        mag_str = sprintf("%g / %g", predicted_player.mag_98k, predicted_player.ammo_98k);
-    else if (predicted_player.weapon == WEP_HLSHOTGUN)
-        mag_str = sprintf("%g / %g", predicted_player.mag_shotgun, predicted_player.ammo_shotgun);
-    else if (predicted_player.weapon == WEP_CSM3)
-        mag_str = sprintf("%g / %g", predicted_player.mag_m3, predicted_player.ammo_m3);
-    else if (predicted_player.weapon == WEP_CSMP5)
-        mag_str = sprintf("%g / %g", predicted_player.mag_mp5, predicted_player.ammo_mp5);
-    else if (predicted_player.weapon == WEP_CROSSBOW)
-        mag_str = sprintf("%g / %g", predicted_player.mag_crossbow, predicted_player.ammo_crossbow);
-    else if (predicted_player.weapon == WEP_GRENADELAUNCHER)
-        mag_str = sprintf("%g", predicted_player.mag_grenadelauncher);
-    else if (predicted_player.weapon == WEP_REBAR)
-        mag_str = sprintf("%g", predicted_player.mag_rebar);
-    else if (predicted_player.weapon == WEP_GAUSS)
-        mag_str = sprintf("%g", predicted_player.ammo_gauss);
-    else if (predicted_player.weapon == WEP_GLOCK)
-        mag_str = sprintf("%g / %g", predicted_player.mag_glock, predicted_player.ammo_glock);
-    else if (predicted_player.weapon == WEP_G3SG1)
-        mag_str = sprintf("%g / %g", predicted_player.mag_g3sg1, predicted_player.ammo_g3sg1);
-    else if (predicted_player.weapon == WEP_HLSMG)
-        mag_str = sprintf("%g / %g", predicted_player.mag_hlsmg, predicted_player.ammo_hlsmg);
-    else if (predicted_player.weapon == WEP_HLRPG)
-        mag_str = sprintf("%g / %g", predicted_player.mag_hlrpg, predicted_player.ammo_hlrpg);
-    else if (predicted_player.weapon == WEP_HLGRENADE)
-        mag_str = sprintf("%g", predicted_player.ammo_hlgrenade);
-    else if (predicted_player.weapon == WEP_HLGLOCK)
-        mag_str = sprintf("%g / %g", predicted_player.mag_hlglock, predicted_player.ammo_hlglock);
-    else if (predicted_player.weapon == WEP_HLEGON)
-        mag_str = sprintf("%g", predicted_player.ammo_hlegon);
-    else if (predicted_player.weapon == WEP_CSUSP)
-        mag_str = sprintf("%g / %g", predicted_player.mag_csusp, predicted_player.ammo_csusp);
-    else
+    mag_str = HUD_GetAmmoString();
+    if (mag_str == "")
+    {
+        drawfont = prev_font;
         return;
+    }
 
     // SMG: show grenade ammo above main ammo
     if (predicted_player.weapon == WEP_HLSMG)
     {
-        string gren_str = sprintf("Grenade Launcher: %g", predicted_player.ammo_hlsmg_grenades);
-        float gx = g_width - 20 - stringwidth(gren_str, 1, [16, 16]);
+        string gren_str = HUD_GetHLSMGGrenadeString();
+        float gx = g_width - 20 - hud_hlsmg_gren_cache_width;
         drawstring([gx + HUD_SLOT_SHADOW, y - 20 + HUD_SLOT_SHADOW], gren_str, [16, 16], '0 0 0', 0.4, 0);
         drawstring([gx, y - 20], gren_str, [16, 16], '0.8 0.7 0.3', 0.85, 0);
     }
 
-    x = g_width - 20 - stringwidth(mag_str, 1, [32, 32]);
+    x = g_width - 20 - hud_ammo_cache_width;
     drawstring([x + HUD_SLOT_SHADOW, y + HUD_SLOT_SHADOW], mag_str, [32, 32], '0 0 0', 0.5, 0);
     drawstring([x, y], mag_str, [32, 32], '1 1 1', 0.9, 0);
 
@@ -541,7 +881,6 @@ void() HUD_DrawSpeedometer =
 //   srv tick vs cl snd  — if cl snd < srv tick, server sees stale input
 //   snap dt             — time since last snapshot; should be small (0 to 1/tick)
 //   snap interval       — spacing of recent snapshots; flat means steady network
-//   interp              — cl_interp_time; shows the configured lerp-behind window
 //   extrap              — cl_extrap master + grounded flag
 //
 // Smoothed fps/snap-interval via EMA so the readout doesn't jitter every frame.
@@ -590,8 +929,6 @@ void() HUD_DrawNetGraph =
 
     float cl_send = cvar("cl_netfps");
 
-    float interp = cvar("cl_interp_time");
-
     float extrap_master;
     if (cvar_string("cl_extrap") == "")
         extrap_master = 1;
@@ -602,14 +939,27 @@ void() HUD_DrawNetGraph =
     float snap_dt_now = cltime - net_graph_last_snap_cltime;  // time since latest snap
     float snap_hz = (net_graph_ema_snap_interval > 0) ? (1.0 / net_graph_ema_snap_interval) : 0;
 
+    // Smoothing (entity error compensation) state — visible so the three
+    // smoothness layers (interp / extrap / smooth) are all in one panel.
+    float smooth_enabled = 1;
+    if (cvar_string("cl_extrap_smooth") != "" && !cvar("cl_extrap_smooth"))
+        smooth_enabled = 0;
+    float smooth_time;
+    if (cvar_string("cl_extrap_smooth_time") == "")
+        smooth_time = 0.031;
+    else
+        smooth_time = cvar("cl_extrap_smooth_time");
+
     // --- Build lines ---
-    string line_fps   = sprintf("fps   %4.0f", net_graph_ema_fps);
-    string line_srv   = sprintf("srv   %4.0f Hz  (%.4fs)", srv_hz, sv_tick);
-    string line_snd   = sprintf("snd   %4.0f Hz", cl_send);
-    string line_snap  = sprintf("snap  %4.0f Hz  dt %.3fs", snap_hz, snap_dt_now);
-    string line_extr  = sprintf("extrap %s%s", extrap_master ? "ON " : "OFF",
-                                extrap_grounded ? "(grounded)" : "");
-    string line_intr  = sprintf("interp %.3fs %s", interp, (interp > 0) ? "ON" : "OFF");
+    string line_fps    = sprintf("fps   %4.0f", net_graph_ema_fps);
+    string line_srv    = sprintf("srv   %4.0f Hz  (%.4fs)", srv_hz, sv_tick);
+    string line_snd    = sprintf("snd   %4.0f Hz", cl_send);
+    string line_snap   = sprintf("snap  %4.0f Hz  dt %.3fs", snap_hz, snap_dt_now);
+    string line_extr   = sprintf("extrap %s%s", extrap_master ? "ON " : "OFF",
+                                 extrap_grounded ? "(grounded)" : "");
+    string line_smooth = sprintf("smooth %s %.3fs",
+                                 (smooth_enabled && smooth_time > 0) ? "ON " : "OFF",
+                                 smooth_time);
 
     // --- Layout: bottom-right, stacked upward ---
     vector text_size = [12, 12];
@@ -624,7 +974,7 @@ void() HUD_DrawNetGraph =
     lines[2] = line_snd;
     lines[3] = line_snap;
     lines[4] = line_extr;
-    lines[5] = line_intr;
+    lines[5] = line_smooth;
 
     // Background panel
     float panel_w = 0;
@@ -638,7 +988,7 @@ void() HUD_DrawNetGraph =
     vector panel_pos = [right_x - panel_w - 6, bottom_y - panel_h];
     drawfill(panel_pos, [panel_w + 8, panel_h], '0 0 0', 0.55, 0);
 
-    // Lines stacked from bottom to top (interp at bottom, fps at top)
+    // Lines stacked from bottom to top (smooth at bottom, fps at top)
     for (i = 0; i < 6; i++)
     {
         float w = stringwidth(lines[i], 0, text_size);
@@ -648,7 +998,7 @@ void() HUD_DrawNetGraph =
         // Highlight the big ones
         if (i == 3) col = (snap_dt_now > sv_tick * 2) ? '1 0.5 0.3' : '0.7 1 0.7';  // snap dt
         if (i == 4) col = extrap_master ? '0.7 1 0.7' : '1 0.7 0.7';
-        if (i == 5) col = (interp > 0)  ? '0.7 1 0.7' : '0.8 0.8 0.8';
+        if (i == 5) col = (smooth_enabled && smooth_time > 0) ? '0.7 1 0.7' : '0.8 0.8 0.8';
         drawstring(p + [1, 1], lines[i], text_size, '0 0 0', 0.7, 0);
         drawstring(p, lines[i], text_size, col, 0.95, 0);
     }

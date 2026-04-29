@@ -11,6 +11,8 @@ string create_server_password_text;
 float create_server_password_cursor;
 string create_server_rcon_password_text;
 float create_server_rcon_password_cursor;
+string create_server_port_text;
+float create_server_port_cursor;
 string create_server_fraglimit_text;
 float create_server_fraglimit_cursor;
 string create_server_roundtime_text;
@@ -35,6 +37,13 @@ float create_server_stamina;
 float create_server_gamemode;
 float create_server_cheats;
 float create_server_noblock;
+float create_server_nomapweapons;
+// Hitmarker / damage owner: 0 = server-auth (server traces decide hits and
+// emits hitmarker), 1 = trust client claims (client predicts hitmarker
+// locally, server suppresses its own emit to dedupe).  Mode 2 (full trust,
+// no sanity checks) is power-user — not exposed in the menu, set via
+// console / data/server.cfg if needed.
+float create_server_trust_clienthits;
 float create_server_seeded;
 float create_server_tab;    // 0 = server, 1 = game, 2 = movement
 float create_server_tickrate_index;
@@ -52,31 +61,27 @@ float create_server_airaccelerate_cursor;
 string create_server_friction_text;
 float create_server_friction_cursor;
 
+// --- Gamemode dropdown state ---
+float  create_server_gamemode_open;
+vector create_server_gamemode_scroll;
+vector create_server_gamemode_pos;
+vector create_server_gamemode_size;
+strbuf create_server_gamemode_options;
+float  create_server_gamemode_options_loaded;
+
 // --- Physics tab state ---
 
 string create_server_hitforce_text;       float create_server_hitforce_cursor;
-string create_server_pushforce_text;      float create_server_pushforce_cursor;
 string create_server_useforce_text;       float create_server_useforce_cursor;
 string create_server_usevelmult_text;     float create_server_usevelmult_cursor;
 string create_server_mass_text;           float create_server_mass_cursor;
-string create_server_minkick_text;        float create_server_minkick_cursor;
-string create_server_pushradius_text;     float create_server_pushradius_cursor;
 string create_server_odeiter_text;        float create_server_odeiter_cursor;
-string create_server_pushheight_text;     float create_server_pushheight_cursor;
 string create_server_erp_text;            float create_server_erp_cursor;
 string create_server_damplin_text;        float create_server_damplin_cursor;
 string create_server_dampang_text;        float create_server_dampang_cursor;
-string create_server_playerbounce_text;   float create_server_playerbounce_cursor;
-string create_server_kickback_text;       float create_server_kickback_cursor;
 string create_server_phfriction_text;     float create_server_phfriction_cursor;
-float  create_server_passthrough;
-float  create_server_qccollide;
 float  create_server_odequick;
 float  create_server_odeautodisable;
-float  create_server_shape_index;
-float  create_server_axis_index;
-string physprop_shapes[] = { "box", "capsule", "cylinder", "sphere" };
-string physprop_axes[]   = { "x", "y", "z" };
 
 // --- Default-loadout dropdown state ---
 // Parallel (id, display-name) arrays drive the four "Default Weapons"
@@ -114,6 +119,80 @@ strbuf cs_default_secondary_options;
 strbuf cs_default_melee_options;
 strbuf cs_default_utility_options;
 float  cs_default_options_loaded;
+
+// MenuQC doesn't compile against shared/sh_weapons.qc, so the Create
+// Server screen keeps a small local parser for seeding its dropdowns
+// from named sv_default_* values such as "ak47" or "desert eagle".
+string(string raw) create_server_weapon_name_key =
+{
+    raw = strtolower(raw);
+    raw = strreplace(" ", "", raw);
+    raw = strreplace("_", "", raw);
+    raw = strreplace("-", "", raw);
+    raw = strreplace(".", "", raw);
+    return raw;
+};
+
+float(string raw, float fallback) create_server_weapon_id_from_string_or_default =
+{
+    string key = create_server_weapon_name_key(raw);
+    float numeric;
+    string numeric_key;
+
+    if (key == "")
+        return fallback;
+
+    numeric = stof(raw);
+    numeric_key = create_server_weapon_name_key(sprintf("%g", numeric));
+    if (key == numeric_key && numeric == floor(numeric)
+        && numeric >= 0 && numeric <= 28)
+        return numeric;
+
+    if (key == "none" || key == "wepnone") return 0;
+    if (key == "deagle" || key == "deserteagle" || key == "wepdeagle") return 1;
+    if (key == "knife" || key == "wepknife") return 2;
+    if (key == "ak47" || key == "wepak47") return 3;
+    if (key == "m4a1" || key == "wepm4a1") return 4;
+    if (key == "flakshotgun" || key == "wepflakshotgun") return 5;
+    if (key == "9mm" || key == "pistol" || key == "weppistol") return 6;
+    if (key == "gauss" || key == "wepgauss") return 7;
+    if (key == "crossbow" || key == "wepcrossbow") return 8;
+    if (key == "357" || key == "wep357") return 9;
+    if (key == "k98" || key == "dod98k" || key == "wepdod98k") return 10;
+    if (key == "scout" || key == "wepscout") return 11;
+    if (key == "gl" || key == "grenadelauncher" || key == "wepgrenadelauncher") return 12;
+    if (key == "m249" || key == "wepm249") return 13;
+    if (key == "crowbar" || key == "hlcrowbar" || key == "wephlcrowbar") return 14;
+    if (key == "hlshotgun" || key == "wephlshotgun") return 15;
+    if (key == "m3" || key == "csm3" || key == "wepcsm3") return 16;
+    if (key == "mp5" || key == "csmp5" || key == "wepcsmp5") return 17;
+    if (key == "rebar" || key == "weprebar") return 18;
+    if (key == "awp" || key == "csawp" || key == "wepcsawp") return 19;
+    if (key == "wrench" || key == "wepwrench") return 20;
+    if (key == "glock" || key == "wepglock") return 21;
+    if (key == "g3sg1" || key == "wepg3sg1") return 22;
+    if (key == "hlsmg" || key == "wephlsmg") return 23;
+    if (key == "rpg" || key == "hlrpg" || key == "wephlrpg") return 24;
+    if (key == "grenade" || key == "hlgrenade" || key == "wephlgrenade") return 25;
+    if (key == "hlglock" || key == "wephlglock") return 26;
+    if (key == "egon" || key == "hlegon" || key == "wephlegon") return 27;
+    if (key == "usp" || key == "csusp" || key == "wepcsusp") return 28;
+
+    return fallback;
+};
+
+void() create_server_load_gamemode_options =
+{
+	if (create_server_gamemode_options_loaded)
+		return;
+
+	create_server_gamemode_options = buf_create();
+	bufstr_add(create_server_gamemode_options, "Team Deathmatch", FALSE);
+	bufstr_add(create_server_gamemode_options, "Elimination", FALSE);
+	bufstr_add(create_server_gamemode_options, "Bhop", FALSE);
+	bufstr_add(create_server_gamemode_options, "Free For All", FALSE);
+	create_server_gamemode_options_loaded = TRUE;
+};
 
 void() create_server_load_loadout_options =
 {
@@ -157,9 +236,12 @@ void() create_server_seed_fields =
 
 	menu_seed_text_from_cvar("hostname", "", create_server_name_text, create_server_name_cursor);
 
+	// Seed from the cvar, but bump anything below 4 up to the mod default
+	// (16). Keeps old installs whose data/server.cfg still has the legacy
+	// "2" from breaking back down every time the menu is opened.
 	maxplayers_text = cvar_string("maxclients");
-	if (maxplayers_text == "")
-		maxplayers_text = "8";
+	if (maxplayers_text == "" || stof(maxplayers_text) < 4)
+		maxplayers_text = "16";
 	if (create_server_maxplayers_text == "")
 	{
 		create_server_maxplayers_text = maxplayers_text;
@@ -167,7 +249,21 @@ void() create_server_seed_fields =
 	}
 
 	menu_seed_text_from_cvar("password", "", create_server_password_text, create_server_password_cursor);
-	menu_seed_text_from_cvar("rcon_password", "", create_server_rcon_password_text, create_server_rcon_password_cursor);
+	if (create_server_rcon_password_text == "")
+	{
+		create_server_rcon_password_text = cvar_string("sv_rcon_password_shadow");
+		if (create_server_rcon_password_text == "")
+			create_server_rcon_password_text = Menu_ReadConfigValue("data/server.cfg", "rcon_password");
+		create_server_rcon_password_cursor = strlen(create_server_rcon_password_text);
+	}
+	// Port defaults to 27500 — never seed from the live sv_port cvar because
+	// the backdrop launcher temporarily moves it into the 27501..27600 range,
+	// and we don't want that ephemeral value showing up in the form.
+	if (create_server_port_text == "")
+	{
+		create_server_port_text   = "27500";
+		create_server_port_cursor = strlen(create_server_port_text);
+	}
 	menu_seed_text_from_cvar("fraglimit", "30", create_server_fraglimit_text, create_server_fraglimit_cursor);
 	menu_seed_text_from_cvar("mp_roundtime", "5", create_server_roundtime_text, create_server_roundtime_cursor);
 	menu_seed_text_from_cvar("mp_timelimit", "25", create_server_timelimit_text, create_server_timelimit_cursor);
@@ -207,9 +303,17 @@ void() create_server_seed_fields =
 	create_server_autohop = cvar("sv_autohop") > 0;
 	create_server_falldamage = cvar("mp_falldamage") > 0;
 	create_server_stamina = cvar("sv_stamina") > 0;
+	create_server_load_gamemode_options();
 	create_server_gamemode = cvar("sv_gamemode");
+	create_server_gamemode = bound(0, create_server_gamemode, buf_getsize(create_server_gamemode_options) - 1);
 	create_server_cheats = cvar("mp_cheats") > 0;
 	create_server_noblock = cvar("mp_noblock") > 0;
+	create_server_nomapweapons = cvar("mp_nomapweapons") > 0;
+	// Treat any non-zero value as "on" so an admin who's set mode 2 from
+	// the console doesn't see the toggle flicker to off here.  Saving
+	// the toggle writes 0 or 1 and clears mode 2 — fine, mode 2 is for
+	// debugging only.
+	create_server_trust_clienthits = cvar("sv_trust_clienthits") > 0;
 
 	// Seed default-loadout dropdown indices from the sv_default_* cvars.
 	// Each cvar stores a WEP_* integer; find its index in the matching
@@ -219,22 +323,22 @@ void() create_server_seed_fields =
 		float want;
 		float i;
 
-		want = cvar("sv_default_primary");
+		want = create_server_weapon_id_from_string_or_default(cvar_string("sv_default_primary"), 0);
 		cs_default_primary_idx = 0;
 		for (i = 0; i < cs_loadout_primary_ids.length; i++)
 			if (cs_loadout_primary_ids[i] == want) { cs_default_primary_idx = i; break; }
 
-		want = cvar("sv_default_secondary");
+		want = create_server_weapon_id_from_string_or_default(cvar_string("sv_default_secondary"), 0);
 		cs_default_secondary_idx = 0;
 		for (i = 0; i < cs_loadout_secondary_ids.length; i++)
 			if (cs_loadout_secondary_ids[i] == want) { cs_default_secondary_idx = i; break; }
 
-		want = cvar("sv_default_melee");
+		want = create_server_weapon_id_from_string_or_default(cvar_string("sv_default_melee"), 0);
 		cs_default_melee_idx = 0;
 		for (i = 0; i < cs_loadout_melee_ids.length; i++)
 			if (cs_loadout_melee_ids[i] == want) { cs_default_melee_idx = i; break; }
 
-		want = cvar("sv_default_utility");
+		want = create_server_weapon_id_from_string_or_default(cvar_string("sv_default_utility"), 0);
 		cs_default_utility_idx = 0;
 		for (i = 0; i < cs_loadout_utility_ids.length; i++)
 			if (cs_loadout_utility_ids[i] == want) { cs_default_utility_idx = i; break; }
@@ -242,37 +346,17 @@ void() create_server_seed_fields =
 
 	// Physics tab seeding
 	menu_seed_text_from_cvar("sv_physprop_hit_force",         "8000",  create_server_hitforce_text,     create_server_hitforce_cursor);
-	menu_seed_text_from_cvar("sv_physprop_push_force",        "8000",  create_server_pushforce_text,    create_server_pushforce_cursor);
 	menu_seed_text_from_cvar("sv_physprop_use_force",         "800",   create_server_useforce_text,     create_server_useforce_cursor);
 	menu_seed_text_from_cvar("sv_physprop_use_velmult",       "800",   create_server_usevelmult_text,   create_server_usevelmult_cursor);
 	menu_seed_text_from_cvar("sv_physprop_mass",              "20",    create_server_mass_text,         create_server_mass_cursor);
-	menu_seed_text_from_cvar("sv_physprop_player_minkick",    "100",   create_server_minkick_text,      create_server_minkick_cursor);
-	menu_seed_text_from_cvar("sv_physprop_push_radius",       "40",    create_server_pushradius_text,   create_server_pushradius_cursor);
 	menu_seed_text_from_cvar("physics_ode_iterationsperframe","10",    create_server_odeiter_text,      create_server_odeiter_cursor);
-	menu_seed_text_from_cvar("sv_physprop_push_height",       "0.6",   create_server_pushheight_text,   create_server_pushheight_cursor);
 	menu_seed_text_from_cvar("sv_physprop_erp",               "0",     create_server_erp_text,          create_server_erp_cursor);
-	menu_seed_text_from_cvar("sv_physprop_damp_lin",          "0.2",   create_server_damplin_text,      create_server_damplin_cursor);
-	menu_seed_text_from_cvar("sv_physprop_damp_ang",          "0.2",   create_server_dampang_text,      create_server_dampang_cursor);
-	menu_seed_text_from_cvar("sv_physprop_player_bounce",     "0.4",   create_server_playerbounce_text, create_server_playerbounce_cursor);
-	menu_seed_text_from_cvar("sv_physprop_player_kickback",   "0.005", create_server_kickback_text,     create_server_kickback_cursor);
+	menu_seed_text_from_cvar("sv_physprop_damp_lin",          "0.01",  create_server_damplin_text,      create_server_damplin_cursor);
+	menu_seed_text_from_cvar("sv_physprop_damp_ang",          "0.01",  create_server_dampang_text,      create_server_dampang_cursor);
 	menu_seed_text_from_cvar("sv_physprop_friction",          "1.0",   create_server_phfriction_text,   create_server_phfriction_cursor);
 
-	create_server_passthrough    = cvar("sv_physprop_passthrough") > 0;
-	create_server_qccollide      = cvar("sv_physprop_qc_collide") > 0;
 	create_server_odequick       = cvar("physics_ode_worldquickstep") > 0;
 	create_server_odeautodisable = cvar("physics_ode_autodisable") > 0;
-
-	// Shape/axis cycle indices — match current cvar to table, default to cylinder/y.
-	create_server_shape_index = 2;
-	string cur_shape = cvar_string("sv_physprop_shape");
-	float si;
-	for (si = 0; si < physprop_shapes.length; si++)
-		if (cur_shape == physprop_shapes[si]) { create_server_shape_index = si; break; }
-
-	create_server_axis_index = 1;
-	string cur_axis = cvar_string("sv_physprop_axis");
-	for (si = 0; si < physprop_axes.length; si++)
-		if (cur_axis == physprop_axes[si]) { create_server_axis_index = si; break; }
 
 	create_server_seeded = TRUE;
 };
@@ -498,7 +582,9 @@ void() create_server_launch =
 	if (mapname == "")
 		return;
 
-	menu_normalize_integer_text(8, 1, 64, create_server_maxplayers_text, create_server_maxplayers_cursor);
+	menu_normalize_integer_text(16, 2, 64, create_server_maxplayers_text, create_server_maxplayers_cursor);
+	// Port: clamp to 1..65535. Default 27500 (PORT_DEFAULTSERVER).
+	menu_normalize_integer_text(27500, 1, 65535, create_server_port_text, create_server_port_cursor);
 	menu_normalize_integer_text(30, 0, 999, create_server_fraglimit_text, create_server_fraglimit_cursor);
 	menu_normalize_integer_text(5, 1, 999, create_server_roundtime_text, create_server_roundtime_cursor);
 	menu_normalize_integer_text(25, 1, 999, create_server_timelimit_text, create_server_timelimit_cursor);
@@ -515,12 +601,9 @@ void() create_server_launch =
 
 	// Physics integer clamps
 	menu_normalize_integer_text(8000, 0, 100000, create_server_hitforce_text,   create_server_hitforce_cursor);
-	menu_normalize_integer_text(8000, 0, 100000, create_server_pushforce_text,  create_server_pushforce_cursor);
 	menu_normalize_integer_text(800,  0, 100000, create_server_useforce_text,   create_server_useforce_cursor);
 	menu_normalize_integer_text(800,  0, 10000,  create_server_usevelmult_text, create_server_usevelmult_cursor);
 	menu_normalize_integer_text(20,   1, 1000,   create_server_mass_text,       create_server_mass_cursor);
-	menu_normalize_integer_text(100,  0, 10000,  create_server_minkick_text,    create_server_minkick_cursor);
-	menu_normalize_integer_text(40,   0, 512,    create_server_pushradius_text, create_server_pushradius_cursor);
 	menu_normalize_integer_text(10,   1, 60,     create_server_odeiter_text,    create_server_odeiter_cursor);
 
 	// Compute tickrate values
@@ -532,6 +615,7 @@ void() create_server_launch =
 	cvar_set("maxclients", create_server_maxplayers_text);
 	cvar_set("password", create_server_password_text);
 	cvar_set("rcon_password", create_server_rcon_password_text);
+	cvar_set("sv_rcon_password_shadow", create_server_rcon_password_text);
 	cvar_set("sv_pure", create_server_pure ? "1" : "0");
 	cvar_set("sv_mintic", tic_val);
 	cvar_set("sv_maxtic", tic_val);
@@ -544,9 +628,11 @@ void() create_server_launch =
 	cvar_set("mp_cheats", create_server_cheats ? "1" : "0");
 	cvar_set("sv_cheats", create_server_cheats ? "1" : "0");
 	cvar_set("mp_noblock", create_server_noblock ? "1" : "0");
+	cvar_set("mp_nomapweapons", create_server_nomapweapons ? "1" : "0");
 	cvar_set("sv_autohop", create_server_autohop ? "1" : "0");
 	cvar_set("mp_falldamage", create_server_falldamage ? "1" : "0");
 	cvar_set("sv_stamina", create_server_stamina ? "1" : "0");
+	cvar_set("sv_trust_clienthits", create_server_trust_clienthits ? "1" : "0");
 	cvar_set("sv_gamemode", ftos(create_server_gamemode));
 
 	// Default-loadout WEP_* IDs.  Index is clamped because the dropdown
@@ -572,37 +658,33 @@ void() create_server_launch =
 
 	// Physics settings
 	cvar_set("sv_physprop_hit_force",       create_server_hitforce_text);
-	cvar_set("sv_physprop_push_force",      create_server_pushforce_text);
 	cvar_set("sv_physprop_use_force",       create_server_useforce_text);
 	cvar_set("sv_physprop_use_velmult",     create_server_usevelmult_text);
 	cvar_set("sv_physprop_mass",            create_server_mass_text);
-	cvar_set("sv_physprop_player_minkick",  create_server_minkick_text);
-	cvar_set("sv_physprop_push_radius",     create_server_pushradius_text);
-	cvar_set("sv_physprop_push_height",     create_server_pushheight_text);
 	cvar_set("sv_physprop_erp",             create_server_erp_text);
 	cvar_set("sv_physprop_damp_lin",        create_server_damplin_text);
 	cvar_set("sv_physprop_damp_ang",        create_server_dampang_text);
-	cvar_set("sv_physprop_player_bounce",   create_server_playerbounce_text);
-	cvar_set("sv_physprop_player_kickback", create_server_kickback_text);
 	cvar_set("sv_physprop_friction",        create_server_phfriction_text);
-	cvar_set("sv_physprop_shape",           physprop_shapes[create_server_shape_index]);
-	cvar_set("sv_physprop_axis",            physprop_axes[create_server_axis_index]);
-	cvar_set("sv_physprop_passthrough",     create_server_passthrough ? "1" : "0");
-	cvar_set("sv_physprop_qc_collide",      create_server_qccollide ? "1" : "0");
 	cvar_set("physics_ode_iterationsperframe", create_server_odeiter_text);
 	cvar_set("physics_ode_worldquickstep",  create_server_odequick ? "1" : "0");
 	cvar_set("physics_ode_autodisable",     create_server_odeautodisable ? "1" : "0");
 
 	// Save only the server cvars to data/server.cfg.
-	// sv_main.qc execs this file on worldspawn to pick up the values.
+	// sv_main.qc applies this file on worldspawn to pick up the values.
 	Menu_SaveServerConfig();
 
 	create_server_map_dropdown_open = FALSE;
+	create_server_gamemode_open = FALSE;
 	current_menu = MENU_MAIN;
 	m_close();
 	// Leaving the backdrop — the new map is a real game, so CSQC should
 	// show HUD + team-select normally.  See m_main.qc m_init for details.
 	localcmd("set cl_menu_backdrop_active 0\n");
+	localcmd("set sv_backdrop 0\n");
+	// Apply the user-chosen listen port (backdrop launchers temporarily
+	// move sv_port into 27501..27600 to avoid blocking 27500 for another
+	// local server — this restores the form's value).
+	localcmd(sprintf("sv_port %s\n", create_server_port_text));
 	localcmd(sprintf("map %s\n", mapname));
 };
 
@@ -688,22 +770,50 @@ void() create_server_menu =
 		if (my_button_colored("tab_server", [xpos, ypos], [tab_w, 20], "Server",
 			create_server_tab == 0 ? active_col : inactive_col,
 			create_server_tab == 0 ? active_brd : inactive_brd))
+		{
+			create_server_gamemode_open = FALSE;
+			cs_default_primary_open = FALSE;
+			cs_default_secondary_open = FALSE;
+			cs_default_melee_open = FALSE;
+			cs_default_utility_open = FALSE;
 			create_server_tab = 0;
+		}
 
 		if (my_button_colored("tab_game", [xpos + tab_w + 4, ypos], [tab_w, 20], "Game",
 			create_server_tab == 1 ? active_col : inactive_col,
 			create_server_tab == 1 ? active_brd : inactive_brd))
+		{
+			create_server_gamemode_open = FALSE;
+			cs_default_primary_open = FALSE;
+			cs_default_secondary_open = FALSE;
+			cs_default_melee_open = FALSE;
+			cs_default_utility_open = FALSE;
 			create_server_tab = 1;
+		}
 
 		if (my_button_colored("tab_movement", [xpos + (tab_w + 4) * 2, ypos], [tab_w, 20], "Movement",
 			create_server_tab == 2 ? active_col : inactive_col,
 			create_server_tab == 2 ? active_brd : inactive_brd))
+		{
+			create_server_gamemode_open = FALSE;
+			cs_default_primary_open = FALSE;
+			cs_default_secondary_open = FALSE;
+			cs_default_melee_open = FALSE;
+			cs_default_utility_open = FALSE;
 			create_server_tab = 2;
+		}
 
 		if (my_button_colored("tab_physics", [xpos + (tab_w + 4) * 3, ypos], [tab_w, 20], "Physics",
 			create_server_tab == 3 ? active_col : inactive_col,
 			create_server_tab == 3 ? active_brd : inactive_brd))
+		{
+			create_server_gamemode_open = FALSE;
+			cs_default_primary_open = FALSE;
+			cs_default_secondary_open = FALSE;
+			cs_default_melee_open = FALSE;
+			cs_default_utility_open = FALSE;
 			create_server_tab = 3;
+		}
 	}
 	ypos += 26;
 
@@ -723,6 +833,10 @@ void() create_server_menu =
 		ypos += 18;
 
 		menu_text_field("Rcon PW", "create_rcon_password", [xpos, ypos], property_width, 32, create_server_rcon_password_text, create_server_rcon_password_cursor);
+		ypos += 18;
+
+		menu_text_field("Port", "create_port", [xpos, ypos], property_width, 5, create_server_port_text, create_server_port_cursor);
+		menu_sanitize_numeric_text(create_server_port_text, create_server_port_cursor, FALSE);
 		ypos += 20;
 
 		menu_toggle_button("create_pure", [xpos, ypos], [property_width, 20], "SV Pure", create_server_pure);
@@ -773,17 +887,19 @@ void() create_server_menu =
 		menu_toggle_button("create_cheats", [xpos + half_w + 4, ypos], [half_w, 20], "Cheats",        create_server_cheats);
 		ypos += 24;
 
+		create_server_load_gamemode_options();
 		{
-			string gamemode_label;
-			// 0 = TDM, 1 = Elimination, 2 = Bhop (see shared/sh_customdefs.qc)
-			if (create_server_gamemode == 1)
-				gamemode_label = "Elimination";
-			else if (create_server_gamemode == 2)
-				gamemode_label = "Bhop";
-			else
-				gamemode_label = "Team Deathmatch";
-			if (my_button("create_gamemode", [xpos, ypos], [property_width, 20], gamemode_label))
-				create_server_gamemode = (create_server_gamemode + 1) - floor((create_server_gamemode + 1) / 3) * 3;
+			create_server_gamemode_pos  = [xpos, ypos];
+			create_server_gamemode_size = [half_w, 108];
+			if (menu_dropdown_button("create_gamemode", create_server_gamemode_pos, create_server_gamemode_size,
+				create_server_gamemode_options, create_server_gamemode, create_server_gamemode_open, FALSE))
+			{
+				cs_default_primary_open = FALSE;
+				cs_default_secondary_open = FALSE;
+				cs_default_melee_open = FALSE;
+				cs_default_utility_open = FALSE;
+			}
+			menu_toggle_button("create_nomapweapons", [xpos + half_w + 4, ypos], [half_w, 20], "No Map Weapons", create_server_nomapweapons);
 		}
 		ypos += 24;
 
@@ -806,6 +922,7 @@ void() create_server_menu =
 			if (menu_dropdown_button("create_def_prim", cs_default_primary_pos, cs_default_primary_size,
 				cs_default_primary_options, cs_default_primary_idx, cs_default_primary_open, FALSE))
 			{
+				create_server_gamemode_open = FALSE;
 				cs_default_secondary_open = FALSE;
 				cs_default_melee_open = FALSE;
 				cs_default_utility_open = FALSE;
@@ -813,6 +930,7 @@ void() create_server_menu =
 			if (menu_dropdown_button("create_def_sec", cs_default_secondary_pos, cs_default_secondary_size,
 				cs_default_secondary_options, cs_default_secondary_idx, cs_default_secondary_open, FALSE))
 			{
+				create_server_gamemode_open = FALSE;
 				cs_default_primary_open = FALSE;
 				cs_default_melee_open = FALSE;
 				cs_default_utility_open = FALSE;
@@ -827,6 +945,7 @@ void() create_server_menu =
 			if (menu_dropdown_button("create_def_mel", cs_default_melee_pos, cs_default_melee_size,
 				cs_default_melee_options, cs_default_melee_idx, cs_default_melee_open, FALSE))
 			{
+				create_server_gamemode_open = FALSE;
 				cs_default_primary_open = FALSE;
 				cs_default_secondary_open = FALSE;
 				cs_default_utility_open = FALSE;
@@ -834,6 +953,7 @@ void() create_server_menu =
 			if (menu_dropdown_button("create_def_util", cs_default_utility_pos, cs_default_utility_size,
 				cs_default_utility_options, cs_default_utility_idx, cs_default_utility_open, FALSE))
 			{
+				create_server_gamemode_open = FALSE;
 				cs_default_primary_open = FALSE;
 				cs_default_secondary_open = FALSE;
 				cs_default_melee_open = FALSE;
@@ -873,6 +993,13 @@ void() create_server_menu =
 
 		menu_toggle_button("create_falldamage", [xpos,              ypos], [half_w, 20], "Fall Damage", create_server_falldamage);
 		menu_toggle_button("create_noblock",    [xpos + half_w + 4, ypos], [half_w, 20], "No Block",    create_server_noblock);
+		ypos += 22;
+
+		// Trust client hits: ON → client predicts hitmarker locally,
+		// server suppresses its own emit (so the marker doesn't fire
+		// twice on high-ping connections).  OFF → server is authoritative
+		// and the only source of hitmarker feedback.
+		menu_toggle_button("create_trust_clienthits", [xpos, ypos], [half_w, 20], "Trust Client Hits", create_server_trust_clienthits);
 	}
 	else
 	{
@@ -894,27 +1021,21 @@ void() create_server_menu =
 		// Integer rows (half-width paired, tight labels for more input space)
 		menu_text_field_tight("Hit Force",   "create_ph_hitf",  [xpos,              ypos], half_w, 6, create_server_hitforce_text,   create_server_hitforce_cursor);
 		menu_sanitize_numeric_text(create_server_hitforce_text, create_server_hitforce_cursor, FALSE);
-		menu_text_field_tight("Push Force",  "create_ph_pushf", [xpos + half_w + 4, ypos], half_w, 6, create_server_pushforce_text,  create_server_pushforce_cursor);
-		menu_sanitize_numeric_text(create_server_pushforce_text, create_server_pushforce_cursor, FALSE);
-		ypos += 18;
-
-		menu_text_field_tight("Use Force",   "create_ph_usef",  [xpos,              ypos], half_w, 6, create_server_useforce_text,   create_server_useforce_cursor);
+		menu_text_field_tight("Use Force",   "create_ph_usef",  [xpos + half_w + 4, ypos], half_w, 6, create_server_useforce_text,   create_server_useforce_cursor);
 		menu_sanitize_numeric_text(create_server_useforce_text, create_server_useforce_cursor, FALSE);
-		menu_text_field_tight("Use VelMult", "create_ph_uvm",   [xpos + half_w + 4, ypos], half_w, 5, create_server_usevelmult_text, create_server_usevelmult_cursor);
-		menu_sanitize_numeric_text(create_server_usevelmult_text, create_server_usevelmult_cursor, FALSE);
 		ypos += 18;
 
-		menu_text_field_tight("Mass",        "create_ph_mass",  [xpos,              ypos], half_w, 4, create_server_mass_text,       create_server_mass_cursor);
+		menu_text_field_tight("Use VelMult", "create_ph_uvm",   [xpos,              ypos], half_w, 5, create_server_usevelmult_text, create_server_usevelmult_cursor);
+		menu_sanitize_numeric_text(create_server_usevelmult_text, create_server_usevelmult_cursor, FALSE);
+		menu_text_field_tight("Mass",        "create_ph_mass",  [xpos + half_w + 4, ypos], half_w, 4, create_server_mass_text,       create_server_mass_cursor);
 		menu_sanitize_numeric_text(create_server_mass_text, create_server_mass_cursor, FALSE);
-		menu_text_field_tight("Push Radius", "create_ph_prad",  [xpos + half_w + 4, ypos], half_w, 4, create_server_pushradius_text, create_server_pushradius_cursor);
-		menu_sanitize_numeric_text(create_server_pushradius_text, create_server_pushradius_cursor, FALSE);
 		ypos += 18;
 
 		// Decimal rows (half-width paired, tight labels)
-		menu_text_field_tight("Push Height", "create_ph_phh",   [xpos,              ypos], half_w, 5, create_server_pushheight_text, create_server_pushheight_cursor);
-		menu_sanitize_numeric_text(create_server_pushheight_text, create_server_pushheight_cursor, TRUE);
-		menu_text_field_tight("Friction",    "create_ph_frict", [xpos + half_w + 4, ypos], half_w, 5, create_server_phfriction_text, create_server_phfriction_cursor);
+		menu_text_field_tight("Friction",    "create_ph_frict", [xpos,              ypos], half_w, 5, create_server_phfriction_text, create_server_phfriction_cursor);
 		menu_sanitize_numeric_text(create_server_phfriction_text, create_server_phfriction_cursor, TRUE);
+		menu_text_field_tight("ERP",         "create_ph_erp",   [xpos + half_w + 4, ypos], half_w, 5, create_server_erp_text,        create_server_erp_cursor);
+		menu_sanitize_numeric_text(create_server_erp_text, create_server_erp_cursor, TRUE);
 		ypos += 18;
 
 		menu_text_field_tight("Damp Lin",    "create_ph_dl",    [xpos,              ypos], half_w, 5, create_server_damplin_text,    create_server_damplin_cursor);
@@ -923,34 +1044,11 @@ void() create_server_menu =
 		menu_sanitize_numeric_text(create_server_dampang_text, create_server_dampang_cursor, TRUE);
 		ypos += 18;
 
-		menu_text_field_tight("Plr Bounce",  "create_ph_bnc",   [xpos,              ypos], half_w, 5, create_server_playerbounce_text, create_server_playerbounce_cursor);
-		menu_sanitize_numeric_text(create_server_playerbounce_text, create_server_playerbounce_cursor, TRUE);
-		menu_text_field_tight("Plr Kickback","create_ph_kb",    [xpos + half_w + 4, ypos], half_w, 6, create_server_kickback_text,   create_server_kickback_cursor);
-		menu_sanitize_numeric_text(create_server_kickback_text, create_server_kickback_cursor, TRUE);
-		ypos += 18;
-
-		menu_text_field_tight("Plr MinKick", "create_ph_mk",    [xpos,              ypos], half_w, 5, create_server_minkick_text,    create_server_minkick_cursor);
-		menu_sanitize_numeric_text(create_server_minkick_text, create_server_minkick_cursor, FALSE);
-		menu_text_field_tight("ODE Iter",    "create_ph_oiter", [xpos + half_w + 4, ypos], half_w, 3, create_server_odeiter_text,    create_server_odeiter_cursor);
+		menu_text_field_tight("ODE Iter",    "create_ph_oiter", [xpos,              ypos], half_w, 3, create_server_odeiter_text,    create_server_odeiter_cursor);
 		menu_sanitize_numeric_text(create_server_odeiter_text, create_server_odeiter_cursor, FALSE);
-		ypos += 18;
-
-		menu_text_field_tight("ERP",         "create_ph_erp",   [xpos,              ypos], half_w, 5, create_server_erp_text,        create_server_erp_cursor);
-		menu_sanitize_numeric_text(create_server_erp_text, create_server_erp_cursor, TRUE);
 		ypos += 20;
 
-		// Shape / Axis cycle buttons (half-width paired)
-		if (my_button("create_ph_shape", [xpos,              ypos], [half_w, 20], sprintf("Shape: %s", physprop_shapes[create_server_shape_index])))
-			create_server_shape_index = (create_server_shape_index + 1) - floor((create_server_shape_index + 1) / physprop_shapes.length) * physprop_shapes.length;
-		if (my_button("create_ph_axis",  [xpos + half_w + 4, ypos], [half_w, 20], sprintf("Axis: %s",  physprop_axes[create_server_axis_index])))
-			create_server_axis_index  = (create_server_axis_index  + 1) - floor((create_server_axis_index  + 1) / physprop_axes.length)  * physprop_axes.length;
-		ypos += 22;
-
 		// Toggles
-		menu_toggle_button("create_ph_pt", [xpos,              ypos], [half_w, 20], "Passthrough", create_server_passthrough);
-		menu_toggle_button("create_ph_qc", [xpos + half_w + 4, ypos], [half_w, 20], "QC Collide",  create_server_qccollide);
-		ypos += 22;
-
 		menu_toggle_button("create_ph_oq",  [xpos,              ypos], [half_w, 20], "ODE QuickStep",  create_server_odequick);
 		menu_toggle_button("create_ph_oad", [xpos + half_w + 4, ypos], [half_w, 20], "ODE AutoDisable", create_server_odeautodisable);
 	}
@@ -961,6 +1059,7 @@ void() create_server_menu =
 	if (my_button("create_back", [pad, -8], [left_width, 20], "Back"))
 	{
 		create_server_map_dropdown_open = FALSE;
+		create_server_gamemode_open = FALSE;
 		current_menu = MENU_MAIN;
 	}
 
@@ -978,13 +1077,16 @@ void() create_server_menu =
 
 	// Overlay: draw any open Default Loadout list on top of the footer so
 	// the picker is visible and clickable even when it would overlap the
-	// Start Server button.  Only the Game tab draws the buttons, so these
-	// positions are zero on other tabs and the `is_open` guards no-op.
+	// Start Server button. The gamemode selector uses the same overlay path.
+	// Only the Game tab draws the buttons, so these positions are zero on
+	// other tabs and the `is_open` guards no-op.
 	// Reset alignment — the footer buttons above left it at END/END, which
 	// would reinterpret the stored positions relative to the bottom-right.
 	sui_set_align([SUI_ALIGN_START, SUI_ALIGN_START]);
 	if (create_server_tab == 1)
 	{
+		menu_dropdown_list("create_gamemode", create_server_gamemode_pos, create_server_gamemode_size,
+			create_server_gamemode_options, create_server_gamemode, create_server_gamemode_open, create_server_gamemode_scroll);
 		menu_dropdown_list("create_def_prim", cs_default_primary_pos, cs_default_primary_size,
 			cs_default_primary_options, cs_default_primary_idx, cs_default_primary_open, cs_default_primary_scroll);
 		menu_dropdown_list("create_def_sec", cs_default_secondary_pos, cs_default_secondary_size,
@@ -1000,6 +1102,7 @@ void() create_server_menu =
 	if (sui_listen_back())
 	{
 		create_server_map_dropdown_open = FALSE;
+		create_server_gamemode_open = FALSE;
 		current_menu = MENU_MAIN;
 	}
 

@@ -125,6 +125,20 @@ void() W_GrenadeThink =
     W_GrenadeExplode();   // timer expired
 };
 
+// Periodic tick wrapper — see W_HLGrenadeProjectileTick for the rationale.
+// Pulses CSQC SendFlags every sv_toss_tickrate tick and detonates when
+// the absolute fuse time hits.
+void() W_GrenadeProjectileTick =
+{
+    self.SendFlags |= 1;
+    if (time >= self.proj_fuse_end)
+    {
+        W_GrenadeExplode();   // removes self
+        return;
+    }
+    self.nextthink = time + Toss_NextThinkInterval();
+};
+
 void() W_GLFire =
 {
     float r;
@@ -150,9 +164,15 @@ void() W_GLFire =
         gren.avelocity = '180 360 120';
         gren.gravity = 1;
         gren.touch = W_GrenadeTouch;
-        gren.think = W_GrenadeThink;
-        gren.nextthink = time + 5;
-        gren.nodrawtoclient = self;   // shooter sees client-predicted grenade instead
+        // CSQC replication via projectile_SendEntity — owner-hide handled
+        // by the SendEntity FALSE-return for the shooter; others receive
+        // origin+velocity+avelocity at sv_toss_tickrate for smooth flight.
+        gren.proj_type     = PROJ_TYPE_GRENADE;
+        gren.SendEntity    = projectile_SendEntity;
+        gren.SendFlags     = 1;
+        gren.proj_fuse_end = time + 5;
+        gren.think         = W_GrenadeProjectileTick;
+        gren.nextthink     = time + Toss_NextThinkInterval();
 
         // Random fire sound
         float snd = random();

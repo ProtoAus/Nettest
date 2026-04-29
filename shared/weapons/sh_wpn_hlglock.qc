@@ -258,8 +258,8 @@ void() CSQC_PredictHLGlockCommand =
             {
                 localsound("sounds/weapons/wpn_hlglock/fire.wav");
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(HLGLOCK_BASE_SPREAD, HLGLOCK_MOVE_SPREAD, HLGLOCK_FULL_SPREAD_SPEED,
-                    HLGLOCK_CLOSE_DAMAGE, HLGLOCK_MIN_DAMAGE, HLGLOCK_DAMAGE_FALLOFF_RANGE);
+                CSQC_PredictedPenetratingImpact(HLGLOCK_BASE_SPREAD, HLGLOCK_MOVE_SPREAD, HLGLOCK_FULL_SPREAD_SPEED,
+                    HLGLOCK_CLOSE_DAMAGE, HLGLOCK_MIN_DAMAGE, HLGLOCK_DAMAGE_FALLOFF_RANGE, 10, 0.94);
                 CSQC_SpawnCasing("models/weapons/9mmcasing.mdl",
                     '8 4 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }
@@ -286,8 +286,8 @@ void() CSQC_PredictHLGlockCommand =
             {
                 localsound("sounds/weapons/wpn_hlglock/fire.wav");
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(HLGLOCK_ALT_SPREAD, HLGLOCK_MOVE_SPREAD, HLGLOCK_FULL_SPREAD_SPEED,
-                    HLGLOCK_CLOSE_DAMAGE, HLGLOCK_MIN_DAMAGE, HLGLOCK_DAMAGE_FALLOFF_RANGE);
+                CSQC_PredictedPenetratingImpact(HLGLOCK_ALT_SPREAD, HLGLOCK_MOVE_SPREAD, HLGLOCK_FULL_SPREAD_SPEED,
+                    HLGLOCK_CLOSE_DAMAGE, HLGLOCK_MIN_DAMAGE, HLGLOCK_DAMAGE_FALLOFF_RANGE, 10, 0.94);
                 CSQC_SpawnCasing("models/weapons/9mmcasing.mdl",
                     '8 4 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }

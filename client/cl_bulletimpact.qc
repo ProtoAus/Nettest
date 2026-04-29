@@ -98,7 +98,23 @@ float(float mat) Impact_GetEffectFor =
 float(entity hit) Impact_ClassifyLocal =
 {
     if (!hit) return IMPACT_MAT_DEFAULT;
-    if (hit.classname == "player") return IMPACT_MAT_FLESH;
+    // All player hits use the lethal spark-splash variant — promoted from
+    // headshot/killing-blow only so every body shot reads with the same
+    // visceral look. Server uses IMPACT_MAT_FLESH_LETHAL for player hits
+    // too (sh_weapon_standard.qc + shotgun pellet paths), keeping the
+    // predicted local effect identical to the authoritative one.
+    if (hit.classname == "player") return IMPACT_MAT_FLESH_LETHAL;
+    // Remote players in this mod render through player_visual_proxy
+    // (CSQC entity networked via CSQC_Ent_Update), not via engine player
+    // slots. Classify them as flesh too so local-hit particles land.
+    if (hit.classname == "player_visual_proxy") return IMPACT_MAT_FLESH_LETHAL;
+
+    // Physics props — metal sparks/ric on hit, no hole (the bullet-
+    // hole gate rejects by classname).  Replicated via SendEntity
+    // (cl_physprop.qc) which sets classname before the trace can
+    // ever land, so this match is reliable now.
+    if (hit.classname == "phys_barrel" || hit.classname == "phys_can")
+        return IMPACT_MAT_METAL;
 
     // Breakable brush — read material code mirroring server values.
     // Hardcoded values mirror sv_breakable.qc:14-21 (BREAKABLE_*).
@@ -152,6 +168,18 @@ vector impact_light_pos[8];
 float  impact_light_time[8];
 float  impact_light_count;
 
+// Explosion lights — same ringbuffer pattern but brighter / wider / longer
+// so grenade explosions read as the real visual punch (not a tiny bullet
+// flash). dynamiclight_add wants a per-frame call to persist, so the
+// lifetime fades the radius + intensity over EXPLOSION_LIGHT_DURATION.
+const float EXPLOSION_LIGHT_RADIUS   = 360;
+const float EXPLOSION_LIGHT_DURATION = 0.45;
+const float EXPLOSION_LIGHT_MAX      = 4;
+
+vector explosion_light_pos[4];
+float  explosion_light_time[4];
+float  explosion_light_count;
+
 void(vector pos) CSQC_AddImpactLight =
 {
     float slot;
@@ -160,6 +188,43 @@ void(vector pos) CSQC_AddImpactLight =
     impact_light_pos[slot] = pos;
     impact_light_time[slot] = cltime;
     impact_light_count += 1;
+};
+
+void(vector pos) CSQC_AddExplosionLight =
+{
+    float slot;
+    slot = explosion_light_count - floor(explosion_light_count / EXPLOSION_LIGHT_MAX) * EXPLOSION_LIGHT_MAX;
+    explosion_light_pos[slot] = pos;
+    explosion_light_time[slot] = cltime;
+    explosion_light_count += 1;
+};
+
+// Animate the classic Quake explode sprite frames 0..5, then remove.
+// Spawned explicitly because CSQC's te_explosion builtin only emits
+// particles + sound, not the sprite (the sprite is part of the engine's
+// network temp-entity handler, which doesn't fire when te_explosion is
+// called locally from CSQC).
+void() CSQC_ExplodeSpriteThink =
+{
+    self.frame = self.frame + 1;
+    if (self.frame >= 6)
+    {
+        remove(self);
+        return;
+    }
+    self.nextthink = time + 0.05;
+};
+
+void(vector pos) CSQC_SpawnExplodeSprite =
+{
+    entity spr = spawn();
+    setorigin(spr, pos);
+    setmodel(spr, "progs/s_explod.spr");
+    spr.drawmask  = MASK_ENGINE;
+    spr.effects   = EF_ADDITIVE;
+    spr.frame     = 0;
+    spr.think     = CSQC_ExplodeSpriteThink;
+    spr.nextthink = time + 0.05;
 };
 
 // Called every render frame from CSQC_UpdateView, before renderscene()
@@ -182,6 +247,27 @@ void() CSQC_DrawImpactLights =
         frac = 1.0 - (age / IMPACT_LIGHT_DURATION);
         dynamiclight_add(impact_light_pos[i], IMPACT_LIGHT_RADIUS * frac, '1 0.7 0.3' * frac);
     }
+
+    // Explosion lights — same per-frame fade. Color skewed warm-orange
+    // with super-bright peak (>1 components ride the HDR path so the
+    // light blooms hot in the first frames) then linearly fades out.
+    for (i = 0; i < EXPLOSION_LIGHT_MAX; i++)
+    {
+        if (explosion_light_time[i] <= 0)
+            continue;
+
+        age = cltime - explosion_light_time[i];
+        if (age >= EXPLOSION_LIGHT_DURATION)
+        {
+            explosion_light_time[i] = 0;
+            continue;
+        }
+
+        frac = 1.0 - (age / EXPLOSION_LIGHT_DURATION);
+        dynamiclight_add(explosion_light_pos[i],
+                         EXPLOSION_LIGHT_RADIUS * frac,
+                         '2.5 1.6 0.7' * frac);
+    }
 };
 
 // Pull particles just slightly off the surface — far enough that the
@@ -191,12 +277,20 @@ void() CSQC_DrawImpactLights =
 const float IMPACT_PARTICLE_OFFSET = 4;
 
 // Should we spawn a persistent bullet-hole decal for this impact?
-// Static surfaces (world / func_wall / unbreakable brushes) yes — they
-// don't move or get destroyed. Flesh and breakables no, because the
-// decal would get orphaned when the target dies, moves, or breaks.
+// Any material that leaves a solid surface behind gets a hole — for
+// func_breakables the hole attaches to the brush entity via
+// CSQC_SpawnBulletHole's bh_dynamic path, follows it if it moves, and
+// is removed by CSQC_BulletHolesRemoveByOwner on brush destruction.
+// Glass included: cracks on a pane that's still intact look great, and
+// the same destroy-event cleanup yanks them the instant the pane breaks.
+// Excluded:
+//   FLESH / FLESH_LETHAL — hit target is a player or gibbing flesh
+//                          breakable; decal would orphan on the body.
 float(float mat) Impact_ShouldSpawnHole =
 {
-    return (mat == IMPACT_MAT_DEFAULT);
+    if (mat == IMPACT_MAT_FLESH)        return 0;
+    if (mat == IMPACT_MAT_FLESH_LETHAL) return 0;
+    return 1;
 };
 
 // CSQC mirror of sv_breakable.qc BreakableRandomImpactSound. Takes the
@@ -497,7 +591,12 @@ void(vector pos, vector normal) CSQC_BulletImpactSilent =
 // `mat` = IMPACT_MAT_* code from the server multicast — server has full
 // trace_ent visibility (including func_breakable.style) and classifies
 // per-surface there, so this gets the accurate per-material effect.
-void(vector pos, vector normal, float mat) CSQC_BulletImpactRemote =
+// `target` is the BSP entity the trace hit (resolved via the entnum
+// that rides along in the CSQC_EVENT_IMPACT payload), or world for
+// static-geometry hits. Passing the real target lets bullet-hole
+// decals attach to func_breakables on remote-shooter impacts so they
+// vanish along with the breakable on CSQC_EVENT_BRUSH_DESTROY.
+void(vector pos, vector normal, float mat, entity target) CSQC_BulletImpactRemote =
 {
     vector offset_pos;
     float r;
@@ -511,7 +610,7 @@ void(vector pos, vector normal, float mat) CSQC_BulletImpactRemote =
     pointparticles(Impact_GetEffectFor(mat), offset_pos, normal * 200, 1);
     CSQC_AddImpactLight(offset_pos);
     if (Impact_ShouldSpawnHole(mat))
-        CSQC_SpawnBulletHole(pos, normal, world);
+        CSQC_SpawnBulletHole(pos, normal, target);
 
     // Positional ricochet sound for other players
     r = floor(random() * 5) + 1;

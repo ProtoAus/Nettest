@@ -51,7 +51,7 @@ const float K98_MIN_DAMAGE            = 60;
 const float K98_DAMAGE_FALLOFF_RANGE  = 4096;
 const float K98_DRYFIRE_DELAY         = 0.2;
 const float K98_STAB_DAMAGE           = 70;
-const float K98_STAB_RANGE            = 72;
+const float K98_STAB_RANGE            = 88;
 
 // --- Pre-computed state durations ---
 const float K98_DRAW_DURATION         = (K98_DRAW_END - K98_DRAW_START) * K98_FRAME_INTERVAL;
@@ -299,8 +299,8 @@ void() CSQC_Predict98KCommand =
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_dod98k/fire.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(K98_BASE_SPREAD, K98_MOVE_SPREAD, K98_FULL_SPREAD_SPEED,
-                    K98_CLOSE_DAMAGE, K98_MIN_DAMAGE, K98_DAMAGE_FALLOFF_RANGE);
+                CSQC_PredictedPenetratingImpact(K98_BASE_SPREAD, K98_MOVE_SPREAD, K98_FULL_SPREAD_SPEED,
+                    K98_CLOSE_DAMAGE, K98_MIN_DAMAGE, K98_DAMAGE_FALLOFF_RANGE, 80, 0.98);
                 CSQC_SpawnCasing("models/weapons/riflecasingbig.mdl",
                     '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }

@@ -7,9 +7,8 @@
 .vector movedir;     /* push direction for trigger_push */
 .float  spawnflags;  /* trigger/entity spawn flags (not in CSQC defs) */
 
-// Standard QW player fields not present in cl_defs.qc
-.float  weapon;
-.float  weaponframe;
+// .weapon / .weaponframe moved to shared/sh_customdefs.qc so shared
+// files compiled before this one (sh_weapons.qc) can reference them.
 // attack_finished moved to shared/sh_weapons.qc
 
 vector cursor_pos; /* Current mouse cursor position, updated in csqc_inputevent */
@@ -93,6 +92,43 @@ float clframetime;
 // actual use site is CSQC_PlayerVisual_Update; see cl_player.qc for the
 // full set of vis_* fields.
 .float vis_owner_entnum;
+
+// Forward-declared so cl_player.qc's CSQC_PlayerVisual_Predraw can gate
+// own-body visibility on the death-cam window. Defined in cl_spectate.qc,
+// which is compiled after cl_player.qc.
+float() Spectate_InDeathCam;
+
+// Entity smoothing / error compensation (CSQC_SmoothSetOrigin in
+// cl_player.qc). Declared here so the helper — which appears earlier
+// in cl_player.qc than the other vis_* field block — can see them.
+.vector extrap_error_offset;
+.float  extrap_error_cltime;
+// Fade duration chosen at offset-capture time.  Held with the offset so
+// the helper applying the decaying offset reads the SAME value the
+// reconcile site computed — without storing it, the two sites would
+// have to recompute from velocity each frame and drift.  Used only by
+// cl_driftlock's reconcile-error fade; the remote-proxy and
+// toss-smooth helpers fall back to cl_extrap_smooth_time directly.
+.float  extrap_error_smooth_time;
+
+// Toss-smoothing fields (cl_tosssmooth.qc). Stash the latest server
+// {origin, velocity, sample-time} and per-entity gravity factor so the
+// per-frame predraw can extrapolate forward and apply the decaying
+// extrap_error_offset on top. Used by dropped weapons + server
+// projectiles. General entity fields, intentionally not gated.
+.vector toss_last_origin;
+.vector toss_last_velocity;
+.float  toss_last_cltime;
+.float  toss_gravity;          // 0 = no gravity (rocket); 0.5 = grenade; 1 = full
+.float  toss_moving;           // cached velocity state for predraw smoothing
+
+// Forward — defined in cl_player.qc, dispatched from cl_main.qc's
+// CSQC_ConsoleCommand. Both files compile after cl_customdefs.qc.
+void() CSQC_DumpPlayerBones;
+
+// Drift-trace ring buffer (cl_player.qc). Used by cl_weapons.qc which
+// compiles earlier than cl_player.qc.
+void() CL_Drift_Dump;
 
 vector() readvector =
 {

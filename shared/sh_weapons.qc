@@ -85,6 +85,9 @@ const float CSQC_EVENT_BREAKABLE_IMPACT_SOUND = 16;  // breakable material thump
 const float CSQC_EVENT_BREAKABLE_BREAK_SOUND = 17;   // breakable destruction sound routed to PVS clients except the attacker (who predicted it via replicated brush_health)
 const float CSQC_EVENT_FOOTSTEP_SOUND = 18;          // player footstep, routed to PVS clients except the stepper (whose CSQC pmove plays it via localsound as the predicted step fires)
 const float CSQC_EVENT_DEATH_DROP = 19;              // visual fake-drop scatter for the dying local player; server-authoritative origin/velocity so the fake matches the server's rng scatter until weapon_become_solid wires the real SendEntity at +0.7s
+const float CSQC_EVENT_GRENADE_EXPLODE = 20;         // grenade detonation FX — sprite + particles + light + boom sound. Server multicasts to PVS EXCEPT shooter (who handles all FX locally via CSQC_FakeHLGrenadeExplode). Carries a sample-variant byte for the boom; the dimension_send mask on the multicast does the filtering (sound() builtin doesn't honor dimension_send, so we route the audio via this event).
+const float CSQC_EVENT_DAMAGE_REPORT   = 21;         // death-screen damage report (sent only to the dying player) — given/taken lists with each opponent's name + current HP. cl_playerdamage gates display.
+const float CSQC_EVENT_GRENADE_BOUNCE  = 22;         // grenade surface bounce sound. Server multicasts to PVS EXCEPT shooter (who plays it locally via CSQC_FakeHLGrenadeBounce). Carries the sample-variant byte. Same rationale as CSQC_EVENT_GRENADE_EXPLODE — sound() doesn't honor dimension_send, multicast does.
 
 // --- Kill-feed causes (byte payload of CSQC_EVENT_KILLFEED) ---
 const float KILL_CAUSE_WEAPON       = 0;
@@ -92,6 +95,42 @@ const float KILL_CAUSE_FALL         = 1;
 const float KILL_CAUSE_SUICIDE      = 2;
 const float KILL_CAUSE_FRIENDLYFIRE = 3;
 const float KILLFEED_NO_ATTACKER    = 255;
+
+// --- Server-projectile types (CSQC_ENT_PROJECTILE sub-byte) ---
+// Routed through the CSQC tosssmooth pipeline (cl_projectiles.qc parser
+// + cl_tosssmooth.qc extrap+smooth predraw) so other players see the
+// projectile fly smoothly instead of snapping at every server send tick.
+// Each type carries its own model + gravity factor — see Projectile_Type
+// helpers below. Add new entries here AND in those helpers.
+const float PROJ_TYPE_HLGRENADE     = 0;   // hand grenade (gravity 0.5)
+const float PROJ_TYPE_GRENADE       = 1;   // GL grenade   (gravity 1.0)
+const float PROJ_TYPE_RPG_ROCKET    = 2;   // RPG rocket   (gravity 0.0)
+const float PROJ_TYPE_CROSSBOW_BOLT = 3;   // crossbow     (gravity 0.0)
+
+// Type → world model path. Matches the SSQC spawn site of each
+// projectile. Used by the CSQC parser to setmodel the local entity
+// once it knows the type byte.
+string(float t) Projectile_TypeModel =
+{
+    if (t == PROJ_TYPE_HLGRENADE)     return "models/weapons/wpn_hlgrenade/w_grenade.mdl";
+    if (t == PROJ_TYPE_GRENADE)       return "models/weapons/wpn_grenadelauncher/grenade.mdl";
+    if (t == PROJ_TYPE_RPG_ROCKET)    return "models/weapons/wpn_hlrpg/rpgrocket.mdl";
+    if (t == PROJ_TYPE_CROSSBOW_BOLT) return "models/weapons/wpn_hlcrossbow/bolt.mdl";
+    return "";
+};
+
+// Type → gravity factor for CSQC extrap. Must match the .gravity each
+// projectile sets on its server-spawn site so the CSQC trajectory
+// extrapolation curves the same way the server's MOVETYPE_TOSS path
+// computes between snapshots.
+float(float t) Projectile_TypeGravity =
+{
+    if (t == PROJ_TYPE_HLGRENADE)     return 0.5;
+    if (t == PROJ_TYPE_GRENADE)       return 1.0;
+    if (t == PROJ_TYPE_RPG_ROCKET)    return 0;
+    if (t == PROJ_TYPE_CROSSBOW_BOLT) return 0;
+    return 0;
+};
 
 // Should the HUD crosshair render for this weapon?  Melees, utility
 // items, and scope-capable snipers all hide it.  Must stay in sync with
@@ -127,6 +166,70 @@ float(float wep_id) Weapon_HasScope =
     if (wep_id == WEP_G3SG1)    return 1;
     if (wep_id == WEP_CROSSBOW) return 1;
     return 0;
+};
+
+// Canonicalize a weapon token so console-friendly aliases like
+// "desert eagle", "hl_shotgun", ".357", and "AK47" all collapse to a
+// simple comparable key.
+string(string raw) Weapon_NameKey =
+{
+    raw = strtolower(raw);
+    raw = strreplace(" ", "", raw);
+    raw = strreplace("_", "", raw);
+    raw = strreplace("-", "", raw);
+    raw = strreplace(".", "", raw);
+    return raw;
+};
+
+// Accept either a numeric weapon id or a short weapon alias. Unknown
+// strings fall back to the caller-provided value so existing numeric
+// cvar behavior remains intact.
+float(string raw, float fallback) Weapon_IdFromStringOrDefault =
+{
+    string key = Weapon_NameKey(raw);
+    float numeric;
+    string numeric_key;
+
+    if (key == "")
+        return fallback;
+
+    numeric = stof(raw);
+    numeric_key = Weapon_NameKey(sprintf("%g", numeric));
+    if (key == numeric_key && numeric == floor(numeric)
+        && numeric >= WEP_NONE && numeric <= WEP_CSUSP)
+        return numeric;
+
+    if (key == "none" || key == "wepnone") return WEP_NONE;
+    if (key == "deagle" || key == "deserteagle" || key == "wepdeagle") return WEP_DEAGLE;
+    if (key == "knife" || key == "wepknife") return WEP_KNIFE;
+    if (key == "ak47" || key == "wepak47") return WEP_AK47;
+    if (key == "m4a1" || key == "wepm4a1") return WEP_M4A1;
+    if (key == "flakshotgun" || key == "wepflakshotgun") return WEP_FLAKSHOTGUN;
+    if (key == "9mm" || key == "pistol" || key == "weppistol") return WEP_PISTOL;
+    if (key == "gauss" || key == "wepgauss") return WEP_GAUSS;
+    if (key == "crossbow" || key == "wepcrossbow") return WEP_CROSSBOW;
+    if (key == "357" || key == "wep357") return WEP_357;
+    if (key == "k98" || key == "dod98k" || key == "wepdod98k") return WEP_DOD98K;
+    if (key == "scout" || key == "wepscout") return WEP_SCOUT;
+    if (key == "gl" || key == "grenadelauncher" || key == "wepgrenadelauncher") return WEP_GRENADELAUNCHER;
+    if (key == "m249" || key == "wepm249") return WEP_M249;
+    if (key == "crowbar" || key == "hlcrowbar" || key == "wephlcrowbar") return WEP_HLCROWBAR;
+    if (key == "hlshotgun" || key == "wephlshotgun") return WEP_HLSHOTGUN;
+    if (key == "m3" || key == "csm3" || key == "wepcsm3") return WEP_CSM3;
+    if (key == "mp5" || key == "csmp5" || key == "wepcsmp5") return WEP_CSMP5;
+    if (key == "rebar" || key == "weprebar") return WEP_REBAR;
+    if (key == "awp" || key == "csawp" || key == "wepcsawp") return WEP_CSAWP;
+    if (key == "wrench" || key == "wepwrench") return WEP_WRENCH;
+    if (key == "glock" || key == "wepglock") return WEP_GLOCK;
+    if (key == "g3sg1" || key == "wepg3sg1") return WEP_G3SG1;
+    if (key == "hlsmg" || key == "wephlsmg") return WEP_HLSMG;
+    if (key == "rpg" || key == "hlrpg" || key == "wephlrpg") return WEP_HLRPG;
+    if (key == "grenade" || key == "hlgrenade" || key == "wephlgrenade") return WEP_HLGRENADE;
+    if (key == "hlglock" || key == "wephlglock") return WEP_HLGLOCK;
+    if (key == "egon" || key == "hlegon" || key == "wephlegon") return WEP_HLEGON;
+    if (key == "usp" || key == "csusp" || key == "wepcsusp") return WEP_CSUSP;
+
+    return fallback;
 };
 
 // Short display name for a weapon ID — used by the kill feed and (potentially)
@@ -207,12 +310,18 @@ float(float wep_id) Weapon_SpeedFactor =
     if (wep_id == WEP_HLRPG)           return 0.945;
 
     // heavy — ~250 qu/s at default sv_maxspeed 270
-    if (wep_id == WEP_CSAWP)           return 0.926;
     if (wep_id == WEP_G3SG1)           return 0.926;
-    if (wep_id == WEP_M249)            return 0.926;
+
+    // extra-heavy — ~240 qu/s at default sv_maxspeed 270
+    if (wep_id == WEP_CSAWP)           return 0.889;
+    if (wep_id == WEP_M249)            return 0.889;
 
     return 1.0;  // empty hands / unknown
 };
+
+// Definition moved below — Weapon_SpeedFactor_Smooth references .weapon
+// and .pm_weapon_* fields that are declared further down in the file.
+// See the function body after the field block.
 
 // --- Bullet impact material codes (sent in CSQC_EVENT_IMPACT) ---
 // Used by CSQC to pick the right particle effect per surface.
@@ -274,9 +383,72 @@ const float PLAYER_ATTACKANIM_MELEE = 2;
 .float wep_action_id;    // increments whenever a new weapon action starts
 .float wep_nextframe;    // server-side: absolute server time of next frame tick
 .float wep_anim_start;   // absolute time when the current animation began
+
+// Speed-factor transition state (used by Weapon_SpeedFactor_Smooth in
+// PM_ReadMovevars).  On weapon switch, both client and server reset
+// pm_weapon_blend_progress to 0 and capture the CURRENT effective factor
+// into pm_weapon_prev_factor.  PM_ReadMovevars advances progress by
+// input_timelength / sv_wepswap_speed_transition per pmove tick.  The
+// smooth helper interpolates from prev → new based on progress.
+//
+// Input-tick-driven (NOT wall-clock-driven): both sides advance progress
+// using the same input_timelength per buffered command, so client live,
+// client replay, and server pmove all reach the same progress at the
+// same input frame.  Mirrors shift-walk's input-bit determinism — see
+// the rewrite history in plans/radiant-popping-hollerith.md for context.
+//
+// Serialized via the prediction proxy (PM_SF_WEAPON_STATE section) so a
+// reconcile mid-blend doesn't lose in-flight transition state.
+.float pm_weapon_blend_progress;   // 0 = at prev_factor, 1 = at new_factor
+.float pm_weapon_prev_factor;
 .float zoomstage;        // scope zoom level: 0=unscoped, 1=zoom1, 2=zoom2
                          // sent through proxy as elapsed time; used by CSQC to
                          // compute the display frame via cltime - wep_anim_start
+
+// Returns the player's CURRENT effective speed factor, smoothing the
+// transition from the prior weapon's factor (pm_weapon_prev_factor) to
+// the new weapon's factor based on pm_weapon_blend_progress (0..1).
+// PM_ReadMovevars advances progress per pmove tick.
+//
+// Input-tick-driven so both client live, client replay, and server pmove
+// reach the same progress at the same input frame — pmove output stays
+// deterministic regardless of ping.
+//
+// The "prev factor" snapshot at switch time is intentionally the CURRENT
+// effective factor (which may itself be mid-transition from a previous
+// switch).  That makes rapid back-to-back switches blend smoothly
+// instead of snapping back to an old reference point each time.
+//
+// Defined here, not earlier with Weapon_SpeedFactor, because it needs
+// .pm_weapon_* and .weapon (declared above) to be in scope.
+float() Weapon_SpeedFactor_Smooth =
+{
+    // mp_weaponweight 0 disables the per-weapon movement penalty entirely
+    // (AWP / M249 / sniper rifles no longer slow you down). Server-pushed
+    // via serverinfo so CSQC prediction reads the same value the SSQC
+    // pmove uses — otherwise the predicted speed would diverge.
+#ifdef CSQC
+    float weight_on = serverkeyfloat("mp_weaponweight", 1);
+#else
+    float weight_on = cvar("mp_weaponweight");
+#endif
+    if (weight_on == 0)
+        return 1.0;
+
+    float new_factor = Weapon_SpeedFactor(self.weapon);
+    float t = self.pm_weapon_blend_progress;
+
+    if (t >= 1.0) return new_factor;
+    if (t <= 0.0) return self.pm_weapon_prev_factor;
+
+    // Smoothstep — zero slope at both endpoints so the factor leaves
+    // prev_factor and reaches new_factor without slope discontinuities.
+    // Rapid back-to-back switches blend continuously because each switch
+    // captures prev_factor at the current effective value.
+    float smooth_t = t * t * (3 - 2 * t);
+    return self.pm_weapon_prev_factor
+         + (new_factor - self.pm_weapon_prev_factor) * smooth_t;
+};
 
 // --- Active weapon function pointers (set by equip, valid for current weapon) ---
 .void() fire;

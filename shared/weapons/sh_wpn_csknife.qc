@@ -24,8 +24,8 @@
 // ============================================================
 
 // --- Balance ---
-const float KNIFE_SLASH_RANGE  = 64;
-const float KNIFE_STAB_RANGE   = 72;
+const float KNIFE_SLASH_RANGE  = 72;
+const float KNIFE_STAB_RANGE   = 88;
 const float KNIFE_SLASH_DAMAGE = 20;
 const float KNIFE_STAB_DAMAGE  = 50;
 
@@ -338,6 +338,10 @@ float(float attack_range, float damage) W_KnifeTraceAttack =
     sound(self, CHAN_AUTO, "sounds/weapons/wpn_csknife/hitwall.wav", 1.0, ATTN_NORM);
     dimension_send = saved_dim;
 
+    // Phys props get pushed by melee too (no-op for world / static BSP —
+    // PhysProp_TryPushFromTrace gates on movetype == MOVETYPE_PHYSICS).
+    PhysProp_TryPushFromTrace(v_forward, damage);
+
     if (trace_ent == world || trace_ent.solid == SOLID_BSP)
     {
         W_ImpactEffect(trace_endpos);
@@ -577,17 +581,24 @@ void() CSQC_PredictKnifeCommand =
         }
     }
 
-    // Predicted hit sound — fires at KNIFE_SLASH_HIT_TIME (or the stab's
+    // Predicted hit — fires at KNIFE_SLASH_HIT_TIME (or the stab's
     // variant-specific hit time) elapsed into an attack, matching the
-    // moment W_KnifeTraceAttack runs on the server. The server excludes
-    // the attacker from its hit-sound broadcast (via dimension_send
-    // narrowing) so this predicted play is the single authoritative
-    // audio feedback for the slash/stab contact — eliminating the
-    // ~ping-ms delay on hit thumps that made the weapon feel laggy.
+    // moment W_KnifeTraceAttack runs on the server.
     //
-    // Stage 2 = hit sound played (separate from stage 1 = draw sound).
-    // Trace uses input_angles since predicted_player lacks v_angle on
-    // CSQC; MOVE_HITMODEL matches the server's W_WeaponTraceLine path.
+    // Routes through CSQC_PredictedMeleeTrace for full bullet-style
+    // parity with crowbar / wrench / 98K bayonet:
+    //   - CSQC_SendHitclaim on player hits (lag-comp client claim)
+    //   - CSQC_PredictBreakableBreak on brushes (instant local break)
+    //   - CSQC_BulletImpactSilent for hit-decal
+    //   - hit/miss sounds picked locally
+    // The server's W_KnifeTraceAttack narrows dimension_send to exclude
+    // the attacker from its hit-sound broadcast, so this predicted play
+    // is the single authoritative audio feedback for the contact.
+    //
+    // hit_snd1/hit_snd2 are the hit1/hit2 player-flesh sounds; if the
+    // trace lands on a non-player CSQC_PredictedMeleeTrace still uses
+    // them, which is fine since the server's hitwall path also plays
+    // through hit-feedback channels at this elapsed moment.
     if (!pm_suppress_sounds
         && self.wep_anim_start > 0
         && csqc_knife_snd_stage < 2)
@@ -595,18 +606,21 @@ void() CSQC_PredictKnifeCommand =
         elapsed = csqc_pred_time - self.wep_anim_start;
         float hit_time = 0;
         float attack_range = 0;
+        float attack_damage = 0;
 
         if (self.weaponstate == WS_FIRE)
         {
-            hit_time     = KNIFE_SLASH_HIT_TIME;
-            attack_range = KNIFE_SLASH_RANGE;
+            hit_time      = KNIFE_SLASH_HIT_TIME;
+            attack_range  = KNIFE_SLASH_RANGE;
+            attack_damage = KNIFE_SLASH_DAMAGE;
         }
         else if (self.weaponstate == WS_SPECIAL)
         {
             // Stab vs stab_miss have different hit-detection moments;
             // predicted_player.weaponframe holds the server-authoritative
             // stab variant picked at alt-fire time.
-            attack_range = KNIFE_STAB_RANGE;
+            attack_range  = KNIFE_STAB_RANGE;
+            attack_damage = KNIFE_STAB_DAMAGE;
             if (predicted_player.weaponframe == KNIFE_SEQ_STAB)
                 hit_time = KNIFE_STAB_HIT_TIME;
             else
@@ -615,20 +629,20 @@ void() CSQC_PredictKnifeCommand =
 
         if (hit_time > 0 && elapsed >= hit_time)
         {
-            vector hit_src, hit_end;
-            makevectors(input_angles);
-            hit_src = predicted_player.origin + predicted_player.view_ofs;
-            hit_end = hit_src + (v_forward * attack_range);
-            traceline(hit_src, hit_end, MOVE_NORMAL | MOVE_HITMODEL, predicted_player);
+            // Pass "" for all sounds — knife sound selection differs
+            // from the standard helper: player hits play hit1/hit2 (50/50),
+            // non-player hits play hitwall.wav, miss plays nothing
+            // (fire-time slash.wav already covers the swing audio).
+            // Pick locally after the trace by inspecting trace_ent (still
+            // populated by CSQC_PredictedMeleeTrace's internal traceline).
+            float did_hit = CSQC_PredictedMeleeTrace(attack_range, attack_damage,
+                "", "", "");
 
-            if (trace_fraction < 1.0)
+            if (did_hit)
             {
-                // Player hit → hit1/hit2; world/breakable → hitwall.
-                // Player detection matches CSQC_PredictedImpact's logic.
                 float is_player_hit =
                     (trace_ent != world && trace_ent.entnum >= 1 && trace_ent.entnum <= maxclients)
                     || (trace_ent.classname == "player_visual_proxy");
-
                 if (is_player_hit)
                 {
                     if (random() < 0.5)

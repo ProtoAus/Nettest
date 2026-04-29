@@ -38,6 +38,20 @@ void(float new_weapon) CSQC_PredictSelectWeapon =
     if (self.weapon != WEP_NONE)
         self.previous_weapon = self.weapon;
 
+    if (cvar("sv_debug_wepswap"))
+    {
+        dprint(sprintf("[CL wepswap] cltime=%g  %g→%g  origin=%v  velocity=%v  speed=%.1f\n",
+            cltime, self.weapon, new_weapon, self.origin, self.velocity, vlen(self.velocity)));
+        CL_Drift_Dump();
+    }
+
+    // Capture the CURRENT effective speed factor (which may itself be
+    // mid-transition from a prior switch) BEFORE updating self.weapon,
+    // then reset blend progress to 0 — PM_ReadMovevars advances it per
+    // pmove tick, deterministic between live, replay and server.
+    self.pm_weapon_prev_factor    = Weapon_SpeedFactor_Smooth();
+    self.pm_weapon_blend_progress = 0;
+
     self.weapon         = new_weapon;
     self.weaponstate    = WS_DRAW;
     self.wep_action_id += 1;
@@ -447,13 +461,20 @@ void(entity w) dropped_weapon_list_remove_csqc =
     }
 }
 
-// Predraw for spinning dropped-weapon pickups (classic-Quake feel).
-// Server flags the weapon via .dropped_spin; client rotates yaw from
-// cltime so every client sees synchronized rotation without angle
-// replication. 100 deg/sec = one revolution per 3.6 s (tuneable).
+// Predraw for every dropped weapon. Two responsibilities:
+//   1. Run the toss-smoothing extrap (cl_tosssmooth.qc) so the entity
+//      flies smoothly between server samples instead of snapping every
+//      sv_toss_tickrate tick.
+//   2. Spin yaw locally on classic-Quake-style pickups (.dropped_spin)
+//      — server doesn't replicate angles for spinners, every client
+//      derives the same rotation from cltime.
+// Always assigned in CSQC_DroppedWeapon_Update so the smoothing path
+// is in effect for both spinning and settled drops.
 float() CSQC_DroppedWeapon_Predraw =
 {
-    self.angles_y = cltime * 100;
+    CSQC_TossPredraw(self);
+    if (self.dropped_spin)
+        self.angles_y = cltime * 100;
     addentity(self);
     return PREDRAW_NEXT;
 };
@@ -466,6 +487,13 @@ void(float isnew) CSQC_DroppedWeapon_Update =
     new_origin_x = readcoord();
     new_origin_y = readcoord();
     new_origin_z = readcoord();
+    // Velocity for the toss-smoothing extrap (cl_tosssmooth.qc). Read
+    // even on settled weapons (server sends 0,0,0) so the parse layout
+    // stays one-shape regardless of phase.
+    vector new_velocity;
+    new_velocity_x = readcoord();
+    new_velocity_y = readcoord();
+    new_velocity_z = readcoord();
     string mdl   = readstring();
     self.dropped_weapon_mag      = readbyte();
     self.dropped_weapon_ammo     = readbyte();
@@ -533,20 +561,13 @@ void(float isnew) CSQC_DroppedWeapon_Update =
         }
     }
 
-    // Attach / detach the rotation predraw based on the server's flag.
-    // Changing the flag mid-life (e.g. by a different server snapshot)
-    // flips behaviour correctly.
-    if (self.dropped_spin)
-        self.predraw = CSQC_DroppedWeapon_Predraw;
-    else
-    {
-        self.predraw = __NULL__;
-        // Inherit the settled pitch/yaw/roll the server's weapon_settle_
-        // think computed from the floor normal — otherwise the real ent
-        // renders flat at (0,0,0) and visibly jumps off the slope when
-        // the fake drop is swapped out.
+    // Single predraw covers both spin-yaw and toss-smoothing extrap.
+    // Inherit settled pitch/yaw/roll for non-spin weapons so the real
+    // ent doesn't pop off a slope at the fake→real handoff (settled
+    // angles come from the server's weapon_settle_think floor trace).
+    self.predraw = CSQC_DroppedWeapon_Predraw;
+    if (!self.dropped_spin)
         self.angles = new_angles;
-    }
 
     if (self.model != mdl)
         setmodel(self, mdl);
@@ -556,7 +577,13 @@ void(float isnew) CSQC_DroppedWeapon_Update =
     vector real_maxs = '0 0 0';
     CSQC_FakeDrop_Size(self.dropped_weapon_id, real_mins, real_maxs);
     setsize(self, real_mins, real_maxs);
-    setorigin(self, new_origin);
+    // Route position through the smoothing helper instead of a bare
+    // setorigin. CSQC_TossSampleApply diffs the new authoritative
+    // origin against the predraw's current extrap, stashes the visual
+    // error into extrap_error_offset, and anchors the new sample for
+    // future extrap. Predraw applies the smoothed origin every frame.
+    // Gravity factor 1.0 = standard MOVETYPE_TOSS (matches server).
+    CSQC_TossSampleApply(self, new_origin, new_velocity, 1.0);
 
     // Hidden-vs-still-present dispatch:
     //   • empty model → server has hidden the pickup (post-touch on a
@@ -938,6 +965,10 @@ void() CSQC_AddPredictedViewmodel =
     if (!predicted_player || predicted_player.weapon == WEP_NONE)
         return;
     if (getstatf(STAT_IS_DEAD))
+        return;
+    // Chase cam renders the third-person proxy — the viewmodel would float
+    // in front of the camera like first-person, which looks wrong.
+    if (cvar("chase_active"))
         return;
 
     mdl = predicted_player.weapon_viewmodel;

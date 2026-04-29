@@ -3,12 +3,31 @@
 
 const float FL_JUMPRELEASED = 4096;
 
+// EF_NODRAW — hides an entity's model from the renderer while keeping
+// SOLID and the AABB intact.  cl_defs.qc declares this const for CSQC
+// (matches the value used by NQEF_NODRAW in the engine).  sv_defs.qc
+// declares the DP_EF_NODRAW extension flag but not the constant
+// itself, so server-side files that use it (sv_push.qc, sv_teleport.qc,
+// sv_ladder.qc — all hide their brush-bbox triggers via this) need
+// it declared somewhere reachable.  Bit value 16 mirrors the
+// authoritative client + extension declarations.
+const float EF_NODRAW = 16;
+
 // Hitclaim dedup — written by W_ApplyDamage in sv_weapons.qc and read by
 // SV_HandleHitclaim in sv_player.qc so server-auth hits and client
 // claims don't double-damage the same target within a single shot.
 // Declared here (earliest server-side file) so both users see them.
 .entity last_damaged_target;
 .float  last_damaged_time;
+
+// BSP entity-lump fields that map compilers (e.g. light, worldspawn) stamp
+// onto entities but we don't consume. Declared as no-op stubs so the engine
+// stops printing "'X' is not a field" warnings on map load. Do not reference.
+// Note: mapname is NOT added here — it already exists as a global string
+// (sv_defs.qc) which shadows any field named `mapname`, so declaring it
+// here as `.string` errors with "Type mismatch on redeclaration".
+.float  delay;      // light / trigger delayed-use timer
+.string wad;        // worldspawn texture wad path(s)
 
 // ---- mover / door / button fields ----
 .vector pos1;           // closed/bottom position
@@ -140,6 +159,7 @@ float red_team_score;       // rounds won by red team
 .float sv_is_dead;          // clientstat: 1 when dead, 0 when alive
 .float sv_blue_score;       // clientstat: blue team round wins
 .float sv_red_score;        // clientstat: red team round wins
+.float pending_round_join;  // TRUE between mid-round Elimination join and next RoundRestart
 
 // Fall damage tracking
 .float fall_velocity;       // current downward speed while airborne
@@ -148,6 +168,9 @@ float red_team_score;       // rounds won by red team
 // Forward declarations
 void(entity player) PlayerRefreshScoreboardInfo;  // sv_player.qc
 void() RoundStart;                                 // sv_main.qc
+// Drift-trace ring buffer (sv_player.qc).
+void(float t_now, float msec, vector mv, float btn, float wep, vector org, vector vel) Drift_Append;
+void(string label) Drift_Dump;
 
 entity player_chain_head;
 .entity player_chain_next;
@@ -179,4 +202,3 @@ void(entity removing) player_chain_remove =
 	removing.player_chain_next = world;
 	removing.player_chain_prev = world;
 };
-

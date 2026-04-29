@@ -291,8 +291,8 @@ void() CSQC_PredictScoutCommand =
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csscout/fire.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(self.zoomstage > 0 ? 0 : SCOUT_BASE_SPREAD, SCOUT_MOVE_SPREAD, SCOUT_FULL_SPREAD_SPEED,
-                    SCOUT_CLOSE_DAMAGE, SCOUT_MIN_DAMAGE, SCOUT_DAMAGE_FALLOFF_RANGE);
+                CSQC_PredictedPenetratingImpact(self.zoomstage > 0 ? 0 : SCOUT_BASE_SPREAD, SCOUT_MOVE_SPREAD, SCOUT_FULL_SPREAD_SPEED,
+                    SCOUT_CLOSE_DAMAGE, SCOUT_MIN_DAMAGE, SCOUT_DAMAGE_FALLOFF_RANGE, 80, 0.98);
                 CSQC_SpawnCasing("models/weapons/riflecasingbig.mdl",
                     '8 -6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }

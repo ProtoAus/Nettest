@@ -16,10 +16,8 @@
 //  m_loading_should_show).
 // ============================================================
 
-// serverkey() isn't declared in the menu defs; pull it in locally.  #354
-// matches pr_menu.c's PF_cl_serverkey entry.
-string(string key) serverkey = #354;
-
+// serverkey() declaration moved to m_menu.qc so the Connect/Disconnect
+// button gate (and the m_draw auto-close) can also read serverinfo.
 // Panel padding — kept in sync with the main menu so sizes feel familiar.
 const float LD_PAD       = 8;    // uniform outer padding
 const float LD_TITLE_SZ  = 18;
@@ -159,6 +157,11 @@ void(vector screensize) m_loading_draw_panel =
                + LD_PAD;
     }
 
+    // Disconnect button at the bottom of the panel — lets the user back
+    // out of a hung connect / long download without dropping to console.
+    float disc_btn_h = 22;
+    float disc_btn_gap = 10;
+
     float panel_w = has_dl ? 280 : 220;
     float panel_h = LD_PAD
                   + LD_TITLE_SZ
@@ -166,6 +169,7 @@ void(vector screensize) m_loading_draw_panel =
                   + 8
                   + stage_block_h
                   + (has_dl ? (6 + card_h) : 0)
+                  + disc_btn_gap + disc_btn_h
                   + LD_PAD;
 
     vector panel_size = [panel_w, panel_h, 0];
@@ -296,6 +300,23 @@ void(vector screensize) m_loading_draw_panel =
                  stats, MENU_TEXT_2, 0.9, 0);
 
         sui_pop_frame();
+    }
+
+    // Disconnect button — anchored to the bottom of the panel.  Mirrors
+    // the in-game Disconnect button's full flow (Menu_DisconnectAnd-
+    // ReturnToMenuMap in m_menu.qc): drops the connection AND relaunches
+    // the backdrop server with cl_menumap, so the user lands back on the
+    // menumap instead of a black screen.  Red colour matches the in-game
+    // Disconnect button.
+    float disc_btn_y = panel_h - LD_PAD - disc_btn_h;
+    if (my_button_colored("ld_disconnect",
+        [LD_PAD, disc_btn_y],
+        [panel_w - LD_PAD * 2, disc_btn_h],
+        "Disconnect",
+        '0.55 0.2 0.2',
+        '0.75 0.3 0.3'))
+    {
+        Menu_DisconnectAndReturnToMenuMap();
     }
 
     sui_pop_frame();

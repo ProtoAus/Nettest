@@ -43,8 +43,22 @@ float() TeamMenuNeedsSelection =
     return getstati(STAT_PLAYERTEAM) <= TEAM_NONE;
 };
 
+// True only when connected to our mod's server.  worldspawn pushes
+// `serverinfo modname nettest` so this key is set on every map our
+// server hosts; vanilla QW servers leave it empty.  Used to gate the
+// team menu off entirely when our client connects to a non-mod server
+// (the menu hijacks cursor + input waiting on STAT_PLAYERTEAM, which
+// vanilla doesn't push, so without this gate the player gets stuck
+// in the menu forever and never spawns).
+float() TeamMenu_IsModServer =
+{
+    return serverkey("modname") == "nettest";
+};
+
 float() TeamMenuIsOpen =
 {
+    if (!TeamMenu_IsModServer())
+        return FALSE;
     return (TeamMenuNeedsSelection() && !team_menu_hidden) || team_menu_forced_open;
 };
 
@@ -254,6 +268,16 @@ void(vector preview_pos, vector preview_size, string mdl_path) DrawCharacterPrev
         model_origin = '0 0 0';
     }
 
+    // No camera-distance reflection here.  Authored cameras (cam +
+    // info_notnull) sit at the position the mapper intended; doubling
+    // origin' = 2*origin - model would mirror the camera through the
+    // model's plane, throwing the camera into walls behind the
+    // authored position — the "void overlay" / "in the wall" symptom.
+    // Synthesised cameras already place themselves at the correct
+    // viewport distance (CAM_SYNTH_BACK_125 = 125 units, picked to
+    // frame a full player in the resized panel).  If a specific
+    // authored camera ever feels too close, fix it in the .map.
+
     setmodel(team_menu_preview_ent, mdl_path);
     team_menu_preview_ent.frame = 1; // CSANIM_IDLE
     team_menu_preview_ent.origin = model_origin;
@@ -273,6 +297,150 @@ void(vector preview_pos, vector preview_size, string mdl_path) DrawCharacterPrev
     setproperty(VF_AFOV, 20);                // tight FOV for portrait framing
     addentity(team_menu_preview_ent);
     renderscene();
+};
+
+// --- FFA Character Select Screen ---
+// All 8 models in a single panel, two columns (blue 0-3 left, red 0-3 right)
+// + one shared 3D preview on the right. No "Back" button (FFA skips Phase 0
+// entirely so there's nowhere to back to). Click sends the appropriate
+// blue/red team command based on which side the picked model belongs to,
+// keeping the backend team field populated for clean mode-switching.
+void() DrawCharacterSelectFFA =
+{
+    float i;
+
+    // Dark background (gated on cl_menu_backdrop so it can be disabled).
+    if (cvar("cl_menu_backdrop"))
+        drawfill('0 0 0', [g_width, g_height, 0], '0.01 0.01 0.02', 0.82, 0);
+
+    // Layout constants. Button column dimensions drive panel height +
+    // preview height so everything stays aligned: bottom of last button
+    // == bottom of preview == (panel_h - bottom_pad).
+    float btn_w = 120;
+    float btn_h = 44;
+    float col_gap = 8;
+    float row_gap = 8;
+    float btn_y0 = 44;
+    float btn_left_pad = 20;
+    float bottom_pad = 16;
+    float btn_area_h = (4 * btn_h) + (3 * row_gap);   // 4 rows × (h + gap) − 1 trailing gap
+
+    // Panel dimensions. panel_h sized to button column + header + bottom
+    // padding so there's no empty bottom strip. panel_w fits two button
+    // columns + inter-section gap + preview + right padding.
+    float preview_w = 200;
+    float preview_h = btn_area_h;
+    float section_gap = 12;
+    float right_pad = 20;
+    float panel_w = btn_left_pad + (2 * btn_w) + col_gap + section_gap + preview_w + right_pad;
+    float panel_h = btn_y0 + btn_area_h + bottom_pad;
+
+    float px = (g_width - panel_w) * 0.5;
+    float py = (g_height - panel_h) * 0.5;
+
+    // Neutral border (no team allegiance shown in FFA).
+    vector neutral_border = '0.55 0.55 0.6';
+
+    sui_push_frame([px, py], [panel_w, panel_h]);
+
+    sui_fill([0, 0], [panel_w, panel_h], '0.06 0.06 0.08', 0.95, 0);
+    sui_border_box([0, 0], [panel_w, panel_h], 2, neutral_border, 0.8, 0);
+
+    sui_set_align([SUI_ALIGN_CENTER, SUI_ALIGN_START]);
+    sui_text([0, 12], [14, 14, 0], "Choose Your Character",
+             '1 1 1', 1.0, 0);
+
+    sui_set_align([SUI_ALIGN_START, SUI_ALIGN_START]);
+
+    // Two columns of 4 buttons each: blue side (0..3) on the left, red
+    // side (4..7) on the right. Indices map directly to the model_idx
+    // we send to the server.
+    float blue_col_x = btn_left_pad;
+    float red_col_x  = blue_col_x + btn_w + col_gap;
+
+    vector blue_col_fill   = '0.12 0.22 0.5';
+    vector blue_col_border = '0.3 0.5 1';
+    vector red_col_fill    = '0.46 0.1 0.12';
+    vector red_col_border  = '1 0.3 0.35';
+
+    for (i = 0; i < 8; i++)
+    {
+        float is_blue_btn = (i < 4);
+        float row = is_blue_btn ? i : (i - 4);
+        float bx = is_blue_btn ? blue_col_x : red_col_x;
+        float by = btn_y0 + row * (btn_h + row_gap);
+
+        vector fill   = is_blue_btn ? blue_col_fill   : red_col_fill;
+        vector border = is_blue_btn ? blue_col_border : red_col_border;
+
+        string btn_id = sprintf("ffacs_char_%d", i);
+        vector btn_col = fill;
+        if (sui_is_hovered(btn_id))
+        {
+            btn_col = btn_col + (border * 0.15);
+            team_menu_hover_model = i;
+        }
+        if (sui_is_held(btn_id))
+            btn_col = btn_col * 0.85;
+
+        sui_push_frame([bx, by], [btn_w, btn_h]);
+        sui_fill([0, 0], [btn_w, btn_h], btn_col, 0.92, 0);
+        sui_border_box([0, 0], [btn_w, btn_h], 2, border, 0.8, 0);
+        sui_action_element([0, 0], [btn_w, btn_h], btn_id, sui_noop);
+
+        sui_set_align([SUI_ALIGN_CENTER, SUI_ALIGN_CENTER]);
+        string char_name = is_blue_btn ? team_blue_names[row]
+                                       : team_red_names[row];
+        sui_text([0, 0], [12, 12, 0], char_name, '1 1 1', 1.0, 0);
+        sui_pop_frame();
+        sui_set_align([SUI_ALIGN_START, SUI_ALIGN_START]);
+
+        if (sui_is_clicked(btn_id))
+        {
+            // Translate unified 0..7 into the right team + 0..3 model_idx.
+            // CharacterMenuSelect reads team_menu_pending_team to build
+            // the "blue"/"red" command string, so set it here just before
+            // dispatching.
+            if (is_blue_btn)
+            {
+                team_menu_pending_team = TEAM_BLUE;
+                CharacterMenuSelect(row);
+            }
+            else
+            {
+                team_menu_pending_team = TEAM_RED;
+                CharacterMenuSelect(row);
+            }
+        }
+    }
+
+    sui_pop_frame();
+
+    // Right side: 3D model preview. Camera-flag selection follows the
+    // hovered model's side, so the preview cam swaps cleanly when the
+    // user moves between the blue and red columns. Top-aligned with the
+    // button column and the same height — no overhang past the buttons.
+    float preview_x = px + panel_w - preview_w - right_pad;
+    float preview_y = py + btn_y0;
+
+    drawfill([preview_x - 1, preview_y - 1], [preview_w + 2, preview_h + 2], '0.2 0.2 0.25', 0.8, 0);
+
+    float hover_idx = team_menu_hover_model;
+    float hover_is_blue = (hover_idx < 4);
+    string preview_mdl;
+    if (hover_is_blue)
+        preview_mdl = team_blue_models[bound(0, hover_idx, TEAM_MODEL_COUNT - 1)];
+    else
+        preview_mdl = team_red_models[bound(0, hover_idx - 4, TEAM_MODEL_COUNT - 1)];
+
+    // Latch pending_team to match the hovered side so DrawCharacterPreview's
+    // camera-flag check picks the right preview cam (CAM_FLAG_TEAM_BLUE_PLAYER
+    // for indices 0-3, CAM_FLAG_TEAM_RED_PLAYER for 4-7).
+    team_menu_pending_team = hover_is_blue ? TEAM_BLUE : TEAM_RED;
+
+    DrawCharacterPreview([preview_x, preview_y], [preview_w, preview_h], preview_mdl);
+
+    sui_set_default_kb_focus("ffacs_char_0");
 };
 
 // --- Character Select Screen ---
@@ -430,11 +598,25 @@ void() TeamMenuDraw =
 
     TeamMenuUpdateCursorState();
 
+    // FFA collapses the menu to a single character-select panel — no
+    // "Join Blue / Join Red" Phase 0. Force state=1 each frame so the
+    // FFA branch always lands on the character grid.
+    // Unified-team modes (FFA + Bhop) collapse the menu to a single
+    // character-select panel — no Phase 0. Force state=1 each frame so
+    // the unified branch always lands on the character grid.
+    float in_ffa = Gamemode_HasUnifiedTeams();
+    if (in_ffa)
+        team_menu_state = 1;
+
     // Keep the server's camera phase in sync with the menu state.  The world
     // view during char-select rides the Team_Blue/Team_Red-flagged cameras;
     // the small preview viewport in DrawCharacterPreview independently uses
     // Team_Blue_Player/Team_Red_Player cameras via CSQC_GetPreviewCamera.
-    if (team_menu_state == 1 && team_menu_pending_team == TEAM_BLUE)
+    // FFA stays on NEUTRAL — the per-hover side flip in DrawCharacterSelectFFA
+    // would otherwise spam cam_phase changes as the user moves the mouse.
+    if (in_ffa)
+        TeamMenuSetCamPhase(CAM_PHASE_NEUTRAL);
+    else if (team_menu_state == 1 && team_menu_pending_team == TEAM_BLUE)
         TeamMenuSetCamPhase(CAM_PHASE_TEAM_BLUE);
     else if (team_menu_state == 1 && team_menu_pending_team == TEAM_RED)
         TeamMenuSetCamPhase(CAM_PHASE_TEAM_RED);
@@ -443,9 +625,13 @@ void() TeamMenuDraw =
 
     if (team_menu_join_pending != TEAM_NONE)
     {
-        // Show "Joining..." overlay while waiting for server
+        // Show "Joining..." overlay while waiting for server. In FFA the
+        // backend team is implementation detail (every model is fair game),
+        // so just say "Joining..." rather than naming a team.
         string status_text;
-        if (team_menu_join_pending == TEAM_BLUE)
+        if (in_ffa)
+            status_text = "Joining...";
+        else if (team_menu_join_pending == TEAM_BLUE)
             status_text = "Joining Blue Team...";
         else
             status_text = "Joining Red Team...";
@@ -458,6 +644,12 @@ void() TeamMenuDraw =
         float tw = stringwidth(status_text, 1, tsz);
         drawstring([g_width * 0.5 - tw * 0.5, g_height * 0.5, 0], status_text, tsz, '1 1 1', 1.0, 0);
         drawfont = prev_font;
+        return;
+    }
+
+    if (in_ffa)
+    {
+        DrawCharacterSelectFFA();
         return;
     }
 
@@ -489,11 +681,15 @@ float(float evtype, float scanx, float chary, float devid) TeamMenuInputEvent =
     {
         if (evtype == IE_KEYDOWN)
         {
-            // ESC in character select → back to team select
-            if (team_menu_state == 1)
-                team_menu_state = 0;
-            else
-                TeamMenuClose();
+            // ESC universally closes the team-select window in any
+            // gamemode and any phase. Previously Phase 1 (character
+            // select) in team mode went back to Phase 0 — but FFA has
+            // no Phase 0 to back to (state is force-pinned to 1), and
+            // users expect ESC to be a consistent "get me out of here"
+            // exit everywhere. The on-screen Back button in team mode's
+            // DrawCharacterSelect still navigates back to Phase 0 for
+            // users who explicitly want it.
+            localcmd("togglemenu\n");
         }
         return TRUE;
     }

@@ -80,6 +80,18 @@ float  PM_MOVETYPE_NOCLIP    = 5;
 .float pm_timecarry;      // leftover command time for fixed-step simulation
 .entity pm_prediction_proxy; // owner-only SSQC->CSQC authoritative snapshot proxy
 
+// Per-field ammo-changed bitmask stored on the prediction proxy.  Six
+// bytes cover 47 mag/ammo/silencer fields — bit N in mbK corresponds to
+// the same field order the PM_SF_AMMO write section (and the matching
+// client read) serialises.  Only fields whose bit is set get a WriteByte
+// — the rest keep their cached value on the client.
+.float pm_ammo_mb0;
+.float pm_ammo_mb1;
+.float pm_ammo_mb2;
+.float pm_ammo_mb3;
+.float pm_ammo_mb4;
+.float pm_ammo_mb5;
+
 // ============================================================================
 //  Per-move working globals  (loaded from self at the start of PM_PlayerMove)
 // ============================================================================
@@ -118,7 +130,30 @@ void() PM_CategorizePosition;
 void() PM_PlayerMove;
 void() PM_PlayerMoveStep;
 void() PM_CheckLadder;
-void(string snd, float vol) PM_EmitStepSound;
+void(float snd_idx, float vol) PM_EmitStepSound;
+
+// Footstep sound catalogue — a flat byte enum so CSQC_EVENT_FOOTSTEP_SOUND
+// can carry a 1-byte index instead of the full ~24-byte sound path.
+// Layout: step1..step4, waterstep1..waterstep10, ladder1..ladder4.
+// Keep FS_SoundName() below in lock-step with this layout.
+const float FS_SOUND_STEP_BASE    = 0;
+const float FS_SOUND_STEP_COUNT   = 4;
+const float FS_SOUND_WATER_BASE   = 4;
+const float FS_SOUND_WATER_COUNT  = 10;
+const float FS_SOUND_LADDER_BASE  = 14;
+const float FS_SOUND_LADDER_COUNT = 4;
+const float FS_SOUND_COUNT        = 18;
+
+string(float idx) FS_SoundName =
+{
+    if (idx >= FS_SOUND_STEP_BASE && idx < FS_SOUND_STEP_BASE + FS_SOUND_STEP_COUNT)
+        return strcat("sounds/player/step", itos(idx - FS_SOUND_STEP_BASE + 1), ".wav");
+    if (idx >= FS_SOUND_WATER_BASE && idx < FS_SOUND_WATER_BASE + FS_SOUND_WATER_COUNT)
+        return strcat("sounds/player/waterstep", itos(idx - FS_SOUND_WATER_BASE + 1), ".wav");
+    if (idx >= FS_SOUND_LADDER_BASE && idx < FS_SOUND_LADDER_BASE + FS_SOUND_LADDER_COUNT)
+        return strcat("sounds/player/ladder", itos(idx - FS_SOUND_LADDER_BASE + 1), ".wav");
+    return "sounds/player/step1.wav";   // safe fallback on out-of-range idx
+};
 
 // ============================================================================
 //  8.  PM_Trace  –  tracebox wrapper using the shared hull
@@ -225,14 +260,49 @@ void PM_DisentangleFromPlayer()
     if (oy < 0) oy = 0;
     if (oz < 0) oz = 0;
 
+    // "Standing on top" early-out: if my AABB bottom (feet) is at or
+    // above the other player's vertical center (their hip), the contact
+    // is unambiguously vertical — push Z+ to land on their head/
+    // shoulders cleanly, regardless of which axis has the smallest
+    // overlap.  Without this, near-edge cases (small ox/oy plus tiny
+    // oz) eject horizontally — the "stuck floating on horizontal edge"
+    // symptom from playtest.  Walking-into-from-front (feet at floor =
+    // same Z as theirs) doesn't trigger because my_bottom < their_center
+    // there.
+    float my_bottom    = my_mins_z;
+    float their_center = (hi_mins_z + hi_maxs_z) * 0.5;
+    if (my_bottom >= their_center)
+    {
+        pm_origin_z += oz + 1;
+        return;
+    }
+
     // Nudge 1 unit past the overlap so the next tracebox clears.
+    //
+    // NEVER push DOWNWARD here.  The "above their center" branch above
+    // already handled standing-on-top with Z+.  Any time we reach this
+    // block we're at-or-below their center, so a Z- push would shove
+    // us further into them or, worse, into the floor.  Concrete
+    // playtest case: I'm standing on someone's head, they crouch.
+    // Their pmove disentangles vs. me with smallest-axis = oz → tries
+    // to push them DOWN by `oz + 1` → they sink visibly into the
+    // floor before re-entering pmove next tick.
+    //
+    // If Z would be the smallest axis but its direction would be
+    // downward, fall back to the smaller of the two horizontal axes.
+    // We always have a viable horizontal push when overlap exists
+    // (ox or oy must be > 0 for the AABBs to actually intersect).
     vector push = '0 0 0';
     if (ox <= oy && ox <= oz)
         push_x = (pm_origin_x >= trace_ent.origin_x) ? (ox + 1) : -(ox + 1);
     else if (oy <= oz)
         push_y = (pm_origin_y >= trace_ent.origin_y) ? (oy + 1) : -(oy + 1);
+    else if (pm_origin_z >= trace_ent.origin_z)
+        push_z = oz + 1;                    // Z smallest, going UP — fine
+    else if (ox <= oy)
+        push_x = (pm_origin_x >= trace_ent.origin_x) ? (ox + 1) : -(ox + 1);
     else
-        push_z = (pm_origin_z >= trace_ent.origin_z) ? (oz + 1) : -(oz + 1);
+        push_y = (pm_origin_y >= trace_ent.origin_y) ? (oy + 1) : -(oy + 1);
 
     pm_origin = pm_origin + push;
 }
@@ -1450,9 +1520,9 @@ void PM_CheckJump()
 
     // jump sound: step at full volume (water sound if feet are wet)
     if (pm_waterlevel >= 1)
-        PM_EmitStepSound(strcat("sounds/player/waterstep", itos(floor(random() * 10) + 1), ".wav"), 1.0);
+        PM_EmitStepSound(FS_SOUND_WATER_BASE + floor(random() * FS_SOUND_WATER_COUNT), 1.0);
     else
-        PM_EmitStepSound(strcat("sounds/player/step", itos(floor(random() * 4) + 1), ".wav"), 1.0);
+        PM_EmitStepSound(FS_SOUND_STEP_BASE  + floor(random() * FS_SOUND_STEP_COUNT),  1.0);
 
     pm_onground       = FALSE;
     // CS 1.6 jump impulse: sqrt(2 * sv_gravity * 45) — 45-unit apex at g=800
@@ -1815,24 +1885,109 @@ void PM_NoclipMove()
 
 // Helper: read a movement cvar from serverinfo (client) or local cvar (server).
 // The server pushes movement cvars to serverinfo so clients auto-sync.
+#ifdef CSQC
+float pm_mv_cache_valid;
+float pm_mv_cache_stamp;
+float pm_mv_cache_hull_height;
+float pm_mv_cache_eye_height;
+float pm_mv_cache_gravity;
+float pm_mv_cache_maxspeed;
+float pm_mv_cache_shiftspeed;
+float pm_mv_cache_wepswap_transition;
+float pm_mv_cache_stopspeed;
+float pm_mv_cache_friction;
+float pm_mv_cache_waterfriction;
+float pm_mv_cache_accelerate;
+float pm_mv_cache_airaccelerate;
+float pm_mv_cache_wateraccelerate;
+float pm_mv_cache_spectatormaxspeed;
+float pm_mv_cache_stamina;
+float pm_mv_cache_autohop;
+float pm_mv_cache_mintic;
+
+float(string name, float fallback) PM_ReadMovevarUncached =
+{
+    float val;
+    val = serverkeyfloat(name, 0);
+    if (!val) val = fallback;
+    return val;
+};
+
+void() PM_RefreshMovevarCache =
+{
+    float cache_stamp;
+
+    cache_stamp = serverprevtime;
+    if (cache_stamp <= 0)
+        cache_stamp = cltime;
+
+    if (pm_mv_cache_valid && pm_mv_cache_stamp == cache_stamp)
+        return;
+
+    pm_mv_cache_valid = TRUE;
+    pm_mv_cache_stamp = cache_stamp;
+    pm_mv_cache_hull_height         = PM_ReadMovevarUncached("sv_hull_height", 72);
+    pm_mv_cache_eye_height          = PM_ReadMovevarUncached("sv_eye_height", 56);
+    pm_mv_cache_gravity             = PM_ReadMovevarUncached("sv_gravity", 800);
+    pm_mv_cache_maxspeed            = PM_ReadMovevarUncached("sv_maxspeed", 270);
+    pm_mv_cache_shiftspeed          = PM_ReadMovevarUncached("sv_shiftspeed", 135);
+    pm_mv_cache_wepswap_transition  = PM_ReadMovevarUncached("sv_wepswap_speed_transition", 0.15);
+    pm_mv_cache_stopspeed           = PM_ReadMovevarUncached("sv_stopspeed", 100);
+    pm_mv_cache_friction            = PM_ReadMovevarUncached("sv_friction", 4);
+    pm_mv_cache_waterfriction       = PM_ReadMovevarUncached("sv_waterfriction", 1);
+    pm_mv_cache_accelerate          = PM_ReadMovevarUncached("sv_accelerate", 5);
+    pm_mv_cache_airaccelerate       = PM_ReadMovevarUncached("sv_airaccelerate", 150);
+    pm_mv_cache_wateraccelerate     = PM_ReadMovevarUncached("sv_wateraccelerate", 10);
+    pm_mv_cache_spectatormaxspeed   = PM_ReadMovevarUncached("sv_spectatormaxspeed", 500);
+    pm_mv_cache_stamina             = PM_ReadMovevarUncached("sv_stamina", 0);
+    pm_mv_cache_autohop             = PM_ReadMovevarUncached("sv_autohop", 0);
+    pm_mv_cache_mintic              = PM_ReadMovevarUncached("sv_mintic", 0.01);
+};
+#endif
+
 float(string name, float fallback) PM_ReadMovevar =
 {
     float val;
 #ifdef CSQC
-    val = serverkeyfloat(name, 0);
+    PM_RefreshMovevarCache();
+    if (name == "sv_hull_height")              return pm_mv_cache_hull_height;
+    if (name == "sv_eye_height")               return pm_mv_cache_eye_height;
+    if (name == "sv_gravity")                  return pm_mv_cache_gravity;
+    if (name == "sv_maxspeed")                 return pm_mv_cache_maxspeed;
+    if (name == "sv_shiftspeed")               return pm_mv_cache_shiftspeed;
+    if (name == "sv_wepswap_speed_transition") return pm_mv_cache_wepswap_transition;
+    if (name == "sv_stopspeed")                return pm_mv_cache_stopspeed;
+    if (name == "sv_friction")                 return pm_mv_cache_friction;
+    if (name == "sv_waterfriction")            return pm_mv_cache_waterfriction;
+    if (name == "sv_accelerate")               return pm_mv_cache_accelerate;
+    if (name == "sv_airaccelerate")            return pm_mv_cache_airaccelerate;
+    if (name == "sv_wateraccelerate")          return pm_mv_cache_wateraccelerate;
+    if (name == "sv_spectatormaxspeed")        return pm_mv_cache_spectatormaxspeed;
+    if (name == "sv_stamina")                  return pm_mv_cache_stamina;
+    if (name == "sv_autohop")                  return pm_mv_cache_autohop;
+    if (name == "sv_mintic")                   return pm_mv_cache_mintic;
+    val = PM_ReadMovevarUncached(name, fallback);
 #else
     val = cvar(name);
-#endif
     if (!val) val = fallback;
+#endif
     return val;
 };
 
 void PM_ReadMovevars()
 {
+#ifdef CSQC
+    PM_RefreshMovevarCache();
+#endif
+
     // Hull height cvar — set to 56 (default) or 72 (GoldSrc proportions).
     // All duck/view values are derived so crouching adjusts automatically.
     float h;
+#ifdef CSQC
+    h = pm_mv_cache_hull_height;
+#else
     h = PM_ReadMovevar("sv_hull_height", 72);
+#endif
     if (h < 32) h = 56;
 
     //  standing hull:  0 → h   (feet at origin), shifted down by pm_player_z_offset
@@ -1858,36 +2013,90 @@ void PM_ReadMovevars()
      // serverinfo via SV_UpdateMovementServerInfo; CSQC's PM_ReadMovevar
      // reads it back via serverkeyfloat — both sides converge on the
      // same value so prediction and view stay in sync.
-    float eye_h = PM_ReadMovevar("sv_eye_height", 56);
+    float eye_h;
+#ifdef CSQC
+    eye_h = pm_mv_cache_eye_height;
+#else
+    eye_h = PM_ReadMovevar("sv_eye_height", 56);
+#endif
     PM_VIEW_OFS_x = 0;      PM_VIEW_OFS_y = 0;      PM_VIEW_OFS_z = eye_h - zo;
     PM_DUCK_VIEW_OFS_x = 0; PM_DUCK_VIEW_OFS_y = 0; PM_DUCK_VIEW_OFS_z = h * 0.75 - 4 - zo;
 
+#ifdef CSQC
+    mv_gravity           = pm_mv_cache_gravity;
+    mv_maxspeed          = pm_mv_cache_maxspeed;
+    mv_shiftspeed        = pm_mv_cache_shiftspeed;
+#else
     mv_gravity           = PM_ReadMovevar("sv_gravity", 800);
     mv_maxspeed          = PM_ReadMovevar("sv_maxspeed", 270);
     mv_shiftspeed        = PM_ReadMovevar("sv_shiftspeed", 135);
+#endif
 
     // Per-weapon weight scaling.  self is the player entity in both
     // SSQC and CSQC (= predicted_player during prediction), so reading
-    // self.weapon converges identically and weapon-switch speed change
-    // is predicted instantly.
-    float wep_spd_factor = Weapon_SpeedFactor(self.weapon);
+    // self.weapon converges identically.
+    //
+    // Weapon_SpeedFactor_Smooth ramps the factor from prev → new based
+    // on .pm_weapon_blend_progress (0..1).  Switch resets progress to 0
+    // and captures prev_factor (CSQC_PredictSelectWeapon / W_SelectWeapon).
+    // Here we advance progress by input_timelength / transition each
+    // pmove tick — input-tick-driven, deterministic between live, replay
+    // and server, regardless of ping.  Mirrors how shift-walk's bit-flag
+    // is replayed identically on both sides.
+    float transition;
+#ifdef CSQC
+    transition = pm_mv_cache_wepswap_transition;
+#else
+    transition = PM_ReadMovevar("sv_wepswap_speed_transition", 0.15);
+#endif
+    if (transition > 0.001 && self.pm_weapon_blend_progress < 1.0)
+    {
+        self.pm_weapon_blend_progress = min(1.0,
+            self.pm_weapon_blend_progress + (input_timelength / transition));
+    }
+    else if (transition <= 0.001)
+    {
+        // Disabled / instant switch — pin progress to 1 so the factor
+        // is unconditionally the new weapon's full value.
+        self.pm_weapon_blend_progress = 1.0;
+    }
+
+    float wep_spd_factor = Weapon_SpeedFactor_Smooth();
     mv_maxspeed   *= wep_spd_factor;
     mv_shiftspeed *= wep_spd_factor;
+#ifdef CSQC
+    mv_stopspeed         = pm_mv_cache_stopspeed;
+    mv_friction          = pm_mv_cache_friction;
+    mv_waterfriction     = pm_mv_cache_waterfriction;
+    mv_accelerate        = pm_mv_cache_accelerate;
+#else
     mv_stopspeed         = PM_ReadMovevar("sv_stopspeed", 100);
     mv_friction          = PM_ReadMovevar("sv_friction", 4);
     mv_waterfriction     = PM_ReadMovevar("sv_waterfriction", 1);
     mv_accelerate        = PM_ReadMovevar("sv_accelerate", 5);
+#endif
 
     // sv_airaccelerate: mod default 150 (high-accel strafe feel). If the
     // movevar is 0 for some reason, fall back to mv_accelerate rather
     // than leaving air control at zero.
+#ifdef CSQC
+    mv_airaccelerate     = pm_mv_cache_airaccelerate;
+#else
     mv_airaccelerate     = PM_ReadMovevar("sv_airaccelerate", 150);
+#endif
     if (!mv_airaccelerate)    mv_airaccelerate     = mv_accelerate;
 
+#ifdef CSQC
+    mv_wateraccelerate   = pm_mv_cache_wateraccelerate;
+    mv_spectatormaxspeed = pm_mv_cache_spectatormaxspeed;
+    mv_stamina           = pm_mv_cache_stamina;
+    mv_autohop           = pm_mv_cache_autohop;
+#else
     mv_wateraccelerate   = PM_ReadMovevar("sv_wateraccelerate", 10);
     mv_spectatormaxspeed = PM_ReadMovevar("sv_spectatormaxspeed", 500);
     mv_stamina           = PM_ReadMovevar("sv_stamina", 0);
     mv_autohop           = PM_ReadMovevar("sv_autohop", 0);
+#endif
 #ifdef CSQC
     // Client-side autohop: predicts bunnyhop locally even when the server
     // hasn't enabled it.  Will desync from the server if sv_autohop is 0
@@ -1899,6 +2108,55 @@ void PM_ReadMovevars()
     // per-entity gravity multiplier
     mv_entgravity = self.gravity ? self.gravity : 1;
 }
+
+// ============================================================================
+//  PM_BoxInTriggerBrush — BSP-shape overlap test for an angled trigger brush
+//
+// The legacy AABB pre-filter still runs as a cheap reject (covers most
+// triggers, costs only six float compares). Triggers that pass the AABB
+// then go through this probe to confirm the player's hull actually
+// overlaps the BSP geometry — not just the AABB enclosing it. Without
+// this step, an angled / diagonally-cut brush behaves as its full bbox.
+//
+// Trick: temporarily swap the trigger to SOLID_BSP and tag it with a
+// dedicated dimension bit. Set self.dimension_hit to ONLY that bit so
+// the tracebox can't hit anything else (world brushes, other triggers,
+// players) — only this one specific trigger's BSP geometry.
+//
+// SSQC: triggers carry their `*N` BSP submodel since trigger spawn no
+// longer zeroes modelindex (sv_push.qc / sv_teleport.qc / sv_ladder.qc).
+//
+// CSQC: trigger SendEntity functions now ship the BSP modelindex too;
+// CSQC_PushTrigger_Update / TeleportTrigger / LadderTrigger bind it via
+// setmodelindex so the probe runs identically here and prediction
+// matches the server on angled brushes. Falls through to AABB-only if
+// modelindex hasn't arrived yet (very early in the connection).
+// ============================================================================
+
+const float PM_TRIGGER_PROBE_DIM = 64;   // dim bit reserved for this probe
+
+float(entity trig) PM_BoxInTriggerBrush =
+{
+    if (!trig.modelindex)
+        return TRUE;   // no BSP available — fall back to AABB result
+
+    float saved_solid     = trig.solid;
+    float saved_dim_solid = trig.dimension_solid;
+    float saved_dim_hit   = self.dimension_hit;
+
+    trig.solid            = SOLID_BSP;                 // make MOVE_NORMAL hit it
+    trig.dimension_solid |= PM_TRIGGER_PROBE_DIM;      // tag for filter
+    self.dimension_hit    = PM_TRIGGER_PROBE_DIM;      // only collide with tagged
+
+    tracebox(pm_origin, PM_CurrentMins(), PM_CurrentMaxs(), pm_origin,
+             MOVE_NORMAL, self);
+
+    trig.solid            = saved_solid;
+    trig.dimension_solid  = saved_dim_solid;
+    self.dimension_hit    = saved_dim_hit;
+
+    return trace_startsolid && trace_ent == trig;
+};
 
 // ============================================================================
 //  25.  PM_CheckTriggerPushes  –  velocity impulse from overlapping push triggers
@@ -1961,6 +2219,11 @@ void() PM_CheckTriggerPushes =
         if (player_absmin_z >= trig_absmax_z) continue;
         if (player_absmax_z <= trig_absmin_z) continue;
 
+        // BSP refinement — confirms the player actually overlaps the
+        // brush geometry (handles angled / diagonally-cut trigger brushes).
+        if (!PM_BoxInTriggerBrush(trig))
+            continue;
+
         PM_ApplyTriggerPush(trig);
     }
 };
@@ -2001,6 +2264,11 @@ void() PM_CheckTeleportTriggers =
         if (player_absmax_y <= trig_absmin_y) continue;
         if (player_absmin_z >= trig_absmax_z) continue;
         if (player_absmax_z <= trig_absmin_z) continue;
+
+        // BSP refinement — only teleport if the player actually overlaps
+        // the brush geometry (not just the AABB enclosing it).
+        if (!PM_BoxInTriggerBrush(trig))
+            continue;
 
         // snap to destination
         pm_origin   = trig.tele_dest_origin;
@@ -2187,6 +2455,11 @@ void() PM_CheckLadder =
         if (player_absmin_z >= trig_absmax_z) continue;
         if (player_absmax_z <= trig_absmin_z) continue;
 
+        // BSP refinement — only attach to ladder if the player actually
+        // overlaps the brush geometry (handles angled / cut ladder brushes).
+        if (!PM_BoxInTriggerBrush(trig))
+            continue;
+
         pm_on_ladder = TRUE;
 
         if (trig.movedir != '0 0 0')
@@ -2277,14 +2550,14 @@ float cl_last_replay_step_time;
 // of the predicted step. The shared PM_UpdateStepSound above runs on both
 // sides and keeps pm_step_time in sync, so both paths hit this helper at
 // the same cadence.
-void(string snd, float vol) PM_EmitStepSound =
+void(float snd_idx, float vol) PM_EmitStepSound =
 {
 #ifdef SSQC
     if (cvar("sv_debug_footsteps"))
     {
         float sv_dt = self.sv_last_step_time > 0 ? (time - self.sv_last_step_time) : 0;
         print(sprintf("^6[step-server]^7 ent=%g t=%.3f dt=%.3f snd=%s vol=%.2f ",
-                      num_for_edict(self), time, sv_dt, snd, vol),
+                      num_for_edict(self), time, sv_dt, FS_SoundName(snd_idx), vol),
               sprintf("pstep=%.3f ft=%.4f spd=%.0f grnd=%g\n",
                       self.pm_step_time, pm_frametime,
                       vlen([self.velocity_x, self.velocity_y, 0]),
@@ -2296,11 +2569,14 @@ void(string snd, float vol) PM_EmitStepSound =
     // Every OTHER client in PVS hears the step at ping-latency; the
     // stepper's CSQC already played its own copy via localsound below
     // (the non-replay prediction pass, before pm_suppress_sounds flips).
+    //
+    // Sound index (FS_SOUND_*) is a 1-byte enum — the string is rebuilt on
+    // the receiver via FS_SoundName().  Saves ~35 B/event over WriteString.
     WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
     WriteByte(MSG_MULTICAST, CSQC_EVENT_FOOTSTEP_SOUND);
     WriteByte(MSG_MULTICAST, num_for_edict(self));
     WriteByte(MSG_MULTICAST, bound(0, vol * 255, 255));
-    WriteString(MSG_MULTICAST, snd);
+    WriteByte(MSG_MULTICAST, snd_idx);
     WriteCoord(MSG_MULTICAST, self.origin_x);
     WriteCoord(MSG_MULTICAST, self.origin_y);
     WriteCoord(MSG_MULTICAST, self.origin_z);
@@ -2317,6 +2593,7 @@ void(string snd, float vol) PM_EmitStepSound =
         float verbose = cvar("cl_debug_footsteps");
         float cl_speed = vlen([self.velocity_x, self.velocity_y, 0]);
         float cl_grnd  = (self.flags & FL_ONGROUND) ? 1 : 0;
+        string snd = FS_SoundName(snd_idx);
         if (pm_suppress_sounds)
         {
             if (verbose >= 2)
@@ -2365,7 +2642,7 @@ void() PM_UpdateStepSound =
     float speed;
     float interval;
     float vol;
-    string snd;
+    float snd_idx;
 
     // advance the countdown
     if (self.pm_step_time > 0)
@@ -2387,7 +2664,7 @@ void() PM_UpdateStepSound =
         if (vlen(pm_velocity) < 50) return;
         interval = 0.35;
         vol      = 0.65;
-        snd = strcat("sounds/player/ladder", itos(floor(random() * 4) + 1), ".wav");
+        snd_idx  = FS_SOUND_LADDER_BASE + floor(random() * FS_SOUND_LADDER_COUNT);
     }
     else if (pm_waterlevel >= 1)
     {
@@ -2395,7 +2672,7 @@ void() PM_UpdateStepSound =
         if (speed < 80) return;
         interval = 0.35;
         vol      = 0.50;
-        snd = strcat("sounds/player/waterstep", itos(floor(random() * 10) + 1), ".wav");
+        snd_idx  = FS_SOUND_WATER_BASE + floor(random() * FS_SOUND_WATER_COUNT);
     }
     else if (pm_onground)
     {
@@ -2417,7 +2694,7 @@ void() PM_UpdateStepSound =
             interval = 0.40;
             vol      = 0.50;
         }
-        snd = strcat("sounds/player/step", itos(floor(random() * 4) + 1), ".wav");
+        snd_idx = FS_SOUND_STEP_BASE + floor(random() * FS_SOUND_STEP_COUNT);
     }
     else
     {
@@ -2425,7 +2702,7 @@ void() PM_UpdateStepSound =
     }
 
     self.pm_step_time = interval;
-    PM_EmitStepSound(snd, vol);
+    PM_EmitStepSound(snd_idx, vol);
 };
 
 // ============================================================================
@@ -2641,13 +2918,6 @@ done:
     self.velocity = pm_velocity;
     PM_SyncHull();
 
-#ifdef SSQC
-    // QC-side collision against rotated physics-prop shapes — runs AFTER
-    // commit so it can write to self.origin / self.velocity directly,
-    // bypassing any global-aliasing concerns with pm_origin/pm_velocity.
-    PhysProp_DepenetratePlayer(self);
-#endif
-
     if (pm_onground)
         self.flags = self.flags | FL_ONGROUND;
     else
@@ -2660,20 +2930,177 @@ done:
 //  26.  PM_PlayerMove  –  fixed-step wrapper around PM_PlayerMoveStep
 // ============================================================================
 
+// Capacity for the noblock stash. 32 = QW MAX_PLAYERS upper bound;
+// we never need more than maxclients - 1 entries on either side
+// (server: live players minus self; client: each remote slot's engine
+// entity + visual proxy). PM_PMOVE_NOBLOCK_STASH_MAX is dimensioned
+// generously so a 32-player server fully covers the dual-entity client
+// case.
+const float PM_PMOVE_NOBLOCK_STASH_MAX = 64;
+entity pm_noblock_stash_ent  [PM_PMOVE_NOBLOCK_STASH_MAX];
+float  pm_noblock_stash_solid[PM_PMOVE_NOBLOCK_STASH_MAX];
+float  pm_noblock_stash_count;
+float  pm_noblock_dbg_last;     // rate-limit for [noblock] dprints
+
+
+// Make every OTHER live player non-solid so PM_PlayerMoveStep's traces
+// pass through them. Restored unconditionally in PM_NoblockRestore.
+//
+// Server-side: the SSQC `player` entity carries the player's authoritative
+// hull, so we just walk player_chain_head and stash live ones.
+//
+// Client-side: the visual proxy is the sole collider per remote player
+// (SOLID_BBOX, set by CSQC_PlayerVisual_Update for live remotes).  An
+// earlier engine-slot loop ran here too but turned out to be dead code
+// in this CSQC mode — edict_num(n) for n=1..maxclients doesn't return
+// engine player slots, only CSQC entities that happen to occupy those
+// edicts (predicted_player, preview models, etc.).  Removed the
+// engine-slot iteration; findchain over the proxy classname catches
+// every real remote-player collider.
+void() PM_NoblockStash =
+{
+    pm_noblock_stash_count = 0;
+
+#ifdef SSQC
+    entity p = player_chain_head;
+    while (p && pm_noblock_stash_count < PM_PMOVE_NOBLOCK_STASH_MAX)
+    {
+        if (p != self && !p.is_dead && p.solid != SOLID_NOT
+            && p.classname == "player")
+        {
+            pm_noblock_stash_ent  [pm_noblock_stash_count] = p;
+            pm_noblock_stash_solid[pm_noblock_stash_count] = p.solid;
+            p.solid = SOLID_NOT;
+            pm_noblock_stash_count = pm_noblock_stash_count + 1;
+        }
+        p = p.player_chain_next;
+    }
+#else
+    // CSQC stash: visual proxies ONLY.
+    //
+    // The earlier engine-slot loop (iterate `edict_num(n)` for n=1..
+    // maxclients, stash anything with a player-model prefix) was dead
+    // code in this CSQC config — `edict_num(n)` doesn't return engine
+    // player slots here (those don't have CSQC edicts at all when the
+    // mod renders remote players via player_visual_proxy entities).
+    // Live diagnostic confirmed: every iteration returned either
+    // predicted_player, a team-select preview model, a viewmodel slot,
+    // or null — never a real per-player engine collider.  The proxy
+    // IS the only collider for remote players, and the iteration
+    // below catches it.
+    entity vp = findchain(classname, "player_visual_proxy");
+    while (vp && pm_noblock_stash_count < PM_PMOVE_NOBLOCK_STASH_MAX)
+    {
+        if (vp != self && vp.solid != SOLID_NOT)
+        {
+            pm_noblock_stash_ent  [pm_noblock_stash_count] = vp;
+            pm_noblock_stash_solid[pm_noblock_stash_count] = vp.solid;
+            vp.solid = SOLID_NOT;
+            pm_noblock_stash_count = pm_noblock_stash_count + 1;
+        }
+        vp = vp.chain;
+    }
+#endif
+};
+
+void() PM_NoblockRestore =
+{
+    float i;
+    for (i = 0; i < pm_noblock_stash_count; i = i + 1)
+    {
+        if (pm_noblock_stash_ent[i])
+            pm_noblock_stash_ent[i].solid = pm_noblock_stash_solid[i];
+        pm_noblock_stash_ent[i] = world;
+    }
+    pm_noblock_stash_count = 0;
+};
+
 void PM_PlayerMove()
 {
     float fixedstep;
     float remaining;
     float saved_timelength;
+    float noblock_active;
 
     // Use sv_mintic as the physics step size so one cvar controls both
     // FTE's server tick rate and our internal simulation rate.
     // 0.015 = 66.67 Hz (standard CS 1.6), 0.01 = 100 Hz (competitive CS 1.6).
-    fixedstep = cvar("sv_mintic");
+    //
+    // Read via PM_ReadMovevar so CSQC pulls the server's pushed value
+    // (via serverkey), not the client engine's local sv_mintic which
+    // can drift from the server's value at non-default tickrates and
+    // produce a different fixedstep iteration count per usercmd.  The
+    // mismatch surfaces during jumps at >64 Hz tickrate as visible
+    // camera bobbing — gravity accumulates differently between client
+    // and server pmove → cl_driftlock fade absorbs the per-tick
+    // divergence → fade keeps re-triggering per snapshot.
+    fixedstep = PM_ReadMovevar("sv_mintic", 0.01);
     if (fixedstep < 0.001) fixedstep = 0.01;
 
     saved_timelength = input_timelength;
     remaining = max(self.pm_timecarry + input_timelength, 0);
+
+    // mp_noblock: temporarily desolidify every other live player so the
+    // pmove traces in this function (and its substep helpers) pass through
+    // them. Restored after the move loop, before the function returns —
+    // bullet traces in PreThink see the normal SOLID state again. Sampled
+    // once per cmd so toggling the cvar mid-game applies on the next tick;
+    // no respawn required.
+    //
+    // Source differs by VM:
+    //   SSQC reads its own cvar() — the server is the authority and the
+    //     cvar is registered SV-side via sh_cvar_table.qc.
+    //   CSQC reads serverkey() — the cvar isn't registered on CSQC, so
+    //     cvar() would return 0 and the client would predict full
+    //     collision against other players while the server's trace
+    //     passes through, causing visible rubber-banding.  The value
+    //     is pushed by sv_main.qc SV_UpdateMovementServerInfo each tick
+    //     it changes.
+#ifdef SSQC
+    noblock_active = cvar("mp_noblock") > 0;
+#else
+    noblock_active = stof(serverkey("mp_noblock")) > 0;
+#endif
+    if (noblock_active)
+        PM_NoblockStash();
+
+    // Diagnostic: rate-limited dprint of noblock state every ~0.5 s so we
+    // can confirm CSQC sees the serverinfo push and the stash actually
+    // captured remote players.  Toggle via `cl_debug_noblock 1` (CSQC) or
+    // `sv_debug_noblock 1` (SSQC).
+#ifdef CSQC
+    if (cvar("cl_debug_noblock"))
+#else
+    if (cvar("sv_debug_noblock"))
+#endif
+    {
+        if (time - pm_noblock_dbg_last > 0.5)
+        {
+            pm_noblock_dbg_last = time;
+#ifdef CSQC
+            dprint(sprintf("[noblock CSQC] active=%g serverkey='%s' stashed=%g\n",
+                noblock_active, serverkey("mp_noblock"), pm_noblock_stash_count));
+#else
+            dprint(sprintf("[noblock SSQC] active=%g cvar=%g stashed=%g\n",
+                noblock_active, cvar("mp_noblock"), pm_noblock_stash_count));
+#endif
+            // Per-entity dump — confirms BOTH the engine player slot
+            // AND the visual proxy are getting stashed on CSQC (or just
+            // the player chain entry on SSQC).  If only one shows,
+            // either the proxy bbox / classname check is filtering it
+            // out or the entity hadn't materialised at stash time.
+            float i;
+            for (i = 0; i < pm_noblock_stash_count; i = i + 1)
+            {
+                entity ne = pm_noblock_stash_ent[i];
+                if (!ne) continue;
+                vector ofs = ne.origin - pm_origin;
+                dprint(sprintf("   [%g] cn='%s' entnum=%g ofs='%v' solid_was=%g\n",
+                    i, ne.classname, num_for_edict(ne),
+                    ofs, pm_noblock_stash_solid[i]));
+            }
+        }
+    }
 
     while (remaining + PM_FIXEDSTEP_EPSILON >= fixedstep)
     {
@@ -2690,4 +3117,7 @@ void PM_PlayerMove()
 
     self.pm_timecarry = remaining;
     input_timelength = saved_timelength;
+
+    if (noblock_active)
+        PM_NoblockRestore();
 }

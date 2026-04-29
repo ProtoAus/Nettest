@@ -8,16 +8,11 @@ float HUD_CROSSHAIR_BASE_SPREAD_TO_GAP_SCALE = 120;
 float HUD_CROSSHAIR_MOVE_SPREAD_TO_GAP_SCALE = 360;
 float HUD_CROSSHAIR_GAP_LERP_SPEED = 14;
 
+// Crosshair cvars are now registered from the shared table in
+// shared/sh_cvar_table.qc CVar_Init(). This stub is kept so the
+// existing call site (line ~216) doesn't need an update.
 void() HUD_EnsureCrosshairCVars =
 {
-    if (hud_crosshair_cvars_registered)
-        return;
-
-    registercvar("cl_crosshairlength", "6");
-    registercvar("cl_crosshairthickness", "1");
-    registercvar("cl_crosshairgap", "3");
-    registercvar("cl_crosshaircolour", "0 1 0");
-    hud_crosshair_cvars_registered = TRUE;
 };
 
 vector() HUD_GetCrosshairColour =
@@ -121,20 +116,51 @@ float() HUD_GetCrosshairGapBonus =
     if (spread_scale <= 0)
         spread_scale = 1;
 
+    // cl_crosshairweapongap 0  → strip the per-weapon baseline (skip
+    //                             base_spread contribution + force
+    //                             gap_scale=1 so the final multiplier
+    //                             is weapon-neutral).
+    // cl_crosshairdynamic   0  → skip ALL live-accuracy influence:
+    //                             movement, jump/landing (sh_spread_flat),
+    //                             AND the fire/jump portion of
+    //                             spread_scale that previously leaked
+    //                             through the weapon baseline.
+    // Both off → gap_bonus = 0 (caller uses cl_crosshairgap unchanged).
+    float want_weapon_gap = cvar("cl_crosshairweapongap");
+    float want_dynamic    = cvar("cl_crosshairdynamic");
+
+    if (!want_weapon_gap)
+        gap_scale = 1;
+
+    // When dynamic is off, don't let spread_scale (which includes jump
+    // and sustained-fire penalties) inflate the weapon baseline. Pin it
+    // to 1 so base_spread stays at its static per-weapon value and
+    // sh_spread_flat is ignored below.
+    if (!want_dynamic)
+    {
+        spread_scale = 1;
+        sh_spread_flat = 0;
+    }
+
     base_spread = base_spread * spread_scale;
     move_spread = move_spread * spread_scale;
 
-    gap_bonus = base_spread * HUD_CROSSHAIR_BASE_SPREAD_TO_GAP_SCALE;
+    gap_bonus = 0;
+    if (want_weapon_gap)
+        gap_bonus = base_spread * HUD_CROSSHAIR_BASE_SPREAD_TO_GAP_SCALE;
 
-    if (move_spread > 0 && full_speed > 0)
+    if (want_dynamic)
     {
-        move_ratio = move_speed / full_speed;
-        move_ratio = bound(0, move_ratio, 1);
-        gap_bonus = gap_bonus + (move_spread * move_ratio * HUD_CROSSHAIR_MOVE_SPREAD_TO_GAP_SCALE);
-    }
+        if (move_spread > 0 && full_speed > 0)
+        {
+            move_ratio = move_speed / full_speed;
+            move_ratio = bound(0, move_ratio, 1);
+            gap_bonus = gap_bonus + (move_spread * move_ratio * HUD_CROSSHAIR_MOVE_SPREAD_TO_GAP_SCALE);
+        }
 
-    // Flat spread bonus from jump/landing — convert to gap pixels
-    gap_bonus += sh_spread_flat * HUD_CROSSHAIR_BASE_SPREAD_TO_GAP_SCALE;
+        // Flat spread bonus from jump/landing — convert to gap pixels
+        gap_bonus += sh_spread_flat * HUD_CROSSHAIR_BASE_SPREAD_TO_GAP_SCALE;
+    }
 
     return gap_bonus * gap_scale;
 };

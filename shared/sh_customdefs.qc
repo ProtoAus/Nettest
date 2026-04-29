@@ -3,7 +3,7 @@
 #define printf(x, ...) print(sprintf(x, __VA_ARGS__))
 
 const float FL_DUCKING = 8192;
-const float PM_CSQC_PROXY_VERSION = 12;  // bump on wire-layout change
+const float PM_CSQC_PROXY_VERSION = 16;  // bump on wire-layout change.  MUST NOT collide with any CSQC_ENT_* id below (CSQC_Ent_Update dispatches by equality before falling through to the pm_proxy parse — v13 collided with CSQC_ENT_CAMERA and silently routed proxy updates into the camera parser).  v14: ammo bitmask + movement byte/short re-encoding.  v15: origin/velocity now WriteFloat (full 32-bit) instead of WriteCoord (1/8 qu) — eliminates snapshot-rounding as a source of reconcile drift.  v16: weapon-state section now also carries pm_weapon_blend_progress + pm_weapon_prev_factor so the speed-factor blend is input-tick-driven instead of wall-clock-driven (deterministic between client live, client replay, and server pmove regardless of ping).
 const string PM_CSQC_PROXY_CLASSNAME = "pm_csqc_proxy";
 
 // PM_CSQC_PROXY SendFlags section bits — each section is gated separately
@@ -17,6 +17,10 @@ const float CSQC_ENT_PUSH_TRIGGER = 2;
 const float CSQC_ENT_SOLID_BRUSH    = 5;
 const float CSQC_ENT_DROPPED_WEAPON = 7;
 const float CSQC_ENT_PLAYER_VISUAL  = 8;
+// MUST NOT collide with PM_CSQC_PROXY_VERSION (14 currently) or any other
+// CSQC_ENT_* id — engine dispatches by this byte and same-value collision
+// silently routes the wrong parser → wire desync (Host_EndGame).
+const float CSQC_ENT_PROJECTILE     = 9;  // server projectiles routed through cl_tosssmooth.qc extrap+smooth
 
 // trigger_push spawnflags
 const float PUSH_ONCE     = 1;  // remove after first touch
@@ -49,18 +53,23 @@ const float PUSH_SOURCE   = 16; // boost along movedir up to speed, don't overwr
 .float subblend2frac;
 .float basesubblend2frac;
 
-// Lag-compensation pose stash (see server/sv_lagcomp.qc). Saved before a
-// rewound trace so Lagcomp_RestorePlayer can put the true pose back.
+// Lag-compensation pose + position stash (see server/sv_lagcomp.qc).
+// Saved before a rewound trace so Lagcomp_RestorePlayer can put the
+// true pose AND origin/angles back.
 .float  lc_stashed;
 .float  lc_stash_frame, lc_stash_frame1time, lc_stash_frame2, lc_stash_frame2time, lc_stash_lerpfrac;
 .float  lc_stash_baseframe, lc_stash_baseframe1time, lc_stash_baseframe2, lc_stash_baseframe2time, lc_stash_baselerpfrac;
 .float  lc_stash_subblendfrac, lc_stash_subblend2frac, lc_stash_basesubblendfrac, lc_stash_basesubblend2frac;
 .float  lc_stash_bonecontrol1, lc_stash_bonecontrol2, lc_stash_bonecontrol3, lc_stash_bonecontrol4;
 .float  lc_stash_basebone;
+.vector lc_stash_origin, lc_stash_angles;
 
-// Forward declaration so shared weapon code (compiled before sv_lagcomp.qc)
-// can call it. Definition lives in server/sv_lagcomp.qc.
+// Forward declarations so shared weapon code (compiled before
+// sv_lagcomp.qc) can call them. Definitions live in
+// server/sv_lagcomp.qc.
 void(vector src, vector end, float moveflags, entity ignore) Lagcomp_TraceLine;
+void(entity attacker) Lagcomp_BeginRewind;
+void()                Lagcomp_EndRewind;
 
 // Team-select camera system — definitions in server/sv_cameras.qc.
 // Forward-declared so sv_player.qc can route team-selecting players
@@ -68,6 +77,7 @@ void(vector src, vector end, float moveflags, entity ignore) Lagcomp_TraceLine;
 float(entity p) Camera_PlacePlayerAtCurrent;   // returns 1 if placed, 0 if no cameras exist
 void() Camera_UpdateCyclingSpectators;
 void() Camera_EnsureTargetsResolved;
+void() Camera_ResetState;                       // call from worldspawn to clear stale state across map loads
 
 // Per-player camera phase (set via `cmd cam_phase <N>` from menu stuffcmd).
 // Selects which flagged cameras to cycle when the player is in team-select.
@@ -80,6 +90,16 @@ void() Camera_EnsureTargetsResolved;
 // default starting loadout from sv_default_* cvars.
 .float survived_round;
 
+// Server projectile networking (sv_weapons.qc projectile_SendEntity +
+// per-weapon spawn sites). proj_type is one of PROJ_TYPE_* (sh_weapons.qc)
+// and tells the CSQC parser which model + gravity factor to apply.
+// proj_fuse_end is the absolute server time when the projectile's existing
+// one-shot think (explode, expire) should fire — the periodic-tick wrapper
+// in each weapon checks against this each tick at sv_toss_tickrate to drive
+// CSQC SendFlags pulses without losing the original fuse semantics.
+.float proj_type;
+.float proj_fuse_end;
+
 // Forward decl — defined in server/sv_player.qc — so sv_cameras.qc can
 // push the proxy origin while the player is still in team-select (where
 // PlayerPreThink returns early and doesn't call this itself).
@@ -91,6 +111,14 @@ void(entity player) PM_SyncPredictionProxy;
 .float altfire_finished;     // separate cooldown for alt-fire (doesn't block primary)
 
 #ifdef CSQC
+// Standard QW player fields not present in cl_defs.qc. Declared here in
+// shared (early in cl_progs.src) instead of client/cl_customdefs.qc so
+// shared files compiled BEFORE cl_customdefs.qc — like sh_weapons.qc's
+// Weapon_SpeedFactor_Smooth — can reference self.weapon. SSQC has these
+// from sv_defs.qc; this CSQC-only block matches.
+.float weapon;
+.float weaponframe;
+
 // Client-local fire latch, cltime-based. Set whenever CSQC prediction
 // succeeds at firing/dryfiring, checked at the top of every try-fire.
 // Never written from the server and never rolled back by
@@ -114,9 +142,55 @@ void(entity player) PM_SyncPredictionProxy;
 // shared/sh_pmove.qc — which compiles earlier — can reference it from
 // PM_IsLivePlayerCollider.
 .float vis_is_dead;
+// Server-pushed remote-player health (0..255 byte). Used by CSQC predicted-
+// death to decide whether a hit is lethal. Updated in CSQC_PlayerVisual_
+// Update each VP_SF_IDENTITY snapshot. Set to 0 by the local predicted
+// death so a multi-pellet shotgun spread doesn't re-trigger predictions
+// across pellets after the first lethal one.
+.float vis_health;
+// Forward-declared here so CSQC_TryPredictDeath (sh_weapon_logic.qc, which
+// compiles before cl_player.qc) can write the death animation frames into
+// the proxy's anim slots. Authoritative declaration + writer is in
+// cl_player.qc — the predraw applies them to .frame and .baseframe.
+.float vis_anim_bottom;
+.float vis_anim_top;
+// Predicted-death latch — set when CSQC_TryPredictDeath fires on this
+// proxy. While set, CSQC_PlayerVisual_Update IGNORES incoming VP_SF_ANIM
+// section data so the server's late-arriving death animation snapshot
+// can't restart / re-trigger the death pose we already played. Cleared
+// only AFTER `vis_pred_dead_at_time + ping + headroom` has passed AND
+// the snapshot still says alive — so a stale "still alive" snapshot
+// arriving before our shot has round-tripped doesn't pop the proxy
+// back to the standing pose mid-death-animation.
+.float vis_pred_dead_latch;
+.float vis_pred_dead_at_time;        // local time when latch was set (0 = never)
+// Set in CSQC_TryPredictDeath when the predicted death also clears the
+// gib threshold (final damage >= 70).  Lets the CSQC_EVENT_PLAYER_GIBS
+// handler suppress the server's late-arriving gib spawn so the same
+// gibs/sound/particles don't double-fire.  Same staleness window as
+// vis_pred_dead_at_time.
+.float vis_pred_gibs_at_time;
+// Forward-declared so CSQC_TryPredictDeath can clear the weapon byte
+// when it predicts a kill (matching the server's W_DropAllWeaponsOnDeath
+// which empties self.weapon and thus the proxy's vis_weapon_id). Real
+// declaration + writer is in cl_player.qc (parser populates it from
+// the VP_SF_IDENTITY_CL section).
+.float vis_weapon_id;
 
 // Forward decl — defined in client/cl_cameras.qc.
 entity(float required_flag) CSQC_GetPreviewCamera;
+
+// Forward decl — defined in client/cl_physprop.qc.  Manual ray-vs-
+// cylinder override called after each weapon traceline so phys props
+// (which are SOLID_NOT on CSQC to keep pmove unaffected) still register
+// as bullet hits for material classification + decal suppression.
+void(vector trace_src, vector trace_end) CSQC_PhysProp_OverrideTrace;
+
+// Same cylinder math, applied to the penetration loop's reverse trace
+// so exit_pos lands on the prop's back face — lets CSQC penetration
+// continue past the barrel/can with reduced damage instead of dead-
+// ending on entry.  Defined in client/cl_physprop.qc.
+void(vector trace_src, vector trace_end) CSQC_PhysProp_OverrideBackTrace;
 
 // CSQC-side dropped-weapon prediction. Server networks dropped weapons
 // via CSQC_ENT_DROPPED_WEAPON so the client can predict pickups for
@@ -303,6 +377,26 @@ const float STAT_RED_SCORE        = 53;
 const float GAMEMODE_TDM         = 0;
 const float GAMEMODE_ELIMINATION = 1;
 const float GAMEMODE_BHOP        = 2;
+const float GAMEMODE_FFA         = 3;
+
+// Returns TRUE for gamemodes that present every player as one big team:
+// no Phase 0 team-pick (one unified character-select panel), single
+// scoreboard column, merged spawn pool (both blue + red spawn entities),
+// friendly-fire bypassed. Currently FFA + Bhop. Add new modes here as
+// they're created — every site that needs the "unified" treatment routes
+// through this single check, so the codebase stays symmetric.
+//
+// Reads sv_gamemode on SSQC and STAT_GAMEMODE on CSQC; same value either
+// way (sv_main.qc pushes the gamemode to the clientstat each tick).
+float() Gamemode_HasUnifiedTeams =
+{
+#ifdef CSQC
+    float gm = getstatf(STAT_GAMEMODE);
+#else
+    float gm = cvar("sv_gamemode");
+#endif
+    return gm == GAMEMODE_FFA || gm == GAMEMODE_BHOP;
+};
 
 // Round phase constants
 const float ROUND_PHASE_NONE      = 0;
@@ -315,7 +409,15 @@ const float ROUND_PHASE_MAP_END   = 4;
 void(entity owner) phys_barrel_spawn_infront;
 void(entity owner) phys_can_spawn_infront;
 void() phys_barrel_precache;
-void(entity plr) PhysProp_DepenetratePlayer;
+
+// Per-frame cvar cache — refreshed once per StartFrame (sv_main.qc) so
+// hot-path readers (Player_VisualProxy_Sync, SH_PlayerAnim_Update) can
+// read these constants without paying for cvar() every call.  Declared
+// here because sh_player_anims.qc references them and compiles before
+// sv_main.qc in sv_progs.src.
+float sv_cached_pose_keepalive_interval;
+float sv_cached_anim_qu_per_sec;
+float sv_cached_anim_qu_per_sec_crouch;
 #endif
 
 void() precache_everything =

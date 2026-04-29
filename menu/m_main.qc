@@ -3,17 +3,42 @@ float menu_active;
 
 float splash_time;
 
-// Pick a random map name from maps.txt in the gamedir.  One map per
-// line; blank lines and lines starting with '#' are skipped.  Returns
-// "" if the file is missing, empty, or unreadable — caller falls back
-// to the cl_menumap cvar.
+string(string line) Menu_MapListEntryFromLine =
+{
+    float argc = tokenize(line);
+    if (argc <= 0)
+        return "";
+
+    string token = argv(0);
+    if (token == "//" || substring(token, 0, 1) == "#")
+        return "";
+
+    string lower = strtolower(token);
+    float len = strlen(token);
+
+    if (len > 5 && substring(lower, 0, 5) == "maps/")
+    {
+        token = substring(token, 5, len - 5);
+        lower = strtolower(token);
+        len = strlen(token);
+    }
+
+    if (len > 4 && substring(lower, len - 4, 4) == ".bsp")
+        token = substring(token, 0, len - 4);
+
+    return token;
+};
+
+// Pick a random map name from a simple map-list file. One map per line;
+// blank lines and comment lines are skipped. Entries may be either bare
+// map names (`2fort`) or BSP-style paths (`maps/2fort.bsp`).
 //
 // Two passes: count valid lines, then re-open and grab the Nth.  QC
 // has no dynamic arrays and string temporaries can evaporate between
 // frames; a second fopen is simpler than juggling preallocated buffers.
-string() Menu_PickMapFromFile =
+string(string path) Menu_PickMapFromListedFile =
 {
-    float f = fopen("maps.txt", FILE_READ);
+    float f = fopen(path, FILE_READ);
     if (f < 0)
         return "";
 
@@ -21,15 +46,7 @@ string() Menu_PickMapFromFile =
     string line = fgets(f);
     while (line)
     {
-        // FTE's fgets strips LF but can leave a trailing CR on files
-        // written with Windows line endings.
-        float n = strlen(line);
-        if (n > 0 && substring(line, n - 1, 1) == "\r")
-        {
-            line = substring(line, 0, n - 1);
-            n = n - 1;
-        }
-        if (n > 0 && substring(line, 0, 1) != "#")
+        if (Menu_MapListEntryFromLine(line) != "")
             count = count + 1;
         line = fgets(f);
     }
@@ -69,7 +86,7 @@ string() Menu_PickMapFromFile =
     if (pick < 0)      pick = pick + count;
     if (pick >= count) pick = count - 1;
 
-    f = fopen("maps.txt", FILE_READ);
+    f = fopen(path, FILE_READ);
     if (f < 0)
         return "";
 
@@ -78,17 +95,12 @@ string() Menu_PickMapFromFile =
     line = fgets(f);
     while (line)
     {
-        n = strlen(line);
-        if (n > 0 && substring(line, n - 1, 1) == "\r")
-        {
-            line = substring(line, 0, n - 1);
-            n = n - 1;
-        }
-        if (n > 0 && substring(line, 0, 1) != "#")
+        string entry = Menu_MapListEntryFromLine(line);
+        if (entry != "")
         {
             if (i == pick)
             {
-                chosen = line;
+                chosen = entry;
                 break;
             }
             i = i + 1;
@@ -98,6 +110,18 @@ string() Menu_PickMapFromFile =
     fclose(f);
 
     return chosen;
+};
+
+// Prefer the persistent data/maps.txt pool so both the backdrop and the
+// server map-cycle can share one editable list. Fall back to the old
+// gamedir-level maps.txt for older installs.
+string() Menu_PickMapFromFile =
+{
+    string chosen = Menu_PickMapFromListedFile("data/maps.txt");
+    if (chosen != "")
+        return chosen;
+
+    return Menu_PickMapFromListedFile("maps.txt");
 };
 
 void() m_init =
@@ -125,9 +149,9 @@ void() m_init =
 	// main menu, because the engine auto-closes it when transitioning into
 	// a map load.  Blank cl_menumap to disable the whole thing.
 	//
-	// Map picked from maps.txt in the gamedir (one name per line), so the
-	// rotation covers every official map instead of always booting into the
-	// same one.  cl_menumap is used as the fallback when maps.txt is
+	// Map picked from data/maps.txt first (with legacy maps.txt fallback),
+	// so the backdrop and the live server map cycle can share one editable
+	// pool file. cl_menumap is used as the fallback when both files are
 	// missing / empty, and still disables the backdrop when set to "none".
 	//
 	// cl_menu_backdrop_active is the persistent flag CSQC reads to suppress
@@ -138,6 +162,10 @@ void() m_init =
 	// or Create Server (see main_menu / create_server_launch).
 	registercvar("cl_menumap", "surf_gigariver", 0);
 	registercvar("cl_menu_backdrop_active", "0", 0);
+	// 1 = m_draw forces vid_conautoscale based on screen height (default,
+	// keeps the menu legible on 4K + 720p without per-user tuning).
+	// 0 = m_draw leaves vid_conautoscale alone, user controls it directly.
+	registercvar("cl_menu_autoscale", "1", 0);
 	string menumap = Menu_PickMapFromFile();
 	if (menumap == "")
 		menumap = cvar_string("cl_menumap");
@@ -148,7 +176,31 @@ void() m_init =
 		// menu or console is up (sv_main.c PAUSE_AUTO check), which halts the
 		// backdrop camera cycling.  Two slots bypasses that; data/server.cfg
 		// can still raise it further.
+		//
+		// The `map` command always boots a listen server.  Make THIS one
+		// invisible + unjoinable so random players browsing LAN / master
+		// lists can't connect to the menu backdrop by mistake:
+		//   sv_public -1       — don't advertise to the master browser.
+		//   password <random>  — any would-be direct-connect fails.
+		//   hostname           — cosmetic flag so we can tell it apart in logs.
+		// The user's "Create Server" flow (create_server_launch in
+		// m_createserver.qc) writes its own sv_public + password values,
+		// so these locks are overwritten cleanly on the first real launch.
+		localcmd("sv_public -1\n");
+		localcmd(sprintf("password backdrop_%g_%g\n", random() * 1000000, gettime(0)));
+		localcmd("hostname \"menu backdrop (private)\"\n");
 		localcmd("set cl_menu_backdrop_active 1\n");
+		// Server-side backdrop flag (pushed to serverinfo by sv_main.qc).
+		// CSQC reads serverkeyfloat("sv_backdrop") to suppress HUD — set
+		// here so the listen server boots with it already true.
+		localcmd("set sv_backdrop 1\n");
+		// Move the backdrop's listen socket off the default 27500 port so
+		// another local server (another nettest instance, or a dedicated
+		// QW server) can grab 27500 cleanly. Random pick in 27501..27600
+		// keeps two backdrops from colliding if you launch two clients.
+		// Real-game launchers (Connect / Create Server) reset sv_port to
+		// 27500 below.
+		localcmd(sprintf("sv_port %g\n", 27501 + floor(random() * 100)));
 		localcmd("deathmatch 1\n");
 		localcmd("maxclients 2\n");
 		localcmd(sprintf("map %s\n", menumap));
@@ -158,18 +210,152 @@ void() m_init =
 
 vector() randomofs = { return [random() - 0.5, random() - 0.5] * 2; };
 
+// Tracks last-frame "we're in a real game" state so m_draw can fire m_close
+// only on the rising edge (transition into a real server). Without the edge
+// gate the menu would slam shut every frame whenever the user opened it
+// while in-game (ESC during a match), defeating its own purpose.
+float prev_in_real_game;
+// Same edge-gate idea, but for the connecting/downloading phase.  Catches
+// `connect <ip>` typed at the console: the menu was over the loading
+// progress and the console was open on top, both hiding the actual
+// progress indicator.  Closing both lets the loading panel surface.
+float prev_in_connect;
+// Tracks the "loading panel is up but main menu isn't" state so we can
+// bump keydest to menu mode for input routing on the rising edge and
+// restore keydest=0 when loading ends.
+float prev_loading_active;
+
+// One-shot init flag for m_draw — the very first frame initialises every
+// rising-edge tracker to TRUE so the boot sequence (backdrop server
+// connect/load cycles `constate=connecting` during normal startup)
+// doesn't spuriously fire the connect-edge handler and slam the menu
+// shut + open the console at game start.
+float m_draw_inited;
+
+// Forward decl — m_open is defined further down. m_draw needs to call
+// it on the disconnect→backdrop trailing edge to re-push kdm_menu.
+void() m_open;
+
+// mm_returning_to_backdrop is declared in m_menu.qc (compiles first).
+// Set by Menu_DisconnectAndReturnToMenuMap; the connect-edge handler
+// below skips its m_close + toggleconsole branch while it's TRUE so the
+// menu stays visibly up through the disconnect→backdrop map-load (no
+// console flash). Cleared on the trailing edge once we've landed on
+// the backdrop.
+
 void(vector screensize) m_draw =
 {
 //	clearscene();
 
-	
-	vector realsize = getproperty(VF_SCREENPSIZE);
-	float target_conauto = 2;
-	if (realsize_y < 600) target_conauto = 1;
-	else if (realsize_y < 1440) target_conauto = 2;
-	else target_conauto = 4;
-	
-	if (target_conauto != cvar("vid_conautoscale")) localcmd(sprintf("vid_conautoscale %f\n", target_conauto));
+	// First-frame seeding — without this, every prev_* tracker starts at
+	// 0 and the boot sequence (backdrop server connect cycling through
+	// constate="connecting") trips the connect-edge handler immediately,
+	// closing the main menu and toggling the console open as if the
+	// user had typed `connect <ip>`.  Setting them to TRUE on the very
+	// first frame means a TRUE state on that frame doesn't qualify as
+	// a rising edge.
+	if (!m_draw_inited)
+	{
+		m_draw_inited = TRUE;
+		prev_in_real_game   = TRUE;
+		prev_in_connect     = TRUE;
+		prev_loading_active = TRUE;
+	}
+
+	// Auto-close when the user transitions from menu/backdrop into a real
+	// game via any path the menu didn't initiate (typically `connect <ip>`
+	// from the console). The Connect/Disconnect menu buttons already call
+	// m_close() explicitly, so this only matters for console-driven paths.
+	// Gate on rising edge so opening the menu mid-game doesn't insta-close.
+	float in_real_game =
+	    (serverkey("constate") == "active") &&
+	    (serverkey("sv_backdrop") != "1");
+	if (menu_active && in_real_game && !prev_in_real_game)
+		m_close();
+	prev_in_real_game = in_real_game;
+
+	// While the loading panel is up but the main menu isn't, route input
+	// to the menu (SUI) so the disconnect button is clickable AND the
+	// menu's Menu_InputEvent handles ~/toggleconsole — without this,
+	// keydest stays at 0 (game) during the loading plaque and the user
+	// has to press ESC first to bring the menu up before ~ works.
+	// Restore keydest=0 on the trailing edge so game input resumes once
+	// loading is done.  (When menu_active is TRUE the existing m_open /
+	// m_close paths own keydest, so we leave them alone.)
+	float loading_active = m_loading_should_show() && !menu_active;
+	if (loading_active && !prev_loading_active)
+		setkeydest(2);
+	else if (!loading_active && prev_loading_active && !menu_active)
+		setkeydest(0);
+	prev_loading_active = loading_active;
+
+	// Same close-on-rising-edge for the CONNECTING / DOWNLOADING phase.
+	// `connect <ip>` from console drops the user into a state where the
+	// engine is downloading content, but the main menu (still on top)
+	// hides the progress.  Detecting the rising edge here lets us drop
+	// the menu out of the way as soon as the load actually starts, AND
+	// dismiss the console on top.
+	//
+	// Gate on `menu_active` BEFORE m_close: when the user typed connect
+	// from console, the menu was up underneath and the console on top —
+	// closing both is the right outcome.  When the user clicked a
+	// Connect button in the UI, that button already called m_close
+	// (menu_was_open=FALSE here), so we skip the toggleconsole — the
+	// console wasn't open and unconditionally calling toggleconsole
+	// would OPEN it, which is the opposite of what the user wants.
+	float in_connect = (serverkey("constate") == "connecting")
+	                || m_loading_should_show();
+	if (in_connect && !prev_in_connect)
+	{
+		float menu_was_open = menu_active;
+		// mm_returning_to_backdrop: we're mid-Disconnect-to-menumap and
+		// want the menu to stay up through the load. The toggleconsole
+		// here exists for the `connect <ip> from console` scenario
+		// (menu underneath, console on top — toggle closes the console)
+		// and would do the wrong thing for our path: close the menu
+		// AND potentially OPEN the console if it wasn't already up.
+		if (menu_was_open && !mm_returning_to_backdrop)
+		{
+			m_close();
+			localcmd("toggleconsole\n");
+		}
+	}
+	prev_in_connect = in_connect;
+
+	// Trailing edge: once we've finished loading the backdrop, drop the
+	// disconnect-in-progress flag and force the menu visibly open. The
+	// engine's PF_cl_setkeydest pushes/pops kdm_menu via an internal
+	// menu-link stack; during the disconnect+map-load it unlinks the
+	// menu from kdm_menu (rendered blank) even though our QC
+	// menu_active flag is still TRUE. Calling m_open re-pushes the
+	// menu via setkeydest(2) so it actually renders. Without this the
+	// user sees a black screen until they hit ESC.
+	if (mm_returning_to_backdrop &&
+	    serverkey("constate") == "active" &&
+	    serverkey("sv_backdrop") == "1")
+	{
+		mm_returning_to_backdrop = FALSE;
+		m_open();
+	}
+
+
+	// Auto-pick a sane vid_conautoscale based on physical screen height
+	// so the menu doesn't render at headache-tiny font sizes on 4K
+	// displays or pixelated mush on 720p.  GATED on cl_menu_autoscale
+	// so the user can opt out — set `cl_menu_autoscale 0` from console
+	// to take control of vid_conautoscale manually (e.g. force 1 for
+	// native pixels on a 1440p display).
+	if (cvar("cl_menu_autoscale"))
+	{
+		vector realsize = getproperty(VF_SCREENPSIZE);
+		float target_conauto = 2;
+		if (realsize_y < 600) target_conauto = 1;
+		else if (realsize_y < 1440) target_conauto = 2;
+		else target_conauto = 4;
+
+		if (target_conauto != cvar("vid_conautoscale"))
+			localcmd(sprintf("vid_conautoscale %f\n", target_conauto));
+	}
 	
 	
 	drawfont = menu_font;
@@ -214,8 +400,14 @@ void(vector screensize) m_draw =
 	sui_end();
 };
 
+void() mm_flush_name;  // defined in m_menu.qc
+
 void() m_close =
 {
+	// Commit any pending name-field edit before saving — otherwise a
+	// rename typed into the main menu and then dismissed with Esc
+	// wouldn't reach the server (we no longer cvar_set per keystroke).
+	mm_flush_name();
 	Menu_SaveConfig();
 	setkeydest(0);
 	menu_active = FALSE;
@@ -235,6 +427,13 @@ float(float evtype, float scanx, float chary, float devid) Menu_InputEvent =
 
 	if (evtype == IE_KEYDOWN && !used)
 	{
+		// Enter on the name field commits the pending name to the `name`
+		// cvar / server. Let the event continue to SUI's default handling
+		// so focus behavior is preserved — we just piggy-back a flush.
+		if ((scanx == K_ENTER || scanx == K_KP_ENTER)
+		    && sui_is_last_clicked("mm_name"))
+			mm_flush_name();
+
 		switch (scanx)
 		{
 			case K_GP_START:
@@ -248,6 +447,13 @@ float(float evtype, float scanx, float chary, float devid) Menu_InputEvent =
 		{
 		case "togglemenu":
 			m_close();
+			return TRUE;
+			break;
+		case "toggleconsole":
+			// Let ~/backtick drop the console over the menu without
+			// needing to close the menu first. The menu stays visible
+			// behind the console (engine handles layering).
+			localcmd("toggleconsole\n");
 			return TRUE;
 			break;
 		default: break;

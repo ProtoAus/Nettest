@@ -126,6 +126,12 @@ void() button_blocked =
 
 void() button_fire =
 {
+    // Live gate: mp_disabledoors suppresses ALL button activation
+    // regardless of how the press got here (use, touch, damage).
+    // Bhop forces this on via the StartFrame gamemode block in
+    // sv_main.qc; admins can also flip it in any other mode.
+    if (cvar("mp_disabledoors")) return;
+
     if (self.button_state == BUTTON_STATE_UP || self.button_state == BUTTON_STATE_TOP)
         return;
 
@@ -189,16 +195,10 @@ void() func_button =
     self.button_state = BUTTON_STATE_BOTTOM;
     self.mover_state  = MOVER_STATE_BOTTOM;
 
-    // Bhop gamemode: leave the brush solid but inert — no use/touch/damage.
-    if (cvar("sv_gamemode") == GAMEMODE_BHOP)
-    {
-        self.blocked    = __NULL__;
-        self.use        = __NULL__;
-        self.touch      = __NULL__;
-        self.takedamage = DAMAGE_NO;
-        return;
-    }
-
+    // Use/touch always wired — the actual disable check lives in
+    // button_fire so mp_disabledoors works as a LIVE toggle (works
+    // mid-game without map restart). Bhop sets mp_disabledoors=1 via
+    // the StartFrame gamemode-force block in sv_main.qc.
     self.blocked      = button_blocked;
     self.use          = button_use;
     self.touch        = button_touch;
@@ -358,6 +358,12 @@ void(entity seed) Door_OpenGroup =
 
 void() door_use =
 {
+    // Live gate: mp_disabledoors suppresses ALL door activation —
+    // direct use, auto-trigger touch, scripted Trigger_UseTargets.
+    // Bhop forces this on via the StartFrame gamemode-force block in
+    // sv_main.qc; admins can also flip it in any other mode.
+    if (cvar("mp_disabledoors")) return;
+
     if ((self.spawnflags & DOOR_LOCKED) && sv_use_is_player_direct)
         return;
     if (self.attack_finished > time)
@@ -494,16 +500,10 @@ void() func_door =
     self.door_state  = DOOR_STATE_BOTTOM;
     self.mover_state = MOVER_STATE_BOTTOM;
 
-    // Bhop gamemode: leave the door solid but inert — no auto-trigger, no use,
-    // no blocked crush.  Players treat it like static world geometry.
-    if (cvar("sv_gamemode") == GAMEMODE_BHOP)
-    {
-        self.blocked    = __NULL__;
-        self.use        = __NULL__;
-        self.takedamage = DAMAGE_NO;
-        return;
-    }
-
+    // Door wired up normally — actual movement is gated live in
+    // door_use against mp_disabledoors so admins can toggle the
+    // disable mid-game without map restart. Bhop sets the cvar to 1
+    // via the StartFrame gamemode-force block in sv_main.qc.
     if (!self.targetname)
         door_spawn_trigger();
 };
@@ -515,3 +515,10 @@ void() info_player_start_blue = { info_player_blue(); };
 void() info_player_start_red = { info_player_red(); };
 void() info_player_team1 = { info_player_blue(); };
 void() info_player_team2 = { info_player_red(); };
+
+// CS-style fallback spawn — empty stub so the engine keeps the entity
+// at map load (entities with no matching QC function get dropped).
+// PlayerGetSpawnPointEntity falls back to info_player_deathmatch as
+// the RED/T-side primary CS spawn classname.  info_player_start
+// already has its own QC function in sv_player.qc.
+void() info_player_deathmatch = {};

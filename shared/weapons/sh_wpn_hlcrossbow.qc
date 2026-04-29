@@ -169,6 +169,21 @@ void() W_CrossbowBoltThink =
     remove(self);
 };
 
+// Periodic tick wrapper — pulses CSQC SendFlags every sv_toss_tickrate
+// tick so cl_tosssmooth.qc has fresh origin+velocity samples to extrap
+// the bolt's flight smoothly. Removes the bolt at proj_fuse_end (5 s
+// from spawn — same one-shot expire as the original W_CrossbowBoltThink).
+void() W_CrossbowBoltProjectileTick =
+{
+    self.SendFlags |= 1;
+    if (time >= self.proj_fuse_end)
+    {
+        remove(self);
+        return;
+    }
+    self.nextthink = time + Toss_NextThinkInterval();
+};
+
 void() W_CrossbowFire =
 {
     float r;
@@ -240,9 +255,15 @@ void() W_CrossbowFire =
             bolt.angles = vectoangles(bolt.velocity);
             bolt.proj_damage = XBOW_PROJECTILE_DAMAGE;
             bolt.touch = W_CrossbowBoltTouch;
-            bolt.think = W_CrossbowBoltThink;
-            bolt.nextthink = time + 5;
-            bolt.nodrawtoclient = self;
+            // CSQC replication via projectile_SendEntity — owner-hidden,
+            // others receive sample updates at sv_toss_tickrate routed
+            // through cl_tosssmooth.qc for smooth flight.
+            bolt.proj_type     = PROJ_TYPE_CROSSBOW_BOLT;
+            bolt.SendEntity    = projectile_SendEntity;
+            bolt.SendFlags     = 1;
+            bolt.proj_fuse_end = time + 5;
+            bolt.think         = W_CrossbowBoltProjectileTick;
+            bolt.nextthink     = time + Toss_NextThinkInterval();
         }
 
         self.zoomstage = 0;

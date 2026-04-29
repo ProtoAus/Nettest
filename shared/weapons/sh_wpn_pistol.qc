@@ -247,8 +247,8 @@ void() CSQC_PredictPistolCommand =
                 else
                     localsound("sounds/weapons/wpn_pistol/fire4.wav");
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(PISTOL_BASE_SPREAD, PISTOL_MOVE_SPREAD, PISTOL_FULL_SPREAD_SPEED,
-                    PISTOL_CLOSE_DAMAGE, PISTOL_MIN_DAMAGE, PISTOL_DAMAGE_FALLOFF_RANGE);
+                CSQC_PredictedPenetratingImpact(PISTOL_BASE_SPREAD, PISTOL_MOVE_SPREAD, PISTOL_FULL_SPREAD_SPEED,
+                    PISTOL_CLOSE_DAMAGE, PISTOL_MIN_DAMAGE, PISTOL_DAMAGE_FALLOFF_RANGE, 12, 0.94);
                 CSQC_SpawnCasing("models/weapons/9mmcasing.mdl",
                     '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }

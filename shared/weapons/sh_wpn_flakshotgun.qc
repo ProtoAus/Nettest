@@ -86,28 +86,35 @@ void() W_FlakShotgunShoot =
         end = src + dir * 8192;
 
 #ifdef SSQC
-        Lagcomp_TraceLine(src, end, MOVE_NORMAL | MOVE_LAGGED, self);
+        // Server: QC rewind already applied — no MOVE_LAGGED.
+        Lagcomp_TraceLine(src, end, MOVE_NORMAL, self);
 #else
-        traceline(src, end, MOVE_NORMAL | MOVE_LAGGED, self);
+        // Client prediction path: traces against locally-replicated ents,
+        // no engine antilag involvement.
+        traceline(src, end, MOVE_NORMAL, self);
 #endif
 
         if (trace_fraction < 1.0)
         {
             dist = vlen(trace_endpos - src);
+            damage = W_LinearDamageFalloff(dist,
+                FLAKSHOTGUN_PELLET_CLOSE_DAMAGE, FLAKSHOTGUN_PELLET_MIN_DAMAGE,
+                FLAKSHOTGUN_DAMAGE_FALLOFF_RANGE);
 
             if (W_CanDamageTarget(trace_ent))
             {
-                damage = W_LinearDamageFalloff(dist,
-                    FLAKSHOTGUN_PELLET_CLOSE_DAMAGE, FLAKSHOTGUN_PELLET_MIN_DAMAGE,
-                    FLAKSHOTGUN_DAMAGE_FALLOFF_RANGE);
+                if (trace_ent.classname == "player")
+                {
+                    // Stamp hitgroup before W_ApplyDamage so the gib-on-
+                    // headshot path inside it sees this pellet's hitgroup.
+                    trace_ent.death_hitgroup = W_BoneToHitgroup(trace_bone_id);
+                }
                 W_ApplyDamage(self, trace_ent, damage);
                 if (trace_ent.classname == "player")
                 {
-                    float pelletmat = IMPACT_MAT_FLESH;
-                    float pellet_hg = W_BoneToHitgroup(trace_bone_id);
-                    if (pellet_hg == HITGROUP_HEAD || trace_ent.health <= 0)
-                        pelletmat = IMPACT_MAT_FLESH_LETHAL;
-                    W_ImpactEffectAllMat(trace_endpos, trace_plane_normal, pelletmat);
+                    // All player hits use the lethal spark-splash variant —
+                    // matches the cool head-pop look on every body shot.
+                    W_ImpactEffectAllMat(trace_endpos, trace_plane_normal, IMPACT_MAT_FLESH_LETHAL);
                 }
                 else
                 {
@@ -121,10 +128,11 @@ void() W_FlakShotgunShoot =
             }
             else
             {
+                PhysProp_TryPushFromTrace(dir, damage);
                 W_ImpactEffect(trace_endpos);
             }
 
-            W_DebugImpact(trace_endpos, W_LinearDamageFalloff(dist, FLAKSHOTGUN_PELLET_CLOSE_DAMAGE, FLAKSHOTGUN_PELLET_MIN_DAMAGE, FLAKSHOTGUN_DAMAGE_FALLOFF_RANGE), W_BoneToHitgroup(trace_bone_id));
+            W_DebugImpact(trace_endpos, damage, W_BoneToHitgroup(trace_bone_id));
         }
 
         pellet += 1;

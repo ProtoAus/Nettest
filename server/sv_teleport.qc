@@ -11,20 +11,16 @@
 //  Destination lookup  (shared with NewQuake original)
 // ---------------------------------------------------------------------------
 
+// Match any entity whose targetname equals target_name — not just
+// info_teleport_destination.  Lets mappers point a teleport at e.g. a
+// path_corner, info_player_deathmatch, or any other entity that
+// happens to sit where they want the player to land, without having
+// to drop a duplicate info_teleport_destination on top of it.  First
+// match wins, which mirrors `find`'s iteration order (= entity-link
+// order = roughly map-file order).
 entity(string target_name) Teleport_FindDestination =
 {
-    entity dest;
-
-    dest = find(world, targetname, target_name);
-    while (dest)
-    {
-        if (dest.classname == "info_teleport_destination")
-            return dest;
-
-        dest = find(dest, targetname, target_name);
-    }
-
-    return world;
+    return find(world, targetname, target_name);
 };
 
 // ---------------------------------------------------------------------------
@@ -57,6 +53,10 @@ float(entity playerent, float changedflags) trigger_teleport_SendEntity =
 
     WriteFloat(MSG_ENTITY, self.spawnflags);
     WriteFloat(MSG_ENTITY, self.tele_resolved);
+
+    // BSP submodel index — CSQC binds via setmodelindex so prediction's
+    // PM_BoxInTriggerBrush hits the same angled brush as the server.
+    WriteShort(MSG_ENTITY, self.modelindex);
 
     return TRUE;
 };
@@ -114,8 +114,11 @@ void() trigger_teleport =
         return;
     }
 
+    // Keep BSP submodel bound (don't zero modelindex) so angled trigger
+    // brushes use their actual BSP geometry in PM_BoxInTriggerBrush, not
+    // just the AABB. EF_NODRAW hides the brush visually.
     setmodel(self, self.model);
-    self.modelindex = 0;
+    self.effects   |= EF_NODRAW;
     self.movetype   = MOVETYPE_NONE;
     self.solid      = SOLID_TRIGGER;  // kept so engine can fire touch if needed
 

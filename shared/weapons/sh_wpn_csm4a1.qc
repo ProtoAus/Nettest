@@ -353,10 +353,10 @@ void() CSQC_PredictM4A1Command =
                         localsound("sounds/weapons/wpn_csm4a1/fire2.wav");
                 }
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(M4A1_BASE_SPREAD, M4A1_MOVE_SPREAD, M4A1_FULL_SPREAD_SPEED,
+                CSQC_PredictedPenetratingImpact(M4A1_BASE_SPREAD, M4A1_MOVE_SPREAD, M4A1_FULL_SPREAD_SPEED,
                     self.m4a1_silenced ? M4A1_SILENCED_CLOSE_DAMAGE : M4A1_CLOSE_DAMAGE,
                     self.m4a1_silenced ? M4A1_SILENCED_MIN_DAMAGE   : M4A1_MIN_DAMAGE,
-                    M4A1_DAMAGE_FALLOFF_RANGE);
+                    M4A1_DAMAGE_FALLOFF_RANGE, 48, 0.97);
                 CSQC_SpawnCasing("models/weapons/riflecasing.mdl",
                     '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }

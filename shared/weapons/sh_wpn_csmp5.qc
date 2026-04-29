@@ -214,8 +214,8 @@ void() CSQC_PredictMP5Command =
                 else
                     sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csmp5/fire2.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(MP5_BASE_SPREAD, MP5_MOVE_SPREAD, MP5_FULL_SPREAD_SPEED,
-                    MP5_CLOSE_DAMAGE, MP5_MIN_DAMAGE, MP5_DAMAGE_FALLOFF_RANGE);
+                CSQC_PredictedPenetratingImpact(MP5_BASE_SPREAD, MP5_MOVE_SPREAD, MP5_FULL_SPREAD_SPEED,
+                    MP5_CLOSE_DAMAGE, MP5_MIN_DAMAGE, MP5_DAMAGE_FALLOFF_RANGE, 32, 0.96);
                 CSQC_SpawnCasing("models/weapons/redcasing.mdl",
                     '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }

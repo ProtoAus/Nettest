@@ -259,8 +259,8 @@ void() CSQC_PredictAK47Command =
                 else
                     sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csak47/fire2.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(AK47_BASE_SPREAD, AK47_MOVE_SPREAD, AK47_FULL_SPREAD_SPEED,
-                    AK47_CLOSE_DAMAGE, AK47_MIN_DAMAGE, AK47_DAMAGE_FALLOFF_RANGE);
+                CSQC_PredictedPenetratingImpact(AK47_BASE_SPREAD, AK47_MOVE_SPREAD, AK47_FULL_SPREAD_SPEED,
+                    AK47_CLOSE_DAMAGE, AK47_MIN_DAMAGE, AK47_DAMAGE_FALLOFF_RANGE, 64, 0.97);
                 CSQC_SpawnCasing("models/weapons/riflecasing.mdl",
                     '8 -6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }
@@ -324,6 +324,19 @@ void() CSQC_AK47Equip =
 	self.csqc_predict_reload = CSQC_PredictAK47Reload;
 	self.csqc_display_frame  = CSQC_AK47DisplayFrame;
 	self.csqc_drop_clear     = CSQC_AK47DropClear;
+
+	// First-spawn dedup: if the equip arrives via reconcile with WS_DRAW
+	// already past the boltpull frame, the server's sound() was delivered
+	// in the same snapshot packet — the engine played it BEFORE any
+	// predict tick could set csqc_last_predicted_auto_sound_time, so the
+	// CHAN_AUTO dedup window was empty and didn't suppress it. Latch the
+	// per-weapon flag so the next predict tick doesn't fire a second
+	// localsound on top. Latch only — never clears — so an in-progress
+	// draw that's pre-boltpull keeps its existing flag state (FALSE so
+	// predict can fire normally, then dedup the server echo).
+	if (self.weaponstate == WS_DRAW && self.wep_anim_start > 0
+	    && (cltime - self.wep_anim_start) >= AK47_DRAW_BOLTPULL_TIME)
+		csqc_ak47_draw_snd_played = TRUE;
 };
 
 #endif // CSQC

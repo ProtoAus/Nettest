@@ -327,8 +327,8 @@ void() CSQC_PredictGlockCommand =
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csglock/fire.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(GLOCK_BASE_SPREAD, GLOCK_MOVE_SPREAD, GLOCK_FULL_SPREAD_SPEED,
-                    GLOCK_CLOSE_DAMAGE, GLOCK_MIN_DAMAGE, GLOCK_DAMAGE_FALLOFF_RANGE);
+                CSQC_PredictedPenetratingImpact(GLOCK_BASE_SPREAD, GLOCK_MOVE_SPREAD, GLOCK_FULL_SPREAD_SPEED,
+                    GLOCK_CLOSE_DAMAGE, GLOCK_MIN_DAMAGE, GLOCK_DAMAGE_FALLOFF_RANGE, 8, 0.94);
                 CSQC_SpawnCasing("models/weapons/9mmcasing.mdl",
                     '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }
@@ -352,8 +352,8 @@ void() CSQC_PredictGlockCommand =
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csglock/fireburst.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(GLOCK_BURST_SPREAD, GLOCK_MOVE_SPREAD, GLOCK_FULL_SPREAD_SPEED,
-                    GLOCK_BURST_DAMAGE, GLOCK_MIN_DAMAGE, GLOCK_DAMAGE_FALLOFF_RANGE);
+                CSQC_PredictedPenetratingImpact(GLOCK_BURST_SPREAD, GLOCK_MOVE_SPREAD, GLOCK_FULL_SPREAD_SPEED,
+                    GLOCK_BURST_DAMAGE, GLOCK_MIN_DAMAGE, GLOCK_DAMAGE_FALLOFF_RANGE, 8, 0.94);
                 CSQC_SpawnCasing("models/weapons/9mmcasing.mdl",
                     '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }
@@ -378,8 +378,8 @@ void() CSQC_PredictGlockCommand =
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csglock/fireburst.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_PredictedImpact(GLOCK_BURST_SPREAD, GLOCK_MOVE_SPREAD, GLOCK_FULL_SPREAD_SPEED,
-                    GLOCK_BURST_DAMAGE, GLOCK_MIN_DAMAGE, GLOCK_DAMAGE_FALLOFF_RANGE);
+                CSQC_PredictedPenetratingImpact(GLOCK_BURST_SPREAD, GLOCK_MOVE_SPREAD, GLOCK_FULL_SPREAD_SPEED,
+                    GLOCK_BURST_DAMAGE, GLOCK_MIN_DAMAGE, GLOCK_DAMAGE_FALLOFF_RANGE, 8, 0.94);
                 CSQC_SpawnCasing("models/weapons/9mmcasing.mdl",
                     '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
             }

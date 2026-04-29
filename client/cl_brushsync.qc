@@ -52,20 +52,23 @@ const float CSQC_USE_TRACE_LENGTH = 96;
 
 void() CSQC_SolidBrush_Update =
 {
-    string modelname;
+    float mdlindex;
     vector org, ang, emins, emaxs, vel;
     float alpha_value;
     float effect_flags;
     float btype;
     float sv_state;
 
-    modelname = readstring();
+    // Server writes the precache index (readshort) instead of the model
+    // path — setmodelindex below resolves it back.
+    mdlindex = readshort();
     org = readvector();
     ang = readvector();
     emins = readvector();
     emaxs = readvector();
-    alpha_value = readfloat();
-    effect_flags = readfloat();
+    // alpha byte biased 0..255 → 0..1 float; effects packed into short.
+    alpha_value  = readbyte() * (1.0 / 255.0);
+    effect_flags = readshort();
     vel = readvector();
 
     btype = readbyte();
@@ -108,12 +111,13 @@ void() CSQC_SolidBrush_Update =
     if (!broken && self.brush_max_health > 0 && self.brush_health >= self.brush_max_health)
         self.brush_broken_predicted = 0;
 
-    // Always setmodel — the conditional "only on model change" variant
-    // left the render binding stale after a drawmask=0 → drawmask=MASK_ENGINE
-    // transition (breakable reset), so the brush stayed invisible even
-    // though the model string hadn't changed. An unconditional rebind on
-    // every snapshot is cheap (model is already precached) and reliable.
-    setmodel(self, modelname);
+    // Always setmodelindex — the conditional "only on model change"
+    // variant left the render binding stale after a drawmask=0 →
+    // drawmask=MASK_ENGINE transition (breakable reset), so the brush
+    // stayed invisible even though the model index hadn't changed. An
+    // unconditional rebind on every snapshot is cheap (model is already
+    // precached by virtue of being in the BSP submodel list) and reliable.
+    setmodelindex(self, mdlindex);
     setsize(self, emins, emaxs);
 
     // Keep the brush hidden if EITHER the server confirmed broken OR we
@@ -203,6 +207,15 @@ void(entity ent, vector destination) CSQC_MoverPredict =
 // corrected when the server snapshot arrives.
 void(entity hit) CSQC_PredictMoverActivate =
 {
+    // Bhop gamemode: server clears door/button .use/.touch/.blocked so the
+    // brush is inert (sv_doors.qc spawn paths). If we predicted locally
+    // anyway, the server would never move the brush, never dirty its
+    // SendFlags, never snapshot a "you got it wrong" — the predicted
+    // open/closed state would stick on the client until map change.
+    // Treat bhop +use on a brush as a no-op to match server.
+    if (getstatf(STAT_GAMEMODE) == GAMEMODE_BHOP)
+        return;
+
     // Already moving? Don't re-trigger (matches server guard)
     if (hit.mover_state == MOVER_STATE_UP || hit.mover_state == MOVER_STATE_DOWN)
         return;
@@ -225,14 +238,17 @@ void(entity hit) CSQC_PredictMoverActivate =
     }
 };
 
-// Try to predict door/button activation via +use trace.
+// Forward decl from cl_weapons.qc (compiled later in cl_progs.src).
+void(entity w) CSQC_PredictPickupWeapon;
+
+// Try to predict door/button activation OR weapon pickup via +use trace.
 // Called from CSQC_PredictWeaponCommand context (self = predicted_player).
 // Matches the server's SV_PlayerTryUse: tracebox first, then cone fallback.
 void() CSQC_PredictUse =
 {
     vector use_start, use_end;
-    entity hit, best, e;
-    float best_dot, dot;
+    entity hit, best, e, w, best_w;
+    float best_dot, dot, w_best_dot;
 
     makevectors(input_angles);
     use_start = self.origin + self.view_ofs;
@@ -271,7 +287,40 @@ void() CSQC_PredictUse =
         e = e.chain;
     }
 
-    if (best)
+    // Dropped-weapon scan — proxies are SOLID_NOT so the tracebox above
+    // can't hit them (otherwise the local player would also collide with
+    // them on walk-through). Walk dropped_weapon_list and pick the best
+    // cone-aligned one. Mirrors the server's combined cone in SV_PlayerTryUse.
+    best_w = world;
+    w_best_dot = 0.7;
+    w = dropped_weapon_list;
+    float guard = 0;
+    while (w)
+    {
+        entity nxt = w.dropped_weapon_next;
+        guard = guard + 1;
+        if (guard > 4096) break;
+
+        if (!w.dropped_weapon_predicted_taken
+            && cltime >= w.dropped_weapon_pickup_time
+            && vlen(self.origin - w.origin) < CSQC_USE_TRACE_LENGTH)
+        {
+            dot = normalize(w.origin - use_start) * v_forward;
+            if (dot > w_best_dot)
+            {
+                w_best_dot = dot;
+                best_w = w;
+            }
+        }
+        w = nxt;
+    }
+
+    // Whichever (door/button vs weapon) is most centered wins. If both
+    // tied near the threshold, weapon pickup gets priority — matches the
+    // intuition that a weapon at your feet is the obvious target.
+    if (best_w && (best == world || w_best_dot >= best_dot))
+        CSQC_PredictPickupWeapon(best_w);
+    else if (best)
         CSQC_PredictMoverActivate(best);
 };
 

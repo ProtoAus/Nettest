@@ -198,13 +198,32 @@ void(vector pos) W_ImpactEffect;
 void(vector pos, vector normal) W_ImpactEffectAll;
 void(vector pos, vector normal, float mat) W_ImpactEffectAllMat;
 float(entity hit) W_ClassifyImpactMaterial;
-float(float bone_id) W_BoneToHitgroup;
-float(float hitgroup) W_HitgroupDamageMultiplier;
+// W_BoneToHitgroup + W_HitgroupDamageMultiplier moved to sh_weapon_logic.qc
+// (shared, compiled before this file) so CSQC can call them too. Real
+// definitions visible from earlier in compile order — no forward decl
+// needed here.
 float(vector shot_dir, float damage) PhysProp_TryPushFromTrace;
-void(vector start, vector end, float tracetype, entity ignore) PhysProp_TraceLine;
 void(entity target) W_SendServerHitboxes;
 void() W_PlayersExpandHitboxes;
 void() W_PlayersRestoreHitboxes;
+
+// Returns TRUE when the server should DEFER player-damage to the attacker's
+// incoming hitclaim. Conditions: sv_trust_clienthits >= 1 (admin opted in)
+// AND the attacker's userinfo says cl_predict_hits is on (so a claim is
+// actually expected). Lets us skip the server's own lag-comped player-damage
+// path, which would otherwise race the claim and silently drop the claim's
+// visually-accurate hit via the dedup gate. World/breakable/prop damage
+// still applies server-side as today — only the player branch is gated.
+float(entity attacker) W_ShouldDeferToClaim =
+{
+    if (cvar("sv_trust_clienthits") < 1) return 0;
+    if (!attacker || attacker.classname != "player") return 0;
+    // Default cl_predict_hits to ON when the userinfo key is missing
+    // (legacy clients that haven't pushed it yet).
+    string s = infokey(attacker, "cl_predict_hits");
+    if (s == "") return 1;
+    return stof(s) != 0;
+};
 
 // Send debug impact marker to the shooter only.
 // Includes the shooter's eye position, damage, and hitgroup.
@@ -234,9 +253,6 @@ void(float base_spread, float move_spread, float full_spread_speed,
     vector src, dir, end, flat_vel;
     float spread, sx, sy, move_speed, dist, damage;
 
-    float saved_dim_hit = self.dimension_hit;
-    self.dimension_hit = saved_dim_hit | 2;
-
     makevectors(self.v_angle);
     src = self.origin + self.view_ofs;
 
@@ -262,9 +278,16 @@ void(float base_spread, float move_spread, float full_spread_speed,
     W_PlayersExpandHitboxes();
 
 #ifdef SSQC
-    Lagcomp_TraceLine(src, end, MOVE_NORMAL | MOVE_LAGGED | MOVE_HITMODEL, self);
+    // Open a rewound window around the trace so trace + debug emit
+    // both observe the historical positions.  MOVE_LAGGED is gone:
+    // the engine path only forward-extrapolates, which leaves
+    // ping/2 + cl_interp_time of motion uncorrected at high ping.
+    // Lagcomp_BeginRewind handles origin AND animation pose; the
+    // trace runs against the position the shooter actually saw.
+    Lagcomp_BeginRewind(self);
+    traceline(src, end, MOVE_NORMAL | MOVE_HITMODEL, self);
 #else
-    traceline(src, end, MOVE_NORMAL | MOVE_LAGGED | MOVE_HITMODEL, self);
+    traceline(src, end, MOVE_NORMAL | MOVE_HITMODEL, self);
 #endif
 
     W_PlayersRestoreHitboxes();
@@ -280,20 +303,27 @@ void(float base_spread, float move_spread, float full_spread_speed,
 
         if (W_CanDamageTarget(trace_ent))
         {
-            trace_ent.death_hitgroup = hitgroup;
-            W_SendServerHitboxes(trace_ent);
-            W_ApplyDamage(self, trace_ent, damage);
-            // Players: pick the spark-splash variant for headshots and
-            // killing blows; otherwise the calmer cloud-only flesh effect.
+            float defer_player = (trace_ent.classname == "player")
+                                 && W_ShouldDeferToClaim(self);
+            if (!defer_player)
+            {
+                trace_ent.death_hitgroup = hitgroup;
+                // Emitted while players are still rewound — the
+                // hitbox sent here matches where the trace actually
+                // hit, so the per-hit debug overlay shows shooters
+                // exactly where they need to aim.
+                W_SendServerHitboxes(trace_ent);
+                W_ApplyDamage(self, trace_ent, damage);
+            }
+            // Players: every hit uses the spark-splash lethal variant
+            // (the cool "head-pop" look the team liked on headshot kills,
+            // promoted to apply on all body shots too).
             // Breakables: auto-classify by material; if a flesh-style
             // breakable just took its killing blow, upgrade to the lethal
             // variant so it sparks like a player kill.
             if (trace_ent.classname == "player")
             {
-                float mat = IMPACT_MAT_FLESH;
-                if (hitgroup == HITGROUP_HEAD || trace_ent.health <= 0)
-                    mat = IMPACT_MAT_FLESH_LETHAL;
-                W_ImpactEffectAllMat(trace_endpos, trace_plane_normal, mat);
+                W_ImpactEffectAllMat(trace_endpos, trace_plane_normal, IMPACT_MAT_FLESH_LETHAL);
             }
             else
             {
@@ -312,7 +342,9 @@ void(float base_spread, float move_spread, float full_spread_speed,
         W_DebugImpact(trace_endpos, damage, hitgroup);
     }
 
-    self.dimension_hit = saved_dim_hit;
+#ifdef SSQC
+    Lagcomp_EndRewind();
+#endif
 };
 
 // Lag-compensated hitscan with spread, linear falloff, AND wall penetration.
@@ -327,9 +359,6 @@ void(float base_spread, float move_spread, float full_spread_speed,
     float pen_remaining, wall_thick;
     vector entry_pos, nudge_pos, exit_pos;
     float pen_count;
-
-    float saved_dim_hit = self.dimension_hit;
-    self.dimension_hit = saved_dim_hit | 2;
 
     makevectors(self.v_angle);
     src = self.origin + self.view_ofs;
@@ -360,11 +389,15 @@ void(float base_spread, float move_spread, float full_spread_speed,
     // MOVE_NORMAL (static BSP only) so we restore immediately after.
     W_PlayersExpandHitboxes();
 
-    // First trace uses lag compensation + hitmodel; subsequent use MOVE_NORMAL (static BSP).
+    // First trace uses lag compensation + hitmodel; subsequent traces
+    // (after wall penetration) use MOVE_NORMAL but stay inside the
+    // rewound window so a bullet that punches a wall and hits a
+    // SECOND rewound player still registers correctly.
 #ifdef SSQC
-    Lagcomp_TraceLine(src, end, MOVE_NORMAL | MOVE_LAGGED | MOVE_HITMODEL, self);
+    Lagcomp_BeginRewind(self);
+    traceline(src, end, MOVE_NORMAL | MOVE_HITMODEL, self);
 #else
-    traceline(src, end, MOVE_NORMAL | MOVE_LAGGED | MOVE_HITMODEL, self);
+    traceline(src, end, MOVE_NORMAL | MOVE_HITMODEL, self);
 #endif
 
     W_PlayersRestoreHitboxes();
@@ -380,18 +413,22 @@ void(float base_spread, float move_spread, float full_spread_speed,
 
         if (W_CanDamageTarget(trace_ent))
         {
-            trace_ent.death_hitgroup = hitgroup;
-            W_SendServerHitboxes(trace_ent);
-            W_ApplyDamage(self, trace_ent, damage);
-            // Players: flesh variant, upgrading to lethal on HS/kill.
+            float defer_player = (trace_ent.classname == "player")
+                                 && W_ShouldDeferToClaim(self);
+            if (!defer_player)
+            {
+                trace_ent.death_hitgroup = hitgroup;
+                W_SendServerHitboxes(trace_ent);
+                W_ApplyDamage(self, trace_ent, damage);
+            }
+            // Players: every hit uses the spark-splash lethal variant.
             // Breakables: auto-classify; flesh breakables get the lethal
-            // upgrade on their killing blow.
+            // upgrade on their killing blow. Shooter is excluded from the
+            // multicast — CSQC_PredictedPenetratingImpact handles every
+            // entry/exit decal locally, including post-pen hits.
             if (trace_ent.classname == "player")
             {
-                float mat = IMPACT_MAT_FLESH;
-                if (hitgroup == HITGROUP_HEAD || trace_ent.health <= 0)
-                    mat = IMPACT_MAT_FLESH_LETHAL;
-                W_ImpactEffectAllMat(trace_endpos, trace_plane_normal, mat);
+                W_ImpactEffectAllMat(trace_endpos, trace_plane_normal, IMPACT_MAT_FLESH_LETHAL);
             }
             else
             {
@@ -404,12 +441,7 @@ void(float base_spread, float move_spread, float full_spread_speed,
         else
         {
             PhysProp_TryPushFromTrace(dir, damage);
-            // First impact: shooter sees it via CSQC prediction, others via server.
-            // Post-penetration impacts: ALL players need them (CSQC can't predict).
-            if (pen_count > 0)
-                W_ImpactEffectAll(trace_endpos, trace_plane_normal);
-            else
-                W_ImpactEffect(trace_endpos);
+            W_ImpactEffect(trace_endpos);
         }
 
         W_DebugImpact(trace_endpos, damage, hitgroup);
@@ -421,6 +453,15 @@ void(float base_spread, float move_spread, float full_spread_speed,
         // Only penetrate world geometry and func_ entities (not players)
         if (trace_ent != world && W_CanDamageTarget(trace_ent))
             break;
+
+        // Capture before the back-trace below overwrites trace_ent so
+        // the exit decal multicast can be skipped when the bullet
+        // pierced a phys prop (barrel/can).  The prop tips/rolls under
+        // ODE, so an exit decal pinned to world space would slide off.
+        // CSQC_PredictedPenetratingImpact mirrors this skip locally.
+        float entry_was_physprop =
+            (trace_ent.classname == "phys_barrel" ||
+             trace_ent.classname == "phys_can");
 
         entry_pos = trace_endpos;
 
@@ -452,7 +493,10 @@ void(float base_spread, float move_spread, float full_spread_speed,
 
         // Exit impact — uses the ACTUAL wall normal from the reverse trace,
         // not the bullet direction, so the decal sits flat on the surface.
-        W_ImpactEffectAll(exit_pos, exit_normal);
+        // Shooter is excluded — CSQC_PredictedPenetratingImpact predicts
+        // the same reverse trace and renders the exit decal locally.
+        if (!entry_was_physprop)
+            W_ImpactEffectAll(exit_pos, exit_normal);
 
         // Continue from exit point
         src = exit_pos + dir * 1;
@@ -460,7 +504,9 @@ void(float base_spread, float move_spread, float full_spread_speed,
         traceline(src, end, MOVE_NORMAL, self);
     }
 
-    self.dimension_hit = saved_dim_hit;
+#ifdef SSQC
+    Lagcomp_EndRewind();
+#endif
 };
 
 // Common equip setup — sets draw state, model, and timing.

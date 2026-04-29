@@ -34,7 +34,7 @@ const float CROWBAR_FIRE_DELAY        = 0.5;
 
 // --- Balance ---
 const float CROWBAR_DAMAGE            = 25;
-const float CROWBAR_RANGE             = 64;
+const float CROWBAR_RANGE             = 72;
 
 // --- Pre-computed state durations ---
 const float CROWBAR_DRAW_DURATION     = (CROWBAR_DRAW_END - CROWBAR_DRAW_START) * CROWBAR_FRAME_INTERVAL;
@@ -137,7 +137,10 @@ void() W_CrowbarSwing =
         if (W_CanDamageTarget(trace_ent))
             W_ApplyDamage(self, trace_ent, CROWBAR_DAMAGE);
         else
+        {
+            PhysProp_TryPushFromTrace(v_forward, CROWBAR_DAMAGE);
             W_ImpactEffect(trace_endpos);
+        }
     }
     else
     {

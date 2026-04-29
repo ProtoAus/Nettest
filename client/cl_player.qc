@@ -111,16 +111,22 @@ entity csqc_authority_proxy;
 //  Buffered input command history
 // ---------------------------------------------------------------------------
 
-const float PRED_CMD_BACKUP = 128;
+// Buffer depth — must be >= server_tickrate × max_supported_ping_seconds.
+// 512 covers 300 tick × ~1.7s ping, 200 tick × 2.5s, 100 tick × 5s, etc.
+// Memory cost: 8 fields × ~6 bytes avg × 512 = ~24 KB total — trivial.
+// Replay CPU cost scales with `actual` ping × tick rate, not buffer size,
+// so keeping headroom in the buffer is free; the buffer just needs to be
+// deep enough not to truncate replay when the ack-to-current span is large.
+const float PRED_CMD_BACKUP = 512;
 
-float  pred_cmd_valid[128];
-float  pred_cmd_sequence[128];
-float  pred_cmd_timestamp[128];
-float  pred_cmd_timelength[128];
-vector pred_cmd_angles[128];
-vector pred_cmd_movevalues[128];
-float  pred_cmd_buttons[128];
-float  pred_cmd_impulse[128];
+float  pred_cmd_valid     [PRED_CMD_BACKUP];
+float  pred_cmd_sequence  [PRED_CMD_BACKUP];
+float  pred_cmd_timestamp [PRED_CMD_BACKUP];
+float  pred_cmd_timelength[PRED_CMD_BACKUP];
+vector pred_cmd_angles    [PRED_CMD_BACKUP];
+vector pred_cmd_movevalues[PRED_CMD_BACKUP];
+float  pred_cmd_buttons   [PRED_CMD_BACKUP];
+float  pred_cmd_impulse   [PRED_CMD_BACKUP];
 float  pred_cmd_count;
 float  pred_cmd_latest_sequence;
 
@@ -145,6 +151,49 @@ float  g_interp_last_snap_cltime;      // cltime at which the most recent snapsh
 // ---------------------------------------------------------------------------
 //  Presentation, live input, and diagnostics
 // ---------------------------------------------------------------------------
+
+// Drift-trace ring buffer — captures last N live-tick pmove outputs so
+// CSQC_PredictSelectWeapon can dump pre-/post-switch context to console
+// without flooding the log. Live tick only (skip replay) — replay re-runs
+// every render frame and would overwrite the ring 100x/sec at high ping.
+const float CL_DRIFT_RING_SIZE = 32;
+float  cl_drift_t  [CL_DRIFT_RING_SIZE];
+float  cl_drift_seq[CL_DRIFT_RING_SIZE];
+float  cl_drift_msec[CL_DRIFT_RING_SIZE];
+vector cl_drift_mv [CL_DRIFT_RING_SIZE];
+float  cl_drift_btn[CL_DRIFT_RING_SIZE];
+float  cl_drift_wep[CL_DRIFT_RING_SIZE];
+vector cl_drift_org[CL_DRIFT_RING_SIZE];
+vector cl_drift_vel[CL_DRIFT_RING_SIZE];
+float  cl_drift_idx;
+
+void(float t_now, float seq, float msec, vector mv, float btn, float wep, vector org, vector vel) CL_Drift_Append =
+{
+	cl_drift_t  [cl_drift_idx] = t_now;
+	cl_drift_seq[cl_drift_idx] = seq;
+	cl_drift_msec[cl_drift_idx] = msec;
+	cl_drift_mv [cl_drift_idx] = mv;
+	cl_drift_btn[cl_drift_idx] = btn;
+	cl_drift_wep[cl_drift_idx] = wep;
+	cl_drift_org[cl_drift_idx] = org;
+	cl_drift_vel[cl_drift_idx] = vel;
+	cl_drift_idx = (cl_drift_idx + 1) % CL_DRIFT_RING_SIZE;
+};
+
+void() CL_Drift_Dump =
+{
+	float i;
+	dprint(sprintf("--- CL drift ring (oldest first, %g entries) ---\n", CL_DRIFT_RING_SIZE));
+	for (i = 0; i < CL_DRIFT_RING_SIZE; i++)
+	{
+		float ix = (cl_drift_idx + i) % CL_DRIFT_RING_SIZE;
+		if (cl_drift_t[ix] <= 0) continue;
+		dprint(sprintf("[CL] t=%.4f seq=%g msec=%.2f mv=%v btn=%g wep=%g\n",
+			cl_drift_t[ix], cl_drift_seq[ix], cl_drift_msec[ix],
+			cl_drift_mv[ix], cl_drift_btn[ix], cl_drift_wep[ix]));
+		dprint(sprintf("[CL]   org=%v vel=%v\n", cl_drift_org[ix], cl_drift_vel[ix]));
+	}
+};
 
 vector csqc_present_origin;
 vector csqc_present_view_ofs;
@@ -1120,9 +1169,18 @@ float(float first_sequence, float replay_weapons) CSQC_ReplayBufferedCommands =
 		CSQC_ClampMoveInputs();
 		csqc_pred_sequence = pred_cmd_sequence[slot];
 		csqc_pred_time = pred_cmd_timestamp[slot];
-		PM_PlayerMove();
+		// Weapon impulse first, then pmove — mirrors server order
+		// (PlayerPreThink runs CheckImpulses BEFORE PM_Move). See live-tick
+		// note in CSQC_PredictCurrentCommand for the full rationale.
 		if (replay_weapons)
 			CSQC_PredictWeaponCommand();
+		PM_PlayerMove();
+		// Replay tick — DO NOT append to drift ring. Replay re-runs every
+		// render frame (potentially 100+ Hz) and would overwrite the ring
+		// instantly. Live tick capture is what we compare against the
+		// server, so the replay's per-tick details aren't needed in the
+		// trace. The final post-replay state IS already the next live tick's
+		// starting state.
 		replay_count += 1;
 	}
 
@@ -1233,6 +1291,178 @@ void() CSQC_ReconcilePrediction =
 	// prediction matched server; any delta is the visible yank.
 	Smooth_Push(SMOOTH_M_RECONC, vlen(self.origin - smooth_pre_reset_origin));
 
+	// Capture the post-replay error and stash it on predicted_player so
+	// CSQC_BuildPresentationView can fade it out of the rendered camera
+	// origin over cl_extrap_smooth_time.  Without this, every reconcile
+	// snaps the view by however much the replay drifted from live
+	// prediction — at high ping this lands as a steady push in the
+	// movement direction.  Same shape as the remote-proxy path
+	// (cl_player.qc:2614-2622).
+	{
+		vector err  = smooth_pre_reset_origin - self.origin;   // pre - post (cumulative)
+		float  elen = vlen(err);
+
+		// Per-reconcile authoritative-position delta.  This is how much
+		// the server's view of the player advanced THIS snapshot, which
+		// cleanly separates "server is gradually catching up to a stopped
+		// player" (small steady delta) from "user got shoved" (one big
+		// delta in a single snapshot).  The lock gates on this rather
+		// than on `elen` (cumulative) so a long walk-stop catch-up
+		// window can't accumulate divergence past a fixed cap and
+		// trigger the smoother fallback as a visible bump.
+		//
+		// '0 0 0' init means we have no previous reference — first
+		// reconcile sees per_recon_len = 0 and the lock can apply if
+		// otherwise eligible.
+		float per_recon_len;
+		if (smooth_prev_post_origin == '0 0 0')
+			per_recon_len = 0;
+		else
+			per_recon_len = vlen(self.origin - smooth_prev_post_origin);
+
+		// Capture the post-replay origin BEFORE any restore — we want
+		// `smooth_prev_post_origin` to track where the server thinks
+		// the player is, not where we locked the camera to.
+		smooth_prev_post_origin = self.origin;
+
+		// Read directly from CSQC's keyboard-event-driven live latches.
+		// These are updated by CSQC_UpdateLiveInputFromBind on actual
+		// key press/release ONLY — they're never clobbered by the
+		// engine's replay path the way input_movevalues / saved_*
+		// can be.  At >300 ms ping the engine fires several replay
+		// passes between input frames and saved_movevalues snapshots
+		// the LAST replayed buffered command's value, which made the
+		// smoother briefly read "released" while the user was holding
+		// a key (lock toggled off → fade fired → oscillation).
+		float live_wants_motion = (csqc_live_forward
+		                        || csqc_live_back
+		                        || csqc_live_left
+		                        || csqc_live_right
+		                        || csqc_live_up
+		                        || csqc_live_down
+		                        || (csqc_live_buttons & PM_BTN_JUMP) != 0);
+
+		// Lock state: hold camera at live trajectory unless the user is
+		// actively walking on the ground.  In the air (FL_ONGROUND clear)
+		// the lock STAYS engaged regardless of input — keeps the parabolic
+		// jump/fall trajectory stable through reconciles instead of
+		// letting the smoother fade re-trigger every snapshot.  Only when
+		// grounded AND pressing a movement key do we let the fade take
+		// over; that's the case where the camera should track the
+		// bleeding-edge predicted position responsively.
+		float on_ground          = (self.flags & FL_ONGROUND) != 0;
+		float walking_on_ground  = on_ground && live_wants_motion;
+
+		if (cvar("cl_debug_driftlock"))
+			dprint(sprintf("[smooth_local] reconcile elen=%.3f dpost=%.3f wants_motion=%g grounded=%g pre=%v post=%v\n",
+				elen, per_recon_len, live_wants_motion, on_ground,
+				smooth_pre_reset_origin, self.origin));
+
+		// Expose live values to cl_debug_drift overlay.  lock_active
+		// will be set to 1 below if the lock branch fires; default 0.
+		smooth_local_dbg_elen           = elen;
+		smooth_local_dbg_dpost          = per_recon_len;
+		smooth_local_dbg_wants_motion   = live_wants_motion;
+		smooth_local_dbg_lock_active    = 0;
+		smooth_local_dbg_last_reconcile = cltime;
+
+		const float LOCAL_SMOOTH_MIN     = 0.05;
+		const float LOCAL_SMOOTH_MAXJUMP = 32.0;
+
+		if (!walking_on_ground && elen <= LOCAL_SMOOTH_MAXJUMP
+		    && cvar("cl_driftlock"))
+		{
+			smooth_local_dbg_lock_active = 1;
+			// User has released keys.  Hold camera at live trajectory
+			// regardless of dpost magnitude or cumulative elen — both
+			// the steady catch-up tail (small dpost) and the subframe-
+			// quantization bursts within it (occasional dpost spikes)
+			// are server-side artifacts of physics that live prediction
+			// already played out locally.  None of them is information
+			// the user wants to see act on the camera while standing
+			// still.
+			//
+			// Trade-off: small external pushes (< 32 qu cumulative)
+			// from teammates walking into the player won't be visible
+			// until the user next presses a movement key — at which
+			// point the smoother branch below picks up the accumulated
+			// offset and fades it over a long smooth_time so the
+			// release isn't perceived as a bump.  Real teleports /
+			// respawns (> 32 qu) bypass this branch into the snap path.
+			setorigin(self, smooth_pre_reset_origin);
+			self.extrap_error_offset      = '0 0 0';
+			self.extrap_error_cltime      = 0;
+			self.extrap_error_smooth_time = 0;
+		}
+		else if (elen > LOCAL_SMOOTH_MIN && elen <= LOCAL_SMOOTH_MAXJUMP)
+		{
+			// Smoother — used during active motion AND when the lock
+			// releases (user just started moving after a stop with
+			// accumulated server-vs-live drift).
+			//
+			// Pick smooth_time based on err magnitude AND player
+			// velocity:
+			//
+			//   small err (< 1 qu) — steady-state structural lag in
+			//       active motion.  Use cvar default (~31 ms) so the
+			//       camera tracks the bleeding-edge prediction
+			//       responsively.
+			//
+			//   large err (>= 1 qu) — almost certainly a lock release
+			//       carrying accumulated catch-up drift.  The fade
+			//       pull rate visible on the camera is err / fade_time,
+			//       which previously landed at e.g. 50 qu/s for a
+			//       10 qu err over 0.2 s.  At slow walk speeds (60
+			//       qu/s), that's a noticeable yank.  Scale fade_time
+			//       so the visible pull rate is ~20 % of the player's
+			//       current speed (so the correction is subordinate to
+			//       the user's own motion).  Floored at 30 qu/s pull
+			//       rate so fades complete reasonably even at rest.
+			float smooth_time;
+			if (elen >= 1.0)
+			{
+				float vel_mag   = vlen(self.velocity);
+				float pull_rate = max(30, vel_mag * 0.2);
+				smooth_time = elen / pull_rate;
+				smooth_time = bound(0.15, smooth_time, 1.5);
+			}
+			else
+			{
+				smooth_time = cvar("cl_extrap_smooth_time");
+				if (smooth_time <= 0) smooth_time = 0.1;
+			}
+
+			// Continuity preservation against any in-flight previous
+			// offset (active-motion overlapping reconciles).  Use the
+			// PREVIOUS capture's stored smooth_time for the visible-
+			// tail calculation so the decay math matches what the
+			// helper has been applying.
+			if (self.extrap_error_cltime > 0
+			    && self.extrap_error_smooth_time > 0)
+			{
+				float age = cltime - self.extrap_error_cltime;
+				if (age >= 0 && age < self.extrap_error_smooth_time)
+				{
+					float decay = 1.0 - (age / self.extrap_error_smooth_time);
+					err = err + self.extrap_error_offset * decay;
+				}
+			}
+			self.extrap_error_offset      = err;
+			self.extrap_error_cltime      = cltime;
+			self.extrap_error_smooth_time = smooth_time;
+		}
+		else if (elen > LOCAL_SMOOTH_MAXJUMP)
+		{
+			// Teleport / respawn — clear so the camera follows the
+			// real warp instead of fading 32+ qu over smooth_time.
+			self.extrap_error_offset      = '0 0 0';
+			self.extrap_error_cltime      = 0;
+			self.extrap_error_smooth_time = 0;
+			smooth_local_dbg_last_snap = cltime;
+		}
+		// elen <= LOCAL_SMOOTH_MIN: noise floor, no action.
+	}
+
 	input_timelength = saved_timelength;
 	input_angles     = saved_angles;
 	input_movevalues = saved_movevalues;
@@ -1257,13 +1487,69 @@ void() CSQC_PredictCurrentCommand =
 
 	csqc_pred_sequence = clientcommandframe;
 	csqc_pred_time = cltime;
-	PM_PlayerMove();
-	CSQC_CheckPickupTouches();   // MVP weapon-pickup prediction — self is predicted_player
+
+	// Weapon impulse runs BEFORE pmove to mirror the server. SSQC processes
+	// CheckImpulses inside PlayerPreThink (sv_player.qc:584) which fires
+	// before the engine's PM_Move, so the switch-tick on the server already
+	// uses the new weapon's speed factor in pmove. If we ran pmove first
+	// here, the switch-tick would use the OLD speed factor on the client and
+	// the new one on the server — that 1-tick divergence becomes a position
+	// jump after every reconcile at high ping (heavier weapon → snap back,
+	// lighter weapon → snap forward).
 	CSQC_PredictWeaponCommand();
+	PM_PlayerMove();
+	if (cvar("sv_debug_wepswap"))
+	{
+		vector dbg_mv = '0 0 0';
+		dbg_mv_x = input_movevalues_x; dbg_mv_y = input_movevalues_y;
+		CL_Drift_Append(cltime, csqc_pred_sequence, input_timelength * 1000,
+			dbg_mv, input_buttons, self.weapon, self.origin, self.velocity);
+	}
+	CSQC_CheckPickupTouches();   // MVP weapon-pickup prediction — self is predicted_player
 	csqc_dbg_last_predict_dt = (cltime - csqc_dbg_last_key_time) * 1000;
 	CSQC_CheckDebugPredictResponse();
 
 	self = saved;
+};
+
+// Add the still-decaying reconcile-error offset to `base` so the rendered
+// camera position lands smoothly at the post-replay predicted position
+// instead of jumping the full reconcile delta in one frame.  Returns the
+// adjusted origin.  Mirrors the remote-proxy decay in CSQC_SmoothSetOrigin
+// (cl_player.qc:1584-1611).  Gated by cl_driftlock — set 0 to A/B
+// against the old snap behaviour.
+vector(vector base) CSQC_ApplyLocalSmoothOffset =
+{
+	if (cvar_string("cl_driftlock") != "" && !cvar("cl_driftlock"))
+		return base;
+	if (!predicted_player || predicted_player.extrap_error_cltime <= 0)
+		return base;
+
+	// Read the smooth_time that was chosen at offset-capture time.
+	// CSQC_ReconcilePrediction velocity-scales it for large errs so slow
+	// walks see slower fades — recomputing here would diverge if the
+	// player's velocity changed mid-fade.  Fall back to cvar default if
+	// no stored value (e.g. legacy state before this field existed).
+	float smooth_time = predicted_player.extrap_error_smooth_time;
+	if (smooth_time <= 0)
+	{
+		smooth_time = cvar("cl_extrap_smooth_time");
+		if (smooth_time <= 0) smooth_time = 0.1;
+	}
+
+	float age = cltime - predicted_player.extrap_error_cltime;
+	if (age >= 0 && age < smooth_time)
+	{
+		float decay = 1.0 - (age / smooth_time);
+		return base + predicted_player.extrap_error_offset * decay;
+	}
+
+	// Decay finished — clear so the next reconcile starts a fresh
+	// timer, instead of inheriting a zero-but-nonzero-cltime entry.
+	predicted_player.extrap_error_offset      = '0 0 0';
+	predicted_player.extrap_error_cltime      = 0;
+	predicted_player.extrap_error_smooth_time = 0;
+	return base;
 };
 
 void() CSQC_BuildPresentationView =
@@ -1301,7 +1587,7 @@ void() CSQC_BuildPresentationView =
 		return;
 
 	csqc_present_valid = TRUE;
-	csqc_present_origin = predicted_player.origin;
+	csqc_present_origin = CSQC_ApplyLocalSmoothOffset(predicted_player.origin);
 	csqc_present_view_ofs = predicted_player.view_ofs;
 
 	if (!pred_cmd_count)
@@ -1364,7 +1650,7 @@ void() CSQC_BuildPresentationView =
 		input_buttons = input_buttons & ~1;
 	}
 
-	float fixedstep = cvar("sv_mintic");
+	float fixedstep = PM_ReadMovevar("sv_mintic", 0.01);
 	if (fixedstep < 0.001) fixedstep = 0.01;
 
 	pm_suppress_sounds = TRUE;   // preview steps are speculative — no sounds
@@ -1376,7 +1662,7 @@ void() CSQC_BuildPresentationView =
 	}
 	pm_suppress_sounds = FALSE;
 
-	csqc_present_origin = self.origin;
+	csqc_present_origin = CSQC_ApplyLocalSmoothOffset(self.origin);
 	csqc_present_view_ofs = self.view_ofs;
 	csqc_dbg_last_present_time = cltime;
 	csqc_dbg_last_preview_dt = (cltime - csqc_dbg_last_key_time) * 1000;
@@ -1472,18 +1758,17 @@ void() CSQC_BuildPresentationView =
 //  overwrites it with fresh lerp data at the start of the next frame.
 //
 //  Tuning cvars (all live, no restart needed):
-//    cl_extrap                  1   master toggle; 0 = pure engine lerp only
-//    cl_extrap_grounded         0   extrapolate grounded players too (snap-
-//                                   back risk on direction changes — try 1
-//                                   for sniper-tracking feel)
-//    cl_extrap_grounded_minspeed 0  only extrap grounded if XY speed exceeds
-//                                   this (e.g. 200 to skip extrap on slow
-//                                   players where direction-change snap-back
-//                                   is most visible; 0 = always)
-//    cl_extrap_max              3   max extrap window in ticrate multiples
-//                                   (default = ticrate * 3 ≈ 45 ms at 66 Hz)
-//    cl_debug_extrap            0   1 = print per-player extrap delta each
-//                                   frame to console (spammy, use briefly)
+//    cl_extrap             1   master toggle; 0 = pure engine lerp only
+//    cl_extrap_grounded    1   also extrapolate grounded players (required
+//                              for smooth running-target motion; smoothing
+//                              hides any direction-change snap-back)
+//    cl_debug_extrap       0   1 = print per-player extrap delta each
+//                              frame to console (spammy, use briefly)
+//
+// The extrap window cap is hard-coded at 10 × sv_mintic (~156 ms at
+// 64 Hz) — enough to ride out several ticks of packet loss without
+// runaway extrapolation. Retired from cvar list as no users benefit
+// from tuning.
 // ---------------------------------------------------------------------------
 
 // Record a remote player snapshot into the interp ring buffer.
@@ -1503,12 +1788,55 @@ void() CSQC_BuildPresentationView =
 //
 // Key: vis_owner_entnum (the player's slot, 1..maxclients — stable).
 // Tag: cltime, so all downstream math is in a single clock frame.
+// Setorigin with entity-smoothing error offset applied. Target is the
+// "where we want to render this proxy this frame" position (either the
+// interp-behind lerp result or the extrap-forward projection). If an
+// error was stashed in CSQC_PlayerVisual_Update on the last snapshot
+// arrival and it hasn't fully decayed, we shift target by err*decay so
+// the rendered position interpolates smoothly from "where we were"
+// to "where the server says we are" over cl_extrap_smooth_time.
+//
+// decay = 1 at the moment of the snapshot (render = old predicted position,
+//         matches last frame exactly, no jump)
+// decay = 0 after smooth_time elapsed (render = authoritative target)
+void(entity proxy, vector target) CSQC_SmoothSetOrigin =
+{
+	if (proxy.extrap_error_cltime > 0)
+	{
+		// smooth_time <= 0 means "no smoothing" (instant correction).
+		// Earlier version silently substituted 0.1 when the cvar was 0
+		// or negative, which made `cl_extrap_smooth_time 0` behave
+		// identical to the default — wrong. Fall back to default ONLY
+		// when the cvar is completely unset.
+		float smooth_time;
+		if (cvar_string("cl_extrap_smooth_time") == "")
+			smooth_time = 0.1;
+		else
+			smooth_time = cvar("cl_extrap_smooth_time");
+
+		if (smooth_time > 0)
+		{
+			float age = cltime - proxy.extrap_error_cltime;
+			if (age >= 0 && age < smooth_time)
+			{
+				float decay = 1.0 - (age / smooth_time);
+				target = target + proxy.extrap_error_offset * decay;
+			}
+		}
+		// else: smoothing disabled by value — snap to target.
+	}
+	setorigin(proxy, target);
+};
+
 void(entity proxy, vector snap_origin) CSQC_RecordProxySnapshot =
 {
 	if (proxy.vis_owner_entnum <= 0 || proxy.vis_owner_entnum > INTERP_MAX_PLAYERS)
 		return;
 	if (proxy.vis_owner_entnum == player_localentnum)
 		return;   // don't buffer our own proxy — local player uses prediction
+	if (proxy.vis_is_dead)
+		return;   // don't pollute the slot's ring buffer with frozen corpse origins
+		          // — the slot is shared with the (respawning) live proxy.
 
 	float slot = proxy.vis_owner_entnum - 1;
 	float base = slot * INTERP_HIST_SIZE;
@@ -1594,6 +1922,25 @@ void() CSQC_PushInterpUserInfo =
 	localcmd(sprintf("setinfo cl_interp_time %f\n", v));
 };
 
+// Push cl_predict_hits as userinfo so the server knows whether to expect
+// a hitclaim from this shooter. When sv_trust_clienthits >= 1, the server
+// suppresses its own player-damage path for shooters that *will* claim,
+// avoiding the dedup race that silently dropped the visually-accurate
+// claim in favor of a slightly-off lag-comped server hit. Shooters with
+// cl_predict_hits 0 keep the legacy server-auth damage path.
+float cl_predict_hits_pushed_init;
+float cl_predict_hits_last_pushed;
+
+void() CSQC_PushPredictHitsUserInfo =
+{
+	float v = cvar("cl_predict_hits");
+	if (cl_predict_hits_pushed_init && v == cl_predict_hits_last_pushed)
+		return;
+	cl_predict_hits_pushed_init = 1;
+	cl_predict_hits_last_pushed = v;
+	localcmd(sprintf("setinfo cl_predict_hits %f\n", v));
+};
+
 // NOTE: cl_extrap_* cvars only have a visible effect when at least one
 // other player is connected.  In a single-player session the per-player
 // loop body never executes, so every cvar combination produces identical
@@ -1628,10 +1975,12 @@ void() CSQC_ExtrapolateRemotePlayers =
 		master = cvar("cl_extrap");
 
 	float extrap_grounded = cvar("cl_extrap_grounded");
-	float grounded_minspeed = cvar("cl_extrap_grounded_minspeed");
 
-	float max_mult = cvar("cl_extrap_max");
-	if (max_mult <= 0) max_mult = 3;
+	// Hard-coded: max extrap window = 10 × sv_mintic (≈156 ms at 64 Hz).
+	// Previously cl_extrap_max cvar; users set it to 99 effectively
+	// disabling the cap. 10 ticks is enough slack for normal packet
+	// jitter without runaway extrapolation under catastrophic loss.
+	const float max_mult = 10;
 
 	// cl_interp_time: render N seconds behind the latest snapshot using
 	// the ring buffer (overrides extrap per-player when data available).
@@ -1654,8 +2003,8 @@ void() CSQC_ExtrapolateRemotePlayers =
 	{
 		print(sprintf("[extrap] enter cltime=%.3f last_snap_cltime=%.3f dt=%.3f\n",
 			cltime, g_interp_last_snap_cltime, dt));
-		print(sprintf("[extrap]   master=%g grounded=%g minspeed=%g maxmult=%g interp=%.3f\n",
-			master, extrap_grounded, grounded_minspeed, max_mult, interp_time));
+		print(sprintf("[extrap]   master=%g grounded=%g maxmult=%g interp=%.3f\n",
+			master, extrap_grounded, max_mult, interp_time));
 		print(sprintf("[extrap]   maxclients=%g player_localentnum=%g\n",
 			maxclients, player_localentnum));
 	}
@@ -1699,6 +2048,18 @@ void() CSQC_ExtrapolateRemotePlayers =
 			continue;
 		}
 
+		// Corpses (vis_is_dead) don't move — and they share
+		// vis_owner_entnum with the respawning live proxy, so the
+		// shared interp ring buffer's latest entry is the LIVE
+		// player's origin. Without this skip the corpse would
+		// extrap to whatever the new live proxy's just-received
+		// origin is and visibly follow that player around.
+		if (proxy.vis_is_dead)
+		{
+			proxy = proxy.chain;
+			continue;
+		}
+
 		seen_remote = 1;
 
 		if (extrap_debug)
@@ -1718,8 +2079,10 @@ void() CSQC_ExtrapolateRemotePlayers =
 				// spatial index and gettaginfo see the updated position.
 				// A direct field write leaves hitbox bones anchored to the
 				// last setorigin, which produces the "hitboxes lag behind
-				// the model and snap back" symptom.
-				setorigin(proxy, lerped);
+				// the model and snap back" symptom. Smoothed variant
+				// applies any pending error offset so snapshot snaps
+				// blend over cl_extrap_smooth_time instead of popping.
+				CSQC_SmoothSetOrigin(proxy, lerped);
 				if (extrap_debug)
 					print(sprintf("[extrap] proxy owner=%g  interp-behind=%.3fs\n",
 						owner, interp_time));
@@ -1756,19 +2119,6 @@ void() CSQC_ExtrapolateRemotePlayers =
 				continue;
 			}
 
-			if (grounded_minspeed > 0)
-			{
-				float xy_speed = sqrt(proxy.velocity_x * proxy.velocity_x
-				                    + proxy.velocity_y * proxy.velocity_y);
-				if (xy_speed < grounded_minspeed)
-				{
-					if (extrap_debug)
-						print(sprintf("[extrap] proxy owner=%g skipped (xy_speed=%.1f < %.1f)\n",
-							owner, xy_speed, grounded_minspeed));
-					proxy = proxy.chain;
-					continue;
-				}
-			}
 		}
 
 		// Extrap from the LATEST SNAPSHOT origin (newest ring-buffer entry),
@@ -1795,10 +2145,10 @@ void() CSQC_ExtrapolateRemotePlayers =
 		if (!(proxy.flags & FL_ONGROUND))
 			extrap_origin_z -= 0.5 * gravity * dt * dt;
 
-		// setorigin so hitboxes (gettaginfo) and model render from the
-		// same position — a direct .origin assignment leaves the engine's
-		// spatial index stale.
-		setorigin(proxy, extrap_origin);
+		// Smoothed setorigin — applies any pending error-offset decay so
+		// snapshot snap-backs bleed out over cl_extrap_smooth_time
+		// instead of popping in a single frame.
+		CSQC_SmoothSetOrigin(proxy, extrap_origin);
 
 		if (extrap_debug)
 		{
@@ -1817,66 +2167,21 @@ void() CSQC_ExtrapolateRemotePlayers =
 };
 
 // ---------------------------------------------------------------------------
-//  CSQC_SetupRemotePlayerSolids
-//  Called before each prediction tick so that other players are solid
-//  obstacles in PM_TraceHull (MOVE_NORMAL).  Uses the engine-interpolated
-//  position for each active remote player slot, with the correct standing or
-//  ducking hull.  Must run before PM_PlayerMoveStep, not just at render time.
+// CSQC_SetupRemotePlayerSolids was removed.  It tried to set engine
+// player slots SOLID_SLIDEBOX every input frame via edict_num(n) for
+// n=1..maxclients — but in this CSQC config edict_num(n) doesn't
+// return engine player slots, it returns whatever CSQC entity happens
+// to be at edict slot n (predicted_player, preview models, etc.).
+// Live diagnostic confirmed every iteration was skipped by the model-
+// prefix check; the function ran 32 outer iterations doing nothing.
+//
+// Player-vs-player collision on CSQC is handled by the visual proxy
+// alone (set SOLID_BBOX in CSQC_PlayerVisual_Update and stashed by
+// PM_NoblockStash when mp_noblock is on).  PM_ReadMovevars (which
+// SetupRemotePlayerSolids also called) is invoked per-pmove inside
+// PM_PlayerMove and on every CSQC_PlayerVisual_Update for proxy
+// bbox sizing, so its globals stay populated without this caller.
 // ---------------------------------------------------------------------------
-
-void() CSQC_SetupRemotePlayerSolids =
-{
-	float  n;
-	entity ent;
-	vector emins, emaxs;
-
-	PM_ReadMovevars();
-
-	for (n = 1; n <= maxclients; n++)
-	{
-		if (n == player_localentnum)
-			continue;
-
-		if (!(float)getentity(n, GE_ACTIVE))
-			continue;
-
-		ent = edict_num(n);
-		if (!ent || ent == world)
-			continue;
-
-		// Skip slots with no model (disconnected/invalid player)
-		if (!ent.modelindex)
-			continue;
-
-		// Skip slots that aren't actually a player. On listen server,
-		// edict_num(n) for n > num-real-players can return a CSQC entity
-		// the engine assigned to that slot via SendEntity (e.g. our
-		// func_breakable brushes use slots 86+). Without this guard we
-		// stomp their bbox to PM_MINS/MAXS and solid to SOLID_SLIDEBOX
-		// every prediction frame, producing 31 invisible player-shaped
-		// colliders piled at world origin. The model-prefix check is
-		// safe: real player entities always wear a "models/player/..." MDL,
-		// brush submodels are "*N", everything else has a different prefix.
-		if (substring(ent.model, 0, 14) != "models/player/")
-			continue;
-
-		// Use duck hull if the remote player is crouching
-		if (ent.flags & FL_DUCKING)
-		{
-			emins = PM_DUCK_MINS;
-			emaxs = PM_DUCK_MAXS;
-		}
-		else
-		{
-			emins = PM_MINS;
-			emaxs = PM_MAXS;
-		}
-
-		setorigin(ent, getentity(n, GE_ORIGIN));
-		setsize(ent, emins, emaxs);
-		ent.solid = SOLID_SLIDEBOX;
-	}
-};
 
 // ---------------------------------------------------------------------------
 //  CSQC_Input_Frame  -  called each input frame, inputs already set
@@ -1885,7 +2190,15 @@ void() CSQC_SetupRemotePlayerSolids =
 void() CSQC_Input_Frame =
 {
 	localplayer = CSQC_GetEngineLocalPlayer();
-	CSQC_SetupRemotePlayerSolids();
+
+	// Advance remote player proxies to their interped/extrapped positions
+	// BEFORE any fire trace runs. Without this, client's hit traces use
+	// proxy positions from the previous render frame's UpdateView pass,
+	// which is 1 render frame behind what the user will visually see
+	// when the trace draws its impact. Small (~3 ms of target motion at
+	// 300 fps) but user-visible as "aim hit the player model, trace
+	// missed." Idempotent with the UpdateView call that follows.
+	CSQC_ExtrapolateRemotePlayers();
 	CSQC_ClampMoveInputs();
 	csqc_dbg_last_inputframe_time = cltime;
 	CSQC_LatchLiveInputFromCommand();
@@ -1944,6 +2257,8 @@ const string PLAYER_VISUAL_MODEL = "models/player/leet/leet.mdl";
 .float vis_aim_yaw;          // server-sent aim direction (never modified by predraw)
 .float vis_anim_top_gen;     // fire/reload generation counter — detects re-fires
 .float vis_last_anim_top_gen;
+// extrap_error_* fields live in client/cl_customdefs.qc so
+// CSQC_SmoothSetOrigin (defined earlier in this file) can see them.
 
 // Weapon attachment entity + state
 .entity vis_weapon_ent;
@@ -2034,19 +2349,43 @@ string g_pbones[] =
 float() CSQC_PlayerVisual_Predraw =
 {
 	// Hide the visual proxy when we shouldn't see it:
-	// 1. Own body in first person (not chase cam, not spectating)
+	// 1. Own body in first person (not chase cam, not spectating, not death cam)
 	// 2. Spectated player's body in first-person spectate mode
+	// Death cam is a 3rd-person orbit around spec_death_origin — the corpse
+	// should be visible there, so keep our own proxy drawn while it's active.
+	//
+	// Corpses (vis_is_dead) are NEVER hidden by the first-person rule —
+	// we want to see our own body on the ground after respawning.
+	// Per-frame Sync no longer touches the corpse, so vis_is_dead stays
+	// at the moment-of-death value (=1) for the life of the corpse.
 	if (self.vis_owner_entnum == player_localentnum
-	    && spec_target == 0 && !cvar("chase_active"))
+	    && !self.vis_is_dead
+	    && spec_target == 0 && !cvar("chase_active")
+	    && !Spectate_InDeathCam())
 		return PREDRAW_NEXT;
 
+	// Hide the spectated player's proxy so it doesn't block the first-
+	// person view. NOT during death-cam: that's a 3rd-person orbit
+	// around our corpse, and spec_target gets pre-populated with the
+	// killer's entnum — without this guard the killer's proxy would
+	// vanish from view the instant we die. Mirrors the VF_VIEWENTITY
+	// gate in cl_main.qc CSQC_UpdateView (also Spectate_InDeathCam-
+	// excluded).
 	if (spec_target > 0 && spec_mode == SPEC_MODE_FIRSTPERSON_FWD
-	    && self.vis_owner_entnum == spec_target)
+	    && self.vis_owner_entnum == spec_target
+	    && !Spectate_InDeathCam())
 		return PREDRAW_NEXT;
 
 	// Snap local player's proxy to predicted position so it doesn't
 	// flicker between server snapshots when in chase_active.
-	if (self.vis_owner_entnum == player_localentnum && predicted_player
+	//
+	// Corpses must NOT be snapped — they share vis_owner_entnum with the
+	// (now-respawning) live proxy, so without this guard the corpse
+	// would teleport to the live player's predicted position every
+	// frame and visibly follow them around.
+	if (self.vis_owner_entnum == player_localentnum
+	    && !self.vis_is_dead
+	    && predicted_player
 	    && csqc_prediction_valid)
 		setorigin(self, csqc_present_origin);
 
@@ -2118,10 +2457,21 @@ float() CSQC_PlayerVisual_Predraw =
 	if (is_locomotion && speed2d > 1)
 	{
 		// How many QU the walk cycle covers per second of animation time.
-		// Tune this to match the model — higher = faster foot cycle.
-		// sv_anim_qu_per_sec overrides for testing (default 240).
-		float qu_per_sec = cvar("sv_anim_qu_per_sec");
-		if (qu_per_sec <= 0) qu_per_sec = 240;
+		// Higher = faster foot cycle. Crouch run uses its own value
+		// (sv_anim_qu_per_sec_crouch, default 100) since crouch movement
+		// is slower — sharing one value made the legs cycle look right
+		// standing but glacial when crouching.
+		float qu_per_sec;
+		if (self.vis_anim_bottom == CSANIM_RUN_CROUCH)
+		{
+			qu_per_sec = cvar("sv_anim_qu_per_sec_crouch");
+			if (qu_per_sec <= 0) qu_per_sec = 100;
+		}
+		else
+		{
+			qu_per_sec = cvar("sv_anim_qu_per_sec");
+			if (qu_per_sec <= 0) qu_per_sec = 240;
+		}
 
 		vector delta = self.origin - self.vis_prev_origin;
 		delta_z = 0;  // horizontal distance only
@@ -2174,6 +2524,13 @@ float() CSQC_PlayerVisual_Predraw =
 	self.bonecontrol2 = fCorrect * 0.5;
 	self.bonecontrol3 = fCorrect * 0.25;
 	self.bonecontrol4 = fCorrect * 0.125;
+
+	// (Tried locking bone 1's translation here via skel_build +
+	// skel_set_bone — froze the whole model because skel_build replaces
+	// the engine's frame+baseframe blend with a single-track build,
+	// losing the basebone split. The proper fix lives outside the
+	// runtime — strip the root translation from the breathing animation
+	// in the .smd source, or accept the feet drift. See repo notes.)
 
 	addentity(self);
 
@@ -2252,6 +2609,44 @@ const float VP_SF_POSE_CL     = 1;
 const float VP_SF_ANIM_CL     = 2;
 const float VP_SF_IDENTITY_CL = 4;
 
+// Console command: dump every bone of the first visible player_visual_proxy
+// to the console (name + index). Use the result to pick the right value
+// for sv_player_basebone — it should split between the last torso/arm
+// bone and the first leg bone (typically the bone whose translation is
+// driven by the breathing/idle animation should fall on the TORSO side
+// of the split, while the root bone — if it has no animation translation
+// — can stay on either side). Registered in cl_main.qc.
+void() CSQC_DumpPlayerBones =
+{
+	entity vis = findchain(classname, "player_visual_proxy");
+	if (!vis || !vis.modelindex)
+	{
+		print("[bones] no active player_visual_proxy with a model — try chase_active 1 or watch a remote player\n");
+		return;
+	}
+
+	if (!vis.skeletonindex)
+		vis.skeletonindex = skel_create(vis.modelindex);
+	if (!vis.skeletonindex)
+	{
+		print("[bones] skel_create failed — model may not have a skeleton\n");
+		return;
+	}
+
+	float n = skel_get_numbones(vis.skeletonindex);
+	print(sprintf("[bones] proxy owner=%g model='%s' bones=%g\n",
+		vis.vis_owner_entnum, vis.model, n));
+	float i;
+	for (i = 1; i <= n; i++)
+	{
+		float parent = skel_get_boneparent(vis.skeletonindex, i);
+		print(sprintf("[bones]  %3d  parent=%-3d  %s\n",
+			i, parent, skel_get_bonename(vis.skeletonindex, i)));
+	}
+	print(sprintf("[bones] current sv_player_basebone = %g\n",
+		cvar("sv_player_basebone")));
+};
+
 void() CSQC_PlayerVisual_Update =
 {
 	self.vis_owner_entnum = readbyte();
@@ -2277,11 +2672,25 @@ void() CSQC_PlayerVisual_Update =
 	if (section_bits & VP_SF_ANIM_CL)
 	{
 		// Wire order: byte1 = .frame (legs), byte2 = .baseframe (torso)
-		self.vis_anim_bottom  = readbyte();   // .frame    = locomotion (legs)
-		self.vis_anim_top     = readbyte();   // .baseframe = aim (torso)
-		self.vis_pitch        = readfloat();
-		self.flags            = readfloat();
-		self.vis_anim_top_gen = readbyte();
+		// Always READ from the wire (else later sections desync), but
+		// only APPLY when the proxy isn't predicted-dead — otherwise
+		// the server's late death-anim snapshot would re-trigger the
+		// pose CSQC_TryPredictDeath already played out, causing a
+		// visible "the body restarts the death animation" jitter.
+		float new_anim_bottom  = readbyte();
+		float new_anim_top     = readbyte();
+		float new_pitch        = readfloat();
+		float new_flags        = readfloat();
+		float new_anim_top_gen = readbyte();
+
+		if (!self.vis_pred_dead_latch)
+		{
+			self.vis_anim_bottom  = new_anim_bottom;
+			self.vis_anim_top     = new_anim_top;
+			self.vis_pitch        = new_pitch;
+			self.flags            = new_flags;
+			self.vis_anim_top_gen = new_anim_top_gen;
+		}
 	}
 
 	float identity_changed = (section_bits & VP_SF_IDENTITY_CL);
@@ -2296,6 +2705,36 @@ void() CSQC_PlayerVisual_Update =
 		// Death byte — server sets when owner.is_dead. Drops proxy
 		// solidity so the corpse stops shoving live players around.
 		self.vis_is_dead = readbyte();
+		// Health byte (0..255) — used by CSQC_TryPredictDeath to
+		// decide whether a predicted hit is lethal. Server clamps to
+		// the byte range in Player_VisualProxy_Sync.
+		self.vis_health  = readbyte();
+
+		// Rollback clear: if the server snapshot says alive, our
+		// predicted-death was wrong (target had armor / regen / FF /
+		// bad hitclaim) — clear the latch so future anim updates
+		// resume applying. Stays set while server confirms dead so
+		// subsequent dead-state snapshots can't re-restart the anim.
+		//
+		// Time-gate: only believe an "alive" snapshot once enough time
+		// has elapsed for our shot to have round-tripped (ping +
+		// headroom). Within that window, an "alive" snapshot is just
+		// the pre-kill state the server hadn't processed our hit at —
+		// keep the latch and the predicted death pose. Without this
+		// gate, body-shot prediction visibly snapped back to standing
+		// for one frame before the kill confirmation came through.
+		if (!self.vis_is_dead && self.vis_pred_dead_latch)
+		{
+			float ping_s = getplayerkeyfloat(player_localnum, INFOKEY_P_PING, 0) * 0.001;
+			float confirm_window = bound(0.05, ping_s + 0.10, 2.5);
+			if (self.vis_pred_dead_at_time == 0
+			    || time - self.vis_pred_dead_at_time > confirm_window)
+			{
+				self.vis_pred_dead_latch   = 0;
+				self.vis_pred_dead_at_time = 0;
+				self.vis_pred_gibs_at_time = 0;
+			}
+		}
 
 		if (team_model_byte == 255)
 			mdl_path = "models/player/sini.mdl";
@@ -2345,12 +2784,84 @@ void() CSQC_PlayerVisual_Update =
 			              self.model, self.modelindex));
 		}
 		setcustomskin(self, "", "geomset 0 2\n");
-		// setmodel resets bbox to the model's bounds — restore pmove hull
-		// so MOVE_HITMODEL traces use the right broad-phase volume.
-		setsize(self, '-16 -16 0', '16 16 56');
 	}
+
+	// Bbox sync — every snapshot, not just on model change.
+	//
+	// The proxy is the sole client-side pmove collider for remote
+	// players in this CSQC mode (no engine-slot collider exists; the
+	// removed CSQC_SetupRemotePlayerSolids tried to populate one but
+	// the edict_num(n) it queried didn't actually map to engine player
+	// slots).  Sizing matches PM_MINS / PM_MAXS — origin-at-body-
+	// center hulls (Z range -36..+36) — so pmove traces against the
+	// proxy match the server's authoritative hull and PM_Disentangle-
+	// FromPlayer resolves against the right shape.
+	//
+	// PM_ReadMovevars() populates PM_MINS / PM_MAXS / PM_DUCK_*.
+	// They're also filled on every PM_PlayerMove tick, but a fresh
+	// proxy snapshot can land before pmove runs on a new connect, so
+	// we call defensively here.
+	PM_ReadMovevars();
+
+	// Duck state: read directly from the proxy's own .flags, which the
+	// VP_SF_ANIM_CL section just deserialised at line ~2526 from the
+	// player_visual_proxy SendEntity payload (server writes self.flags
+	// at sv_player.qc:978).  Earlier version looked up
+	// edict_num(self.vis_owner_entnum).flags — wrong: in this CSQC
+	// edict_num(N) for N=1..maxclients does NOT return engine player
+	// slots, it returns whatever entity happens to live at edict N
+	// (predicted_player, preview models, etc.).  The first remote-
+	// player proxy was reading predicted_player.flags — i.e. the LOCAL
+	// player's duck state — so the wrong proxy resized.
+	float prox_ducking = (self.flags & FL_DUCKING) != 0;
+
+	if (prox_ducking)
+		setsize(self, PM_DUCK_MINS, PM_DUCK_MAXS);
+	else
+		setsize(self, PM_MINS, PM_MAXS);
 	if (had_pose)
+	{
+		// Stash the "error" between where we extrapolated the proxy to
+		// last frame and where the server says it actually is. The
+		// extrap function bleeds this offset out over
+		// cl_extrap_smooth_time so the snap-back isn't visible as a
+		// single-frame pop.
+		if (self.vis_owner_entnum > 0 && self.vis_owner_entnum != player_localentnum)
+		{
+			float smooth_enabled = 1;
+			if (cvar_string("cl_extrap_smooth") != "" && !cvar("cl_extrap_smooth"))
+				smooth_enabled = 0;
+
+			if (smooth_enabled)
+			{
+				// Hard-coded 32 units = teleport threshold (one player
+				// bbox width). Smaller deltas are prediction error and
+				// get smoothed; larger = teleport/respawn, snap instantly.
+				// Previously cl_extrap_smooth_maxjump cvar; no user ever
+				// benefits from tuning this.
+				const float SMOOTH_MAXJUMP = 32;
+
+				vector err = self.origin - new_origin;
+				float elen = vlen(err);
+				// Ignore tiny sub-pixel noise (floor rounding, 0.5-unit
+				// snaps) and ignore huge jumps (teleport, respawn) — the
+				// first would spam pointless smoothing, the second would
+				// render the player visibly lagging behind a teleport.
+				if (elen > 0.5 && elen <= SMOOTH_MAXJUMP)
+				{
+					self.extrap_error_offset = err;
+					self.extrap_error_cltime  = cltime;
+				}
+				else
+				{
+					self.extrap_error_offset  = '0 0 0';
+					self.extrap_error_cltime  = 0;
+				}
+			}
+		}
+
 		setorigin(self, new_origin);
+	}
 
 	// Solidity policy — set LAST so setmodel/setsize re-link calls can't
 	// silently default solid back to SOLID_BBOX.
@@ -2455,6 +2966,12 @@ noref void(float isnew) CSQC_Ent_Update =
 		return;
 	}
 
+	if (ent_type == CSQC_ENT_PROJECTILE)
+	{
+		CSQC_Projectile_Update(isnew);
+		return;
+	}
+
 	// --- prediction proxy ---
 
 	if (ent_type != PM_CSQC_PROXY_VERSION)
@@ -2477,17 +2994,32 @@ noref void(float isnew) CSQC_Ent_Update =
 
 	if (changedflags & PM_SF_MOVEMENT)
 	{
-		setorigin(self, readvector());
-		self.velocity      = readvector();
+		// Full 32-bit float for origin / velocity (paired with the
+		// matching WriteFloat in PM_PredictionProxy_SendEntity).  Avoids
+		// 1/8 qu coord quantization that was the dominant source of
+		// reconcile-vs-live drift — pmove on both sides is deterministic,
+		// but coord rounding on snapshot turned that determinism into
+		// per-reconcile noise.  view_ofs stays at coord precision (rarely
+		// changes; 1/8 qu noise is well below visible).
+		vector pred_origin;
+		pred_origin_x = readfloat();
+		pred_origin_y = readfloat();
+		pred_origin_z = readfloat();
+		setorigin(self, pred_origin);
+		self.velocity_x    = readfloat();
+		self.velocity_y    = readfloat();
+		self.velocity_z    = readfloat();
 		self.view_ofs      = readvector();
 		self.flags         = readfloat();
-		self.pm_movetype   = readfloat();
-		self.pm_jump_held  = readfloat();
-		self.pm_jump_msec  = readfloat();
+		// Matches server's re-encoding in PM_PredictionProxy_SendEntity:
+		// small integer / bitfield fields are byte or short, not float.
+		self.pm_movetype   = readbyte();
+		self.pm_jump_held  = readbyte();
+		self.pm_jump_msec  = readshort();
 		self.pm_waterjumptime = readfloat();
-		self.pm_in_duck    = readfloat();
-		self.pm_duck_msec  = readfloat();
-		self.pm_oldbuttons    = readfloat();
+		self.pm_in_duck    = readbyte();
+		self.pm_duck_msec  = readshort();
+		self.pm_oldbuttons    = readbyte();
 		self.pm_timecarry     = readfloat();
 		self.pm_teleport_time        = readfloat();
 		self.pm_ladder_detach_time   = readfloat();
@@ -2518,57 +3050,85 @@ noref void(float isnew) CSQC_Ent_Update =
 				self.wep_anim_start = 0;
 		}
 		self.zoomstage       = readbyte();
+		// Speed-factor blend state — paired with WriteFloat in
+		// PM_PredictionProxy_SendEntity.  Preserves in-flight transition
+		// across reconcile so client replay and server pmove stay
+		// synchronized through ping-window weapon switches.
+		self.pm_weapon_blend_progress = readfloat();
+		self.pm_weapon_prev_factor    = readfloat();
 	}
 
 	if (changedflags & PM_SF_AMMO)
 	{
-		self.mag_deagle      = readbyte();
-		self.ammo_deagle     = readbyte();
-		self.mag_ak47        = readbyte();
-		self.ammo_ak47       = readbyte();
-		self.mag_m4a1        = readbyte();
-		self.ammo_m4a1       = readbyte();
-		self.m4a1_silenced   = readbyte();
-		self.mag_flakshotgun = readbyte();
-		self.mag_pistol      = readbyte();
-		self.ammo_pistol     = readbyte();
-		self.mag_scout       = readbyte();
-		self.ammo_scout      = readbyte();
-		self.mag_357         = readbyte();
-		self.ammo_357        = readbyte();
-		self.mag_m249        = readbyte();
-		self.ammo_m249       = readbyte();
-		self.mag_awp         = readbyte();
-		self.ammo_awp        = readbyte();
-		self.mag_98k         = readbyte();
-		self.ammo_98k        = readbyte();
-		self.mag_shotgun     = readbyte();
-		self.ammo_shotgun    = readbyte();
-		self.mag_m3          = readbyte();
-		self.ammo_m3         = readbyte();
-		self.mag_mp5         = readbyte();
-		self.ammo_mp5        = readbyte();
-		self.mag_crossbow    = readbyte();
-		self.ammo_crossbow   = readbyte();
-		self.mag_grenadelauncher = readbyte();
-		self.mag_rebar       = readbyte();
-		self.ammo_gauss      = readbyte();
-		self.mag_glock       = readbyte();
-		self.ammo_glock      = readbyte();
-		self.mag_g3sg1       = readbyte();
-		self.ammo_g3sg1      = readbyte();
-		self.mag_hlsmg       = readbyte();
-		self.ammo_hlsmg      = readbyte();
-		self.ammo_hlsmg_grenades = readbyte();
-		self.mag_hlrpg       = readbyte();
-		self.ammo_hlrpg      = readbyte();
-		self.ammo_hlgrenade  = readbyte();
-		self.mag_hlglock     = readbyte();
-		self.ammo_hlglock    = readbyte();
-		self.ammo_hlegon     = readbyte();
-		self.mag_csusp       = readbyte();
-		self.ammo_csusp      = readbyte();
-		self.csusp_silenced  = readbyte();
+		// 6-byte bitmask + per-bit conditional readbyte.  Matches the
+		// server write order in PM_PredictionProxy_SendEntity exactly.
+		// Fields whose bit is clear keep their cached value (server
+		// skipped writing them because they didn't change this send).
+		float m0 = readbyte();
+		float m1 = readbyte();
+		float m2 = readbyte();
+		float m3 = readbyte();
+		float m4 = readbyte();
+		float m5 = readbyte();
+
+		// byte 0
+		if (m0 &   1) self.mag_deagle          = readbyte();
+		if (m0 &   2) self.ammo_deagle         = readbyte();
+		if (m0 &   4) self.mag_ak47            = readbyte();
+		if (m0 &   8) self.ammo_ak47           = readbyte();
+		if (m0 &  16) self.mag_m4a1            = readbyte();
+		if (m0 &  32) self.ammo_m4a1           = readbyte();
+		if (m0 &  64) self.m4a1_silenced       = readbyte();
+		if (m0 & 128) self.mag_flakshotgun     = readbyte();
+
+		// byte 1
+		if (m1 &   1) self.mag_pistol          = readbyte();
+		if (m1 &   2) self.ammo_pistol         = readbyte();
+		if (m1 &   4) self.mag_scout           = readbyte();
+		if (m1 &   8) self.ammo_scout          = readbyte();
+		if (m1 &  16) self.mag_357             = readbyte();
+		if (m1 &  32) self.ammo_357            = readbyte();
+		if (m1 &  64) self.mag_m249            = readbyte();
+		if (m1 & 128) self.ammo_m249           = readbyte();
+
+		// byte 2
+		if (m2 &   1) self.mag_awp             = readbyte();
+		if (m2 &   2) self.ammo_awp            = readbyte();
+		if (m2 &   4) self.mag_98k             = readbyte();
+		if (m2 &   8) self.ammo_98k            = readbyte();
+		if (m2 &  16) self.mag_shotgun         = readbyte();
+		if (m2 &  32) self.ammo_shotgun        = readbyte();
+		if (m2 &  64) self.mag_m3              = readbyte();
+		if (m2 & 128) self.ammo_m3             = readbyte();
+
+		// byte 3
+		if (m3 &   1) self.mag_mp5             = readbyte();
+		if (m3 &   2) self.ammo_mp5            = readbyte();
+		if (m3 &   4) self.mag_crossbow        = readbyte();
+		if (m3 &   8) self.ammo_crossbow       = readbyte();
+		if (m3 &  16) self.mag_grenadelauncher = readbyte();
+		if (m3 &  32) self.mag_rebar           = readbyte();
+		if (m3 &  64) self.ammo_gauss          = readbyte();
+		if (m3 & 128) self.mag_glock           = readbyte();
+
+		// byte 4
+		if (m4 &   1) self.ammo_glock          = readbyte();
+		if (m4 &   2) self.mag_g3sg1           = readbyte();
+		if (m4 &   4) self.ammo_g3sg1          = readbyte();
+		if (m4 &   8) self.mag_hlsmg           = readbyte();
+		if (m4 &  16) self.ammo_hlsmg          = readbyte();
+		if (m4 &  32) self.ammo_hlsmg_grenades = readbyte();
+		if (m4 &  64) self.mag_hlrpg           = readbyte();
+		if (m4 & 128) self.ammo_hlrpg          = readbyte();
+
+		// byte 5 (bit 7 unused — 47 fields total)
+		if (m5 &   1) self.ammo_hlgrenade      = readbyte();
+		if (m5 &   2) self.mag_hlglock         = readbyte();
+		if (m5 &   4) self.ammo_hlglock        = readbyte();
+		if (m5 &   8) self.ammo_hlegon         = readbyte();
+		if (m5 &  16) self.mag_csusp           = readbyte();
+		if (m5 &  32) self.ammo_csusp          = readbyte();
+		if (m5 &  64) self.csusp_silenced      = readbyte();
 	}
 
 	CSQC_StoreConfirmedStateFromEntity(self);

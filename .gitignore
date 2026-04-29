@@ -27,3 +27,11 @@ w_pistol.qc
 .gitignore
 fteqcc.ini
 scintilla.cfg
+fteqw
+/fteqw/
+ode
+/ode/
+.vscode/
+.vscode
+/.vscode
+data
