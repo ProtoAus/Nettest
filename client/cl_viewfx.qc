@@ -591,57 +591,12 @@ void(entity gun) CSQC_ViewFX_ComputeOffsets =
             ads_vm_flip = !ads_vm_flip;
         float ads_side = ads_vm_flip ? -1 : 1;
 
-        // Per-weapon ADS pose lookup.  Each viewmodel has a different
-        // grip anchor / sight height, so a single global offset can
-        // only land one weapon's sights at screen center.  HDAK47 and
-        // AK47 share the legacy global `cl_viewmodel_ads_*` set (the
-        // user's tuned defaults); everything else routes through a
-        // weapon-specific prefix so each gun's sights can be aligned
-        // independently.  The trailing axis names (_forward / _right
-        // / _down / _pitch / _yaw / _roll) are the same across all
-        // prefixes so tuning is muscle-memory consistent.
-        //
-        // Adding more weapons to ADS: append an else-if branch here,
-        // register the 6 cvars in sh_cvar_table.qc, and add the
-        // weapon to both the ads_target gate above AND
-        // Weapon_IsADSActive in sh_weapon_logic.qc.
-        string ads_pfx = "cl_ads";   // fallback / HDAK47 / AK47
-        if (predicted_player.weapon == WEP_DEAGLE)
-            ads_pfx = "cl_ads_deagle";
-        else if (predicted_player.weapon == WEP_CFMAC10)
-            ads_pfx = "cl_ads_mac10";
-        else if (predicted_player.weapon == WEP_CFFAMAS)
-            ads_pfx = "cl_ads_famas";
-        else if (predicted_player.weapon == WEP_CFFIVESEVEN)
-            ads_pfx = "cl_ads_fiveseven";
-        else if (predicted_player.weapon == WEP_CFDEAGLE)
-            ads_pfx = "cl_ads_anaconda";
-        else if (predicted_player.weapon == WEP_CFAWP)
-            ads_pfx = "cl_ads_barrett";
-        else if (predicted_player.weapon == WEP_CFG3SG1)
-            ads_pfx = "cl_ads_psg1";
-        else if (predicted_player.weapon == WEP_CFELITE)
-            ads_pfx = "cl_ads_elite";
-        else if (predicted_player.weapon == WEP_CFSCOUTM700)
-            ads_pfx = "cl_ads_m700";
-        else if (predicted_player.weapon == WEP_CFGALIL)
-            ads_pfx = "cl_ads_scar";
-        else if (predicted_player.weapon == WEP_CFGLOCK)
-            ads_pfx = "cl_ads_mauser";
-        else if (predicted_player.weapon == WEP_CFSG550)
-            ads_pfx = "cl_ads_dragunov";
-        else if (predicted_player.weapon == WEP_CFXM1014)
-            ads_pfx = "cl_ads_spas12";
-        else if (predicted_player.weapon == WEP_CFM3)
-            ads_pfx = "cl_ads_winchester";
-        else if (predicted_player.weapon == WEP_CFAUG)
-            ads_pfx = "cl_ads_aug";
-        else if (predicted_player.weapon == WEP_CFMP5)
-            ads_pfx = "cl_ads_cfmp5";
-        else if (predicted_player.weapon == WEP_CFVECTOR)
-            ads_pfx = "cl_ads_vector";
-        else if (predicted_player.weapon == WEP_CFTYPE89)
-            ads_pfx = "cl_ads_type89";
+        // Single shared ADS pose for every weapon — tuned via the
+        // global cl_ads_* set (cl_ads_pitch / _yaw / _roll / _forward
+        // / _right / _down).  The former per-weapon prefixes
+        // (cl_ads_deagle_*, cl_ads_mac10_*, …) were removed in favour
+        // of one shared pose for all guns.
+        string ads_pfx = "cl_ads";
 
         ang_x += cvar(strcat(ads_pfx, "_pitch"))   * ae;
         ang_y += cvar(strcat(ads_pfx, "_yaw"))     * ae * ads_side;

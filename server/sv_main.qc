@@ -481,6 +481,41 @@ string sv_info_last_trust_clienthits;
 // to defer its own trace damage on those targets).
 string sv_info_last_trust_clientbreak;
 
+// CoD-style movement / scope / kick feature cvars.  CSQC reads each of
+// these via PM_ReadMovevar / serverkey, so they MUST be pushed to
+// serverinfo or the client-side feature (sniper scope, gunkick, sliding,
+// codstamina, grapple, …) silently no-ops with a 0 fallback.
+string sv_info_last_jumpstyle;
+string sv_info_last_jumplag;
+string sv_info_last_groundstick_suppress_jump;
+string sv_info_last_sliding;
+string sv_info_last_sliding_start_speed;
+string sv_info_last_sliding_end_speed;
+string sv_info_last_sliding_friction_mult;
+string sv_info_last_sliding_boost;
+string sv_info_last_slidingcrouch;
+string sv_info_last_grappling;
+string sv_info_last_ads_spread_mult;
+string sv_info_last_crosshair;
+string sv_info_last_gunkick;
+string sv_info_last_gunkick_strength;
+string sv_info_last_gunkick_decay_rate;
+string sv_info_last_gunkick_damping;
+string sv_info_last_gunkick_instant;
+string sv_info_last_headkick;
+string sv_info_last_headkick_return_rate;
+string sv_info_last_mp_friendlyfire;
+string sv_info_last_hitbox_expand;
+string sv_info_last_codladders;
+string sv_info_last_codscopes;
+string sv_info_last_codscope_fov;
+string sv_info_last_codstamina;
+string sv_info_last_codstamina_ground_grace;
+string sv_info_last_codstamina_jump_cost;
+string sv_info_last_codstamina_punish_jump_scale;
+string sv_info_last_codstamina_fire_suppress_time;
+string sv_info_last_codstamina_land_cost;
+
 // Per-frame cvar cache globals (sv_cached_*) live in shared/sh_customdefs.qc
 // inside #ifdef SSQC, because sh_player_anims.qc references them and
 // compiles earlier in sv_progs.src than this file.
@@ -574,6 +609,41 @@ void() SV_UpdateMovementServerInfo =
 	// (sends `cmd breakclaim`) and server defers its own trace damage
 	// on func_breakable targets.  Mirrors sv_trust_clienthits.
 	sv_info_push_if_changed("sv_trust_clientbreak", sv_info_last_trust_clientbreak);
+
+	// CoD-style movement / scope / kick replication.  Without these the
+	// CSQC side reads 0 and the features are off client-side: sniper
+	// +attack2 ADS-scope (sv_codscopes / sv_codscope_fov), grapple
+	// (sv_grappling), sliding, codstamina, gunkick / headkick, etc.
+	sv_info_push_if_changed("sv_jumpstyle",     sv_info_last_jumpstyle);
+	sv_info_push_if_changed("sv_jumplag",       sv_info_last_jumplag);
+	sv_info_push_if_changed("pm_groundstick_suppress_jump", sv_info_last_groundstick_suppress_jump);
+	sv_info_push_if_changed("sv_codladders",    sv_info_last_codladders);
+	sv_info_push_if_changed("sv_codscopes",     sv_info_last_codscopes);
+	sv_info_push_if_changed("sv_codscope_fov",  sv_info_last_codscope_fov);
+	sv_info_push_if_changed("sv_codstamina",    sv_info_last_codstamina);
+	sv_info_push_if_changed("sv_codstamina_ground_grace",      sv_info_last_codstamina_ground_grace);
+	sv_info_push_if_changed("sv_codstamina_jump_cost",         sv_info_last_codstamina_jump_cost);
+	sv_info_push_if_changed("sv_codstamina_punish_jump_scale", sv_info_last_codstamina_punish_jump_scale);
+	sv_info_push_if_changed("sv_codstamina_fire_suppress_time", sv_info_last_codstamina_fire_suppress_time);
+	sv_info_push_if_changed("sv_codstamina_land_cost",          sv_info_last_codstamina_land_cost);
+	sv_info_push_if_changed("sv_sliding",       sv_info_last_sliding);
+	sv_info_push_if_changed("sv_sliding_start_speed",    sv_info_last_sliding_start_speed);
+	sv_info_push_if_changed("sv_sliding_end_speed",      sv_info_last_sliding_end_speed);
+	sv_info_push_if_changed("sv_sliding_friction_mult",  sv_info_last_sliding_friction_mult);
+	sv_info_push_if_changed("sv_sliding_boost",          sv_info_last_sliding_boost);
+	sv_info_push_if_changed("sv_slidingcrouch",          sv_info_last_slidingcrouch);
+	sv_info_push_if_changed("sv_grappling",              sv_info_last_grappling);
+	sv_info_push_if_changed("sv_ads_spread_mult",        sv_info_last_ads_spread_mult);
+	sv_info_push_if_changed("sv_crosshair",     sv_info_last_crosshair);
+	sv_info_push_if_changed("sv_gunkick",            sv_info_last_gunkick);
+	sv_info_push_if_changed("sv_gunkick_strength",   sv_info_last_gunkick_strength);
+	sv_info_push_if_changed("sv_gunkick_decay_rate", sv_info_last_gunkick_decay_rate);
+	sv_info_push_if_changed("sv_gunkick_damping",    sv_info_last_gunkick_damping);
+	sv_info_push_if_changed("sv_gunkick_instant",    sv_info_last_gunkick_instant);
+	sv_info_push_if_changed("sv_headkick",           sv_info_last_headkick);
+	sv_info_push_if_changed("sv_headkick_return_rate", sv_info_last_headkick_return_rate);
+	sv_info_push_if_changed("mp_friendlyfire",  sv_info_last_mp_friendlyfire);
+	sv_info_push_if_changed("sv_hitbox_expand",     sv_info_last_hitbox_expand);
 };
 
 // Post-config fixup: if the persisted data/server.cfg snapshot leaves any
@@ -586,6 +656,42 @@ void() SV_FixupEmptyDefaults =
 		return;
 	sv_cfg_fixed_up = TRUE;
 	CVar_ForceDefaults();
+};
+
+// `cleanmodels` / `cleandecals` server-console commands, implemented as
+// cvars a StartFrame watcher polls + resets.  Admin `cleanmodels 1` bulk-
+// wipes corpses + client casings/mags; `cleandecals 1` wipes bullet holes
+// / scorch / muzzle smoke / CS smoke puffs (all pure CSQC visuals).
+void() SV_DoCleanModels =
+{
+	// Server-side: bulk-remove every corpse on the map.  Collect-then-
+	// remove (safe against remove() during a find() walk).  32-cap
+	// matches the MAX_PLAYERS-derived corpse ceiling per round.
+	entity corpses[32];
+	float ccount = 0;
+	entity ce = find(world, classname, "player_visual_proxy");
+	while (ce && ccount < 32)
+	{
+		if (ce.vis_is_corpse)
+			corpses[ccount++] = ce;
+		ce = find(ce, classname, "player_visual_proxy");
+	}
+	float i;
+	for (i = 0; i < ccount; i = i + 1)
+		remove(corpses[i]);
+
+	// Tell every client to wipe their CSQC casings + mags.
+	WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
+	WriteByte(MSG_MULTICAST, CSQC_EVENT_CLEANMODELS);
+	multicast('0 0 0', MULTICAST_ALL);
+};
+
+void() SV_DoCleanDecals =
+{
+	// All decals are pure CSQC visual entities — just broadcast the wipe.
+	WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
+	WriteByte(MSG_MULTICAST, CSQC_EVENT_CLEANDECALS);
+	multicast('0 0 0', MULTICAST_ALL);
 };
 
 void() StartFrame =
@@ -742,6 +848,20 @@ void() StartFrame =
 	sv_info_push_phase = (sv_info_push_phase + 1) & 7;
 	if (sv_info_push_phase == 0)
 		SV_UpdateMovementServerInfo();
+
+	// Admin cleanup commands (cvars polled + auto-reset).  `cleanmodels 1`
+	// wipes corpses + client casings/mags; `cleandecals 1` wipes bullet
+	// holes / scorch / muzzle smoke / CS smoke puffs.
+	if (cvar("cleanmodels") != 0)
+	{
+		SV_DoCleanModels();
+		cvar_set("cleanmodels", "0");
+	}
+	if (cvar("cleandecals") != 0)
+	{
+		SV_DoCleanDecals();
+		cvar_set("cleandecals", "0");
+	}
 
 	// Resolve any "camera .target" strings on the first tick (after all
 	// info_null entities have spawned) and rotate the active team-select

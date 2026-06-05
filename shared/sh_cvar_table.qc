@@ -308,149 +308,15 @@ void() CVar_Init =
     CVar_Add("Client", "cl_ads_fov",                 "8",    CVAR_SIDE_CL);
     CVar_Add("Client", "cl_sprinting_fov",           "5",    CVAR_SIDE_CL);
     CVar_Add("Client", "cl_ads_fade",      "0.5",  CVAR_SIDE_CL);
-    // Default / HDAK47 / AK47 ADS pose.  cl_viewfx.qc's per-weapon
-    // prefix lookup falls back to this set for any ADS weapon that
-    // doesn't have its own dedicated cvar group below.
+    // Shared ADS pose for ALL weapons.  cl_viewfx.qc applies this single
+    // cl_ads_* set to every ADS weapon (the former per-weapon
+    // cl_ads_<weapon>_* sets were removed).
     CVar_Add("Client", "cl_ads_pitch",     "0",    CVAR_SIDE_CL);
     CVar_Add("Client", "cl_ads_yaw",       "0",    CVAR_SIDE_CL);
     CVar_Add("Client", "cl_ads_roll",      "0",    CVAR_SIDE_CL);
     CVar_Add("Client", "cl_ads_forward",   "-5",   CVAR_SIDE_CL);
     CVar_Add("Client", "cl_ads_right",     "6.69", CVAR_SIDE_CL);
     CVar_Add("Client", "cl_ads_down",      "2",    CVAR_SIDE_CL);
-    // Per-weapon ADS pose sets.  Each viewmodel's grip + sight-height
-    // anchor sits in a different place, so a single global offset can
-    // only centre one weapon's sights.  Tune each weapon's set
-    // independently to put that gun's sights at screen centre.
-    // Defaults clone the HDAK47 values so the gun shows up roughly
-    // in the right place on first ADS press — then nudge to taste.
-    // --- Deagle ---
-    CVar_Add("Client", "cl_ads_deagle_pitch",   "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_deagle_yaw",     "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_deagle_roll",    "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_deagle_forward", "-5",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_deagle_right",   "6.69", CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_deagle_down",    "2",    CVAR_SIDE_CL);
-    // --- Mac10 (WEP_CFMAC10) ---
-    CVar_Add("Client", "cl_ads_mac10_pitch",    "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_mac10_yaw",      "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_mac10_roll",     "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_mac10_forward",  "-5",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_mac10_right",    "6.69", CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_mac10_down",     "2",    CVAR_SIDE_CL);
-    // --- FAMAS (WEP_CFFAMAS) ---
-    CVar_Add("Client", "cl_ads_famas_pitch",    "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_famas_yaw",      "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_famas_roll",     "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_famas_forward",  "-5",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_famas_right",    "6.69", CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_famas_down",     "2",    CVAR_SIDE_CL);
-    // --- Beretta M9 (WEP_CFFIVESEVEN) ---
-    CVar_Add("Client", "cl_ads_fiveseven_pitch",    "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_fiveseven_yaw",      "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_fiveseven_roll",     "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_fiveseven_forward",  "-5",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_fiveseven_right",    "6.69", CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_fiveseven_down",     "2",    CVAR_SIDE_CL);
-    // --- Colt Anaconda (WEP_CFDEAGLE) ---
-    CVar_Add("Client", "cl_ads_anaconda_pitch",     "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_anaconda_yaw",       "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_anaconda_roll",      "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_anaconda_forward",   "-5",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_anaconda_right",     "6.69", CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_anaconda_down",      "2",    CVAR_SIDE_CL);
-    // --- Barrett M82 (WEP_CFAWP) — snipers also tune the gun-raise
-    // pose under sv_codscopes; the CoD-scope envelope rides this same
-    // ADS pose for the raise portion of the scope cycle.
-    CVar_Add("Client", "cl_ads_barrett_pitch",      "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_barrett_yaw",        "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_barrett_roll",       "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_barrett_forward",    "-5",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_barrett_right",      "6.69", CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_barrett_down",       "2",    CVAR_SIDE_CL);
-    // --- AUG (WEP_CFAUG) — low-power optic, CoD-scope ADS ---
-    CVar_Add("Client", "cl_ads_aug_pitch",          "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_aug_yaw",            "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_aug_roll",           "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_aug_forward",        "-5",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_aug_right",          "6.69", CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_aug_down",           "2",    CVAR_SIDE_CL);
-    // --- PSG1 (WEP_CFG3SG1) ---
-    CVar_Add("Client", "cl_ads_psg1_pitch",         "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_psg1_yaw",           "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_psg1_roll",          "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_psg1_forward",       "-5",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_psg1_right",         "6.69", CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_psg1_down",          "2",    CVAR_SIDE_CL);
-    // --- Dual Desert Deagle (WEP_CFELITE) ---
-    CVar_Add("Client", "cl_ads_elite_pitch",        "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_elite_yaw",          "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_elite_roll",         "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_elite_forward",      "-5",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_elite_right",        "6.69", CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_elite_down",         "2",    CVAR_SIDE_CL);
-    // --- M700 (WEP_CFSCOUTM700) ---
-    CVar_Add("Client", "cl_ads_m700_pitch",         "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_m700_yaw",           "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_m700_roll",          "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_m700_forward",       "-5",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_m700_right",         "6.69", CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_m700_down",          "2",    CVAR_SIDE_CL);
-    // --- FN SCAR (WEP_CFGALIL) ---
-    CVar_Add("Client", "cl_ads_scar_pitch",         "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_scar_yaw",           "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_scar_roll",          "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_scar_forward",       "-5",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_scar_right",         "6.69", CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_scar_down",          "2",    CVAR_SIDE_CL);
-    // --- C96 Mauser (WEP_CFGLOCK) ---
-    CVar_Add("Client", "cl_ads_mauser_pitch",       "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_mauser_yaw",         "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_mauser_roll",        "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_mauser_forward",     "-5",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_mauser_right",       "6.69", CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_mauser_down",        "2",    CVAR_SIDE_CL);
-    // --- SVD Dragunov (WEP_CFSG550) ---
-    CVar_Add("Client", "cl_ads_dragunov_pitch",     "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_dragunov_yaw",       "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_dragunov_roll",      "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_dragunov_forward",   "-5",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_dragunov_right",     "6.69", CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_dragunov_down",      "2",    CVAR_SIDE_CL);
-    // --- SPAS-12 (WEP_CFXM1014) ---
-    CVar_Add("Client", "cl_ads_spas12_pitch",       "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_spas12_yaw",         "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_spas12_roll",        "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_spas12_forward",     "-5",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_spas12_right",       "6.69", CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_spas12_down",        "2",    CVAR_SIDE_CL);
-    // --- Winchester (WEP_CFM3) ---
-    CVar_Add("Client", "cl_ads_winchester_pitch",   "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_winchester_yaw",     "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_winchester_roll",    "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_winchester_forward", "-5",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_winchester_right",   "6.69", CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_winchester_down",    "2",    CVAR_SIDE_CL);
-    // --- CF MP5 (WEP_CFMP5) ---
-    CVar_Add("Client", "cl_ads_cfmp5_pitch",        "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_cfmp5_yaw",          "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_cfmp5_roll",         "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_cfmp5_forward",      "-5",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_cfmp5_right",        "6.69", CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_cfmp5_down",         "2",    CVAR_SIDE_CL);
-    // --- Vector (WEP_CFVECTOR) ---
-    CVar_Add("Client", "cl_ads_vector_pitch",       "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_vector_yaw",         "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_vector_roll",        "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_vector_forward",     "-5",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_vector_right",       "6.69", CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_vector_down",        "2",    CVAR_SIDE_CL);
-    // --- Type 89 (WEP_CFTYPE89) ---
-    CVar_Add("Client", "cl_ads_type89_pitch",       "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_type89_yaw",         "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_type89_roll",        "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_type89_forward",     "-5",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_type89_right",       "6.69", CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_ads_type89_down",        "2",    CVAR_SIDE_CL);
 
     // Weapon-lower pose — drives the off-screen viewmodel offset when
     // the player is grappling or (with sv_codladders 1) climbing a

@@ -443,6 +443,26 @@ void(vector org, float weapon_id) SV_DebugSpawnWeaponId =
 	else if (weapon_id == WEP_CSHEGRENADE)    SV_DebugSpawnWeapon(org, weapon_cshegrenade);
 	else if (weapon_id == WEP_CSFLASHBANG)    SV_DebugSpawnWeapon(org, weapon_csflashbang);
 	else if (weapon_id == WEP_CSSMOKEGRENADE) SV_DebugSpawnWeapon(org, weapon_cssmokegrenade);
+	else if (weapon_id == WEP_CFAUG)          SV_DebugSpawnWeapon(org, weapon_cfaug);
+	else if (weapon_id == WEP_CFFAMAS)        SV_DebugSpawnWeapon(org, weapon_cffamas);
+	else if (weapon_id == WEP_CFMAC10)        SV_DebugSpawnWeapon(org, weapon_cfmac10);
+	else if (weapon_id == WEP_CFAWP)          SV_DebugSpawnWeapon(org, weapon_cfawp);
+	else if (weapon_id == WEP_CFG3SG1)        SV_DebugSpawnWeapon(org, weapon_cfg3sg1);
+	else if (weapon_id == WEP_CFXM1014)       SV_DebugSpawnWeapon(org, weapon_cfxm1014);
+	else if (weapon_id == WEP_CFSCOUTM700)    SV_DebugSpawnWeapon(org, weapon_cfscoutm700);
+	else if (weapon_id == WEP_CFM3)           SV_DebugSpawnWeapon(org, weapon_cfm3);
+	else if (weapon_id == WEP_CFGALIL)        SV_DebugSpawnWeapon(org, weapon_cfgalil);
+	else if (weapon_id == WEP_CFSG550)        SV_DebugSpawnWeapon(org, weapon_cfsg550);
+	else if (weapon_id == WEP_CFMP5)          SV_DebugSpawnWeapon(org, weapon_cfmp5);
+	else if (weapon_id == WEP_CFVECTOR)       SV_DebugSpawnWeapon(org, weapon_cfvector);
+	else if (weapon_id == WEP_CFTYPE89)       SV_DebugSpawnWeapon(org, weapon_cftype89);
+	else if (weapon_id == WEP_CFFIVESEVEN)    SV_DebugSpawnWeapon(org, weapon_cffiveseven);
+	else if (weapon_id == WEP_CFDEAGLE)       SV_DebugSpawnWeapon(org, weapon_cfdeagle);
+	else if (weapon_id == WEP_CFELITE)        SV_DebugSpawnWeapon(org, weapon_cfelite);
+	else if (weapon_id == WEP_CFGLOCK)        SV_DebugSpawnWeapon(org, weapon_cfglock);
+	else if (weapon_id == WEP_BUTTERFLY)      SV_DebugSpawnWeapon(org, weapon_butterfly);
+	else if (weapon_id == WEP_KATANA)         SV_DebugSpawnWeapon(org, weapon_katana);
+	else if (weapon_id == WEP_CFC4)           SV_DebugSpawnWeapon(org, weapon_cfc4);
 };
 
 // Apply the correct player model based on team + model_index.
@@ -1043,6 +1063,8 @@ const float VP_SF_IDENTITY = 4;  // weapon, skin, colormap, team_model byte, is_
 // death helper to decide whether a hit is lethal — without it, the client
 // can't predict (would over-fire on every shot).
 .float vps_last_health;
+.float vps_last_bodygroup;
+.float vps_last_life_serial;
 .float vis_last_pose_resync;
 
 // Marks a proxy as a corpse (orphaned by Player_VisualProxy_DetachAsCorpse,
@@ -1112,6 +1134,10 @@ float(entity playerent, float changedflags) Player_Visual_SendEntity =
 		WriteByte(MSG_ENTITY, self.vps_last_team_model);
 		WriteByte(MSG_ENTITY, self.vps_last_is_dead);
 		WriteByte(MSG_ENTITY, self.vps_last_health);
+		// Bodygroup bitfield (bit 0 = C4 backpack) + life generation.
+		// Mirrors the CSQC reader (vis_bodygroup / vis_life_serial).
+		WriteByte(MSG_ENTITY, self.vps_last_bodygroup);
+		WriteByte(MSG_ENTITY, self.vps_last_life_serial);
 	}
 
 	return TRUE;
@@ -1284,12 +1310,27 @@ void(entity player) Player_VisualProxy_Sync =
 		bits |= VP_SF_ANIM;
 
 	float next_health = bound(0, player.health, 255);
+	// Bodygroup bit 0 = C4 backpack visible (carried by a Red player but
+	// not actively held).  Mirrored to the client as vis_bodygroup.
+	float next_bodygroup = 0;
+	if (player.player_team == TEAM_RED && player.ammo_cfc4 > 0 && player.weapon != WEP_CFC4)
+		next_bodygroup |= 1;
+	// Life generation (1..255, byte-wrap, never 0) — hitclaims carry this
+	// so a stale corpse / old-life proxy can't damage the respawned player.
+	float next_life_serial = player.player_life_serial;
+	if (next_life_serial <= 0)
+		next_life_serial = 1;
+	next_life_serial = next_life_serial - floor(next_life_serial / 256) * 256;
+	if (next_life_serial <= 0)
+		next_life_serial = 1;
 	if (vis.vps_last_weapon != player.weapon
 	    || vis.skin != player.skin
 	    || vis.colormap != player.colormap
 	    || vis.vps_last_team_model != next_tmbyte
 	    || vis.vps_last_is_dead != next_is_dead
-	    || vis.vps_last_health != next_health)
+	    || vis.vps_last_health != next_health
+	    || vis.vps_last_bodygroup != next_bodygroup
+	    || vis.vps_last_life_serial != next_life_serial)
 		bits |= VP_SF_IDENTITY;
 
 	// Apply new values to the proxy unconditionally — the cached
@@ -1309,6 +1350,8 @@ void(entity player) Player_VisualProxy_Sync =
 	vis.vps_last_team_model   = next_tmbyte;
 	vis.vps_last_is_dead      = next_is_dead;
 	vis.vps_last_health       = next_health;
+	vis.vps_last_bodygroup    = next_bodygroup;
+	vis.vps_last_life_serial  = next_life_serial;
 
 	if (bits & VP_SF_POSE)
 		vis.vis_last_pose_resync = time;
@@ -1383,6 +1426,22 @@ float(entity playerent, float changedflags) PM_PredictionProxy_SendEntity =
 		WriteFloat(MSG_ENTITY, self.spread_penalty);
 		WriteFloat(MSG_ENTITY, self.fire_spread_penalty);
 		WriteFloat(MSG_ENTITY, self.pm_step_time);
+		// Movement-tail state (slide-friction, jump-lag, grapple rope,
+		// codstamina, fire-suppress) — mirrors the CSQC reader in
+		// cl_player.qc PM_SF_MOVEMENT field-for-field.  Time fields are
+		// sent as remaining-seconds (client rebuilds absolute against its
+		// local `time`), matching attack_finished / wep_anim_start above.
+		WriteByte (MSG_ENTITY, self.slide_friction_active);
+		WriteFloat(MSG_ENTITY, max(0, self.pm_jump_lag_end - time));
+		WriteByte (MSG_ENTITY, self.grapple_rope_active);
+		WriteCoord(MSG_ENTITY, self.grapple_anchor_x);
+		WriteCoord(MSG_ENTITY, self.grapple_anchor_y);
+		WriteCoord(MSG_ENTITY, self.grapple_anchor_z);
+		WriteByte (MSG_ENTITY, self.grapple_attached);
+		WriteByte (MSG_ENTITY, self.pm_grapple_held_last);
+		WriteFloat(MSG_ENTITY, self.codstamina);
+		WriteByte (MSG_ENTITY, self.codstamina_punished);
+		WriteFloat(MSG_ENTITY, max(0, self.pm_fire_suppress_until - time));
 	}
 
 	if (changedflags & PM_SF_WEAPON_STATE)
@@ -1410,6 +1469,14 @@ float(entity playerent, float changedflags) PM_PredictionProxy_SendEntity =
 		// synchronized through ping-window weapon switches.
 		WriteFloat(MSG_ENTITY, self.pm_weapon_blend_progress);
 		WriteFloat(MSG_ENTITY, self.pm_weapon_prev_factor);
+		// sv_gunkick authoritative camera-kick state — the client overwrites
+		// its locally-integrated kick with these each snapshot and keeps
+		// integrating between snapshots.  Mirrors the CSQC reader.
+		WriteFloat(MSG_ENTITY, self.view_kick_pitch);
+		WriteFloat(MSG_ENTITY, self.view_kick_yaw);
+		WriteFloat(MSG_ENTITY, self.view_kick_pitch_vel);
+		WriteFloat(MSG_ENTITY, self.view_kick_yaw_vel);
+		WriteByte (MSG_ENTITY, self.view_kick_burst_idx);
 	}
 
 	if (changedflags & PM_SF_AMMO)
@@ -1434,6 +1501,7 @@ float(entity playerent, float changedflags) PM_PredictionProxy_SendEntity =
 		if (m1 &   1) WriteByte(MSG_ENTITY, self.ammo_cshegrenade);
 		if (m1 &   2) WriteByte(MSG_ENTITY, self.ammo_csflashbang);
 		if (m1 &   4) WriteByte(MSG_ENTITY, self.ammo_cssmokegrenade);
+		if (m1 &   8) WriteByte(MSG_ENTITY, self.ammo_cfc4);
 
 		// Consume the mask now that we've written all pending fields —
 		// PM_SyncPredictionProxy accumulates bits with |= across multiple
@@ -1537,7 +1605,16 @@ void(entity player) PM_SyncPredictionProxy =
 	    proxy.pm_fuser2           != player.pm_fuser2 ||
 	    proxy.spread_penalty      != player.spread_penalty ||
 	    proxy.fire_spread_penalty != player.fire_spread_penalty ||
-	    proxy.pm_step_time        != player.pm_step_time)
+	    proxy.pm_step_time        != player.pm_step_time ||
+	    proxy.slide_friction_active != player.slide_friction_active ||
+	    proxy.pm_jump_lag_end     != player.pm_jump_lag_end ||
+	    proxy.grapple_rope_active != player.grapple_rope_active ||
+	    proxy.grapple_anchor      != player.grapple_anchor ||
+	    proxy.grapple_attached    != player.grapple_attached ||
+	    proxy.pm_grapple_held_last != player.pm_grapple_held_last ||
+	    proxy.codstamina          != player.codstamina ||
+	    proxy.codstamina_punished != player.codstamina_punished ||
+	    proxy.pm_fire_suppress_until != player.pm_fire_suppress_until)
 		bits |= PM_SF_MOVEMENT;
 
 	// Detect weapon-state changes
@@ -1555,7 +1632,12 @@ void(entity player) PM_SyncPredictionProxy =
 	    proxy.snowball_has_slingshot != player.snowball_has_slingshot ||
 	    proxy.snowball_use_slingshot != player.snowball_use_slingshot ||
 	    proxy.pm_weapon_blend_progress != player.pm_weapon_blend_progress ||
-	    proxy.pm_weapon_prev_factor    != player.pm_weapon_prev_factor)
+	    proxy.pm_weapon_prev_factor    != player.pm_weapon_prev_factor ||
+	    proxy.view_kick_pitch     != player.view_kick_pitch ||
+	    proxy.view_kick_yaw       != player.view_kick_yaw ||
+	    proxy.view_kick_pitch_vel != player.view_kick_pitch_vel ||
+	    proxy.view_kick_yaw_vel   != player.view_kick_yaw_vel ||
+	    proxy.view_kick_burst_idx != player.view_kick_burst_idx)
 		bits |= PM_SF_WEAPON_STATE;
 
 	// Ammo diff for canonical slot ammo + multi-carry utility counts.
@@ -1573,6 +1655,7 @@ void(entity player) PM_SyncPredictionProxy =
 	if (proxy.ammo_cshegrenade     != player.ammo_cshegrenade)     mb1 |= 1;
 	if (proxy.ammo_csflashbang     != player.ammo_csflashbang)     mb1 |= 2;
 	if (proxy.ammo_cssmokegrenade  != player.ammo_cssmokegrenade)  mb1 |= 4;
+	if (proxy.ammo_cfc4            != player.ammo_cfc4)            mb1 |= 8;
 
 	// OR (accumulate), don't overwrite.  PlayerSpawn can call
 	// PM_SyncPredictionProxy twice in one tick (once via
@@ -1613,6 +1696,15 @@ void(entity player) PM_SyncPredictionProxy =
 	proxy.spread_penalty          = player.spread_penalty;
 	proxy.fire_spread_penalty     = player.fire_spread_penalty;
 	proxy.pm_step_time            = player.pm_step_time;
+	proxy.slide_friction_active   = player.slide_friction_active;
+	proxy.pm_jump_lag_end         = player.pm_jump_lag_end;
+	proxy.grapple_rope_active     = player.grapple_rope_active;
+	proxy.grapple_anchor          = player.grapple_anchor;
+	proxy.grapple_attached        = player.grapple_attached;
+	proxy.pm_grapple_held_last    = player.pm_grapple_held_last;
+	proxy.codstamina              = player.codstamina;
+	proxy.codstamina_punished     = player.codstamina_punished;
+	proxy.pm_fire_suppress_until  = player.pm_fire_suppress_until;
 
 	proxy.slot_primary     = player.slot_primary;
 	proxy.slot_secondary   = player.slot_secondary;
@@ -1629,6 +1721,11 @@ void(entity player) PM_SyncPredictionProxy =
 	proxy.snowball_use_slingshot = player.snowball_use_slingshot;
 	proxy.pm_weapon_blend_progress = player.pm_weapon_blend_progress;
 	proxy.pm_weapon_prev_factor    = player.pm_weapon_prev_factor;
+	proxy.view_kick_pitch     = player.view_kick_pitch;
+	proxy.view_kick_yaw       = player.view_kick_yaw;
+	proxy.view_kick_pitch_vel = player.view_kick_pitch_vel;
+	proxy.view_kick_yaw_vel   = player.view_kick_yaw_vel;
+	proxy.view_kick_burst_idx = player.view_kick_burst_idx;
 
 	proxy.mag_deagle      = player.mag_deagle;
 	proxy.ammo_deagle     = player.ammo_deagle;
@@ -1680,6 +1777,7 @@ void(entity player) PM_SyncPredictionProxy =
 	proxy.ammo_cshegrenade = player.ammo_cshegrenade;
 	proxy.ammo_csflashbang = player.ammo_csflashbang;
 	proxy.ammo_cssmokegrenade = player.ammo_cssmokegrenade;
+	proxy.ammo_cfc4 = player.ammo_cfc4;
 
 	proxy.slot_primary_mag    = player.slot_primary_mag;
 	proxy.slot_primary_ammo   = player.slot_primary_ammo;
@@ -1882,6 +1980,71 @@ void() W_GiveStartingAmmo =
 		self.slot_primary_drop  = W_PaintballDrop;
 		self.mag_paintball = MAX_MAG_PAINTBALL; self.ammo_paintball = MAX_AMMO_PAINTBALL;
 		break;
+	case WEP_CFAUG:
+		self.slot_primary_equip = W_CFAugEquip;
+		self.slot_primary_drop  = W_CFAugDrop;
+		self.mag_cfaug = MAX_MAG_CFAUG;         self.ammo_cfaug = MAX_AMMO_CFAUG;
+		break;
+	case WEP_CFFAMAS:
+		self.slot_primary_equip = W_CFFamasEquip;
+		self.slot_primary_drop  = W_CFFamasDrop;
+		self.mag_cffamas = MAX_MAG_CFFAMAS;     self.ammo_cffamas = MAX_AMMO_CFFAMAS;
+		break;
+	case WEP_CFMAC10:
+		self.slot_primary_equip = W_CFMac10Equip;
+		self.slot_primary_drop  = W_CFMac10Drop;
+		self.mag_cfmac10 = MAX_MAG_CFMAC10;     self.ammo_cfmac10 = MAX_AMMO_CFMAC10;
+		break;
+	case WEP_CFAWP:
+		self.slot_primary_equip = W_CFAwpEquip;
+		self.slot_primary_drop  = W_CFAwpDrop;
+		self.mag_cfawp = MAX_MAG_CFAWP;         self.ammo_cfawp = MAX_AMMO_CFAWP;
+		break;
+	case WEP_CFG3SG1:
+		self.slot_primary_equip = W_CFG3SG1Equip;
+		self.slot_primary_drop  = W_CFG3SG1Drop;
+		self.mag_cfg3sg1 = MAX_MAG_CFG3SG1;     self.ammo_cfg3sg1 = MAX_AMMO_CFG3SG1;
+		break;
+	case WEP_CFXM1014:
+		self.slot_primary_equip = W_CFXM1014Equip;
+		self.slot_primary_drop  = W_CFXM1014Drop;
+		self.mag_cfxm1014 = MAX_MAG_CFXM1014;   self.ammo_cfxm1014 = MAX_AMMO_CFXM1014;
+		break;
+	case WEP_CFSCOUTM700:
+		self.slot_primary_equip = W_CFScoutM700Equip;
+		self.slot_primary_drop  = W_CFScoutM700Drop;
+		self.mag_cfscoutm700 = MAX_MAG_CFSCOUTM700; self.ammo_cfscoutm700 = MAX_AMMO_CFSCOUTM700;
+		break;
+	case WEP_CFM3:
+		self.slot_primary_equip = W_CFM3Equip;
+		self.slot_primary_drop  = W_CFM3Drop;
+		self.mag_cfm3 = MAX_MAG_CFM3;           self.ammo_cfm3 = MAX_AMMO_CFM3;
+		break;
+	case WEP_CFGALIL:
+		self.slot_primary_equip = W_CFGalilEquip;
+		self.slot_primary_drop  = W_CFGalilDrop;
+		self.mag_cfgalil = MAX_MAG_CFGALIL;     self.ammo_cfgalil = MAX_AMMO_CFGALIL;
+		break;
+	case WEP_CFSG550:
+		self.slot_primary_equip = W_CFSG550Equip;
+		self.slot_primary_drop  = W_CFSG550Drop;
+		self.mag_cfsg550 = MAX_MAG_CFSG550;     self.ammo_cfsg550 = MAX_AMMO_CFSG550;
+		break;
+	case WEP_CFMP5:
+		self.slot_primary_equip = W_CFMp5Equip;
+		self.slot_primary_drop  = W_CFMp5Drop;
+		self.mag_cfmp5 = MAX_MAG_CFMP5;         self.ammo_cfmp5 = MAX_AMMO_CFMP5;
+		break;
+	case WEP_CFVECTOR:
+		self.slot_primary_equip = W_CFVectorEquip;
+		self.slot_primary_drop  = W_CFVectorDrop;
+		self.mag_cfvector = MAX_MAG_CFVECTOR;   self.ammo_cfvector = MAX_AMMO_CFVECTOR;
+		break;
+	case WEP_CFTYPE89:
+		self.slot_primary_equip = W_CFType89Equip;
+		self.slot_primary_drop  = W_CFType89Drop;
+		self.mag_cftype89 = MAX_MAG_CFTYPE89;   self.ammo_cftype89 = MAX_AMMO_CFTYPE89;
+		break;
 	default:
 		self.slot_primary = WEP_NONE;
 		break;
@@ -1894,6 +2057,7 @@ void() W_GiveStartingAmmo =
 	self.slot_secondary_drop  = __NULL__;
 	switch (self.slot_secondary)
 	{
+	case WEP_DEAGLE:
 		self.slot_secondary_equip = W_DeagleEquip;
 		self.slot_secondary_drop  = W_DeagleDrop;
 		self.mag_deagle = MAX_MAG_DEAGLE; self.ammo_deagle = MAX_AMMO_DEAGLE;
@@ -1918,6 +2082,26 @@ void() W_GiveStartingAmmo =
 		self.slot_secondary_drop  = W_PistolDrop;
 		self.mag_pistol = MAX_MAG_PISTOL; self.ammo_pistol = MAX_AMMO_PISTOL;
 		break;
+	case WEP_CFFIVESEVEN:
+		self.slot_secondary_equip = W_CFFiveSevenEquip;
+		self.slot_secondary_drop  = W_CFFiveSevenDrop;
+		self.mag_cffiveseven = MAX_MAG_CFFIVESEVEN; self.ammo_cffiveseven = MAX_AMMO_CFFIVESEVEN;
+		break;
+	case WEP_CFDEAGLE:
+		self.slot_secondary_equip = W_CFDeagleEquip;
+		self.slot_secondary_drop  = W_CFDeagleDrop;
+		self.mag_cfdeagle = MAX_MAG_CFDEAGLE; self.ammo_cfdeagle = MAX_AMMO_CFDEAGLE;
+		break;
+	case WEP_CFELITE:
+		self.slot_secondary_equip = W_CFEliteEquip;
+		self.slot_secondary_drop  = W_CFEliteDrop;
+		self.mag_cfelite = MAX_MAG_CFELITE; self.ammo_cfelite = MAX_AMMO_CFELITE;
+		break;
+	case WEP_CFGLOCK:
+		self.slot_secondary_equip = W_CFGlockEquip;
+		self.slot_secondary_drop  = W_CFGlockDrop;
+		self.mag_cfglock = MAX_MAG_CFGLOCK; self.ammo_cfglock = MAX_AMMO_CFGLOCK;
+		break;
 	default:
 		self.slot_secondary = WEP_NONE;
 		break;
@@ -1941,6 +2125,14 @@ void() W_GiveStartingAmmo =
 	case WEP_HLCROWBAR:
 		self.slot_melee_equip = W_CrowbarEquip;
 		self.slot_melee_drop  = W_CrowbarDrop;
+		break;
+	case WEP_BUTTERFLY:
+		self.slot_melee_equip = W_ButterflyEquip;
+		self.slot_melee_drop  = W_ButterflyDrop;
+		break;
+	case WEP_KATANA:
+		self.slot_melee_equip = W_KatanaEquip;
+		self.slot_melee_drop  = W_KatanaDrop;
 		break;
 	default:
 		self.slot_melee = WEP_NONE;
@@ -2547,6 +2739,178 @@ float(string command_string) SV_HandleBreakclaim =
 	return applied;
 };
 
+float(string command_string, string expected_classname) SV_HandleProjhitClaim =
+{
+	float dbg = cvar("sv_debug_hitclaim");
+
+	float mode = cvar("sv_trust_clienthits");
+	if (mode < 1) {
+		if (dbg) print(sprintf("[projhit] reject: sv_trust_clienthits=%g (<1)\n", mode));
+		return 0;
+	}
+
+	if (!self || self.classname != "player") {
+		if (dbg) print("[projhit] reject: self is not a player\n");
+		return 0;
+	}
+	if (self.is_dead) {
+		if (dbg) print(sprintf("[projhit] reject: %s is dead\n", self.netname));
+		return 0;
+	}
+
+	float target_slot     = stof(argv(1));
+	float body_damage     = stof(argv(2));
+	float claim_action_id = stof(argv(3));
+	float claim_life_serial = stof(argv(4));
+	// argv(5) = hitgroup byte (0..7, HITGROUP_*).  Client resolves it
+	// on its CSQC fake-projectile touch via W_HitgroupClassify so the
+	// server doesn't need an unreliable MOVE_HITMODEL probe from the
+	// touch context here.  Missing on older clients → stof = 0 = GENERIC.
+	float claim_hitgroup  = stof(argv(5));
+	if (claim_hitgroup < 0 || claim_hitgroup > 7)
+		claim_hitgroup = 0;
+
+	if (target_slot <= 0 || target_slot > 32) {
+		if (dbg) print(sprintf("[projhit] reject: target_slot %g out of 1..32\n", target_slot));
+		return 0;
+	}
+	if (body_damage <= 0) {
+		if (dbg) print(sprintf("[projhit] reject: body_damage %g <= 0\n", body_damage));
+		return 0;
+	}
+
+	entity target = edict_num(target_slot);
+	if (!target || target == world) {
+		if (dbg) print(sprintf("[projhit] reject: edict_num(%g) returned world/null\n", target_slot));
+		return 0;
+	}
+	if (target.classname != "player") {
+		if (dbg) print(sprintf("[projhit] reject: target slot %g classname='%s' (not player)\n", target_slot, target.classname));
+		return 0;
+	}
+	if (target.is_dead) {
+		if (dbg) print(sprintf("[projhit] reject: target %s is dead\n", target.netname));
+		return 0;
+	}
+	if (claim_life_serial > 0
+	    && target.player_life_serial > 0
+	    && claim_life_serial != target.player_life_serial) {
+		if (dbg) print(sprintf("[projhit] reject: stale life serial claim=%g live=%g target=%s\n",
+		                       claim_life_serial, target.player_life_serial,
+		                       target.netname));
+		return 0;
+	}
+	if (target == self) {
+		if (dbg) print("[projhit] reject: self-hit\n");
+		return 0;
+	}
+
+	// Anti-spoof: validate action_id against the player's monotonic
+	// fire counter rather than requiring the live projectile entity
+	// to still exist.  Server-side physics regularly consumes the
+	// projectile (fuse expiry, world touch, ODE-driven settle) before
+	// the client's hit claim arrives — they're independent sims and
+	// the trajectories diverge slightly under any non-zero ping.
+	// Looking for the entity in that window rejected ~95% of legit
+	// hits ("[projhit] reject: no proj_paintball ... action_id=N" spam
+	// for every shot the player fired).
+	//
+	// New gate:
+	//   1. claim_action_id must be in (wep_action_id - 64, wep_action_id]
+	//      — proves the player actually fired this shot recently.
+	//   2. claim_action_id must not already appear in proj_consumed_ids
+	//      — prevents a crafted client from replaying the same shot.
+	if (claim_action_id <= 0 || claim_action_id > self.wep_action_id)
+	{
+		if (dbg) print(sprintf("[projhit] reject: action_id=%g out of range (current=%g)\n",
+		                       claim_action_id, self.wep_action_id));
+		return 0;
+	}
+	if (claim_action_id <= self.wep_action_id - 64)
+	{
+		if (dbg) print(sprintf("[projhit] reject: action_id=%g too old (current=%g window=64)\n",
+		                       claim_action_id, self.wep_action_id));
+		return 0;
+	}
+	float ri;
+	for (ri = 0; ri < 32; ri = ri + 1)
+	{
+		if (self.proj_consumed_ids[ri] == claim_action_id)
+		{
+			if (dbg) print(sprintf("[projhit] reject: action_id=%g already consumed (replay)\n",
+			                       claim_action_id));
+			return 0;
+		}
+	}
+	// Stamp this id into the ring (oldest slot wins).
+	self.proj_consumed_ids[self.proj_consumed_ring_idx] = claim_action_id;
+	self.proj_consumed_ring_idx = (self.proj_consumed_ring_idx + 1);
+	if (self.proj_consumed_ring_idx >= 32)
+		self.proj_consumed_ring_idx = 0;
+
+	// Still scan for and remove the matching projectile if it's
+	// alive — keeps the world clean of tagged orphans.  No early-
+	// return on miss; the claim is authorised by the action_id
+	// check above.
+	entity proj = findchain(classname, expected_classname);
+	while (proj)
+	{
+		if (proj.owner == self && proj.wep_action_id == claim_action_id)
+		{
+			remove(proj);
+			break;
+		}
+		proj = proj.chain;
+	}
+
+	// Use the hitgroup the client already resolved.  Engine probes
+	// from a projectile-touch context were unreliable (most landed
+	// on HITGROUP_GENERIC even on clear arm / leg / head hits) so we
+	// no longer try to re-classify here — the client's Z-height
+	// classifier produces consistent results and is the authority.
+	float proj_hitgroup = claim_hitgroup;
+	target.death_hitgroup = proj_hitgroup;
+
+	float damage = body_damage * W_HitgroupDamageMultiplier(proj_hitgroup);
+	float paintgun_kill = (cvar("sv_gamemode") == GAMEMODE_PAINTGUN);
+	if (paintgun_kill)
+		damage = 1000;   // tag mode always lethal, override multiplier
+
+	// Soft-trust sanity: cap body damage, enforce friendly-fire + PVS.
+	// Mirrors SV_HandleHitclaim's gate exactly.
+	if (mode == 1 && !paintgun_kill)
+	{
+		// Cap pre-multiplier body damage to match the hitscan path;
+		// the headshot multiplier still applies on top.
+		if (body_damage > 200)
+			damage = 200 * W_HitgroupDamageMultiplier(proj_hitgroup);
+
+		if (!Gamemode_HasUnifiedTeams()
+		    && self.player_team == target.player_team
+		    && self.player_team != TEAM_NONE
+		    && !cvar("mp_friendlyfire"))
+		{
+			if (dbg) print(sprintf("[projhit] reject: friendly-fire (team=%g)\n", self.player_team));
+			return 0;
+		}
+
+		if (!checkpvs(self.origin + self.view_ofs, target))
+		{
+			if (dbg) print(sprintf("[projhit] reject: target %s not in PVS of attacker\n", target.netname));
+			return 0;
+		}
+	}
+
+
+	float applied = W_ApplyDamage(self, target, damage);
+
+	if (dbg)
+		print(sprintf("[projhit] %s -> slot %g body=%.0f action=%g applied=%.0f\n",
+			self.netname, target_slot, body_damage, claim_action_id, applied));
+
+	return applied;
+};
+
 void(string command_string) SV_ParseClientCommand =
 {
 	tokenize(command_string);
@@ -2564,9 +2928,93 @@ void(string command_string) SV_ParseClientCommand =
 		return;
 	}
 
+	if (cmd == "paintprojhit")
+	{
+		SV_HandleProjhitClaim(command_string, "proj_paintball");
+		return;
+	}
+
+	if (cmd == "snowprojhit")
+	{
+		SV_HandleProjhitClaim(command_string, "proj_snowball");
+		return;
+	}
+
+	if (cmd == "cs")
+	{
+		// Client-shot notification.  Sent by the client's
+		// SH_StandardTryFire success path under sv_trust_clienthits >= 1.
+		// The server's auto-fire in W_WeaponFrame is gated off in that
+		// mode, so the client tells us "I just fired" and we run the
+		// authoritative fire here.  Makes server's fire count exactly
+		// match the client's — fixes the "extra server shot at end of
+		// mag" rate-divergence symptom.
+		if (cvar("sv_trust_clienthits") < 1)
+			return;
+		if (self.classname != "player" || self.is_dead)
+			return;
+
+		float reported_wep = stof(argv(1));
+		if (reported_wep != self.weapon)
+			return;
+
+		// Scope sway bias: optional pitch / yaw deltas (degrees) the
+		// client sends when scoped + sv_snipersway > 0.  Apply to
+		// self.v_angle around the fire so the authoritative trace
+		// direction matches the client's predicted (swayed) aim.
+		// Clamp to ±5° (legit sway is bounded to ±2°/axis).
+		vector sway_bias = '0 0 0';
+		if (argv(2) != "")
+			sway_bias_x = bound(-5, stof(argv(2)), 5);
+		if (argv(3) != "")
+			sway_bias_y = bound(-5, stof(argv(3)), 5);
+
+		self.attack_finished = time;
+		if (Weapon_LowerBlocksFire()) return;
+		if (Weapon_SprintBlocksFire()) return;
+		if (self.fire)
+		{
+			vector saved_v = self.v_angle;
+			self.v_angle_x += sway_bias_x;
+			self.v_angle_y += sway_bias_y;
+			// Bypass the semi-auto rising-edge gate — the client already
+			// edge-validated this shot; the server just executes.
+			float saved_oldbtns = self.pm_oldbuttons;
+			self.pm_oldbuttons = saved_oldbtns & ~1;   // bit 0 = PM_BTN_FIRE
+			self.fire();
+			self.pm_oldbuttons = saved_oldbtns;
+			self.v_angle = saved_v;
+		}
+		return;
+	}
+
 
 	if (PlayerHandleTeamCommand(cmd))
 		return;
+
+	if (cmd == "setspray")
+	{
+		SV_HandleSetSpray(command_string);
+		return;
+	}
+
+	// `cmd playermodel <idx>` — live model-change driven by the main-
+	// menu picker.  Gated on sv_playerselect.  Index must be one of the
+	// allowed picks (6/7/8).  Alive on a real team swaps immediately;
+	// spec / dead stashes the index for next PlayerSpawn.
+	if (cmd == "playermodel")
+	{
+		if (cvar("sv_playerselect") <= 0)
+			return;
+		float new_idx = stof(argv(1));
+		if (new_idx != 6 && new_idx != 7 && new_idx != 8)
+			return;
+		self.player_model_index = new_idx;
+		if ((self.player_team == TEAM_BLUE || self.player_team == TEAM_RED)
+		    && !self.is_dead)
+			PlayerApplyModel();
+		return;
+	}
 
 	if (cmd == "spawnbarrel")
 	{
