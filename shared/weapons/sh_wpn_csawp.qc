@@ -38,13 +38,21 @@ const float MAX_MAG_AWP               = 10;
 const float MAX_AMMO_AWP              = 20;
 
 // --- Balance ---
-const float AWP_BASE_SPREAD           = 0.03;
+const float AWP_BASE_SPREAD           = 0.01;
 const float AWP_MOVE_SPREAD           = 0.10;
 const float AWP_FULL_SPREAD_SPEED     = 320;
 const float AWP_CLOSE_DAMAGE          = 140;
 const float AWP_MIN_DAMAGE            = 140;
 const float AWP_DAMAGE_FALLOFF_RANGE  = 4096;
 const float AWP_DRYFIRE_DELAY         = 0.2;
+const float AWP_KICK_PITCH    = 4.0;   // sv_gunkick — bolt sniper, huge single kick.
+const float AWP_KICK_VARIANCE = 0.7;
+const float AWP_KICK_STRENGTH = 1.0;   // single-shot bolt — heaviest kick.
+
+// Muzzle offset — see cl_debug_muzzle for live-tune marker.
+const float AWP_MUZZLE_FORWARD = 52;
+const float AWP_MUZZLE_RIGHT   = 6.9;
+const float AWP_MUZZLE_DOWN    = 3.6;
 
 // --- Pre-computed state durations ---
 const float AWP_DRAW_DURATION         = (AWP_DRAW_END - AWP_DRAW_START) * AWP_FRAME_INTERVAL;
@@ -85,6 +93,10 @@ float(float now) SH_AWPTryReload =
 
 float(float now) SH_AWPTryAltFire =
 {
+    // sv_codscopes short-circuit — see SH_ScoutTryAltFire for the
+    // full rationale.  CoD mode owns scope visuals via cl_codscope.qc.
+    if (PM_ReadMovevar("sv_codscopes", 0))
+        return 0;
     if (self.weaponstate != WS_IDLE)
         return 0;
     if (now < self.altfire_finished)
@@ -115,10 +127,12 @@ void() W_AWPShoot =
 {
     if (self.zoomstage > 0)
         W_PenetratingHitscanShoot(0, AWP_MOVE_SPREAD, AWP_FULL_SPREAD_SPEED,
-            AWP_CLOSE_DAMAGE, AWP_MIN_DAMAGE, AWP_DAMAGE_FALLOFF_RANGE, 128, 0.985);
+            AWP_CLOSE_DAMAGE, AWP_MIN_DAMAGE, AWP_DAMAGE_FALLOFF_RANGE, 128, 0.985,
+            AWP_KICK_PITCH, AWP_KICK_VARIANCE, AWP_KICK_STRENGTH);
     else
         W_PenetratingHitscanShoot(AWP_BASE_SPREAD, AWP_MOVE_SPREAD, AWP_FULL_SPREAD_SPEED,
-            AWP_CLOSE_DAMAGE, AWP_MIN_DAMAGE, AWP_DAMAGE_FALLOFF_RANGE, 128, 0.985);
+            AWP_CLOSE_DAMAGE, AWP_MIN_DAMAGE, AWP_DAMAGE_FALLOFF_RANGE, 128, 0.985,
+            AWP_KICK_PITCH, AWP_KICK_VARIANCE, AWP_KICK_STRENGTH);
 };
 
 void() W_AWPFire =
@@ -209,24 +223,22 @@ void() W_AWPDrop =
     self.mag_awp = 0; self.ammo_awp = 0;
 
     setmodel(tgt, "models/weapons/wpn_csawp/w_awp.mdl");
-    setsize(tgt, '-16 -16 0', '16 16 32');
+    setsize(tgt, '-16 -16 0', '16 16 48');
     tgt.classname = "weapon_csawp"; tgt.solid = SOLID_NOT; tgt.movetype = MOVETYPE_TOSS;
     tgt.weapon = WEP_CSAWP; tgt.weapon_slot = SLOT_PRIMARY;
     tgt.weap_draw = W_AWPEquip; tgt.weap_drop_func = W_AWPDrop;
     tgt.pickupcopy = W_AWPPickupCopy; tgt.touch = weapon_touch;
-    tgt.dropped_spin = 1;
     tgt.think = weapon_become_solid; tgt.nextthink = time + 0.7;
 };
 
 void() weapon_csawp =
 {
     setmodel(self, "models/weapons/wpn_csawp/w_awp.mdl");
-    setsize(self, '-16 -16 0', '16 16 32');
+    setsize(self, '-16 -16 0', '16 16 48');
     self.classname = "weapon_csawp"; self.solid = SOLID_TRIGGER; self.movetype = MOVETYPE_TOSS;
     self.weapon = WEP_CSAWP; self.weapon_slot = SLOT_PRIMARY;
     self.weap_draw = W_AWPEquip; self.weap_drop_func = W_AWPDrop;
     self.pickupcopy = W_AWPPickupCopy; self.touch = weapon_touch;
-    self.dropped_spin = 1;
     self.mag_awp = MAX_MAG_AWP; self.ammo_awp = MAX_AMMO_AWP;
     W_RegisterMapWeapon(weapon_csawp);
 };
@@ -269,14 +281,21 @@ void() CSQC_PredictAWPCommand =
         {
             CSQC_MarkPendingWeaponAck();
             csqc_awp_fire_snd_stage = 0;
-            if (!pm_suppress_sounds)
+            if (CSQC_BeginFireActionEffects())
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csawp/fire.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
                 CSQC_PredictedPenetratingImpact(self.zoomstage > 0 ? 0 : AWP_BASE_SPREAD, AWP_MOVE_SPREAD, AWP_FULL_SPREAD_SPEED,
-                    AWP_CLOSE_DAMAGE, AWP_MIN_DAMAGE, AWP_DAMAGE_FALLOFF_RANGE, 128, 0.985);
+                    AWP_CLOSE_DAMAGE, AWP_MIN_DAMAGE, AWP_DAMAGE_FALLOFF_RANGE, 128, 0.985,
+                    AWP_KICK_PITCH, AWP_KICK_VARIANCE, AWP_KICK_STRENGTH);
                 CSQC_SpawnCasing("models/weapons/riflecasingbig.mdl",
                     '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
+                // Sniper muzzle flash — AK47_MUZZLE_* shared default.
+                CSQC_MuzzleFlashAtMuzzle(AWP_MUZZLE_FORWARD, AWP_MUZZLE_RIGHT,
+                    AWP_MUZZLE_DOWN, self.wep_action_id);
+                CSQC_MuzzleSmokeAtMuzzle(AWP_MUZZLE_FORWARD, AWP_MUZZLE_RIGHT,
+                    AWP_MUZZLE_DOWN, self.wep_action_id, 4);
+                CSQC_EndFireActionEffects();
             }
             self.zoomstage = 0;
         }
@@ -349,6 +368,7 @@ void() CSQC_AWPEquip =
 	self.csqc_predict_reload = CSQC_PredictAWPReload;
 	self.csqc_display_frame  = CSQC_AWPDisplayFrame;
 	self.csqc_drop_clear     = CSQC_AWPDropClear;
+//    self.weapon_viewmodel_flip = TRUE;
 };
 
 #endif // CSQC

@@ -71,8 +71,11 @@ float(float now) SH_WrenchTickState =
 
 float(float now) SH_WrenchTryFire =
 {
+    if (Weapon_SprintBlocksFire()) return 0;
+    if (Weapon_LowerBlocksFire()) return 0;
 #ifdef CSQC
-    if (cltime < self.csqc_fire_guard) return 0;
+    // `now`-based — see sh_weapon_standard.qc SH_StandardTryFire.
+    if (now < self.csqc_fire_guard) return 0;
 #endif
     if (self.weaponstate == WS_DRAW)
         return 0;
@@ -84,7 +87,7 @@ float(float now) SH_WrenchTryFire =
     self.wep_anim_start   = now;
     self.attack_finished  = now + WRENCH_FIRE_DELAY;
 #ifdef CSQC
-    self.csqc_fire_guard  = cltime + WRENCH_FIRE_DELAY;
+    self.csqc_fire_guard  = now + WRENCH_FIRE_DELAY;
 #endif
     return 1;
 };
@@ -119,7 +122,14 @@ void() W_WrenchSwing =
             sound(self, CHAN_WEAPON, "sounds/weapons/wpn_wrench/wrenchclank2.wav", 1, ATTN_NORM);
 
         if (W_CanDamageTarget(trace_ent))
-            W_ApplyDamage(self, trace_ent, WRENCH_DAMAGE);
+        {
+            // Defer player damage to attacker's hitclaim to avoid
+            // applying damage twice (server-auth + hitclaim).
+            float defer_player = (trace_ent.classname == "player")
+                                 && W_ShouldDeferToClaim(self);
+            if (!defer_player)
+                W_ApplyDamage(self, trace_ent, WRENCH_DAMAGE);
+        }
         else
         {
             PhysProp_TryPushFromTrace(v_forward, WRENCH_DAMAGE);
@@ -188,7 +198,7 @@ void() W_WrenchDrop =
     entity tgt = weapon_drop_target;
 
     setmodel(tgt, "models/weapons/wpn_wrench/g_wrench.mdl");
-    setsize(tgt, '-16 -16 0', '16 16 32');
+    setsize(tgt, '-16 -16 0', '16 16 48');
     tgt.classname    = "weapon_wrench";
     tgt.solid        = SOLID_NOT;
     tgt.movetype     = MOVETYPE_TOSS;
@@ -198,7 +208,7 @@ void() W_WrenchDrop =
     tgt.weap_drop_func = W_WrenchDrop;
     tgt.pickupcopy   = W_WrenchPickupCopy;
     tgt.touch        = weapon_touch;
-    tgt.dropped_spin = 1;
+    tgt.dropped_spin = 0;
     tgt.think        = weapon_become_solid;
     tgt.nextthink    = time + 0.7;
 };
@@ -206,7 +216,7 @@ void() W_WrenchDrop =
 void() weapon_wrench =
 {
     setmodel(self, "models/weapons/wpn_wrench/g_wrench.mdl");
-    setsize(self, '-16 -16 0', '16 16 32');
+    setsize(self, '-16 -16 0', '16 16 48');
     self.classname     = "weapon_wrench";
     self.solid         = SOLID_TRIGGER;
     self.movetype      = MOVETYPE_TOSS;
@@ -216,7 +226,7 @@ void() weapon_wrench =
     self.weap_drop_func = W_WrenchDrop;
     self.pickupcopy    = W_WrenchPickupCopy;
     self.touch         = weapon_touch;
-    self.dropped_spin  = 1;
+    self.dropped_spin  = 0;
     W_RegisterMapWeapon(weapon_wrench);
 };
 

@@ -1,7 +1,11 @@
 ../menu.dat
 m_defs.qc
 sui_sys.qc
+shared/sh_cvar_table.qc
+shared/sh_weapon_manifest.qc
 menu/m_menu.qc
+menu/m_sprays.qc
+menu/m_playermodels.qc
 menu/m_settings.qc
 menu/m_createserver.qc
 menu/m_loading.qc

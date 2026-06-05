@@ -15,12 +15,35 @@
 //  shared/sh_weapons.qc, so we don't need a per-type parser switch.
 // ============================================================
 
+.float csqc_projectile_type;
+
 // Predraw: extrap+smooth via cl_tosssmooth.qc, then locally spin the
 // model via avelocity (server doesn't send angle updates beyond the
 // initial avelocity vector).
 float() CSQC_Projectile_Predraw =
 {
+    // Sleeping-item fast-path — same heuristic as
+    // CSQC_DroppedWeapon_Predraw. Projectiles rarely settle (gravity
+    // keeps grenades moving, rockets explode mid-flight) but the
+    // gate is harmless: a settled grenade benefits, an in-flight
+    // one fails the toss_moving check and runs the full path.
+    if (!self.toss_moving
+        && self.extrap_error_cltime == 0
+        && (self.avelocity * self.avelocity) <= 1)
+    {
+        addentity(self);
+        return PREDRAW_NEXT;
+    }
+
     CSQC_TossPredraw(self);
+    if ((self.csqc_projectile_type == PROJ_TYPE_CSHEGRENADE
+         || self.csqc_projectile_type == PROJ_TYPE_CSFLASHBANG
+         || self.csqc_projectile_type == PROJ_TYPE_CSSMOKEGRENADE)
+        && vlen(self.avelocity) <= 0)
+    {
+        self.angles_x = 0;
+        self.angles_z = 0;
+    }
     // Avelocity-driven angle drift — frametime is the per-frame engine
     // global, so the rotation rate matches whatever the server set on
     // spawn regardless of client framerate.
@@ -48,6 +71,17 @@ void(float isnew) CSQC_Projectile_Update =
     new_avelocity_y = readcoord();
     new_avelocity_z = readcoord();
 
+    // Paintball-only color suffix — must mirror projectile_SendEntity
+    // in sv_weapons.qc. Read unconditionally per type so the byte
+    // stream stays in sync.
+    vector new_colormod = '1 1 1';
+    if (ptype == PROJ_TYPE_PAINTBALL)
+    {
+        new_colormod_x = readbyte() * (1.0 / 255.0);
+        new_colormod_y = readbyte() * (1.0 / 255.0);
+        new_colormod_z = readbyte() * (1.0 / 255.0);
+    }
+
     if (isnew)
     {
         self.classname = "csqc_projectile";
@@ -67,6 +101,13 @@ void(float isnew) CSQC_Projectile_Update =
         // crossbow bolt that should align with the velocity vector.
         if (vlen(new_velocity) > 0)
             self.angles = vectoangles(new_velocity);
+        // Paintball: shrink the snowball model so it reads as a
+        // small marker round, and apply the per-shot tint.
+        if (ptype == PROJ_TYPE_PAINTBALL)
+        {
+            self.scale    = 0.5;
+            self.colormod = new_colormod;
+        }
     }
 
     // Always live: avelocity may change between samples (rare for
@@ -74,6 +115,8 @@ void(float isnew) CSQC_Projectile_Update =
     // isn't stored on the CSQC entity (the field is gated to SSQC and
     // the local ptype variable is enough for this update).
     self.avelocity = new_avelocity;
+    self.csqc_projectile_type = ptype;
+    self.frame = 0;
 
     // Route the new authoritative sample through the smoothing helper.
     // Gravity factor matches the server's .gravity for this projectile

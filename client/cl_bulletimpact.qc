@@ -8,14 +8,21 @@
 // ============================================================
 
 // Forward declarations (defined in cl_bulletholes.qc)
-void(vector hit_pos, vector hit_normal, entity hit_target) CSQC_SpawnBulletHole;
+void(vector hit_pos, vector hit_normal, entity hit_target, float impact_mat) CSQC_SpawnBulletHole;
 void(entity owner_ent) CSQC_BulletHolesRemoveByOwner;
+
+// Forward declaration (defined in cl_rain.qc — compiles after this file).
+// Spawns the rain-splash sprite+ring visual at the given water-surface
+// world point, gated on cl_rain_splash.  Called from CSQC_BulletImpact.
+void(vector pos) CSQC_Rain_SpawnBulletWaterSplash;
 
 // Forward declarations (defined in cl_breakable.qc — compiles after this file)
 void(vector mins, vector maxs, float count, float damage_scale,
-     float owner_entnum) CSQC_SpawnGlassGibs;
+     float owner_entnum,
+     float throw_mode, vector throw_dir, float throw_force) CSQC_SpawnGlassGibs;
 void(vector mins, vector maxs, float style, float count, float damage_scale,
-     float custom_idx, float alpha_byte, float owner_entnum) CSQC_SpawnDebrisGibs;
+     float custom_idx, float alpha_byte, float owner_entnum,
+     float throw_mode, vector throw_dir, float throw_force) CSQC_SpawnDebrisGibs;
 
 // Fields declared in cl_brushsync.qc which compiles after this file.
 // Forward declared here so Impact_ClassifyLocal can read brush_material
@@ -27,6 +34,7 @@ void(vector mins, vector maxs, float style, float count, float damage_scale,
 .float brush_cnt;
 .float brush_broken_predicted;
 .float brush_broken_confirmed;
+.float brush_type;        // BRUSH_TYPE_STATIC / DOOR / BUTTON
 
 // Field declared in cl_breakable.qc (compiles after this file). Tagged on
 // each predicted-break gib so the rollback sweep can find and remove just
@@ -48,14 +56,40 @@ float impact_effect_flesh_lethal;
 float impact_effect_metal;
 float impact_effect_glass;
 float impact_effect_wood;
+float impact_effect_default_fast;
+float impact_effect_flesh_fast;
+float impact_effect_flesh_lethal_fast;
+float impact_effect_metal_fast;
+float impact_effect_glass_fast;
+float impact_effect_wood_fast;
+// Smoke-only variant of "impact" — same dark rising puff component
+// the bullet effect uses, with the orange chip-burst and the
+// streaking textured-sparks layer omitted.  Used by melee weapons
+// (fists, katana) per the user's request: bullet-style smoke, no
+// sparks.  Defined in particles/weapons.cfg as "weapons.impact_smoke".
+float impact_effect_smoke;
 float impact_effect_resolved;
+
+
+// Validity check helper.  FTE's particleeffectnum (pr_csqc.c:3735) ALWAYS
+// returns a negative slot index even when the named effect doesn't exist
+// — the `if (precache != P_INVALID)` guard is commented out.  So a raw
+// non-zero return is NOT proof the effect is real; pointparticles(slot)
+// against an invalid slot is a silent no-op.  particleeffectquery returns
+// "" for invalid slots; use it to scrub missing variants down to 0 so
+// the picker's `!= 0` fallback correctly routes to the base effect.
+float(float id) Impact_NormalizeEffect =
+{
+    if (id == 0) return 0;
+    if (particleeffectquery(id, 0) == "") return 0;
+    return id;
+};
 
 // One-shot resolve — called from Impact_GetEffectFor on first use.  The
 // particles/weapons.cfg load happens earlier, in data/default.cfg, via the
 // menu VM's Menu_LoadConfig (which runs after PScript_InitParticles has
 // set pe_script_enabled and before any CSQC loads).  By the time this
-// function runs on first shot, every effect is already registered and
-// particleeffectnum returns a valid negative slot index for each.
+// function runs on first shot, every effect is already registered.
 void() Impact_ResolveAll =
 {
     if (impact_effect_resolved) return;
@@ -65,12 +99,40 @@ void() Impact_ResolveAll =
         return;   // slot table full — retry next call
 
     impact_effect_default      = def;
-    impact_effect_flesh        = particleeffectnum("weapons.flesh_impact");
-    impact_effect_flesh_lethal = particleeffectnum("weapons.flesh_impact_lethal");
-    impact_effect_metal        = particleeffectnum("weapons.metal_impact");
-    impact_effect_glass        = particleeffectnum("weapons.glass_impact");
-    impact_effect_wood         = particleeffectnum("weapons.wood_impact");
+    impact_effect_flesh        = Impact_NormalizeEffect(particleeffectnum("weapons.flesh_impact"));
+    impact_effect_flesh_lethal = Impact_NormalizeEffect(particleeffectnum("weapons.flesh_impact_lethal"));
+    impact_effect_metal        = Impact_NormalizeEffect(particleeffectnum("weapons.metal_impact"));
+    impact_effect_glass        = Impact_NormalizeEffect(particleeffectnum("weapons.glass_impact"));
+    impact_effect_wood         = Impact_NormalizeEffect(particleeffectnum("weapons.wood_impact"));
+    impact_effect_default_fast      = Impact_NormalizeEffect(particleeffectnum("weapons.impact_fast"));
+    impact_effect_flesh_fast        = Impact_NormalizeEffect(particleeffectnum("weapons.flesh_impact_fast"));
+    impact_effect_flesh_lethal_fast = Impact_NormalizeEffect(particleeffectnum("weapons.flesh_impact_lethal_fast"));
+    impact_effect_metal_fast        = Impact_NormalizeEffect(particleeffectnum("weapons.metal_impact_fast"));
+    impact_effect_glass_fast        = Impact_NormalizeEffect(particleeffectnum("weapons.glass_impact_fast"));
+    impact_effect_wood_fast         = Impact_NormalizeEffect(particleeffectnum("weapons.wood_impact_fast"));
+    // Skip Impact_NormalizeEffect — particleeffectquery returns "" for the
+    // smoke recipe even when valid, zeroing it and silently disabling the
+    // melee smoke spawn.  Trust the raw slot id.
+    impact_effect_smoke             = particleeffectnum("weapons.impact_smoke");
+
     impact_effect_resolved     = 1;
+};
+
+// Spawn the smoke-only impact puff (no sparks, no chip burst).
+// Used by melee weapons that want bullet-style smoke without the
+// bullet visual.  Caller passes the same (pos, normal) it would
+// give Impact_SpawnParticles.  Lazy-resolves the effect on first
+// use, matching the pattern in Impact_SpawnParticles.
+void(vector pos, vector normal) Impact_SpawnSmokeOnly =
+{
+    Impact_ResolveAll();
+    if (impact_effect_smoke == 0)
+        return;
+    // Token velocity push only — the recipe's own velbias/friction
+    // governs the plume.  A larger injection rockets the lone puff off
+    // the wall before it can be seen (the bullet path's 200 u/s only
+    // works because the orange spark burst masks the drift).
+    pointparticles(impact_effect_smoke, pos, normal * 8, 1);
 };
 
 // Pick the right particle effect ID for a given IMPACT_MAT_* code.
@@ -85,9 +147,76 @@ float(float mat) Impact_GetEffectFor =
     if (mat == IMPACT_MAT_FLESH_LETHAL && impact_effect_flesh_lethal != 0) return impact_effect_flesh_lethal;
     if (mat == IMPACT_MAT_FLESH        && impact_effect_flesh        != 0) return impact_effect_flesh;
     if (mat == IMPACT_MAT_METAL        && impact_effect_metal        != 0) return impact_effect_metal;
+    if (mat == IMPACT_MAT_METAL_NODECAL && impact_effect_metal       != 0) return impact_effect_metal;
     if (mat == IMPACT_MAT_GLASS        && impact_effect_glass        != 0) return impact_effect_glass;
     if (mat == IMPACT_MAT_WOOD         && impact_effect_wood         != 0) return impact_effect_wood;
     return impact_effect_default;
+};
+
+float(float mat) Impact_GetFastEffectFor =
+{
+    Impact_ResolveAll();
+    if (mat == IMPACT_MAT_FLESH_LETHAL && impact_effect_flesh_lethal_fast != 0) return impact_effect_flesh_lethal_fast;
+    if (mat == IMPACT_MAT_FLESH        && impact_effect_flesh_fast        != 0) return impact_effect_flesh_fast;
+    if (mat == IMPACT_MAT_METAL        && impact_effect_metal_fast        != 0) return impact_effect_metal_fast;
+    if (mat == IMPACT_MAT_METAL_NODECAL && impact_effect_metal_fast       != 0) return impact_effect_metal_fast;
+    if (mat == IMPACT_MAT_GLASS        && impact_effect_glass_fast        != 0) return impact_effect_glass_fast;
+    if (mat == IMPACT_MAT_WOOD         && impact_effect_wood_fast         != 0) return impact_effect_wood_fast;
+    if (impact_effect_default_fast != 0) return impact_effect_default_fast;
+    return Impact_GetEffectFor(mat);
+};
+
+// Per-shot impact counters — declared above the first user
+// (Impact_SpawnParticles below) since cl_bulletimpact.qc has the
+// const-block decls further down.  Reset by CSQC_Impact_ResetShot at
+// the top of every predicted hitscan shot.  Each is capped by its
+// own cvar (0 = unlimited).
+//   _light_count  ↔ cl_impact_dlights_per_shot
+//   _effect_count ↔ cl_impact_effects_per_shot
+float  impact_per_shot_light_count;
+float  impact_per_shot_effect_count;
+
+float() Impact_Quality =
+{
+    float q = cvar("cl_impact_quality");
+    if (q <= 0) return 0;
+    if (q < 2) return 1;
+    if (q < 3) return 2;
+    return 3;
+};
+
+void(vector pos, vector normal, float mat) Impact_SpawnParticles =
+{
+    float q = Impact_Quality();
+    if (q <= 0)
+        return;
+
+    // Per-shot particle-effect cap.  Smoke / spark spawns from
+    // penetration exits stack up fast — cap stops one shot from
+    // blowing up the particle budget at higher impact_quality.
+    // bh_shotgun_blast bypasses the cap for the shotgun pellet loop
+    // — same latch CSQC_PredictedShotgunImpact uses for the bullet-
+    // hole cap so each pellet draws its own impact FX.
+    float effect_cap = cvar("cl_impact_effects_per_shot");
+    if (!bh_shotgun_blast
+        && effect_cap > 0
+        && impact_per_shot_effect_count >= effect_cap)
+        return;
+    impact_per_shot_effect_count += 1;
+
+    if (q < 2)
+        pointparticles(Impact_GetFastEffectFor(mat), pos, normal * 200, 1);
+    else
+        pointparticles(Impact_GetEffectFor(mat), pos, normal * 200, 1);
+
+    // Flesh hits also stamp projected blood-splat decals on nearby
+    // BSP geometry — wall behind the target plus a small floor pool.
+    // See cl_bloodsplat.qc.  Engine particles are simulated in C and
+    // can't be inspected from QC, so we approximate "blood that flew
+    // and hit something" with tracelines instead of literal particle
+    // collision.
+    if (mat == IMPACT_MAT_FLESH || mat == IMPACT_MAT_FLESH_LETHAL)
+        CSQC_SpawnBloodDecals(pos, normal);
 };
 
 // Local prediction inspects trace_ent (the shooter's own CSQC trace).
@@ -113,16 +242,23 @@ float(entity hit) Impact_ClassifyLocal =
     // hole gate rejects by classname).  Replicated via SendEntity
     // (cl_physprop.qc) which sets classname before the trace can
     // ever land, so this match is reliable now.
-    if (hit.classname == "phys_barrel" || hit.classname == "phys_can")
-        return IMPACT_MAT_METAL;
+    if (hit.classname == "phys_barrel" || hit.classname == "phys_can"
+        || hit.classname == "csqc_dropped_weapon")
+        return IMPACT_MAT_METAL_NODECAL;
 
     // Breakable brush — read material code mirroring server values.
-    // Hardcoded values mirror sv_breakable.qc:14-21 (BREAKABLE_*).
+    // Style numbering matches the BREAKABLE_*_CL constants in
+    // cl_breakable.qc (which mirror sv_breakable.qc).
+    //   0 GLASS / 7 UNBREAKABLE_GLASS → glass impact FX
+    //   1 WOOD  / 5 TILE              → wood
+    //   2 METAL / 6 COMPUTER          → metal
+    //   3 FLESH                       → flesh
+    //   4 CINDER / 8 ROCKS            → default (concrete-dust)
     float m = hit.brush_material;
-    if (m == 5)                      return IMPACT_MAT_FLESH;   // BREAKABLE_FLESH
-    if (m == 4)                      return IMPACT_MAT_GLASS;   // BREAKABLE_GLASS
-    if (m == 3)                      return IMPACT_MAT_WOOD;    // BREAKABLE_WOOD
-    if (m == 2 || m == 6 || m == 7)  return IMPACT_MAT_METAL;   // METAL/MACHINE/CIRCUIT
+    if (m == 0 || m == 7)        return IMPACT_MAT_GLASS;
+    if (m == 1 || m == 5)        return IMPACT_MAT_WOOD;
+    if (m == 2 || m == 6)        return IMPACT_MAT_METAL;
+    if (m == 3)                  return IMPACT_MAT_FLESH;
     return IMPACT_MAT_DEFAULT;
 };
 
@@ -135,7 +271,7 @@ void() CSQC_FakeProjectileExpire =
 .vector fake_proj_hitpos;   // pre-traced wall hit position for fake projectiles
 .string fake_proj_hitsnd;  // impact sound to play when fake projectile sticks
 
-void(vector pos) CSQC_AddImpactLight;
+void(vector pos, vector normal) CSQC_AddImpactLight;
 
 // Stop a fake projectile at the wall — sticks in place, plays impact sound, then expires
 void() CSQC_FakeProjectileStick =
@@ -151,8 +287,10 @@ void() CSQC_FakeProjectileStick =
     // Impact light + particles at hit point.  No surface normal is stored
     // for stuck projectiles, so feed zero velocity and let the particle
     // effect's own randomvel/veladd scatter it.
-    CSQC_AddImpactLight(self.fake_proj_hitpos);
-    pointparticles(Impact_GetEffectFor(IMPACT_MAT_DEFAULT), self.fake_proj_hitpos, '0 0 0', 1);
+    // Stuck-fake-projectile has no recorded surface normal; pass zero
+    // and the cl_impact_light_offset stack collapses to no extra lift.
+    CSQC_AddImpactLight(self.fake_proj_hitpos, '0 0 0');
+    Impact_SpawnParticles(self.fake_proj_hitpos, '0 0 0', IMPACT_MAT_DEFAULT);
 
     // Expire when server entity should arrive
     float ping_est = getplayerkeyfloat(player_localnum, INFOKEY_P_PING, 0) * 0.001;
@@ -163,10 +301,22 @@ void() CSQC_FakeProjectileStick =
 const float IMPACT_LIGHT_RADIUS   = 60;
 const float IMPACT_LIGHT_DURATION = 0.06;
 const float IMPACT_LIGHT_MAX      = 8;   // max simultaneous impact lights
+// (impact_per_shot_light_count / _effect_count are declared above
+// Impact_SpawnParticles since that function fires first in the file
+// and uses _effect_count.)
 
 vector impact_light_pos[8];
 float  impact_light_time[8];
 float  impact_light_count;
+
+// Reset hook called from sh_weapon_standard.qc at the top of every
+// penetrating hitscan shot so cl_impact_dlights_per_shot scopes to
+// that single shot.
+void() CSQC_Impact_ResetShot =
+{
+    impact_per_shot_light_count  = 0;
+    impact_per_shot_effect_count = 0;
+};
 
 // Explosion lights — same ringbuffer pattern but brighter / wider / longer
 // so grenade explosions read as the real visual punch (not a tiny bullet
@@ -180,30 +330,71 @@ vector explosion_light_pos[4];
 float  explosion_light_time[4];
 float  explosion_light_count;
 
-void(vector pos) CSQC_AddImpactLight =
+void(vector pos, vector normal) CSQC_AddImpactLight =
 {
     float slot;
+    float scale;
 
+    // Decoupled from cl_impact_quality (which only steps particles 0-2).
+    // cl_impact_light is the dedicated dlight toggle — pairs with
+    // cl_explosion_light so users can kill bullet-impact dlights without
+    // also losing the particle smoke/spark from quality 2.
+    if (!cvar("cl_impact_light"))
+        return;
+
+    scale = bound(0, cvar("cl_impact_light_scale"), 2);
+    if (scale <= 0)
+        return;
+
+    // Per-shot dlight cap — the dominant cost of cl_impact_quality 3
+    // during sustained fire is dynamiclight_add() called per hit;
+    // with penetration a single shot can spawn 8 lights.  Cap here so
+    // a burst doesn't turn into a per-tick lightmap relight storm.
+    float dl_cap = cvar("cl_impact_dlights_per_shot");
+    if (dl_cap > 0 && impact_per_shot_light_count >= dl_cap)
+        return;
+    impact_per_shot_light_count += 1;
+
+    // Light sits at the raw impact position (callers pass the un-offset
+    // `pos`).  Particles spawn at pos + normal * cl_impact_particle_offset
+    // further out — so the smoke floats off the wall while the dlight
+    // stays planted on the lit surface.  Normal arg kept on the
+    // signature for future tuning (e.g. fade or scale by angle).
     slot = impact_light_count - floor(impact_light_count / IMPACT_LIGHT_MAX) * IMPACT_LIGHT_MAX;
     impact_light_pos[slot] = pos;
     impact_light_time[slot] = cltime;
     impact_light_count += 1;
+    // Force this render frame's gate to "yes" so the brightest first
+    // sample (frac == 1.0) reaches the engine even when
+    // cl_dlight_update_hz would otherwise skip it.
+    CSQC_DlightGate_ForceUpdate();
 };
 
 void(vector pos) CSQC_AddExplosionLight =
 {
+    // Bail before allocating a slot when the cvar is off.  Existing
+    // active lights still play out their fade; this just suppresses
+    // NEW ones, so flipping the cvar mid-fight doesn't strobe in/out.
+    if (!cvar("cl_explosion_light"))
+        return;
+
     float slot;
     slot = explosion_light_count - floor(explosion_light_count / EXPLOSION_LIGHT_MAX) * EXPLOSION_LIGHT_MAX;
     explosion_light_pos[slot] = pos;
     explosion_light_time[slot] = cltime;
     explosion_light_count += 1;
+    // Force this render frame's gate to "yes" so the bright peak of
+    // the explosion lands on a drawn frame, not a skipped one.
+    CSQC_DlightGate_ForceUpdate();
 };
 
-// Animate the classic Quake explode sprite frames 0..5, then remove.
+// HL-grenade explosion sprite — animates frames 0..5 of fexplo.spr.
 // Spawned explicitly because CSQC's te_explosion builtin only emits
 // particles + sound, not the sprite (the sprite is part of the engine's
 // network temp-entity handler, which doesn't fire when te_explosion is
-// called locally from CSQC).
+// called locally from CSQC). Switched from progs/s_explod.spr to
+// gfx/fexplo.spr per content update — same 6-frame layout, just a
+// nicer-looking fireball.
 void() CSQC_ExplodeSpriteThink =
 {
     self.frame = self.frame + 1;
@@ -217,9 +408,11 @@ void() CSQC_ExplodeSpriteThink =
 
 void(vector pos) CSQC_SpawnExplodeSprite =
 {
+    // Lift the sprite center 16 qu so the lower half doesn't sink
+    // through the ground when the grenade detonates near the floor.
     entity spr = spawn();
-    setorigin(spr, pos);
-    setmodel(spr, "progs/s_explod.spr");
+    setorigin(spr, pos + '0 0 16');
+    setmodel(spr, "gfx/fexplo.spr");
     spr.drawmask  = MASK_ENGINE;
     spr.effects   = EF_ADDITIVE;
     spr.frame     = 0;
@@ -228,9 +421,18 @@ void(vector pos) CSQC_SpawnExplodeSprite =
 };
 
 // Called every render frame from CSQC_UpdateView, before renderscene()
+//
+// cl_dlight_update_hz throttles the dynamiclight_add calls (see
+// CSQC_DlightGate_Tick in cl_main.qc) — the expiry/timestamp
+// bookkeeping always runs so dlights still time out correctly,
+// only the engine submission is skipped on non-update frames.
 void() CSQC_DrawImpactLights =
 {
     float i, age, frac;
+    float impact_scale;
+    float gate = csqc_dlight_update_this_frame;
+
+    impact_scale = bound(0, cvar("cl_impact_light_scale"), 2);
 
     for (i = 0; i < IMPACT_LIGHT_MAX; i++)
     {
@@ -245,7 +447,10 @@ void() CSQC_DrawImpactLights =
         }
 
         frac = 1.0 - (age / IMPACT_LIGHT_DURATION);
-        dynamiclight_add(impact_light_pos[i], IMPACT_LIGHT_RADIUS * frac, '1 0.7 0.3' * frac);
+        if (impact_scale > 0 && gate)
+            dynamiclight_add(impact_light_pos[i],
+                             IMPACT_LIGHT_RADIUS * impact_scale * frac,
+                             '1 0.7 0.3' * frac);
     }
 
     // Explosion lights — same per-frame fade. Color skewed warm-orange
@@ -264,17 +469,27 @@ void() CSQC_DrawImpactLights =
         }
 
         frac = 1.0 - (age / EXPLOSION_LIGHT_DURATION);
-        dynamiclight_add(explosion_light_pos[i],
-                         EXPLOSION_LIGHT_RADIUS * frac,
-                         '2.5 1.6 0.7' * frac);
+        if (gate)
+            dynamiclight_add(explosion_light_pos[i],
+                             EXPLOSION_LIGHT_RADIUS * frac,
+                             '2.5 1.6 0.7' * frac);
     }
 };
 
-// Pull particles just slightly off the surface — far enough that the
-// dust+sparks burst renders in front of the bullet hole decal, close
-// enough that the effect looks attached to the wall instead of floating
-// in mid-air.
-const float IMPACT_PARTICLE_OFFSET = 4;
+// Pull particles off the surface so they depth-sort in front of the
+// client-side bullet-hole sprite. The bullet hole itself sits only a
+// fraction of a unit off the wall, while particles can tolerate a larger
+// normal offset without looking detached.
+float() Impact_ParticleOffset =
+{
+    // Single knob — clamped low end at 2 u so particles don't z-fight
+    // the bullet-hole decal at default; upper end now uncapped so
+    // testing high values for "hover above BSP" works without
+    // needing a second cvar.
+    float off = cvar("cl_impact_particle_offset");
+    if (off < 2) off = 2;
+    return off;
+};
 
 // Should we spawn a persistent bullet-hole decal for this impact?
 // Any material that leaves a solid surface behind gets a hole — for
@@ -290,6 +505,7 @@ float(float mat) Impact_ShouldSpawnHole =
 {
     if (mat == IMPACT_MAT_FLESH)        return 0;
     if (mat == IMPACT_MAT_FLESH_LETHAL) return 0;
+    if (mat == IMPACT_MAT_METAL_NODECAL) return 0;
     return 1;
 };
 
@@ -304,27 +520,31 @@ void(vector pos, float style) Impact_PlayBreakableSound =
     string snd;
     float v = random();
 
-    if (style == 4)  // BREAKABLE_GLASS
+    // Style routing: GLASS (0) + UNBREAKABLE_GLASS (7) → glass;
+    // CINDER (4) + ROCKS (8) → concrete; WOOD (1) + TILE (5) → wood;
+    // FLESH (3) → flesh; METAL (2) + COMPUTER (6) and any
+    // unrecognised value fall through to the metal pool.
+    if (style == 0 || style == 7)
     {
         if      (v < 0.25) snd = "sounds/debris/impact_glasshl1.wav";
         else if (v < 0.50) snd = "sounds/debris/impact_glasshl2.wav";
         else if (v < 0.75) snd = "sounds/debris/impact_glasshl3.wav";
         else               snd = "sounds/debris/impact_glasshl4.wav";
     }
-    else if (style == 0 || style == 1)  // BREAKABLE_ROCK / BREAKABLE_CONCRETE
+    else if (style == 4 || style == 8)
     {
         if      (v < 0.333) snd = "sounds/debris/impact_concretehl1.wav";
         else if (v < 0.666) snd = "sounds/debris/impact_concretehl2.wav";
         else                snd = "sounds/debris/impact_concretehl3.wav";
     }
-    else if (style == 3)  // BREAKABLE_WOOD
+    else if (style == 1 || style == 5)
     {
         if      (v < 0.25) snd = "sounds/debris/impact_woodhl1.wav";
         else if (v < 0.50) snd = "sounds/debris/impact_woodhl2.wav";
         else if (v < 0.75) snd = "sounds/debris/impact_woodhl3.wav";
         else               snd = "sounds/debris/impact_woodhl4.wav";
     }
-    else if (style == 5)  // BREAKABLE_FLESH
+    else if (style == 3)
     {
         if      (v < 0.167) snd = "sounds/debris/impact_fleshhl1.wav";
         else if (v < 0.333) snd = "sounds/debris/impact_fleshhl2.wav";
@@ -333,7 +553,7 @@ void(vector pos, float style) Impact_PlayBreakableSound =
         else if (v < 0.833) snd = "sounds/debris/impact_fleshhl5.wav";
         else                snd = "sounds/debris/impact_fleshhl6.wav";
     }
-    else  // metal, machine, circuit, and any unrecognised style
+    else  // METAL, COMPUTER, fallback
     {
         if      (v < 0.167) snd = "sounds/debris/impact_metalhl1.wav";
         else if (v < 0.333) snd = "sounds/debris/impact_metalhl2.wav";
@@ -355,29 +575,34 @@ void(vector pos, float style) Impact_PlayBreakableBreakSound =
     string snd;
     float v = random();
 
-    if (style == 4)  // BREAKABLE_GLASS
+    // Style routing: GLASS (0); CINDER (4) / ROCKS (8) → concrete;
+    // WOOD (1) / TILE (5) → wood; FLESH (3); COMPUTER (6) →
+    // electronic; METAL (2) and any unrecognised value fall through
+    // to the metal pool.  UNBREAKABLE_GLASS (7) never reaches this
+    // path (gated in func_breakable_break server-side).
+    if (style == 0)
     {
         if      (v < 0.333) snd = "sounds/debris/break_glasshl1.wav";
         else if (v < 0.666) snd = "sounds/debris/break_glasshl2.wav";
         else                snd = "sounds/debris/break_glasshl3.wav";
     }
-    else if (style == 0 || style == 1)  // BREAKABLE_ROCK / BREAKABLE_CONCRETE
+    else if (style == 4 || style == 8)
     {
         if (v < 0.5) snd = "sounds/debris/break_concretehl1.wav";
         else         snd = "sounds/debris/break_concretehl2.wav";
     }
-    else if (style == 3)  // BREAKABLE_WOOD
+    else if (style == 1 || style == 5)
     {
         if      (v < 0.333) snd = "sounds/debris/break_woodhl1.wav";
         else if (v < 0.666) snd = "sounds/debris/break_woodhl2.wav";
         else                snd = "sounds/debris/break_woodhl3.wav";
     }
-    else if (style == 5)  // BREAKABLE_FLESH
+    else if (style == 3)
     {
         if (v < 0.5) snd = "sounds/debris/break_fleshhl1.wav";
         else         snd = "sounds/debris/break_fleshhl2.wav";
     }
-    else if (style == 7)  // BREAKABLE_CIRCUIT
+    else if (style == 6)
     {
         if      (v < 0.125) snd = "sounds/debris/break_eletronichl1.wav";
         else if (v < 0.250) snd = "sounds/debris/break_eletronichl2.wav";
@@ -446,11 +671,32 @@ void(entity target, float damage) CSQC_PredictBreakableBreak =
 {
     if (!target)                              return;
     if (target.classname == "player")         return;
+    // brush_type filter: only static brushwork (func_breakable) is
+    // predict-broken.  func_button / func_door also use brush_health
+    // for shootable activation (Q1 killed-callback fires the button
+    // and resets HP, NOT a destroy).  Without this gate the predict
+    // path played the break sound + hid the button locally on every
+    // shot, then the server's "still alive" snapshot rolled it back.
+    if (target.brush_type != BRUSH_TYPE_STATIC) return;
     // brush_health > 0 identifies a live breakable. brush_material can be
     // 0 for BREAKABLE_CONCRETE, so don't gate on that — non-breakable
     // brushes have health == 0 and are excluded by the next check.
     if (target.brush_health <= 0)             return;    // not a breakable / already gone
     if (target.brush_broken_predicted)        return;    // already predicted
+
+    // User toggle (Settings → Perf & Net → Predict Breaks). When off,
+    // breakables wait for the server's authoritative destroy event
+    // before disappearing — adds ~1 RTT of latency before the brush
+    // visibly breaks but eliminates rollback flicker on contested or
+    // mispredicted hits.
+    if (!cvar("cl_predict_breaks")) return;
+
+    // sv_trust_clientbreak: emit the per-shot damage claim BEFORE the
+    // local-vs-lethal split so non-lethal hits also drive server-side
+    // HP.  The helper internally gates on the server's serverinfo and
+    // pm_suppress_sounds (replay), so this is a no-op when trust is off
+    // or we're inside a reconcile-replay pass.
+    CSQC_SendBreakClaim(target, damage);
 
     // Non-lethal: subtract locally so the NEXT shot fired before the
     // server has acknowledged this one sees the reduced HP. Without this,
@@ -479,6 +725,13 @@ void(entity target, float damage) CSQC_PredictBreakableBreak =
     target.drawmask = 0;
     target.solid    = SOLID_NOT;
 
+    // Clear any tracked-decal bullet holes attached to this brush so
+    // they vanish with the predicted break instead of floating in
+    // place for ~1 RTT until the server's CSQC_EVENT_BRUSH_DESTROY
+    // arrives and triggers the same cleanup.  Idempotent: if the
+    // server confirms first the list is already empty.
+    CSQC_BulletHolesRemoveByOwner(target);
+
     target.think     = CSQC_BreakPredict_Expire;
     target.nextthink = time + BREAK_PREDICT_TIMEOUT;
 
@@ -495,21 +748,94 @@ void(entity target, float damage) CSQC_PredictBreakableBreak =
     // debris from other breakables.
     float ds = max(target.brush_max_health, 20);
     float own = num_for_edict(target);
-    if (target.brush_material == 4 /*BREAKABLE_GLASS*/)
-        CSQC_SpawnGlassGibs(target.absmin, target.absmax, target.brush_cnt, ds, own);
+    // Predicted break — derive damage direction from the brush's
+    // bbox centre toward the local shooter (us).  Reverses the
+    // server's direction so the gibs throw OUT toward the shooter,
+    // matching the perception that "I shot it, gibs come at me".
+    // The server's authoritative event will overwrite the visual
+    // for remote clients; the local shooter only sees the predicted
+    // copy via the attacker-exclude byte.  custom_idx=0 → fall
+    // back to material-default model; alpha=0 → full opacity.
+    // Server can override these via map-editor mdl / alpha2 fields
+    // — the attacker's predicted gibs will mismatch briefly on
+    // custom-override breakables, acceptable MVP drift.
+    vector pred_dir = '0 0 1';
+    float pred_force = 0;
+    float pred_throw_mode = 0;   // explosion-mode key isn't replicated
+                                  // to CSQC, so we can't reliably
+                                  // predict the directional kick yet.
+                                  // Random-throw look matches both
+                                  // the legacy behaviour and the
+                                  // server's broadcast for non-
+                                  // explosion breakables.
+    if (target.brush_material == 0 /*BREAKABLE_GLASS*/)
+        CSQC_SpawnGlassGibs(target.absmin, target.absmax, target.brush_cnt, ds, own,
+                            pred_throw_mode, pred_dir, pred_force);
     else
-        // custom_idx=0 → fall back to material-default model; alpha=0 →
-        // full opacity. Server can override these via map-editor mdl/
-        // alpha2 fields — the attacker's predicted gibs will mismatch
-        // briefly on custom-override breakables, which is acceptable MVP
-        // drift. Fixing requires replicating custom_mdl_idx + alpha2.
         CSQC_SpawnDebrisGibs(target.absmin, target.absmax,
                              target.brush_material, target.brush_cnt,
-                             ds, 0, 0, own);
+                             ds, 0, 0, own,
+                             pred_throw_mode, pred_dir, pred_force);
 
     // Matching the server's cleanup: drop any decals still anchored to the
     // brush so they don't float in the air after the predicted break.
     CSQC_BulletHolesRemoveByOwner(target);
+};
+
+// Locate the EMPTY/WATER boundary above an underwater point.  Hitscan
+// traces ignore liquids, so trace_endpos for an underwater shot lands
+// on the BSP floor below — we need the surface above for splash FX.
+// Step up in 16qu increments until pointcontents stops returning WATER,
+// then refine downward 1qu to sit just above the surface.
+// Find the water-entry point along the ray from `from` (player view
+// or eye) to `to` (under-water impact).  Steps 4qu along the segment
+// until pointcontents flips to CONTENT_WATER, then binary-refines.
+// Falls back to a straight-up scan from `to` if the camera ray never
+// enters water (e.g. shot from beneath the surface).
+vector(vector from, vector to) Impact_FindWaterSurface =
+{
+    vector seg = to - from;
+    float dist = vlen(seg);
+    if (dist > 0.5)
+    {
+        vector dir = seg / dist;
+        float step = 4;
+        float t = 0;
+        while (t < dist)
+        {
+            vector p = from + dir * t;
+            if (pointcontents(p) == CONTENT_WATER)
+            {
+                float lo = t - step; if (lo < 0) lo = 0;
+                float hi = t;
+                while ((hi - lo) > 0.5)
+                {
+                    float mid = (lo + hi) * 0.5;
+                    if (pointcontents(from + dir * mid) == CONTENT_WATER)
+                        hi = mid;
+                    else
+                        lo = mid;
+                }
+                return from + dir * hi;
+            }
+            t = t + step;
+        }
+    }
+    // Fallback: straight-up scan from `to`.
+    vector p = to;
+    float climbed = 0;
+    while (pointcontents(p) == CONTENT_WATER && climbed < 4096)
+    {
+        p_z += 16;
+        climbed += 16;
+    }
+    while (pointcontents(p) != CONTENT_WATER && climbed > 0)
+    {
+        p_z -= 1;
+        climbed -= 1;
+    }
+    p_z += 1;
+    return p;
 };
 
 // Full bullet impact: particles + light + ricochet sound
@@ -524,8 +850,30 @@ void(vector pos, vector normal, float damage) CSQC_BulletImpact =
     if (pointcontents(pos - normal * 2) == CONTENT_SKY)
         return;
 
+    // Water-surface hit — spawn the splash on the actual water
+    // surface (not at trace_endpos, which is the BSP floor underneath
+    // since hitscan traces ignore liquids).  Suppress the wall-impact
+    // FX so only the splash plays for underwater hits.
+    float impact_was_water = 0;
+    if (pointcontents(pos) == CONTENT_WATER)
+    {
+        vector surf = Impact_FindWaterSurface((vector)getproperty(VF_ORIGIN), pos);
+        CSQC_Rain_SpawnBulletWaterSplash(surf);
+        impact_was_water = 1;
+    }
+
+    // Dropped weapons are SOLID_BBOX-ish — the trace lands on the
+    // weapon's bounding box, not its mesh, so the resulting sparks
+    // appear in mid-air around the gun.  Suppress the whole impact
+    // when the original trace hit a dropped weapon so the bullet
+    // visually passes through it instead.  (The bullet still
+    // *registers* against the weapon physically; this only kills
+    // the visual feedback at the bbox boundary.)
+    if (trace_ent && trace_ent.classname == "csqc_dropped_weapon")
+        return;
+
     // Pull effect off the surface so it's not flush against the wall
-    offset_pos = pos + normal * IMPACT_PARTICLE_OFFSET;
+    offset_pos = pos + normal * Impact_ParticleOffset();
 
     // Local prediction: classify based on what we hit. CSQC can only see
     // player vs. anything-else (func_breakable isn't replicated to CSQC),
@@ -534,19 +882,41 @@ void(vector pos, vector normal, float damage) CSQC_BulletImpact =
     // material byte for the full per-surface picker on remote viewers.
     float mat = Impact_ClassifyLocal(trace_ent);
 
+    // Underwater impact: splash is the entire visual — no sparks,
+    // dlight, hole, ricochet ping, or breakable thump.  Still register
+    // the autosound so weapon prediction reconciles correctly.
+    if (impact_was_water)
+    {
+        CSQC_RecordPredictedAutoSound();
+        return;
+    }
+
     // normal * 200 = base velocity for the particle set, gets the dust
     // and sparks "spitting" outward from the surface instead of hanging flat.
-    pointparticles(Impact_GetEffectFor(mat), offset_pos, normal * 200, 1);
-    CSQC_AddImpactLight(offset_pos);
+    Impact_SpawnParticles(offset_pos, normal, mat);
+    // Light at the RAW hit position so it sits on the wall and lights
+    // outward — feeding offset_pos here would put the light behind the
+    // smoke cloud and cause the particle quad to silhouette darkly
+    // against the dlight's illuminated patch on the wall.  The extra
+    // cl_impact_light_offset lift still applies inside CSQC_AddImpactLight.
+    CSQC_AddImpactLight(pos, normal);
     // Only place bullet-hole decals on static surfaces — decals on
     // players or breakables would orphan when the target moves or dies.
     if (Impact_ShouldSpawnHole(mat))
-        CSQC_SpawnBulletHole(pos, normal, trace_ent);
+        CSQC_SpawnBulletHole(pos, normal, trace_ent, mat);
 
-    // Random ricochet sound (ric1-5) at impact location
-    r = floor(random() * 5) + 1;
-    r = bound(1, r, 5);
-    pointsound(offset_pos, sprintf("sounds/weapons/ric%g.wav", r), 1, ATTN_NORM);
+    // Random ricochet sound (ric1-5) at impact location.
+    // Shotgun bypass: per-pellet ricochets are too loud — emit one ric
+    // total per blast, latched after the first pellet plays it.
+    // CSQC_PredictedShotgunImpact resets both flags around the loop.
+    if (!bh_shotgun_blast || !bh_shotgun_ric_played)
+    {
+        r = floor(random() * 5) + 1;
+        r = bound(1, r, 5);
+        pointsound(offset_pos, sprintf("sounds/weapons/ric%g.wav", r), 1, ATTN_NORM);
+        if (bh_shotgun_blast)
+            bh_shotgun_ric_played = 1;
+    }
 
     // Predicted breakable material thump. Gate on brush_health > 0 so we
     // identify live breakables regardless of their material style — style
@@ -555,7 +925,13 @@ void(vector pos, vector normal, float damage) CSQC_BulletImpact =
     // so this correctly separates damageable brushes from static ones.
     // The server's BreakablePlayImpactSound routes the matching multicast
     // event to every OTHER client, so we don't double up locally.
-    if (trace_ent && trace_ent.classname != "player" && trace_ent.brush_health > 0)
+    // Same brush_type gate as the predict-break below — shootable
+    // buttons/doors have brush_health > 0 too, but their "thump" cue
+    // is the button's own activation sound, not the breakable
+    // material sound.
+    if (trace_ent && trace_ent.classname != "player"
+        && trace_ent.brush_type == BRUSH_TYPE_STATIC
+        && trace_ent.brush_health > 0)
         Impact_PlayBreakableSound(offset_pos, trace_ent.brush_material);
 
     // Predicted breakable destruction: if `damage` would drop the brush's
@@ -578,14 +954,34 @@ void(vector pos, vector normal) CSQC_BulletImpactSilent =
     if (pointcontents(pos - normal * 2) == CONTENT_SKY)
         return;
 
-    offset_pos = pos + normal * IMPACT_PARTICLE_OFFSET;
+    // Underwater hit: splash only, no sparks/dlight/hole.
+    if (pointcontents(pos) == CONTENT_WATER)
+    {
+        vector surf = Impact_FindWaterSurface((vector)getproperty(VF_ORIGIN), pos);
+        CSQC_Rain_SpawnBulletWaterSplash(surf);
+        return;
+    }
+
+    // Same dropped-weapon bbox suppression as CSQC_BulletImpact.
+    if (trace_ent && trace_ent.classname == "csqc_dropped_weapon")
+        return;
+
+    offset_pos = pos + normal * Impact_ParticleOffset();
 
     float mat = Impact_ClassifyLocal(trace_ent);
-    pointparticles(Impact_GetEffectFor(mat), offset_pos, normal * 200, 1);
-    CSQC_AddImpactLight(offset_pos);
+    Impact_SpawnParticles(offset_pos, normal, mat);
+    // Light at the RAW hit position so it sits on the wall and lights
+    // outward — feeding offset_pos here would put the light behind the
+    // smoke cloud and cause the particle quad to silhouette darkly
+    // against the dlight's illuminated patch on the wall.  The extra
+    // cl_impact_light_offset lift still applies inside CSQC_AddImpactLight.
+    CSQC_AddImpactLight(pos, normal);
     if (Impact_ShouldSpawnHole(mat))
-        CSQC_SpawnBulletHole(pos, normal, trace_ent);
+        CSQC_SpawnBulletHole(pos, normal, trace_ent, mat);
 };
+
+// Forward decl — defined in cl_tracers.qc, compiled later.
+void(vector start_pos, vector end_pos) CSQC_SpawnTracer;
 
 // Full impact for other players receiving server events.
 // `mat` = IMPACT_MAT_* code from the server multicast — server has full
@@ -596,7 +992,13 @@ void(vector pos, vector normal) CSQC_BulletImpactSilent =
 // static-geometry hits. Passing the real target lets bullet-hole
 // decals attach to func_breakables on remote-shooter impacts so they
 // vanish along with the breakable on CSQC_EVENT_BRUSH_DESTROY.
-void(vector pos, vector normal, float mat, entity target) CSQC_BulletImpactRemote =
+//
+// `shooter_entnum` is the player who fired the shot.  Used to
+// reconstruct the tracer's start point at the shooter's current eye
+// position.  Not used for any gameplay decision — purely a visual
+// anchor.  0 (or a slot we can't resolve) skips the tracer, all
+// other effects still play normally.
+void(vector pos, vector normal, float mat, entity target, float shooter_entnum) CSQC_BulletImpactRemote =
 {
     vector offset_pos;
     float r;
@@ -605,12 +1007,43 @@ void(vector pos, vector normal, float mat, entity target) CSQC_BulletImpactRemot
     if (pointcontents(pos - normal * 2) == CONTENT_SKY)
         return;
 
-    offset_pos = pos + normal * IMPACT_PARTICLE_OFFSET;
+    // Underwater remote hit: splash only.
+    if (pointcontents(pos) == CONTENT_WATER)
+    {
+        vector surf = Impact_FindWaterSurface((vector)getproperty(VF_ORIGIN), pos);
+        CSQC_Rain_SpawnBulletWaterSplash(surf);
+        return;
+    }
 
-    pointparticles(Impact_GetEffectFor(mat), offset_pos, normal * 200, 1);
-    CSQC_AddImpactLight(offset_pos);
+    // Same dropped-weapon bbox suppression as the local variants.
+    // For remote impacts the hit entity arrives as `target` (resolved
+    // from the wire's entnum), not via trace_ent.
+    if (target && target.classname == "csqc_dropped_weapon")
+        return;
+
+    offset_pos = pos + normal * Impact_ParticleOffset();
+
+    Impact_SpawnParticles(offset_pos, normal, mat);
+    // Light at the RAW hit position so it sits on the wall and lights
+    // outward — feeding offset_pos here would put the light behind the
+    // smoke cloud and cause the particle quad to silhouette darkly
+    // against the dlight's illuminated patch on the wall.  The extra
+    // cl_impact_light_offset lift still applies inside CSQC_AddImpactLight.
+    CSQC_AddImpactLight(pos, normal);
     if (Impact_ShouldSpawnHole(mat))
-        CSQC_SpawnBulletHole(pos, normal, target);
+        CSQC_SpawnBulletHole(pos, normal, target, mat);
+
+    // Tracer ribbon — start at the shooter's eye, end at the impact.
+    // Slight stale-pose drift is tolerable at the tracer's typical
+    // <0.2 s lifetime.  Skipped for the LOCAL player so we don't
+    // double up with the predicted tracer (CSQC_PredictedImpact /
+    // ShotgunImpact / PenetratingImpact spawn their own).
+    if (shooter_entnum > 0 && shooter_entnum != player_localentnum)
+    {
+        entity shooter = findfloat(world, entnum, shooter_entnum);
+        if (shooter && shooter != world)
+            CSQC_SpawnTracer(shooter.origin + shooter.view_ofs, pos);
+    }
 
     // Positional ricochet sound for other players
     r = floor(random() * 5) + 1;

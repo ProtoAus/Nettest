@@ -50,6 +50,24 @@ float hud_font;
 float hud_font_regular;
 float hud_font_mono;     // monospace for scrolling numeric strips (debug graphs)
 
+// Dynamic-light re-issue gate — sampled once per render frame in
+// CSQC_DlightGate_Tick (cl_main.qc) from cl_dlight_update_hz.
+// Per-frame-mutable dlight callsites (muzzle flash, bullet impact,
+// explosion) read this and skip their dynamiclight_add when 0 so the
+// engine's lightmap-hack path doesn't pay MarkLights / rebuild cost
+// for that dlight on the skipped frame.  Defaults to 1 so behaviour
+// is unchanged before the first tick fires.
+var float csqc_dlight_update_this_frame = 1;
+
+// Forward decl — defined in cl_main.qc but called from spawn-side
+// helpers earlier in the compile order (CSQC_MuzzleFlash,
+// CSQC_AddImpactLight, CSQC_AddExplosionLight).  Forces the current
+// render frame's gate to "yes" and rebases the cap interval to now
+// so the peak (frac == 1.0) frame of a freshly-spawned dlight is
+// always drawn even when cl_dlight_update_hz would otherwise have
+// skipped this frame.
+void() CSQC_DlightGate_ForceUpdate;
+
 // Spectator freecam input (captured in cl_player.qc, used in cl_spectate.qc)
 float spec_freecam_fwd;
 float spec_freecam_side;
@@ -63,12 +81,23 @@ entity predicted_player;
 float csqc_prediction_valid;    // TRUE once predicted_player can drive view
 float csqc_live_buttons;        // live button bits captured by +cmd aliases
 
+// Pending yaw delta sent privately by func_door_rotating while it carries
+// us.  CSQC_Input_Frame folds it into input_angles_y once and zeroes it,
+// so the local view follows the door without disturbing pitch/roll.
+float csqc_door_yaw_offset;
+
 // Shared CSQC weapon-prediction bookkeeping.
 float csqc_pred_sequence;
 float csqc_weapon_pending_ack_sequence;
 
 // Persistent CSQC viewmodel entity — driven by predicted_player
 entity csqc_viewmodel_ent;
+
+// Sequence-driven viewmodels normally use time since weapon-state start.
+// Multi-part reloads can override this per draw so a later sequence begins
+// at local sequence time 0 instead of inheriting the full reload elapsed.
+float csqc_viewmodel_sequence_time_override;
+float csqc_viewmodel_sequence_time;
 
 // Current "logical time" for weapon prediction.
 // Set to cltime for live prediction, pred_cmd_timestamp[slot] for replay.
@@ -92,6 +121,12 @@ float clframetime;
 // actual use site is CSQC_PlayerVisual_Update; see cl_player.qc for the
 // full set of vis_* fields.
 .float vis_owner_entnum;
+
+// Forward-declared for the same reason — CSQC_SendHitclaim writes
+// these to predict the flinch reaction on the target proxy.  Real
+// declarations and the predraw application live in cl_player.qc.
+.float vis_flinch_until;
+.float vis_flinch_hitgroup;
 
 // Forward-declared so cl_player.qc's CSQC_PlayerVisual_Predraw can gate
 // own-body visibility on the death-cam window. Defined in cl_spectate.qc,
@@ -138,3 +173,16 @@ vector() readvector =
 	r_z = readcoord();
 	return r;
 };
+
+// Forward decls for CoD scope (cl_codscope.qc) — referenced from
+// cl_cameras.qc's sniper-sway helper which compiles BEFORE
+// cl_codscope.qc in cl_progs.src.
+float() CSQC_CodScope_IsScoped;
+float() CSQC_CodScope_IsActive;
+vector() CSQC_CodScope_BreathingSway;
+vector() CSQC_CodScope_GetTraceBias;
+float csqc_codscope_holdbreath_env;
+float csqc_codscope_fire_blocks_ads;
+float csqc_codscope_sway_pitch;
+float csqc_codscope_sway_yaw;
+float() CSQC_CodScope_HidesViewmodel;

@@ -22,6 +22,41 @@ vector MENU_TEXT_SMALL = '8 8 0';
 vector MENU_TEXT_MEDIUM = '16 16 0';
 vector MENU_TEXT_LARGE = '24 24 0';
 
+// --- Floating main-menu (new design) ---
+// menu_font's native size list is 8 12 16 18 24 36 48 60 72; the
+// constants below pick natives so text edges stay crisp.  Anything
+// off this list scales and blurs.
+const float FLOAT_MENU_MAIN_SIZE     = 24;   // big-options height (Create / Browser / Settings / Quit).
+                                              // Two native sizes below the original 48 — menu_font's
+                                              // size list is 8 12 16 18 24 36 48 ..., so 48→36→24.
+const float FLOAT_MENU_SMALL_SIZE    = 16;   // connect / disconnect row height (one native step
+                                              // smaller than 18; menu_font's list is 8 12 16 18 ...)
+const float FLOAT_MENU_LEFT_PAD      = 32;   // left margin from screen edge
+const float FLOAT_MENU_ROW_GAP_LARGE = 8;    // gap between consecutive 48-rows
+const float FLOAT_MENU_ROW_GAP_SMALL = 4;    // gap between the two connect rows
+const float FLOAT_MENU_TOP_GAP       = 18;   // gap between connect/disconnect block and main rows
+const float FLOAT_MENU_QUIT_GAP      = 24;   // small visual gap before Quit
+
+vector FLOAT_MENU_WHITE     = '1 1 1';
+vector FLOAT_MENU_YELLOW    = '1 0.85 0.18';
+vector FLOAT_MENU_GREEN     = '0.35 0.95 0.40';
+vector FLOAT_MENU_RED       = '0.95 0.32 0.32';
+vector FLOAT_MENU_HIGHLIGHT = '0.55 1 0.6';   // light green, used on hover
+
+// Hover-sound state (drives one-shot click.ogg on hover-enter only).
+//   last_hover_voiced_id  — the ID we played click.ogg for most
+//                           recently.  Persists across frames so a
+//                           button isn't re-sounded every frame the
+//                           cursor sits on it.
+//   this_frame_hovered_id — set by any Float_TextOption that's
+//                           hovered this frame.  Cleared at the end
+//                           of main_menu() so a "no hover" frame
+//                           resets last_hover_voiced_id (lets the
+//                           user re-hover the same row later and
+//                           still hear the sound).
+string last_hover_voiced_id;
+string this_frame_hovered_id;
+
 vector menu_root_size;
 
 void() m_close;
@@ -164,6 +199,62 @@ float(string id, vector pos, vector size, string text, vector button_color, vect
 float(string id, vector pos, vector size, string text) my_button =
 {
 	return my_button_colored(id, pos, size, text, MENU_BUTTON, MENU_BUTTON_BORDER);
+};
+
+// Float_TextOption — drop-shadowed left-anchored text "button" for
+// the floating main menu.  Handles:
+//   - hover: faint white wash behind the text (subtle highlight that
+//            works for any text colour, since pure white can't get
+//            brighter via colour multiplication)
+//   - held:  text colour × 0.5 for press feedback
+//   - hover-enter: one-shot sounds/ui/click.ogg (uses the file-scope
+//                  last_hover_voiced_id state machine — see globals
+//                  at top of file)
+//   - click: sounds/ui/submit.ogg
+// Hit-zone width follows `stringwidth(text, FALSE, [h,h,0])` so the
+// clickable rect tracks variable-length labels.  Returns 1 on the
+// frame the click is registered.
+float(string id, vector pos, float height, string text, vector color) Float_TextOption =
+{
+	vector text_sz = [height, height, 0];
+	float text_w = stringwidth(text, FALSE, text_sz);
+	vector size = [text_w, height, 0];
+
+	float hovered = sui_is_hovered(id);
+	float held    = sui_is_held(id);
+
+	if (hovered)
+	{
+		this_frame_hovered_id = id;
+		if (last_hover_voiced_id != id)
+		{
+			localsound("sounds/ui/click.ogg");
+			last_hover_voiced_id = id;
+		}
+	}
+
+	// Hover swaps the text colour to FLOAT_MENU_HIGHLIGHT (light
+	// green) regardless of the base colour — works for white +
+	// yellow + green + red rows.  Held additionally halves the
+	// brightness of whatever colour is showing right now.
+	vector base = hovered ? FLOAT_MENU_HIGHLIGHT : color;
+	vector display_color = held ? base * 0.5 : base;
+
+	// Same-position double-draw — both passes at full alpha at
+	// exactly the same coordinates.  No offset (so no visible
+	// shadow/copy), but the anti-aliased fringe pixels at the
+	// glyph edges get additively blended, which makes the text
+	// read noticeably more opaque against the menumap backdrop
+	// without changing the perceived font.
+	sui_text(pos, text_sz, text, display_color, 1.0, 0);
+	sui_text(pos, text_sz, text, display_color, 1.0, 0);
+
+	sui_action_element(pos, size, id, sui_noop);
+
+	float clicked = sui_is_clicked(id);
+	if (clicked)
+		localsound("sounds/ui/submit.ogg");
+	return clicked;
 };
 
 void(string id, vector pos, vector size, vector minmaxsteps, __inout float value) my_slider =
@@ -418,7 +509,8 @@ name_command bindlist[] =
 	{ "Duck", "+button6" },
 	{ "Use", "+use" },
 	{ "Reload", "impulse 6" },
-	{ "Drop Weapon", "impulse 5" },
+	{ "Drop Weapon", "impulse 8" },
+	{ "Grapple", "+grapple" },
 	{ "Last Weapon", "impulse 14" },
 	{ "Weapon Special", "impulse 7" },
 	{ "Cycle Next", "impulse 12" },
@@ -427,8 +519,13 @@ name_command bindlist[] =
 	{ "Weapon Slot 2", "impulse 2" },
 	{ "Weapon Slot 3", "impulse 3" },
 	{ "Weapon Slot 4", "impulse 4" },
+	{ "Weapon Slot 5 (C4)", "impulse 5" },
 	{ "Team Menu", "impulse 28" },
+	{ "Flashlight", "impulse 50" },
+	{ "Spray", "impulse 19" },
+	{ "Voice (bind in console)", "+voip" },
 	{ "Show Scores", "+showscores" },
+	{ "Radio", "radio" },
 	{ "Chat", "messagemode" },
 };
 
@@ -464,12 +561,21 @@ void(string id, vector pos, vector size, __inout vector scrollofs) bind_list =
 // =============================================
 
 // Client-only cvars — persisted to data/settings.cfg, loaded on menu init.
+// Order mirrors the Settings menu sectioning so the generated cfg
+// reads top-to-bottom in the same groups: General, Crosshair, Graphics,
+// Perf & Net. Engine cvars (sys_*, vid_*, gl_*, r_renderscale,
+// r_viewmodel_maxlight, cl_yieldcpu/maxfps/idlefps) are listed too —
+// the writer just calls cvar_string() so it works regardless of QC vs
+// engine origin.
 string client_config_cvars[] =
 {
+    // --- General ---
     "name",
     "volume",
     "sensitivity",
     "fov",
+
+    // --- Crosshair ---
     "cl_crosshairlength",
     "cl_crosshairthickness",
     "cl_crosshairgap",
@@ -477,82 +583,65 @@ string client_config_cvars[] =
     "cl_crosshairdynamic",
     "cl_crosshairweapongap",
     "cl_teamcolours",
+
+    // --- Graphics: Decals & Bullet Holes ---
+    "cl_bulletholes",
+    "cl_bullethole_renderer",
+    "cl_bulletholes_max",
+    "cl_bullethole_distance",
+    "cl_bullethole_dedupe_scale",
+    "cl_decal_opacity",
+    "cl_impact_quality",
+    "cl_impact_particle_offset",
+    "cl_impact_light",
+    "cl_impact_light_scale",
+    "cl_ejectcasing",
+    "cl_ejectmag",
+
+    // --- Graphics: Lighting ---
+    "cl_muzzleflash_light",
+    "cl_muzzleflash_light_scale",
+    "r_viewmodel_maxlight",
+    "cl_viewmodel_nolight",
+
+    // --- Graphics: Renderer ---
+    "vid_conautoscale",
+    "r_renderscale",
+    "gl_texturemode2d",
+    "gl_texturemode",
+
+    // --- Perf & Net: Network & Prediction ---
+    "cl_extrap",
+    "cl_extrap_grounded",
+    "cl_extrap_max",
+    "cl_extrap_smooth",
+    "cl_extrap_smooth_time",
+    "cl_predict_hits",
+    "cl_predict_breaks",
+    "cl_interp_time",
+    "cl_weapontrace_ignore_playerclip",
+
+    // --- Perf & Net: Phys-Drop Smoothing ---
+    "cl_physdrop_smooth_time",
+    "cl_physdrop_extrap",
+    "cl_physdrop_angextrap",
+
+    // --- Perf & Net: Performance / Frame Pacing ---
+    "sys_highpriority",
+    "sys_clockprecision",
+    "sys_clocktype",
+    "sys_framepacing",
+    "cl_yieldcpu",
+    "cl_maxfps",
+    "cl_idlefps",
+
+    // --- Main-menu picks ---
+    "cl_player_model_choice",
 };
 
-// Server-only cvars — persisted to data/server.cfg, applied by sv_main worldspawn.
-string server_config_cvars[] =
-{
-    "hostname",
-    "maxclients",
-    "password",
-    "rcon_password",
-    "sv_pure",
-    "fraglimit",
-    "mp_roundtime",
-    "mp_timelimit",
-    "mp_maxrounds",
-    "mp_friendlyfire",
-    "mp_falldamage",
-    "mp_nomapweapons",
-    "mp_freezetime",
-    "mp_roundrestartdelay",
-    "mp_respawndelay",
-    "sv_autohop",
-    "sv_stamina",
-    "sv_gamemode",
-    "sv_maxvelocity",
-    "sv_hull_height",
-    "sv_eye_height",
-    "sv_maxspeed",
-    "sv_accelerate",
-    "sv_airaccelerate",
-    "sv_friction",
-    "sv_shiftspeed",
-    "sv_mintic",
-    "sv_maxtic",
-    "sv_minpitch",
-    "sv_maxpitch",
-    "mp_cheats",
-    "sv_cheats",
-    "mp_noblock",
-    "sv_trust_clienthits",
-
-    // Non-UI advanced server cvars (no menu control — edit data/server.cfg to change)
-    "sv_lagcomp",
-    "sv_lagcomp_maxrewind",
-    "sv_hitbox_expand",
-    "sv_anim_qu_per_sec",
-    "sv_anim_qu_per_sec_crouch",
-    "sv_player_basebone",
-    "sv_antilag",
-    "sv_bigcoords",
-    "sv_nqplayerphysics",
-    "sv_wateraccelerate",
-    "sv_waterfriction",
-    "sv_toss_tickrate",
-    "pm_ramp_bumpcount",
-
-    // Physics props
-    "sv_physprop_hit_force",
-    "sv_physprop_mass",
-    "sv_physprop_erp",
-    "sv_physprop_damp_lin",
-    "sv_physprop_damp_ang",
-    "sv_physprop_friction",
-    "sv_physprop_use_force",
-    "sv_physprop_use_velmult",
-
-    // ODE engine cvars
-    "physics_ode_iterationsperframe",
-    "physics_ode_worldquickstep",
-    "physics_ode_autodisable",
-
-    // Default starting loadout (Create Server → Game tab)
-    "sv_default_primary",
-    "sv_default_secondary",
-    "sv_default_melee",
-    "sv_default_utility",
-};
+// Server cvars formerly enumerated here — moved to the manifest in
+// shared/sh_cvar_table.qc.  Persisted entries are anything with the
+// CVAR_FLAG_SAVE_TO_SERVER_CFG bit; the writer is CVar_WriteServerCfg.
 
 void() Menu_SaveClientConfig =
 {
@@ -647,48 +736,26 @@ string(string cfgpath, string target_name) Menu_ReadConfigValue =
 void() Menu_SaveServerConfig =
 {
     // Restore intended defaults for any non-UI cvar that came back empty
-    // from a previous save, so we never persist "" again.
+    // from a previous save, so we never persist "" again.  The fixup
+    // walks the manifest now — see CVar_ForceDefaults.
     Menu_FixupEmptyDefaults();
 
-    float f = fopen("data/server.cfg", FILE_WRITE);
-    if (f < 0)
+    // rcon_password has a special recovery path: if it came back empty,
+    // first try the offline-stash cvar (sv_rcon_password_shadow), then
+    // the previous data/server.cfg.  Done before the writer runs so
+    // the live cvar carries the recovered value into the dump.
+    if (cvar_string("rcon_password") == "")
     {
-        print("Menu_SaveServerConfig: failed to open data/server.cfg\n");
-        return;
+        string rp = cvar_string("sv_rcon_password_shadow");
+        if (rp == "")
+            rp = Menu_ReadConfigValue("data/server.cfg", "rcon_password");
+        if (rp != "")
+            cvar_set("rcon_password", rp);
     }
 
-    fputs(f, "// data/server.cfg — server settings (auto-generated)\n\n");
-
-    float i;
-    for (i = 0; i < server_config_cvars.length; i++)
-    {
-        string name = server_config_cvars[i];
-        string val  = cvar_string(name);
-        // If the live value is empty (e.g. a previous save wrote ""
-        // before the cvar had a registered default), ensure the menu VM
-        // force-set the default via menu_register_default on init — so
-        // if we see empty here, it's because the cfg exec overrode to "".
-        // Re-apply by reading the registered default and setting it live.
-        if (val == "")
-        {
-            if (name == "rcon_password")
-                val = cvar_string("sv_rcon_password_shadow");
-
-            if (name == "rcon_password" && val == "")
-                val = Menu_ReadConfigValue("data/server.cfg", name);
-
-            if (val == "")
-                val = cvar_defstring(name);
-
-            if (val != "")
-            {
-                cvar_set(name, val);   // apply live so the next read works
-            }
-        }
-        fputs(f, sprintf("set %s \"%s\"\n", name, val));
-    }
-
-    fclose(f);
+    // Single source of truth: shared/sh_cvar_table.qc.  Filtered to
+    // SV-side entries with CVAR_FLAG_SAVE_TO_SERVER_CFG.
+    CVar_WriteServerCfg("data/server.cfg");
 };
 
 // Called from the Settings menu "Back" / apply path — saves both client and binds.
@@ -697,13 +764,10 @@ void() Menu_SaveConfig =
     Menu_SaveClientConfig();
 };
 
-// Register every cvar the menu reads so the menu VM doesn't auto-create
-// them when the Create Server / Settings pages seed their UI values.
-// Idempotent — registercvar is a no-op if the cvar already exists.
-// Register a cvar with a default value.  If the cvar already exists (engine
-// builtin, or earlier register call), force its VALUE to default when empty
-// so cvar_string reads the intended value even though registercvar can't
-// overwrite an existing default.
+// Backward-compat shim: a couple of older callers may still ask the
+// menu to "register a cvar with a default and force-set if empty".
+// Forwards to the engine's registercvar (menu signature has 3 args)
+// and applies the empty-string fallback once, the same as before.
 void(string name, string def) menu_register_default =
 {
     registercvar(name, def, 0);
@@ -711,109 +775,38 @@ void(string name, string def) menu_register_default =
         cvar_set(name, def);
 };
 
-// Called AFTER data/server.cfg is exec'd.  Any cvar we care about that came
-// back empty from the cfg gets restored to its hardcoded default.  Call
-// again at save time so the file never writes "" for these.
+// Restore manifest defaults for any SV-side cvar that came back empty
+// after data/server.cfg exec.  Walks the manifest in
+// shared/sh_cvar_table.qc — adding a new cvar there is automatically
+// included here.
 void() Menu_FixupEmptyDefaults =
 {
-    if (cvar_string("sv_lagcomp")           == "") cvar_set("sv_lagcomp",           "1");
-    if (cvar_string("sv_lagcomp_maxrewind") == "") cvar_set("sv_lagcomp_maxrewind", "0.5");
-    if (cvar_string("sv_debug_lagcomp")     == "") cvar_set("sv_debug_lagcomp",     "0");
-    if (cvar_string("sv_hitbox_expand")     == "") cvar_set("sv_hitbox_expand",     "32");
-    if (cvar_string("sv_anim_qu_per_sec")        == "") cvar_set("sv_anim_qu_per_sec",        "240");
-    if (cvar_string("sv_anim_qu_per_sec_crouch") == "") cvar_set("sv_anim_qu_per_sec_crouch", "100");
-    if (cvar_string("sv_player_basebone")   == "") cvar_set("sv_player_basebone",   "0");
-    if (cvar_string("sv_antilag")           == "") cvar_set("sv_antilag",           "3");
-    if (cvar_string("sv_bigcoords")         == "") cvar_set("sv_bigcoords",         "1");
-    if (cvar_string("sv_nqplayerphysics")   == "") cvar_set("sv_nqplayerphysics",   "0");
-    if (cvar_string("sv_wateraccelerate")   == "") cvar_set("sv_wateraccelerate",   "10");
-    if (cvar_string("sv_waterfriction")     == "") cvar_set("sv_waterfriction",     "1");
-    if (cvar_string("sv_toss_tickrate")     == "") cvar_set("sv_toss_tickrate",     "20");
-    if (cvar_string("pm_ramp_bumpcount")    == "") cvar_set("pm_ramp_bumpcount",    "8");
-    if (cvar_string("sv_trust_clienthits")  == "") cvar_set("sv_trust_clienthits",  "1");
-
-    // Default starting loadout — match sv_main.qc's SV_FixupEmptyDefaults so
-    // the menu VM sees the same values before a server is ever started.
-    if (cvar_string("sv_default_primary")   == "") cvar_set("sv_default_primary",   "0");   // WEP_NONE
-    if (cvar_string("sv_default_secondary") == "") cvar_set("sv_default_secondary", "28");  // WEP_CSUSP
-    if (cvar_string("sv_default_melee")     == "") cvar_set("sv_default_melee",     "20");  // WEP_WRENCH
-    if (cvar_string("sv_default_utility")   == "") cvar_set("sv_default_utility",   "25");  // WEP_HLGRENADE
+    CVar_ForceDefaults();
 };
 
 void() Menu_RegisterCvars =
 {
-    // Register cvars that have real defaults BEFORE the generic loop.
-    // registercvar is a no-op if the cvar already exists, so the generic
-    // loop (which uses "" as default) would otherwise clobber these.
+    // Populate the manifest, then registercvar() every entry so the
+    // menu VM doesn't auto-create cvars on first read and the engine
+    // sees the intended defaults before data/*.cfg is exec'd.
+    CVar_Init();
+    CVar_RegisterMine();
+
+    // Menu-only cvars that don't belong in the manifest (purely
+    // ephemeral or menu-internal).  registercvar is idempotent.
     registercvar("_nettest_menu_active", "0", 0);
-    // Ephemeral admin trigger — pre-register so `cvar("sv_roundrestart")`
-    // in QC doesn't auto-create it.  Not persisted (not in save list).
-    menu_register_default("sv_roundrestart", "0");
-    menu_register_default("sv_rcon_password_shadow", "");
-    // Same story — these get registered by worldspawn (sv_main.qc) but
-    // the menu VM reads them earlier (sv_info_push, SV_FixupEmptyDefaults
-    // queued from data/server.cfg exec) and the auto-create path prints
-    // "Created QC Cvar" to console.  Pre-registering here shuts that up.
-    menu_register_default("sv_snipersway",           "0");
-    menu_register_default("sv_command_continuation", "1");
-    menu_register_default("sv_debug_continuation",   "0");
-    // Gameplay toggles / settings that live in the save list.  Defaults
-    // must be registered here so cvar_string doesn't return "".
-    menu_register_default("mp_noblock",      "0");
-    menu_register_default("mp_nomapweapons", "0");
-    menu_register_default("sv_shiftspeed",   "135");
-    // Crosshair behaviour toggles — defaults match the CSQC registration
-    // in HUD_EnsureCrosshairCVars so the menu doesn't spawn "Created QC
-    // Cvar" warnings on first open.
-    menu_register_default("cl_crosshairdynamic",    "1");
-    menu_register_default("cl_crosshairweapongap", "1");
 
-    // Non-UI server cvars (saved to data/server.cfg, no menu control).
-    menu_register_default("sv_lagcomp",           "1");
-    menu_register_default("sv_lagcomp_maxrewind", "0.5");
-    menu_register_default("sv_debug_lagcomp",     "0");
-    menu_register_default("sv_hitbox_expand",     "32");
-    menu_register_default("sv_anim_qu_per_sec",         "240");
-    menu_register_default("sv_anim_qu_per_sec_crouch",  "100");
-    menu_register_default("sv_player_basebone",   "0");
-    menu_register_default("sv_antilag",           "3");
-    menu_register_default("sv_bigcoords",         "1");
-    menu_register_default("sv_nqplayerphysics",   "0");
-    menu_register_default("sv_wateraccelerate",   "10");
-    menu_register_default("sv_waterfriction",     "1");
-    menu_register_default("sv_toss_tickrate",     "20");
-    menu_register_default("sv_ode_loaded",        "0");
-    menu_register_default("pm_ramp_bumpcount",    "8");
-    menu_register_default("sv_trust_clienthits",  "1");
+    // Crosshair UI toggles registered on the CSQC side (CVAR_SIDE_CL).
+    // The manifest's CVar_RegisterMine flagged them BOTH for menu so
+    // they're already covered here — no extra wrangling needed.
 
-    // Default starting loadout cvars — stored as WEP_* integers.
-    menu_register_default("sv_default_primary",   "0");
-    menu_register_default("sv_default_secondary", "28");
-    menu_register_default("sv_default_melee",     "20");
-    menu_register_default("sv_default_utility",   "25");
-
-    // Re-register physics cvars with proper defaults (the loop above registered
-    // them with "" which would make first-open seed to fallback).
-    registercvar("sv_physprop_hit_force",         "8000", 0);
-    registercvar("sv_physprop_mass",              "20",   0);
-    registercvar("sv_physprop_erp",               "0",    0);
-    registercvar("sv_physprop_damp_lin",          "0.01", 0);
-    registercvar("sv_physprop_damp_ang",          "0.01", 0);
-    registercvar("sv_physprop_friction",          "1.0",  0);
-    registercvar("sv_physprop_use_force",         "800",  0);
-    registercvar("sv_physprop_use_velmult",       "800",  0);
-    registercvar("physics_ode_iterationsperframe","10",   0);
-    registercvar("physics_ode_worldquickstep",    "0",    0);
-    registercvar("physics_ode_autodisable",       "0",    0);
-
-    // Fallback: register anything in the save lists that wasn't given a
-    // specific default above (hostname, passwords, mp_* etc).  This is
-    // idempotent — registercvar is a no-op for cvars that already exist.
+    // Idempotent backstop for the small client_config_cvars list (used
+    // by Menu_SaveClientConfig for data/settings.cfg).  Anything in
+    // there that overlaps the manifest is a no-op; the rest gets a
+    // blank default so the engine knows the cvar exists.
     float i;
     for (i = 0; i < client_config_cvars.length; i++)
         registercvar(client_config_cvars[i], "", 0);
-    for (i = 0; i < server_config_cvars.length; i++)
-        registercvar(server_config_cvars[i], "", 0);
 };
 
 void() Menu_LoadConfig =
@@ -845,13 +838,14 @@ void() Menu_LoadConfig =
 //  Menus
 // =============================================
 
-// Player name — persists across all menu pages. Committed to the `name`
-// cvar (and thus broadcast to the server) only on Enter or menu-close,
-// NOT on every keystroke — otherwise the server sees every character of
-// a rename as a separate `<user> changed name to "Pro"`, `"Prot"`,
-// `"Proto"`… spam.
+// Player-name state — preserved as no-op infrastructure after the
+// main-menu rework dropped the inline name input.  m_main.qc still
+// calls mm_flush_name() on Enter / menu-close, so the function
+// stays defined; its early-return on !mm_name_seeded effectively
+// makes it a no-op since nothing ever flips the flag now.  Future
+// reintroduction of a name field (e.g. in Settings) can re-seed
+// mm_name_text from cvar_string("name") and flip mm_name_seeded.
 string mm_name_text;
-float mm_name_cursor;
 float mm_name_seeded;
 
 void() mm_flush_name =
@@ -862,125 +856,101 @@ void() mm_flush_name =
 	cvar_set("name", mm_name_text);
 };
 
+// Forward decls — defined in their respective files (compiled after this).
+void(vector menu_size) Sprays_DrawPanel;
+void(vector menu_size) Playermodels_DrawPanel;
+
 void() main_menu =
 {
-	vector menu_box_size;
-	vector title_font;
-	vector subtitle_font;
-	float  title_block_y;
-	float  title_mid_y;
-	float  menu_stack_h;
-	float  menu_stack_bottom_y;
-	float  menu_stack_top_y;
-	float  subtitle_x;
-	float  subtitle_y;
-
-	// Floating player name island above the title
-	if (!mm_name_seeded)
-	{
-		mm_name_text = cvar_string("name");
-		if (mm_name_text == "")
-			mm_name_text = "Player";
-		mm_name_cursor = strlen(mm_name_text);
-		mm_name_seeded = TRUE;
-	}
-
-	// Main menu box size depends on whether the backdrop-only localhost
-	// connect row is present. The full menu stack sits a little above
-	// the bottom of the screen, and the title centers in the space
-	// between the top of the screen and that stack.
-	menu_box_size = [148, (serverkey("sv_backdrop") == "1") ? 168 : 144];
-	menu_stack_h = menu_box_size_y + 26;  // 20 px name field + 6 px gap
-	menu_stack_bottom_y = max(menu_stack_h + 16, floor(menu_root_size_y * 0.85));
-	menu_stack_top_y = menu_stack_bottom_y - menu_stack_h;
-
-	title_font = menu_pick_main_title_font(menu_root_size_x - 48);
-	subtitle_font = menu_pick_subtitle_font(title_font_y);
-	title_mid_y = floor(menu_stack_top_y * 0.5);
-	title_block_y = max(12, title_mid_y - floor(title_font_y * 0.5));
-	subtitle_x = max(8, floor(title_font_y * 0.80));
-	subtitle_y = title_block_y + floor(title_font_y * 0.85) - 3;
+	// --- Title + subtitle (unchanged) ---
+	// Centred near the top of the screen.  Positioning uses a
+	// fixed Y band rather than the old "stack-relative" math
+	// because the menu stack is now a free-floating left column,
+	// not a centred box.
+	vector title_font = menu_pick_main_title_font(menu_root_size_x - 48);
+	vector subtitle_font = menu_pick_subtitle_font(title_font_y);
+	float title_block_y = max(12, floor(menu_root_size_y * 0.15) - floor(title_font_y * 0.5));
+	float subtitle_x = max(8, floor(title_font_y * 0.80));
+	float subtitle_y = title_block_y + floor(title_font_y * 0.85) - 3;
 
 	sui_set_align([SUI_ALIGN_CENTER, SUI_ALIGN_START]);
-	sui_text([2, title_block_y + 1], title_font, "Quakers", '0 0 0', 0.5, 0);
 	sui_text([0, title_block_y], title_font, "Quakers", [1, 1, 1], 1, 0);
 	sui_text([subtitle_x, subtitle_y], subtitle_font,
 	         "The Religious Society of Friends",
 	         '0.80 0.80 0.80', 1, 0);
 
-	// Build tag — bottom-right corner of the screen, dimmed.  Uses
-	// END align so the offset is from the right/bottom edge.
+	// Floating Sprays panel — right-edge anchored, independent of
+	// the main-menu left column.  See menu/m_sprays.qc.
+	Sprays_DrawPanel(menu_root_size);
+
+	// Player-model picker — sits immediately left of Sprays, shares
+	// the same baseline. See menu/m_playermodels.qc.
+	Playermodels_DrawPanel(menu_root_size);
+
+	// Build tag — bottom-right corner of the screen, dimmed.
 	sui_set_align([SUI_ALIGN_END, SUI_ALIGN_END]);
 	sui_text([-6, -6], MENU_TEXT_SMALL,
-	         "Build: pre-nettest13",
+	         "Build: nettest15",
 	         '0.80 0.80 0.80', 1, 0);
 
-	vector pos = [0, menu_stack_top_y + 26];
-	// Backdrop mode adds a Localhost button under Connect-to-Proto.bar, so
-	// the panel needs an extra row of height. Real-game mode (Disconnect)
-	// has no localhost row and is shorter.  Both heights bumped by 24 px
-	// over the original to fit the new Server Browser row between Create
-	// Server and Settings without clipping into the bottom-aligned Quit.
-	vector size = menu_box_size;
-	sui_set_align([SUI_ALIGN_CENTER, SUI_ALIGN_START]);
+	// --- Floating left-anchored option column ---
+	// Two modes:
+	//   backdrop (menumap, not connected): yellow Proto.bar +
+	//     green Localhost on top of the four main options.
+	//   in-game (real server): a single red Disconnect on top.
+	// All rows use Float_TextOption which handles hover sounds,
+	// drop shadow, hold-darken, click sound, and SUI hit-zone
+	// registration sized to the actual text width.
+	float backdrop_mode = (serverkey("sv_backdrop") == "1");
 
-	sui_push_frame(pos, size);
+	// Compute block height for vertical centring.  Main block is
+	// always 3 big rows + 2 small gaps + the gap-before-Quit + the
+	// Quit row.  The top block changes shape per mode.
+	float main_block = FLOAT_MENU_MAIN_SIZE * 3
+	                 + FLOAT_MENU_ROW_GAP_LARGE * 2
+	                 + FLOAT_MENU_QUIT_GAP
+	                 + FLOAT_MENU_MAIN_SIZE;
+	float top_block;
+	if (backdrop_mode)
+		top_block = FLOAT_MENU_SMALL_SIZE * 2
+		          + FLOAT_MENU_ROW_GAP_SMALL
+		          + FLOAT_MENU_TOP_GAP;
+	else
+		top_block = FLOAT_MENU_SMALL_SIZE
+		          + FLOAT_MENU_TOP_GAP;
+	float block_height = top_block + main_block;
 
-	menu_panel_bg(size, 4);
+	// Bottom-anchored at 15% up from the bottom edge — scales with
+	// viewport height so the menu sits consistently on any
+	// resolution instead of pinning to a fixed pixel offset.
+	// Quit row's bottom edge lands at menu_root_size_y * 0.85.
+	float bx = FLOAT_MENU_LEFT_PAD;
+	float by = floor(menu_root_size_y * 0.85) - block_height;
+	float y  = by;
 
-	sui_set_align([SUI_ALIGN_CENTER, SUI_ALIGN_START]);
+	sui_set_align([SUI_ALIGN_START, SUI_ALIGN_START]);
 
-	// Floating name island — 6px above the main menu box
+	if (backdrop_mode)
 	{
-		float nw = size_x - 16;
-		float nh = 20;
-		sui_push_frame([0, -(nh + 6)], [nw, nh]);
-		menu_panel_bg([nw, nh], 0);
-		sui_set_align([SUI_ALIGN_START, SUI_ALIGN_CENTER]);
-		sui_text([4, 1], MENU_TEXT_SMALL, "Name:", MENU_TEXT_2, 0.85, 0);
-		float input_x = 42;
-		text_input_control("mm_name", [input_x, 0], [nw - input_x - 4, 14], 32, mm_name_text, mm_name_cursor);
-		sui_pop_frame();
-
-		// Do NOT cvar_set here — that would spam the server with a
-		// rename event per keystroke. mm_flush_name() commits on
-		// menu-close (m_close) and on Enter (Menu_InputEvent).
-	}
-
-	// Connect button is swapped for a Disconnect button once we've left the
-	// backdrop map (i.e. the user is in a real game / on a real server).
-	// Clicking Disconnect re-launches the backdrop map and re-arms the
-	// suppress-HUD flag, exactly like the engine-startup path in m_init.
-	//
-	// Reads server-authoritative sv_backdrop instead of the local cvar so
-	// console-driven connects (e.g. `connect localhost`) flip the button
-	// correctly — the local cvar wouldn't update on those code paths.
-	if (serverkey("sv_backdrop") == "1")
-	{
-		if (my_button_colored("mm_connect", [0, 8], [size_x - 16, 20], "Connect to Proto.bar", '0.6 0.55 0.1', '0.75 0.7 0.2'))
+		if (Float_TextOption("mm_proto", [bx, y, 0],
+		                     FLOAT_MENU_SMALL_SIZE, "Connect to Proto.bar",
+		                     FLOAT_MENU_YELLOW))
 		{
-			// Close the menu immediately so m_drawloading takes over during
-			// the network-connect phase (before the engine's auto-close on
-			// map load would have fired).  Otherwise m_draw keeps running
-			// and the main menu flashes with a stale Disconnect button.
+			// Close the menu so m_drawloading takes over while the
+			// network-connect phase runs (preserves the old click
+			// flow exactly — see the historical comment block in
+			// pre-rewrite main_menu for the rationale).
 			m_close();
 			localcmd("set cl_menu_backdrop_active 0\n");
-			// Clear the server-side flag too — the local listen server may
-			// still be running, and `connect` will tear it down, but we set
-			// it explicitly so any future listen-server launch defaults to
-			// "real game" instead of inheriting the stale backdrop value.
 			localcmd("set sv_backdrop 0\n");
-			// Restore the default listen-server port (backdrop launchers
-			// move it off 27500 to avoid colliding with other local servers).
 			localcmd("sv_port 27500\n");
 			localcmd("connect proto.bar\n");
 		}
+		y += FLOAT_MENU_SMALL_SIZE + FLOAT_MENU_ROW_GAP_SMALL;
 
-		// Localhost connect — same teardown as the Proto.bar Connect, but
-		// connects to 127.0.0.1:27500 (a sibling nettest instance the user
-		// is hosting locally). Stacked beneath Proto.bar at the standard
-		// 24px row pitch.
-		if (my_button_colored("mm_connect_local", [0, 8 + 24], [size_x - 16, 20], "Connect to Localhost", '0.18 0.45 0.18', '0.30 0.65 0.30'))
+		if (Float_TextOption("mm_local", [bx, y, 0],
+		                     FLOAT_MENU_SMALL_SIZE, "Connect to Localhost",
+		                     FLOAT_MENU_GREEN))
 		{
 			m_close();
 			localcmd("set cl_menu_backdrop_active 0\n");
@@ -988,40 +958,56 @@ void() main_menu =
 			localcmd("sv_port 27500\n");
 			localcmd("connect localhost\n");
 		}
+		y += FLOAT_MENU_SMALL_SIZE + FLOAT_MENU_TOP_GAP;
 	}
 	else
 	{
-		if (my_button_colored("mm_disconnect", [0, 8], [size_x - 16, 20], "Disconnect", '0.55 0.2 0.2', '0.75 0.3 0.3'))
-		{
+		if (Float_TextOption("mm_disconn", [bx, y, 0],
+		                     FLOAT_MENU_SMALL_SIZE, "Disconnect",
+		                     FLOAT_MENU_RED))
 			Menu_DisconnectAndReturnToMenuMap();
-		}
+		y += FLOAT_MENU_SMALL_SIZE + FLOAT_MENU_TOP_GAP;
 	}
-	// Backdrop mode shows two top buttons (Proto.bar + Localhost), real-game
-	// mode shows one (Disconnect). Push Create Server / Settings down by an
-	// extra row when the localhost row is visible so the layout doesn't
-	// collide with it.
-	float extra_row = (serverkey("sv_backdrop") == "1") ? 24 : 0;
 
-	if (my_button("mm_create", [0, 8 + 24 + extra_row], [size_x - 16, 20], "Create Server"))
+	if (Float_TextOption("mm_create", [bx, y, 0],
+	                     FLOAT_MENU_MAIN_SIZE, "Create Server", FLOAT_MENU_WHITE))
 	{
 		create_server_load_maps();
 		current_menu = MENU_CREATE_SERVER;
 	}
-	my_button("mm_browser",  [0, 8 + 48 + extra_row], [size_x - 16, 20], "Server Browser") ? current_menu = MENU_SERVER_BROWSER : 0;
-	my_button("mm_settings", [0, 8 + 72 + extra_row], [size_x - 16, 20], "Settings") ? current_menu = MENU_SETTINGS : 0;
-	sui_set_align([SUI_ALIGN_CENTER, SUI_ALIGN_END]);
-	my_button_colored("mm_quit", [0, -8], [size_x - 16, 20], "Quit", '0.55 0.2 0.2', '0.75 0.3 0.3') ? localcmd("quit\n") : 0;
-	sui_pop_frame();
+	y += FLOAT_MENU_MAIN_SIZE + FLOAT_MENU_ROW_GAP_LARGE;
 
-	sui_set_default_kb_focus("mm_return");
+	if (Float_TextOption("mm_browser", [bx, y, 0],
+	                     FLOAT_MENU_MAIN_SIZE, "Server Browser", FLOAT_MENU_WHITE))
+		current_menu = MENU_SERVER_BROWSER;
+	y += FLOAT_MENU_MAIN_SIZE + FLOAT_MENU_ROW_GAP_LARGE;
+
+	if (Float_TextOption("mm_settings", [bx, y, 0],
+	                     FLOAT_MENU_MAIN_SIZE, "Settings", FLOAT_MENU_WHITE))
+		current_menu = MENU_SETTINGS;
+	y += FLOAT_MENU_MAIN_SIZE + FLOAT_MENU_QUIT_GAP;
+
+	if (Float_TextOption("mm_quit", [bx, y, 0],
+	                     FLOAT_MENU_MAIN_SIZE, "Quit", FLOAT_MENU_WHITE))
+		localcmd("quit\n");
+
+	// Hover-sound transition reset.  If no button was hovered this
+	// frame, clear last_hover_voiced_id so re-entering any button
+	// next time re-triggers click.ogg.
+	if (this_frame_hovered_id == "")
+		last_hover_voiced_id = "";
+	this_frame_hovered_id = "";
+
+	sui_set_default_kb_focus("mm_create");
 };
 
 void(vector size) root_menu =
 {
 	menu_root_size = size;
 	sui_set_align([SUI_ALIGN_CENTER, SUI_ALIGN_CENTER]);
-	// Full-screen dim behind the main menu (gated on cl_menu_backdrop).
-	if (cvar("cl_menu_backdrop"))
+	// Full-screen dim behind heavier submenus only. The floating main
+	// menu is meant to sit directly over the live menumap backdrop.
+	if (current_menu != MENU_MAIN && cvar("cl_menu_backdrop"))
 		sui_fill([0, 0], size, '0.01 0.01 0.02', 0.64, 0);
 	switch (current_menu)
 	{

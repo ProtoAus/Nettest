@@ -49,6 +49,15 @@ const float M3_PELLET_CLOSE_DAMAGE    = 15;
 const float M3_PELLET_MIN_DAMAGE      = 4;
 const float M3_PELLET_FALLOFF_RANGE   = 1024;
 const float M3_DRYFIRE_DELAY          = 0.2;
+// sv_gunkick — pump shotgun, big single-shot kick (long pump delay).
+const float M3_KICK_PITCH    = 2.5;
+const float M3_KICK_VARIANCE = 0.6;
+const float M3_KICK_STRENGTH = 1.5;
+
+// Muzzle offset — see cl_debug_muzzle for live-tune marker.
+const float M3_MUZZLE_FORWARD = 42;
+const float M3_MUZZLE_RIGHT   = 8.025;
+const float M3_MUZZLE_DOWN    = 4.025;
 
 const string M3_VIEWMODEL    = "models/weapons/wpn_csm3/v_m3.mdl";
 const string M3_WORLDMODEL   = "models/weapons/wpn_csm3/w_m3.mdl";
@@ -89,8 +98,34 @@ float(float now) SH_M3TickState =
     return 0;
 };
 
+// Deterministic variant pick — alternates between the two fire
+// animations on parity of wep_action_id.  Both server and client
+// observe the same wep_action_id at the moment of fire, so they
+// always agree on which variant played and what delay to apply.
+// Older code did the pick via random() on the server only and the
+// client always assumed M3_FIRE_DELAY — when the server rolled the
+// 0.9 s alt path the client's predicted next-fire stamp was 100 ms
+// late, causing visible "skipped beat / silent for a few shots"
+// patterns under sustained fire.
+float() SH_M3FireVariantIsAlt =
+{
+    return (self.wep_action_id & 1) ? 1 : 0;
+};
+
+float() SH_M3FireDelayForVariant =
+{
+    return SH_M3FireVariantIsAlt() ? M3_ALT_FIRE_DELAY : M3_FIRE_DELAY;
+};
+
+float() SH_M3FireFrameStartForVariant =
+{
+    return SH_M3FireVariantIsAlt() ? M3_ALT_FIRE_START : M3_FIRE_START;
+};
+
 float(float now) SH_M3TryFire =
 {
+    if (Weapon_SprintBlocksFire()) return 0;
+    if (Weapon_LowerBlocksFire()) return 0;
     if (self.weaponstate != WS_IDLE) return 0;
     if (now < self.attack_finished) return 0;
 
@@ -101,7 +136,16 @@ float(float now) SH_M3TryFire =
     self.weaponstate      = WS_FIRE;
     self.wep_action_id   += 1;
     self.wep_anim_start   = now;
-    self.attack_finished  = now + M3_FIRE_DELAY;
+    // Compute delay AFTER incrementing wep_action_id so server and
+    // client read the same parity bit.  Phase-locked advance — see
+    // SH_StandardTryFire for the rationale.  M3's ~1 s cadence
+    // tolerates drift better than a fast SMG would, but the same
+    // determinism rules apply.
+    float fd = SH_M3FireDelayForVariant();
+    if (now - self.attack_finished < fd)
+        self.attack_finished += fd;
+    else
+        self.attack_finished  = now + fd;
     return 1;
 };
 
@@ -130,7 +174,17 @@ void() W_M3FirePellets =
     vector src, dir, end;
     float sx, sy, i, dist, damage;
 
+    // sv_gunkick — one impulse per trigger pull (not per pellet),
+    // applied first so the trace direction below uses the kicked
+    // aim. Mirrors W_PenetratingHitscanShoot's structure.
+    SH_ApplyViewKick(M3_KICK_PITCH, M3_KICK_VARIANCE, M3_KICK_STRENGTH);
+
+    vector saved_v_angle = self.v_angle;
+    self.v_angle_x += self.view_kick_pitch;
+    self.v_angle_y += self.view_kick_yaw;
     makevectors(self.v_angle);
+    self.v_angle = saved_v_angle;
+
     src = self.origin + self.view_ofs;
 
     for (i = 0; i < M3_PELLETS; i++)
@@ -187,18 +241,10 @@ void() W_M3Fire =
     float r = SH_M3TryFire(time);
     if (r == 1)
     {
-        // Randomly pick fire animation variant
-        if (random() < 0.5)
-        {
-            self.weaponframe = M3_FIRE_START;
-            self.attack_finished = time + M3_FIRE_DELAY;
-        }
-        else
-        {
-            self.weaponframe = M3_ALT_FIRE_START;
-            self.attack_finished = time + M3_ALT_FIRE_DELAY;
-        }
-
+        // Variant + delay already chosen deterministically inside
+        // SH_M3TryFire — just mirror the matching frame here for the
+        // visible animation pick.  Don't re-stamp attack_finished.
+        self.weaponframe   = SH_M3FireFrameStartForVariant();
         self.wep_nextframe = time + M3_FRAME_INTERVAL;
         W_M3FirePellets();
         sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csm3/fire.wav", 1, ATTN_NORM);
@@ -328,24 +374,22 @@ void() W_M3Drop =
     tgt.mag_m3 = self.mag_m3; tgt.ammo_m3 = self.ammo_m3;
     self.mag_m3 = 0; self.ammo_m3 = 0;
     setmodel(tgt, "models/weapons/wpn_csm3/w_m3.mdl");
-    setsize(tgt, '-16 -16 0', '16 16 32');
+    setsize(tgt, '-16 -16 0', '16 16 48');
     tgt.classname = "weapon_csm3"; tgt.solid = SOLID_NOT; tgt.movetype = MOVETYPE_TOSS;
     tgt.weapon = WEP_CSM3; tgt.weapon_slot = SLOT_PRIMARY;
     tgt.weap_draw = W_M3Equip; tgt.weap_drop_func = W_M3Drop;
     tgt.pickupcopy = W_M3PickupCopy; tgt.touch = weapon_touch;
-    tgt.dropped_spin = 1;
     tgt.think = weapon_become_solid; tgt.nextthink = time + 0.7;
 };
 
 void() weapon_csm3 =
 {
     setmodel(self, "models/weapons/wpn_csm3/w_m3.mdl");
-    setsize(self, '-16 -16 0', '16 16 32');
+    setsize(self, '-16 -16 0', '16 16 48');
     self.classname = "weapon_csm3"; self.solid = SOLID_TRIGGER; self.movetype = MOVETYPE_TOSS;
     self.weapon = WEP_CSM3; self.weapon_slot = SLOT_PRIMARY;
     self.weap_draw = W_M3Equip; self.weap_drop_func = W_M3Drop;
     self.pickupcopy = W_M3PickupCopy; self.touch = weapon_touch;
-    self.dropped_spin = 1;
     self.mag_m3 = MAX_MAG_M3; self.ammo_m3 = MAX_AMMO_M3;
     W_RegisterMapWeapon(weapon_csm3);
 };
@@ -377,12 +421,19 @@ void() CSQC_PredictM3Command =
         {
             CSQC_MarkPendingWeaponAck();
             csqc_m3_casing_spawned = FALSE;
-            if (!pm_suppress_sounds)
+            if (CSQC_BeginFireActionEffects())
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csm3/fire.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
                 CSQC_PredictedShotgunImpact(M3_PELLETS, M3_SPREAD,
-                    M3_PELLET_CLOSE_DAMAGE, M3_PELLET_MIN_DAMAGE, M3_PELLET_FALLOFF_RANGE);
+                    M3_PELLET_CLOSE_DAMAGE, M3_PELLET_MIN_DAMAGE, M3_PELLET_FALLOFF_RANGE,
+                    M3_KICK_PITCH, M3_KICK_VARIANCE, M3_KICK_STRENGTH);
+                // Shotgun muzzle flash — AK47_MUZZLE_* shared default.
+                CSQC_MuzzleFlashAtMuzzle(M3_MUZZLE_FORWARD, M3_MUZZLE_RIGHT,
+                    M3_MUZZLE_DOWN, self.wep_action_id);
+                CSQC_MuzzleSmokeAtMuzzle(M3_MUZZLE_FORWARD, M3_MUZZLE_RIGHT,
+                    M3_MUZZLE_DOWN, self.wep_action_id, M3_PELLETS);
+                CSQC_EndFireActionEffects();
             }
         }
         else if (r == -1)

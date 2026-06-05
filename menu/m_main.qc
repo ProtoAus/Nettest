@@ -112,16 +112,13 @@ string(string path) Menu_PickMapFromListedFile =
     return chosen;
 };
 
-// Prefer the persistent data/maps.txt pool so both the backdrop and the
-// server map-cycle can share one editable list. Fall back to the old
-// gamedir-level maps.txt for older installs.
+// Single source of truth for the map cycle: data/maps.txt — used by the
+// menu backdrop picker, the F2 rcon panel, and the server's round-end
+// cycle. The legacy gamedir-level maps.txt fallback was removed so admins
+// don't have to keep two copies in sync.
 string() Menu_PickMapFromFile =
 {
-    string chosen = Menu_PickMapFromListedFile("data/maps.txt");
-    if (chosen != "")
-        return chosen;
-
-    return Menu_PickMapFromListedFile("maps.txt");
+    return Menu_PickMapFromListedFile("data/maps.txt");
 };
 
 void() m_init =
@@ -132,6 +129,12 @@ void() m_init =
 	menu_font = loadfont("hud", "gfx/RobotoEB", "8 12 16 18 24 36 48 60 72", -1, 0, 0);
 	current_menu = MENU_MAIN;
 	localcmd("set _nettest_menu_active 0\n");
+
+	// UI sound effects for the floating main menu — hover-enter
+	// plays click.ogg, click registers play submit.ogg.  See
+	// Float_TextOption in menu/m_menu.qc.
+	precache_sound("sounds/ui/click.ogg");
+	precache_sound("sounds/ui/submit.ogg");
 
 	// Permanent binds — not configurable
 	localcmd("bind escape togglemenu\n");
@@ -320,23 +323,22 @@ void(vector screensize) m_draw =
 			localcmd("toggleconsole\n");
 		}
 	}
-	prev_in_connect = in_connect;
 
-	// Trailing edge: once we've finished loading the backdrop, drop the
-	// disconnect-in-progress flag and force the menu visibly open. The
-	// engine's PF_cl_setkeydest pushes/pops kdm_menu via an internal
-	// menu-link stack; during the disconnect+map-load it unlinks the
-	// menu from kdm_menu (rendered blank) even though our QC
-	// menu_active flag is still TRUE. Calling m_open re-pushes the
-	// menu via setkeydest(2) so it actually renders. Without this the
-	// user sees a black screen until they hit ESC.
-	if (mm_returning_to_backdrop &&
-	    serverkey("constate") == "active" &&
-	    serverkey("sv_backdrop") == "1")
+	// Trailing edge for disconnect→backdrop: fire the moment in_connect
+	// falls (loading+connecting both done). Re-opens the main menu so the
+	// user lands on it instead of a blank backdrop. Doesn't depend on
+	// sv_backdrop serverinfo — that key has propagation latency that
+	// would leave the menu blank for a few frames between load-finished
+	// and serverinfo-arrived. Engine's PF_cl_setkeydest unlinks the
+	// MenuQC menu from kdm_menu during the map tear-down, so even with
+	// menu_active=TRUE the menu doesn't render until we re-push via
+	// setkeydest(2); m_open does that.
+	if (mm_returning_to_backdrop && !in_connect && prev_in_connect)
 	{
 		mm_returning_to_backdrop = FALSE;
 		m_open();
 	}
+	prev_in_connect = in_connect;
 
 
 	// Auto-pick a sane vid_conautoscale based on physical screen height
@@ -475,6 +477,28 @@ float(string cmd) m_consolecommand =
 
 void(float wantmode) m_toggle =
 {
+	// Respect the engine's requested mode. wantmode is set by FTE's
+	// MP_Toggle(int mode) caller chain (engine pr_menu.c):
+	//   0 = engine wants the menu CLOSED (Menu_PopAll forced-unlink path,
+	//       MP_TryRelease, etc). If we were already closed, do nothing —
+	//       calling m_open here would re-grab kdm_menu after the engine
+	//       just unlinked it, which trips its "Menuqc retook key grabs
+	//       when ordered to yield. Killing." guard and unloads the
+	//       entire MenuQC VM (after which ESC falls back to FTE's
+	//       legacy Quake menu).
+	//   1 = engine wants the menu OPEN (normal togglemenu / ESC path
+	//       when nothing else handled it).
+	//   anything else = pure flip-flop (legacy callers).
+	if (wantmode == 0)
+	{
+		if (menu_active) m_close();
+		return;
+	}
+	if (wantmode == 1)
+	{
+		if (!menu_active) m_open();
+		return;
+	}
 	if (menu_active) m_close();
 	else m_open();
 };

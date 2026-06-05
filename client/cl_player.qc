@@ -39,6 +39,36 @@ float  sv_confirmed_fuser2;
 float  sv_confirmed_spread_penalty;
 float  sv_confirmed_fire_spread_penalty;
 float  sv_confirmed_step_time;
+// Duck-land slide flag + post-landing jump-cooldown end-timestamp.
+// These have to be cached + restored across reconcile-replay or CSQC's
+// predicted_player loses them after every snapshot — without the
+// restore, PM_CheckJump sees pm_jump_lag_end = 0 every tick and
+// autohop fires through the gate; PM_Friction sees
+// slide_friction_active = 0 and the slide ends.
+float  sv_confirmed_slide_friction_active;
+float  sv_confirmed_jump_lag_end;
+// Grappling hook rope-render state — stashed + restored across
+// reconcile-replay so the rope doesn't flicker during prediction
+// rewinds.
+float  sv_confirmed_grapple_rope_active;
+vector sv_confirmed_grapple_anchor;
+// Actively-pulling flag — gates the categorize ground-snap suppress
+// so the suppress only fires during the pull phase, not during hook
+// flight.  Replicated so CSQC's predicted pmove makes the same
+// decision the server does.
+float  sv_confirmed_grapple_attached;
+// PM_BTN_GRAPPLE held-edge latch — the "was held" reference for the
+// CSQC mirror of W_GrappleHeldTick.  See sv_player.qc proxy writer
+// for why this needs to be in the rewind baseline.
+float  sv_confirmed_grapple_held_last;
+// sv_codstamina pool + punish flag + post-fire suppression timestamp
+// — replicated through the prediction proxy so CSQC's predicted
+// values get corrected to the server-authoritative state each
+// snapshot.  Without this CSQC's pmove drains/refills independently
+// and the bar visibly drifts (user-reported "skip one or be late").
+float  sv_confirmed_codstamina;
+float  sv_confirmed_codstamina_punished;
+float  sv_confirmed_fire_suppress_until;
 float  sv_confirmed_cmdframe;    // last acknowledged command for baseline
 
 // Weapon prediction state (extended proxy)
@@ -46,6 +76,12 @@ float  sv_confirmed_slot_primary;
 float  sv_confirmed_slot_secondary;
 float  sv_confirmed_slot_melee;
 float  sv_confirmed_slot_utility;
+float  sv_confirmed_slot_primary_mag;
+float  sv_confirmed_slot_primary_ammo;
+float  sv_confirmed_slot_primary_aux;
+float  sv_confirmed_slot_secondary_mag;
+float  sv_confirmed_slot_secondary_ammo;
+float  sv_confirmed_slot_secondary_aux;
 float  sv_confirmed_weapon;
 float  sv_confirmed_previous_weapon;
 float  sv_confirmed_weaponstate;
@@ -94,12 +130,24 @@ float  sv_confirmed_ammo_hlsmg_grenades;
 float  sv_confirmed_mag_hlrpg;
 float  sv_confirmed_ammo_hlrpg;
 float  sv_confirmed_ammo_hlgrenade;
+float  sv_confirmed_ammo_snowball;
+float  sv_confirmed_ammo_cshegrenade;
+float  sv_confirmed_ammo_csflashbang;
+float  sv_confirmed_ammo_cssmokegrenade;
+float  sv_confirmed_ammo_cfc4;
+float  sv_confirmed_snowball_has_slingshot;
+float  sv_confirmed_snowball_use_slingshot;
 float  sv_confirmed_mag_hlglock;
 float  sv_confirmed_ammo_hlglock;
 float  sv_confirmed_ammo_hlegon;
-float  sv_confirmed_mag_csusp;
-float  sv_confirmed_ammo_csusp;
-float  sv_confirmed_csusp_silenced;
+float  sv_confirmed_mag_paintball;
+float  sv_confirmed_ammo_paintball;
+float  sv_confirmed_mag_cfaug;
+float  sv_confirmed_ammo_cfaug;
+float  sv_confirmed_mag_cffamas;
+float  sv_confirmed_ammo_cffamas;
+float  sv_confirmed_mag_cfmac10;
+float  sv_confirmed_ammo_cfmac10;
 
 // csqc_prediction_valid moved to cl_customdefs.qc so cl_cameras.qc can read it.
 float  csqc_baseline_valid;      // TRUE once an authoritative proxy snapshot arrived
@@ -198,6 +246,14 @@ void() CL_Drift_Dump =
 vector csqc_present_origin;
 vector csqc_present_view_ofs;
 float  csqc_present_valid;
+// Post-preview FL_DUCKING flag (0/1).  The preview at
+// CSQC_BuildPresentationView may complete a duck transition mid-substep —
+// origin drops 18qu, FL_DUCKING gets set, then `self.flags = saved_flags`
+// restores the pre-preview value.  csqc_present_origin reflects the dropped
+// origin, so any consumer sizing a bbox against that origin must use this
+// flag, not predicted_player.flags, or the bbox will be standing-tall while
+// the origin is ducked-low (feet end up 18qu into the floor).
+float  csqc_present_ducking;
 float  csqc_live_forward;
 float  csqc_live_back;
 float  csqc_live_left;
@@ -320,6 +376,14 @@ void(float scan, float down) CSQC_UpdateLiveInputFromBind =
 		CSQC_SetLiveButton(PM_BTN_DUCK, down);
 	else if (cmd == "+button7" || cmd == "+sprint")
 		CSQC_SetLiveButton(PM_BTN_SPRINT, down);
+	else if (cmd == "+button9" || cmd == "+grapple")
+		// Press-and-hold grapple — sets PM_BTN_GRAPPLE in input_buttons
+		// while the bind is held.  Edge-detected on both SSQC
+		// (W_GrappleHeldTick) and CSQC (PredictGrappleHeldEdge) to
+		// engage on rising / release on falling.  Mirrors the +sprint
+		// pattern above so users can bind either `+button9` (the raw
+		// engine name) or the friendlier `+grapple` alias.
+		CSQC_SetLiveButton(PM_BTN_GRAPPLE, down);
 	else if (cmd == "+use")
 	{
 		// Only fire sound + impulse on the initial press, not on OS key-repeat.
@@ -503,11 +567,26 @@ void(entity src) CSQC_StoreConfirmedStateFromEntity =
 	sv_confirmed_spread_penalty       = src.spread_penalty;
 	sv_confirmed_fire_spread_penalty  = src.fire_spread_penalty;
 	sv_confirmed_step_time            = src.pm_step_time;
+	sv_confirmed_slide_friction_active = src.slide_friction_active;
+	sv_confirmed_jump_lag_end         = src.pm_jump_lag_end;
+	sv_confirmed_grapple_rope_active  = src.grapple_rope_active;
+	sv_confirmed_grapple_anchor       = src.grapple_anchor;
+	sv_confirmed_grapple_attached     = src.grapple_attached;
+	sv_confirmed_grapple_held_last    = src.pm_grapple_held_last;
+	sv_confirmed_codstamina           = src.codstamina;
+	sv_confirmed_codstamina_punished  = src.codstamina_punished;
+	sv_confirmed_fire_suppress_until  = src.pm_fire_suppress_until;
 
 	sv_confirmed_slot_primary      = src.slot_primary;
 	sv_confirmed_slot_secondary    = src.slot_secondary;
 	sv_confirmed_slot_melee        = src.slot_melee;
 	sv_confirmed_slot_utility      = src.slot_utility;
+	sv_confirmed_slot_primary_mag  = src.slot_primary_mag;
+	sv_confirmed_slot_primary_ammo = src.slot_primary_ammo;
+	sv_confirmed_slot_primary_aux  = src.slot_primary_aux;
+	sv_confirmed_slot_secondary_mag  = src.slot_secondary_mag;
+	sv_confirmed_slot_secondary_ammo = src.slot_secondary_ammo;
+	sv_confirmed_slot_secondary_aux  = src.slot_secondary_aux;
 	sv_confirmed_weapon           = src.weapon;
 	sv_confirmed_previous_weapon  = src.previous_weapon;
 	sv_confirmed_weaponstate      = src.weaponstate;
@@ -556,12 +635,24 @@ void(entity src) CSQC_StoreConfirmedStateFromEntity =
 	sv_confirmed_mag_hlrpg        = src.mag_hlrpg;
 	sv_confirmed_ammo_hlrpg       = src.ammo_hlrpg;
 	sv_confirmed_ammo_hlgrenade   = src.ammo_hlgrenade;
+	sv_confirmed_ammo_snowball    = src.ammo_snowball;
+	sv_confirmed_ammo_cshegrenade = src.ammo_cshegrenade;
+	sv_confirmed_ammo_csflashbang = src.ammo_csflashbang;
+	sv_confirmed_ammo_cssmokegrenade = src.ammo_cssmokegrenade;
+	sv_confirmed_ammo_cfc4 = src.ammo_cfc4;
+	sv_confirmed_snowball_has_slingshot = src.snowball_has_slingshot;
+	sv_confirmed_snowball_use_slingshot = src.snowball_use_slingshot;
 	sv_confirmed_mag_hlglock      = src.mag_hlglock;
 	sv_confirmed_ammo_hlglock     = src.ammo_hlglock;
 	sv_confirmed_ammo_hlegon      = src.ammo_hlegon;
-	sv_confirmed_mag_csusp        = src.mag_csusp;
-	sv_confirmed_ammo_csusp       = src.ammo_csusp;
-	sv_confirmed_csusp_silenced   = src.csusp_silenced;
+	sv_confirmed_mag_paintball    = src.mag_paintball;
+	sv_confirmed_ammo_paintball   = src.ammo_paintball;
+	sv_confirmed_mag_cfaug        = src.mag_cfaug;
+	sv_confirmed_ammo_cfaug       = src.ammo_cfaug;
+	sv_confirmed_mag_cffamas      = src.mag_cffamas;
+	sv_confirmed_ammo_cffamas     = src.ammo_cffamas;
+	sv_confirmed_mag_cfmac10      = src.mag_cfmac10;
+	sv_confirmed_ammo_cfmac10     = src.ammo_cfmac10;
 };
 
 void() CSQC_ResetToConfirmedMoveState =
@@ -584,11 +675,31 @@ void() CSQC_ResetToConfirmedMoveState =
 	self.spread_penalty          = sv_confirmed_spread_penalty;
 	self.fire_spread_penalty     = sv_confirmed_fire_spread_penalty;
 	self.pm_step_time            = sv_confirmed_step_time;
+	self.slide_friction_active   = sv_confirmed_slide_friction_active;
+	self.pm_jump_lag_end         = sv_confirmed_jump_lag_end;
+	self.grapple_rope_active     = sv_confirmed_grapple_rope_active;
+	self.grapple_anchor          = sv_confirmed_grapple_anchor;
+	self.grapple_attached        = sv_confirmed_grapple_attached;
+	self.pm_grapple_held_last    = sv_confirmed_grapple_held_last;
+	self.codstamina              = sv_confirmed_codstamina;
+	self.codstamina_punished     = sv_confirmed_codstamina_punished;
+	self.pm_fire_suppress_until  = sv_confirmed_fire_suppress_until;
 
 	// Sync hull size to match the confirmed duck state.
 	// Without this, the predicted player replays commands with the wrong
 	// hull size, causing permanent prediction divergence when ducked.
 	PM_SyncHull();
+
+	// Recompute the ladder cache at the rewound position so the first
+	// replay tick's fire gate (Weapon_LowerBlocksFire reads pm_on_ladder_cached)
+	// agrees with the rewound origin instead of carrying the LAST-LIVE-TICK
+	// value through reconcile.  pm_on_ladder_cached is not on the wire
+	// (the trigger list IS replicated, so we can reproduce it deterministically
+	// here) — PM_CheckLadder writes both pm_on_ladder (the per-step global)
+	// AND the latch at done:, but here we call it standalone so we need to
+	// copy the result onto the field ourselves.
+	PM_CheckLadder();
+	self.pm_on_ladder_cached = pm_on_ladder;
 };
 
 void() CSQC_ResetToConfirmedState =
@@ -634,8 +745,12 @@ void() CSQC_ResetToConfirmedState =
 	float old_ammo_glock;
 	float old_mag_g3sg1;
 	float old_ammo_g3sg1;
-	float old_mag_csusp;
-	float old_ammo_csusp;
+	float old_ammo_snowball;
+	float old_ammo_cshegrenade;
+	float old_ammo_csflashbang;
+	float old_ammo_cssmokegrenade;
+	float old_mag_paintball;
+	float old_ammo_paintball;
 
 	old_weapon = self.weapon;
 	old_weaponstate = self.weaponstate;
@@ -678,8 +793,12 @@ void() CSQC_ResetToConfirmedState =
 	old_ammo_glock = self.ammo_glock;
 	old_mag_g3sg1 = self.mag_g3sg1;
 	old_ammo_g3sg1 = self.ammo_g3sg1;
-	old_mag_csusp = self.mag_csusp;
-	old_ammo_csusp = self.ammo_csusp;
+	old_ammo_snowball = self.ammo_snowball;
+	old_ammo_cshegrenade = self.ammo_cshegrenade;
+	old_ammo_csflashbang = self.ammo_csflashbang;
+	old_ammo_cssmokegrenade = self.ammo_cssmokegrenade;
+	old_mag_paintball = self.mag_paintball;
+	old_ammo_paintball = self.ammo_paintball;
 
 	CSQC_ResetToConfirmedMoveState();
 
@@ -687,63 +806,167 @@ void() CSQC_ResetToConfirmedState =
 	self.slot_secondary   = sv_confirmed_slot_secondary;
 	self.slot_melee       = sv_confirmed_slot_melee;
 	self.slot_utility     = sv_confirmed_slot_utility;
+
+	// Ammo reconcile is gated on action_id catch-up.  When the local
+	// predicted_player has fired (or reloaded) past the server's
+	// snapshot view (sv_confirmed_wep_action_id < self.wep_action_id),
+	// the server's mag/ammo / slot-ammo values are STALE PRE-FIRE
+	// numbers and writing them back would roll the predicted decrement
+	// off, which is what previously broke the reload TryReload check
+	// ("mag bounces back to full after firing dry, so TryReload sees
+	// max-mag and refuses to start the reload anim").
+	//
+	// When server has caught up (sv_confirmed_wep_action_id >=
+	// self.wep_action_id), the snapshot is fresh enough to trust —
+	// sync everything, so pickups / round-start loadouts / admin
+	// give-cmds propagate.  Steady-state ping has ammo_sync_ok=true
+	// most of the time; the gate only closes briefly during the
+	// 1× RTT window between predicted fire and server ack.
+	float ammo_sync_ok = (sv_confirmed_wep_action_id >= self.wep_action_id);
+	if (ammo_sync_ok)
+	{
+		self.slot_primary_mag    = sv_confirmed_slot_primary_mag;
+		self.slot_primary_ammo   = sv_confirmed_slot_primary_ammo;
+		self.slot_primary_aux    = sv_confirmed_slot_primary_aux;
+		self.slot_secondary_mag  = sv_confirmed_slot_secondary_mag;
+		self.slot_secondary_ammo = sv_confirmed_slot_secondary_ammo;
+		self.slot_secondary_aux  = sv_confirmed_slot_secondary_aux;
+	}
 	self.weapon          = sv_confirmed_weapon;
 	self.previous_weapon = sv_confirmed_previous_weapon;
-	self.weaponstate     = sv_confirmed_weaponstate;
-	self.wep_action_id   = sv_confirmed_wep_action_id;
-	self.attack_finished = sv_confirmed_attack_finished;
-	self.wep_anim_start  = sv_confirmed_wep_anim_start;
+	// FIRE-DECISION STATE NO LONGER RECONCILED FROM SERVER.
+	//
+	// Under the client-authoritative fire architecture (see the plan
+	// doc, "client-authoritative local-player firing"), predicted_player
+	// owns its own weaponstate / wep_action_id / attack_finished /
+	// wep_anim_start.  The server still snapshots these fields and they
+	// land in sv_confirmed_* / csqc_authority_proxy, but reconcile
+	// deliberately does NOT write them back into predicted_player.
+	// That avoids the entire class of reconcile-rewind bugs:
+	//   - latch trapping at high tick rates (effects skip while ammo
+	//     and animation still fire)
+	//   - live sv_mintic switches leaving the firing latch stuck
+	//   - "ghost shots" after burst → snapshot ack patterns
+	// Local cooldown is purely a function of cltime vs the locally
+	// advanced attack_finished; the client wins.
+	//
+	// csqc_fire_guard / csqc_reload_guard were workaround latches for
+	// the reconcile-rewind problem; with no reconcile, they have
+	// nothing to defend against and the re-sync lines are removed.
+	// (The fields themselves will be deleted in Phase 4 of the plan.)
+	//
+	// zoomstage / snowball_use_slingshot likewise become local — they
+	// were riding the snapshot purely because they happened to live
+	// next to wep_action_id in the wire format.
+	//
+	// snowball_has_slingshot STAYS server-authoritative — it's a
+	// pickup-item flag, not a fire-decision field, so it goes with
+	// the loadout-sync block.
+	self.snowball_has_slingshot = sv_confirmed_snowball_has_slingshot;
 	CSQC_WeaponEquip(self.weapon);
-	self.mag_deagle      = sv_confirmed_mag_deagle;
-	self.ammo_deagle     = sv_confirmed_ammo_deagle;
-	self.mag_ak47        = sv_confirmed_mag_ak47;
-	self.ammo_ak47       = sv_confirmed_ammo_ak47;
-	self.mag_m4a1        = sv_confirmed_mag_m4a1;
-	self.ammo_m4a1       = sv_confirmed_ammo_m4a1;
-	// m4a1_silenced is NOT reset from server — client prediction is authoritative
-	// for this toggle. Resetting it causes sound desyncs at high ping.
-	self.mag_flakshotgun = sv_confirmed_mag_flakshotgun;
-	self.mag_pistol      = sv_confirmed_mag_pistol;
-	self.ammo_pistol     = sv_confirmed_ammo_pistol;
-	self.mag_scout       = sv_confirmed_mag_scout;
-	self.ammo_scout      = sv_confirmed_ammo_scout;
-	self.mag_357         = sv_confirmed_mag_357;
-	self.ammo_357        = sv_confirmed_ammo_357;
-	self.mag_m249        = sv_confirmed_mag_m249;
-	self.ammo_m249       = sv_confirmed_ammo_m249;
-	self.zoomstage       = sv_confirmed_zoomstage;
-	self.mag_awp         = sv_confirmed_mag_awp;
-	self.ammo_awp        = sv_confirmed_ammo_awp;
-	self.mag_98k         = sv_confirmed_mag_98k;
-	self.ammo_98k        = sv_confirmed_ammo_98k;
-	self.mag_shotgun     = sv_confirmed_mag_shotgun;
-	self.ammo_shotgun    = sv_confirmed_ammo_shotgun;
-	self.mag_m3          = sv_confirmed_mag_m3;
-	self.ammo_m3         = sv_confirmed_ammo_m3;
-	self.mag_mp5         = sv_confirmed_mag_mp5;
-	self.ammo_mp5        = sv_confirmed_ammo_mp5;
-	self.mag_crossbow    = sv_confirmed_mag_crossbow;
-	self.ammo_crossbow   = sv_confirmed_ammo_crossbow;
-	self.mag_grenadelauncher = sv_confirmed_mag_grenadelauncher;
-	self.mag_rebar       = sv_confirmed_mag_rebar;
-	self.ammo_gauss      = sv_confirmed_ammo_gauss;
-	self.mag_glock       = sv_confirmed_mag_glock;
-	self.ammo_glock      = sv_confirmed_ammo_glock;
-	self.mag_g3sg1       = sv_confirmed_mag_g3sg1;
-	self.ammo_g3sg1      = sv_confirmed_ammo_g3sg1;
-	self.mag_hlsmg       = sv_confirmed_mag_hlsmg;
-	self.ammo_hlsmg      = sv_confirmed_ammo_hlsmg;
-	self.ammo_hlsmg_grenades = sv_confirmed_ammo_hlsmg_grenades;
-	self.mag_hlrpg       = sv_confirmed_mag_hlrpg;
-	self.ammo_hlrpg      = sv_confirmed_ammo_hlrpg;
-	self.ammo_hlgrenade  = sv_confirmed_ammo_hlgrenade;
-	self.mag_hlglock     = sv_confirmed_mag_hlglock;
-	self.ammo_hlglock    = sv_confirmed_ammo_hlglock;
-	self.ammo_hlegon     = sv_confirmed_ammo_hlegon;
-	self.mag_csusp       = sv_confirmed_mag_csusp;
-	self.ammo_csusp      = sv_confirmed_ammo_csusp;
-	// csusp_silenced is NOT reset from server — client prediction is authoritative
-	// for this toggle, same convention as m4a1_silenced.
+
+	// Snapshot-driven weapon change (respawn / team change / server
+	// force-equip) — mirror what CSQC_PredictSelectWeapon does for
+	// input-initiated switches so the draw animation actually plays
+	// locally.  Without this, the server multicasts the deploy sound
+	// but predicted_player.weaponstate is left at its pre-equip value
+	// (commonly WS_IDLE or WS_DEAD), so the viewmodel anim driver
+	// never enters the WS_DRAW branch — sound plays, no animation.
+	//
+	// Two trigger paths:
+	//   (a) weapon CHANGED since last reconcile (server force-equip,
+	//       weapon pickup, etc.)
+	//   (b) wep_action_id was just reset to 0 by the action-id-
+	//       rewind detector in CSQC_Ent_Update (respawn, team change
+	//       with the SAME primary weapon — common case for CS-style
+	//       loadouts where T+CT both spawn with AK or M4 etc.).
+	//       Without case (b), team-changing into the same primary
+	//       weapon you had before leaves the player with no draw
+	//       animation since case (a) doesn't fire.
+	if (self.weapon != WEP_NONE
+	    && (self.weapon != old_weapon || self.wep_action_id == 0))
+	{
+		self.weaponstate    = WS_DRAW;
+		self.wep_action_id += 1;
+		self.wep_anim_start = cltime;
+		self.attack_finished   = 0;
+		self.altfire_finished  = 0;
+		self.csqc_fire_guard   = 0;
+		self.csqc_reload_guard = 0;
+	}
+
+	// Per-weapon mag/ammo sync — gated on ammo_sync_ok for the same
+	// reason as the slot-ammo block above.  When local has predicted
+	// fires the server hasn't acknowledged yet, the snapshot's values
+	// are stale and writing them back would erase the predicted
+	// decrement (= "ammo bounces back to full, reload TryReload then
+	// refuses to start because mag looks full").  When server has
+	// caught up, sync — which is also how pickup / round-start
+	// loadout values reach the client.
+	if (ammo_sync_ok)
+	{
+		self.mag_deagle      = sv_confirmed_mag_deagle;
+		self.ammo_deagle     = sv_confirmed_ammo_deagle;
+		self.mag_ak47        = sv_confirmed_mag_ak47;
+		self.ammo_ak47       = sv_confirmed_ammo_ak47;
+		self.mag_m4a1        = sv_confirmed_mag_m4a1;
+		self.ammo_m4a1       = sv_confirmed_ammo_m4a1;
+		// m4a1_silenced is NOT reset from server — client prediction is authoritative
+		// for this toggle. Resetting it causes sound desyncs at high ping.
+		self.mag_flakshotgun = sv_confirmed_mag_flakshotgun;
+		self.mag_pistol      = sv_confirmed_mag_pistol;
+		self.ammo_pistol     = sv_confirmed_ammo_pistol;
+		self.mag_scout       = sv_confirmed_mag_scout;
+		self.ammo_scout      = sv_confirmed_ammo_scout;
+		self.mag_357         = sv_confirmed_mag_357;
+		self.ammo_357        = sv_confirmed_ammo_357;
+		self.mag_m249        = sv_confirmed_mag_m249;
+		self.ammo_m249       = sv_confirmed_ammo_m249;
+		// zoomstage stays local — see fire-state-decouple comment above.
+		self.mag_awp         = sv_confirmed_mag_awp;
+		self.ammo_awp        = sv_confirmed_ammo_awp;
+		self.mag_98k         = sv_confirmed_mag_98k;
+		self.ammo_98k        = sv_confirmed_ammo_98k;
+		self.mag_shotgun     = sv_confirmed_mag_shotgun;
+		self.ammo_shotgun    = sv_confirmed_ammo_shotgun;
+		self.mag_m3          = sv_confirmed_mag_m3;
+		self.ammo_m3         = sv_confirmed_ammo_m3;
+		self.mag_mp5         = sv_confirmed_mag_mp5;
+		self.ammo_mp5        = sv_confirmed_ammo_mp5;
+		self.mag_crossbow    = sv_confirmed_mag_crossbow;
+		self.ammo_crossbow   = sv_confirmed_ammo_crossbow;
+		self.mag_grenadelauncher = sv_confirmed_mag_grenadelauncher;
+		self.mag_rebar       = sv_confirmed_mag_rebar;
+		self.ammo_gauss      = sv_confirmed_ammo_gauss;
+		self.mag_glock       = sv_confirmed_mag_glock;
+		self.ammo_glock      = sv_confirmed_ammo_glock;
+		self.mag_g3sg1       = sv_confirmed_mag_g3sg1;
+		self.ammo_g3sg1      = sv_confirmed_ammo_g3sg1;
+		self.mag_hlsmg       = sv_confirmed_mag_hlsmg;
+		self.ammo_hlsmg      = sv_confirmed_ammo_hlsmg;
+		self.ammo_hlsmg_grenades = sv_confirmed_ammo_hlsmg_grenades;
+		self.mag_hlrpg       = sv_confirmed_mag_hlrpg;
+		self.ammo_hlrpg      = sv_confirmed_ammo_hlrpg;
+		self.ammo_hlgrenade  = sv_confirmed_ammo_hlgrenade;
+		self.ammo_snowball   = sv_confirmed_ammo_snowball;
+		self.ammo_cshegrenade = sv_confirmed_ammo_cshegrenade;
+		self.ammo_csflashbang = sv_confirmed_ammo_csflashbang;
+		self.ammo_cssmokegrenade = sv_confirmed_ammo_cssmokegrenade;
+		self.ammo_cfc4 = sv_confirmed_ammo_cfc4;
+		self.mag_hlglock     = sv_confirmed_mag_hlglock;
+		self.ammo_hlglock    = sv_confirmed_ammo_hlglock;
+		self.ammo_hlegon     = sv_confirmed_ammo_hlegon;
+		self.mag_paintball   = sv_confirmed_mag_paintball;
+		self.ammo_paintball  = sv_confirmed_ammo_paintball;
+		self.mag_cfaug       = sv_confirmed_mag_cfaug;
+		self.ammo_cfaug      = sv_confirmed_ammo_cfaug;
+		self.mag_cffamas     = sv_confirmed_mag_cffamas;
+		self.ammo_cffamas    = sv_confirmed_ammo_cffamas;
+		self.mag_cfmac10     = sv_confirmed_mag_cfmac10;
+		self.ammo_cfmac10    = sv_confirmed_ammo_cfmac10;
+		// for this toggle, same convention as m4a1_silenced.
+	}
+	W_SlotAmmo_LoadCurrent(self);
 
 	// Keep a single weapon action monotonic. Once local prediction is already
 	// further through that same action, don't let a delayed server snapshot pull
@@ -761,7 +984,7 @@ void() CSQC_ResetToConfirmedState =
 			self.mag_deagle = max(self.mag_deagle, old_mag_deagle);
 			self.ammo_deagle = min(self.ammo_deagle, old_ammo_deagle);
 		}
-		else if (self.weapon == WEP_AK47)
+		else if (self.weapon == WEP_AK47 || self.weapon == WEP_HDAK47)
 		{
 			self.mag_ak47 = max(self.mag_ak47, old_mag_ak47);
 			self.ammo_ak47 = min(self.ammo_ak47, old_ammo_ak47);
@@ -847,10 +1070,26 @@ void() CSQC_ResetToConfirmedState =
 			self.mag_g3sg1 = max(self.mag_g3sg1, old_mag_g3sg1);
 			self.ammo_g3sg1 = min(self.ammo_g3sg1, old_ammo_g3sg1);
 		}
-		else if (self.weapon == WEP_CSUSP)
+		else if (self.weapon == WEP_SNOWBALL)
 		{
-			self.mag_csusp = max(self.mag_csusp, old_mag_csusp);
-			self.ammo_csusp = min(self.ammo_csusp, old_ammo_csusp);
+			self.ammo_snowball = min(self.ammo_snowball, old_ammo_snowball);
+		}
+		else if (self.weapon == WEP_CSHEGRENADE)
+		{
+			self.ammo_cshegrenade = min(self.ammo_cshegrenade, old_ammo_cshegrenade);
+		}
+		else if (self.weapon == WEP_CSFLASHBANG)
+		{
+			self.ammo_csflashbang = min(self.ammo_csflashbang, old_ammo_csflashbang);
+		}
+		else if (self.weapon == WEP_CSSMOKEGRENADE)
+		{
+			self.ammo_cssmokegrenade = min(self.ammo_cssmokegrenade, old_ammo_cssmokegrenade);
+		}
+		else if (self.weapon == WEP_PAINTBALL)
+		{
+			self.mag_paintball = max(self.mag_paintball, old_mag_paintball);
+			self.ammo_paintball = min(self.ammo_paintball, old_ammo_paintball);
 		}
 
 		if (old_weaponstate == WS_IDLE && self.weaponstate != WS_IDLE)
@@ -866,6 +1105,7 @@ void() CSQC_ResetToConfirmedState =
 			self.wep_anim_start = old_wep_anim_start;
 		}
 	}
+	W_SlotAmmo_SaveCurrent(self);
 };
 
 void() CSQC_ResetPresentationView =
@@ -873,6 +1113,7 @@ void() CSQC_ResetPresentationView =
 	csqc_present_valid = FALSE;
 	csqc_present_origin = '0 0 0';
 	csqc_present_view_ofs = '0 0 0';
+	csqc_present_ducking = 0;
 };
 
 void() CSQC_EnsurePredictedPlayer =
@@ -902,12 +1143,18 @@ void() CSQC_EnsurePredictedPlayer =
 	predicted_player.slot_secondary   = WEP_NONE;
 	predicted_player.slot_melee       = WEP_NONE;
 	predicted_player.slot_utility     = WEP_NONE;
+	W_SlotAmmo_ClearSlots(predicted_player);
 	predicted_player.previous_weapon  = WEP_NONE;
 	predicted_player.weapon          = WEP_NONE;
 	predicted_player.weaponstate     = WS_IDLE;
 	predicted_player.wep_action_id   = 0;
 	predicted_player.wep_anim_start  = 0;
 	predicted_player.attack_finished = 0;
+	// Fresh-entity init only — see comment on csqc_fire_effect_action_id
+	// in sh_customdefs.qc.  Reconcile must NOT zero this; only the
+	// rewind-detected respawn (cl_player.qc CSQC_Ent_Update where
+	// wep_action_id goes backward) does.
+	predicted_player.csqc_fire_effect_action_id = 0;
 	predicted_player.mag_deagle      = 0;
 	predicted_player.ammo_deagle     = 0;
 	predicted_player.mag_ak47        = 0;
@@ -925,6 +1172,16 @@ void() CSQC_EnsurePredictedPlayer =
 	predicted_player.mag_m249        = 0;
 	predicted_player.ammo_m249       = 0;
 	predicted_player.zoomstage       = 0;
+	predicted_player.codstamina      = 1;
+	predicted_player.codstamina_punished = 0;
+	predicted_player.pm_fire_suppress_until = 0;
+	predicted_player.pm_last_onground_time  = 0;
+	predicted_player.ammo_snowball   = 0;
+	predicted_player.ammo_cshegrenade = 0;
+	predicted_player.ammo_csflashbang = 0;
+	predicted_player.ammo_cssmokegrenade = 0;
+	predicted_player.snowball_has_slingshot = FALSE;
+	predicted_player.snowball_use_slingshot = FALSE;
 	predicted_player.mag_awp         = 0;
 	predicted_player.ammo_awp        = 0;
 	predicted_player.mag_98k         = 0;
@@ -944,9 +1201,22 @@ void() CSQC_EnsurePredictedPlayer =
 	predicted_player.ammo_glock      = 0;
 	predicted_player.mag_g3sg1       = 0;
 	predicted_player.ammo_g3sg1      = 0;
-	predicted_player.mag_csusp       = 0;
-	predicted_player.ammo_csusp      = 0;
-	predicted_player.csusp_silenced  = sv_confirmed_csusp_silenced;
+	predicted_player.mag_paintball   = 0;
+	predicted_player.ammo_paintball  = 0;
+
+	// Per-weapon predicted-throw bookkeeping. CS grenades guard the
+	// fake-grenade local spawn against re-firing the same wep_action_id
+	// (csgren_fake_spawned_serial). On respawn, wep_action_id resets to
+	// 0 and increments from there, so a stale serial from before death
+	// can collide with the new value and silently drop the spawn — the
+	// throw animation plays but no fake grenade ever appears. Wiping the
+	// pair here closes that hole.
+	predicted_player.csgren_throw_pending       = 0;
+	predicted_player.csgren_fake_spawned_serial = 0;
+	predicted_player.csgren_spawn_time          = 0;
+	predicted_player.csgren_throw_type          = 0;
+	// Same fix for paintball-projectile fakes (sv_paintball_projectile 1).
+	predicted_player.paintball_fake_spawned_serial = 0;
 };
 
 string() CSQC_DebugSeedSource =
@@ -1008,6 +1278,16 @@ float() CSQC_SeedPredictedPlayerFromEngine =
 	predicted_player.wep_action_id   = 0;
 	predicted_player.wep_anim_start  = 0;
 	predicted_player.attack_finished = 0;
+	predicted_player.csqc_fire_effect_action_id = 0;
+	// CS-grenade fake-spawn bookkeeping. Same fix as CSQC_EnsurePredictedPlayer
+	// (see comment there): without this, post-respawn throws can silently
+	// drop the local fake-grenade spawn when the new wep_action_id collides
+	// with the stale csgren_fake_spawned_serial from before death.
+	predicted_player.csgren_throw_pending       = 0;
+	predicted_player.csgren_fake_spawned_serial = 0;
+	predicted_player.csgren_spawn_time          = 0;
+	predicted_player.csgren_throw_type          = 0;
+	predicted_player.paintball_fake_spawned_serial = 0;
 	{
 		entity old_self = self;
 		self = predicted_player;
@@ -1039,6 +1319,7 @@ void() CSQC_ResetPredictionState =
 	csqc_present_valid = FALSE;
 	csqc_present_origin = '0 0 0';
 	csqc_present_view_ofs = '0 0 0';
+	csqc_present_ducking = 0;
 	csqc_live_forward = FALSE;
 	csqc_live_back = FALSE;
 	csqc_live_left = FALSE;
@@ -1065,6 +1346,11 @@ void() CSQC_ResetPredictionState =
 	csqc_weapon_pending_ack_sequence = 0;
 	CSQC_ClearPredictionBuffer();
 	CSQC_ResetPresentationView();
+
+	// Wipe in-flight CS grenade state — fake projectiles, residual
+	// flashbang blindness, and the ringing sound entity — so a flash
+	// that detonated just before death doesn't bleed past respawn.
+	CSQC_ResetCSGrenadeState();
 };
 
 void() CSQC_CheckDebugPredictResponse =
@@ -1175,6 +1461,11 @@ float(float first_sequence, float replay_weapons) CSQC_ReplayBufferedCommands =
 		if (replay_weapons)
 			CSQC_PredictWeaponCommand();
 		PM_PlayerMove();
+		// sv_gunkick: tick the spring decay once per replay step
+		// (post-fire, post-pmove). Mirrors live-tick path so replay
+		// and live integrate the spring identically.
+		if (replay_weapons)
+			SH_TickViewKickFrame();
 		// Replay tick — DO NOT append to drift ring. Replay re-runs every
 		// render frame (potentially 100+ Hz) and would overwrite the ring
 		// instantly. Live tick capture is what we compare against the
@@ -1219,6 +1510,18 @@ void() CSQC_ReconcilePrediction =
 	// final post-replay origin can be diffed: that delta is the visible
 	// "reconcile correction" that yanks the view if prediction drifted.
 	smooth_pre_reset_origin = self.origin;
+
+	// Duck-completion in PM_CheckDuck snaps origin Z by 18qu (PM_MINS_z -
+	// PM_DUCK_MINS_z) when FL_DUCKING toggles.  If the original prediction
+	// crossed the duck-completion threshold at one sub-step and the replay
+	// crosses it at a different sub-step, pre vs post differ by ~18qu in Z
+	// — that is a deterministic state transition, NOT prediction drift the
+	// smoother should fade out.  Capture the pre-reset duck flag so the
+	// err computation below can exclude the Z component when this happens.
+	// Symptom otherwise: at 300 tick the camera/body dips 18qu into the
+	// ground for a render frame after each duck-press, until smooth offset
+	// decays.
+	float pre_reset_ducking = (self.flags & FL_DUCKING) != 0;
 
 	saved_timelength = input_timelength;
 	saved_angles = input_angles;
@@ -1300,6 +1603,62 @@ void() CSQC_ReconcilePrediction =
 	// (cl_player.qc:2614-2622).
 	{
 		vector err  = smooth_pre_reset_origin - self.origin;   // pre - post (cumulative)
+
+		// Duck-transition Z-step filter: see comment at pre_reset_ducking
+		// capture.  If the duck flag flipped during reconcile, zero err.z
+		// so the 18qu state-transition step does not enter the smoother.
+		float post_reset_ducking = (self.flags & FL_DUCKING) != 0;
+		if (pre_reset_ducking != post_reset_ducking)
+			err_z = 0;
+
+		// Moving-platform Z-step filter.  CSQC pmove already predicts
+		// platform carry locally (sh_pmove.qc:3024-3048 for doors,
+		// sh_pmove.qc:2741+ for trains) and sets self.platform_carry =
+		// rb on each substep the player is riding a moving brush.  But
+		// the server runs Mover_PlatformCarry at sv_func_tickrate (40 Hz
+		// default) while CSQC integrates velocity * pm_frametime per
+		// substep — the two paths integrate to *almost* the same total
+		// over the same interval, but timing drift around door
+		// pause/reverse events leaves a small per-reconcile Z delta.
+		// That delta drives the smoother's fade-to-server-position,
+		// which is visually fine when standing still (lock branch
+		// keeps the camera at pre-reset) but visually awful when
+		// strafing — the smoother branch fades the Z error each cycle
+		// and the player view drifts into the floor (descending plat)
+		// or sky (rising plat) until the brush stops.  Zero err.z when
+		// carried so only XY drift enters the smoother; the per-tick
+		// Z snap is small (~1.5 qu) and the next pmove cycle already
+		// matches server within prediction tolerance.
+		if (self.platform_carry != world)
+			err_z = 0;
+
+		// Rotating-brush contact filter.  PM_CheckRotatingCarry sets
+		// self.rotcarry_active_cltime = cltime whenever Phase 1 (on
+		// brush) or Phase 3 (ground player swept by mesh) runs.  Like
+		// the platform_carry filter above, but rotators move players
+		// in arbitrary directions (XY for yaw axis, YZ for pitch, XZ
+		// for roll), so zero the FULL err vector — not just Z — to
+		// stop the smoother from fading the per-substep / per-tick
+		// rate-mismatch into visible "push then snap back" jitter.
+		// 100 ms staleness window: by then the player has left
+		// rotator contact and the normal smoother resumes.
+		if (self.rotcarry_active_cltime > 0
+		    && cltime - self.rotcarry_active_cltime < 0.1)
+			err = '0 0 0';
+
+		// Linear-mover push contact filter.  Same shape as the
+		// rotating filter above: PM_CheckMovingPushers door branch
+		// sets self.mover_push_active_cltime whenever the geometry
+		// push fires (player being shoved sideways by a door, but
+		// not standing ON it — so platform_carry isn't set).  Zero
+		// err so the smoother doesn't fade the small per-substep /
+		// per-tick rate-mismatch, which otherwise compounds across
+		// reconciles into the user-reported "drift up to 24qu" /
+		// "player sinks into the door" visual.
+		if (self.mover_push_active_cltime > 0
+		    && cltime - self.mover_push_active_cltime < 0.1)
+			err = '0 0 0';
+
 		float  elen = vlen(err);
 
 		// Per-reconcile authoritative-position delta.  This is how much
@@ -1369,8 +1728,36 @@ void() CSQC_ReconcilePrediction =
 		const float LOCAL_SMOOTH_MIN     = 0.05;
 		const float LOCAL_SMOOTH_MAXJUMP = 32.0;
 
+		// Mover contact override: the lock branch below holds the
+		// camera at the pre-reset origin (effectively reverting the
+		// replay-applied carry / slide) whenever the user isn't
+		// pressing movement keys.  That suppresses the visible motion
+		// when a moving brush carries / pushes / sweeps into a
+		// stationary player — symptoms include "door opens through
+		// me then snap" (rotating Phase 3), "player floats above the
+		// floor after func_door arrival snap" (linear platform_carry),
+		// and "drift builds up to 24qu, player sinks into the door"
+		// (linear geometry push).  Skip the lock whenever any mover
+		// is acting on the player:
+		//   - rotcarry_active_cltime: written by PM_CheckRotatingCarry
+		//     on each substep of Phase 1 or Phase 3 contact.
+		//   - platform_carry: set by PM_CheckMovingPushers (or
+		//     server-side Mover_PlatformCarry) while the player is
+		//     riding a linear func_door / func_train / func_tracktrain.
+		//   - mover_push_active_cltime: written by PM_CheckMovingPushers's
+		//     door geometry-push branch when the player is being shoved
+		//     by a brush they're NOT standing on.
+		// 100 ms staleness windows match the err-zero filters above so
+		// they engage / disengage together.
+		float rotcarry_active = (self.rotcarry_active_cltime > 0
+		                         && cltime - self.rotcarry_active_cltime < 0.1);
+		float push_active     = (self.mover_push_active_cltime > 0
+		                         && cltime - self.mover_push_active_cltime < 0.1);
+		float carry_active    = (self.platform_carry != world);
+
 		if (!walking_on_ground && elen <= LOCAL_SMOOTH_MAXJUMP
-		    && cvar("cl_driftlock"))
+		    && cvar("cl_driftlock")
+		    && !rotcarry_active && !carry_active && !push_active)
 		{
 			smooth_local_dbg_lock_active = 1;
 			// User has released keys.  Hold camera at live trajectory
@@ -1389,6 +1776,7 @@ void() CSQC_ReconcilePrediction =
 			// offset and fades it over a long smooth_time so the
 			// release isn't perceived as a bump.  Real teleports /
 			// respawns (> 32 qu) bypass this branch into the snap path.
+			// Rotating-door / fan pushes bypass via rotcarry_active.
 			setorigin(self, smooth_pre_reset_origin);
 			self.extrap_error_offset      = '0 0 0';
 			self.extrap_error_cltime      = 0;
@@ -1498,6 +1886,11 @@ void() CSQC_PredictCurrentCommand =
 	// lighter weapon → snap forward).
 	CSQC_PredictWeaponCommand();
 	PM_PlayerMove();
+	// sv_gunkick: decay tick runs AFTER fire so the bullet trace
+	// (inside CSQC_PredictWeaponCommand) used pre-decay pitch.
+	// SSQC's PlayerPostThink does the same, ensuring both sides
+	// advance the spring once per frame at the same logical point.
+	SH_TickViewKickFrame();
 	if (cvar("sv_debug_wepswap"))
 	{
 		vector dbg_mv = '0 0 0';
@@ -1574,12 +1967,24 @@ void() CSQC_BuildPresentationView =
 	float saved_spread_penalty;
 	float saved_fire_spread_penalty;
 	float saved_step_time;
+	float saved_pm_on_ladder_cached;
 	float saved_impulse;
 	vector saved_origin;
 	vector saved_velocity;
 	vector saved_view_ofs;
 	vector saved_angles;
 	vector saved_movevalues;
+	// Platform-carry tracking state — saved so the preview pmove's
+	// writes to platform_carry_prev_yaw / platform_carry latches don't
+	// leak forward into the next real pmove (preview can advance
+	// brush yaw / velocity past the next real-command timestamp,
+	// which would make the real pmove see only the residual delta and
+	// drop the rest — visible as drift/jitter while riding a train).
+	entity saved_platform_carry;
+	vector saved_platform_carry_velocity;
+	float  saved_platform_carry_prev_yaw;
+	vector saved_platform_carry_jump_origin_consumed;
+	float  saved_platform_carry_jump_yaw_consumed;
 
 	CSQC_ResetPresentationView();
 
@@ -1589,6 +1994,7 @@ void() CSQC_BuildPresentationView =
 	csqc_present_valid = TRUE;
 	csqc_present_origin = CSQC_ApplyLocalSmoothOffset(predicted_player.origin);
 	csqc_present_view_ofs = predicted_player.view_ofs;
+	csqc_present_ducking = (predicted_player.flags & FL_DUCKING) != 0;
 
 	if (!pred_cmd_count)
 		return;
@@ -1625,6 +2031,12 @@ void() CSQC_BuildPresentationView =
 	saved_spread_penalty = self.spread_penalty;
 	saved_fire_spread_penalty = self.fire_spread_penalty;
 	saved_step_time = self.pm_step_time;
+	saved_pm_on_ladder_cached = self.pm_on_ladder_cached;
+	saved_platform_carry                      = self.platform_carry;
+	saved_platform_carry_velocity             = self.platform_carry_velocity;
+	saved_platform_carry_prev_yaw             = self.platform_carry_prev_yaw;
+	saved_platform_carry_jump_origin_consumed = self.platform_carry_jump_origin_consumed;
+	saved_platform_carry_jump_yaw_consumed    = self.platform_carry_jump_yaw_consumed;
 
 	saved_timelength = input_timelength;
 	saved_angles = input_angles;
@@ -1649,6 +2061,18 @@ void() CSQC_BuildPresentationView =
 		input_movevalues_y = 0;
 		input_buttons = input_buttons & ~1;
 	}
+	// C4 plant prefire — predicted side mirror.  Without this the
+	// preview sim would visibly slide for one frame before the
+	// server-side freeze pulled it back.
+	else if (predicted_player
+	         && predicted_player.weapon == WEP_CFC4
+	         && predicted_player.weaponstate == WS_FIRE)
+	{
+		input_movevalues_x = 0;
+		input_movevalues_y = 0;
+		input_movevalues_z = 0;
+		input_buttons = input_buttons & ~PM_BTN_JUMP;
+	}
 
 	float fixedstep = PM_ReadMovevar("sv_mintic", 0.01);
 	if (fixedstep < 0.001) fixedstep = 0.01;
@@ -1664,6 +2088,11 @@ void() CSQC_BuildPresentationView =
 
 	csqc_present_origin = CSQC_ApplyLocalSmoothOffset(self.origin);
 	csqc_present_view_ofs = self.view_ofs;
+	// Post-preview duck flag.  See declaration comment — the saved_flags
+	// restore below this block reverts self.flags to its pre-preview value,
+	// so consumers that pair csqc_present_origin with a bbox size MUST read
+	// this snapshot rather than predicted_player.flags.
+	csqc_present_ducking = (self.flags & FL_DUCKING) != 0;
 	csqc_dbg_last_present_time = cltime;
 	csqc_dbg_last_preview_dt = (cltime - csqc_dbg_last_key_time) * 1000;
 	CSQC_CheckDebugPreviewResponse();
@@ -1732,6 +2161,22 @@ void() CSQC_BuildPresentationView =
 	// next real prediction inherits a corrupted timer and fires extra
 	// steps. Restore it alongside the other move fields.
 	self.pm_step_time = saved_step_time;
+	// Same leak-prevention rationale as pm_step_time above: the
+	// preview's pmove writes pm_on_ladder_cached unconditionally at
+	// the done: block (sh_pmove.qc), so without this restore the
+	// preview's speculative ladder-overlap state would persist on
+	// predicted_player and the next CSQC_Input_Frame's view-fx /
+	// fire-gate would read it instead of the real buffered command's
+	// value.  Visible as the gun briefly dropping (lower envelope
+	// ramps up to a stale TRUE) at the base of a ladder if the player
+	// pushes forward into it at high render fps, even before they
+	// touch it.
+	self.pm_on_ladder_cached = saved_pm_on_ladder_cached;
+	self.platform_carry                      = saved_platform_carry;
+	self.platform_carry_velocity             = saved_platform_carry_velocity;
+	self.platform_carry_prev_yaw             = saved_platform_carry_prev_yaw;
+	self.platform_carry_jump_origin_consumed = saved_platform_carry_jump_origin_consumed;
+	self.platform_carry_jump_yaw_consumed    = saved_platform_carry_jump_yaw_consumed;
 
 	input_timelength = saved_timelength;
 	input_angles = saved_angles;
@@ -2187,6 +2632,18 @@ void() CSQC_ExtrapolateRemotePlayers =
 //  CSQC_Input_Frame  -  called each input frame, inputs already set
 // ---------------------------------------------------------------------------
 
+// Single-frame jump-pulse buffer.  Mouse wheel +jump binds fire a press
+// + release inside a single render frame; depending on phase against the
+// pmove tick the engine will sometimes never sample the press, dropping
+// the jump entirely.  We watch the rising edge of PM_BTN_JUMP and, on
+// the very next frame where the raw button has gone back off, force it
+// on for one extra input frame.  That guarantees at least one full
+// pmove tick sees the press, which is enough for PM_CheckJump to fire.
+// Multi-tick presses are unaffected (the falling edge just lands one
+// frame later than it otherwise would — invisible to the player).
+float csqc_jump_buffer_armed;
+float csqc_jump_was_down;
+
 void() CSQC_Input_Frame =
 {
 	localplayer = CSQC_GetEngineLocalPlayer();
@@ -2204,12 +2661,124 @@ void() CSQC_Input_Frame =
 	CSQC_LatchLiveInputFromCommand();
 	input_buttons = csqc_live_buttons;   // write custom bits before buffer captures them
 
+	// Advance view-feel state (bob phase, landing spring, sway lag) on
+	// the input-frame cadence so the phase is identical across render-
+	// rate fluctuation.  Read-only with respect to prediction state.
+	CSQC_ViewFX_UpdateState();
+	// CoD scope state machine — driven from the ADS envelope updated
+	// above, so MUST come after ViewFX_UpdateState in the same tick.
+	CSQC_CodScope_UpdateState();
+	// Per-frame scope fog sync for the CS-style scope path (no-op
+	// while the CoD machine is engaged — it owns the fog hookup in
+	// CoD mode).
+	CSQC_CodScope_FogCSStyle();
+
+	// Apply any yaw delta posted by func_door_rotating's per-frame carry
+	// pass (CSQC_EVENT_DOOR_VIEWROT).  Folded in *after* the engine has
+	// stamped its mouse-tracked angles so we add to whatever the player
+	// is currently looking at — pitch/roll are left untouched.
+	//
+	// Update VF_CL_VIEWANGLES too so next frame's mouse delta is added
+	// onto the rotated yaw, not snapped back to the pre-rotation value.
+	//
+	// HISTORICAL: the accumulated offset previously came exclusively
+	// from per-tick CSQC_EVENT_DOOR_VIEWROT events fired from the
+	// server's Brush_RotateCarry.  Those arrived at netrate cadence
+	// with ping latency, and the events buffered between rotation-end
+	// and final ack manifested as a 0.5–1 s view-yaw catch-up tail.
+	// The server fire is now disabled — see sv_doors_rotating.qc;
+	// the offset is filled in below by the local-prediction block.
+	if (csqc_door_yaw_offset != 0)
+	{
+		input_angles_y = input_angles_y + csqc_door_yaw_offset;
+		float new_yaw = (float)getproperty(VF_CL_VIEWANGLES_Y) + csqc_door_yaw_offset;
+		setproperty(VF_CL_VIEWANGLES_Y, new_yaw);
+		csqc_door_yaw_offset = 0;
+	}
+
+	// Local-prediction view yaw rotation when standing on a rotating
+	// brush (yaw axis only — pitch/roll rotators don't drag view yaw).
+	// Mirrors PM_CheckRotatingCarry's position prediction: each input
+	// frame we add avelocity_y * input_timelength to the view yaw,
+	// keeping the camera facing the same brush-relative direction
+	// throughout the rotation.
+	//
+	// Uses `input_timelength` (this input command's duration) NOT
+	// `frametime` (engine render frame time).  CSQC_Input_Frame fires
+	// once per input frame, but at high render fps a single input
+	// frame spans many render frames — `frametime` underestimated the
+	// gap by render_fps/input_fps, so the view rotated at only that
+	// fraction of the brush's actual rate (the user's "much less"
+	// report).  `input_timelength` is the correct per-input-frame
+	// duration; total per second equals avelocity exactly.
+	if (predicted_player && rotating_brush_list != world && input_timelength > 0)
+	{
+		entity rb;
+		float iter = 0;
+		entity saved_self = self;
+		self = predicted_player;
+		for (rb = rotating_brush_list; rb; rb = rb.rotating_brush_next)
+		{
+			iter = iter + 1;
+			if (iter > 256) break;
+			if (rb.avelocity == '0 0 0') continue;
+			// Yaw-dominant only — rotators on X/Z don't translate to
+			// view yaw under the existing carry semantics.
+			if (fabs(rb.avelocity_y) < fabs(rb.avelocity_x)) continue;
+			if (fabs(rb.avelocity_y) < fabs(rb.avelocity_z)) continue;
+
+			// Strict "standing on this brush" check — same trace as
+			// PM_CheckRotatingCarry uses.  Bbox overlap alone would
+			// keep rotating the view during jumps; user expectation
+			// is the natural one: jump off → no view carry.
+			tracebox(predicted_player.origin,
+			         PM_CurrentMins(), PM_CurrentMaxs(),
+			         predicted_player.origin - '0 0 4',
+			         MOVE_NORMAL, predicted_player);
+			if (trace_fraction >= 1) continue;
+			if (trace_ent != rb) continue;
+
+			float yaw_delta = rb.avelocity_y * input_timelength;
+			input_angles_y = input_angles_y + yaw_delta;
+			float predicted_yaw = (float)getproperty(VF_CL_VIEWANGLES_Y) + yaw_delta;
+			setproperty(VF_CL_VIEWANGLES_Y, predicted_yaw);
+			break;   // first matching brush wins; no double-rotation
+		}
+		self = saved_self;
+	}
+
+	// Jump pulse extension — see comment above the file-scope statics.
+	float jump_now = (input_buttons & PM_BTN_JUMP) != 0;
+	if (jump_now && !csqc_jump_was_down)
+	{
+		csqc_jump_buffer_armed = 1;
+	}
+	else if (!jump_now && csqc_jump_buffer_armed)
+	{
+		input_buttons = input_buttons | PM_BTN_JUMP;
+		jump_now = 1;
+		csqc_jump_buffer_armed = 0;
+	}
+	csqc_jump_was_down = jump_now;
+
 	// Freeze time: block WASD movement and primary attack
 	if (getstatf(STAT_ROUND_PHASE) == ROUND_PHASE_FREEZE)
 	{
 		input_movevalues_x = 0;
 		input_movevalues_y = 0;
 		input_buttons = input_buttons & ~1;
+	}
+	// C4 plant prefire — buffered-command mirror of the SSQC freeze.
+	// Keep button0 alive (the hold detection runs server-side via
+	// W_CFC4Frame) but zero WASD/jump so the predicted move matches.
+	else if (predicted_player
+	         && predicted_player.weapon == WEP_CFC4
+	         && predicted_player.weaponstate == WS_FIRE)
+	{
+		input_movevalues_x = 0;
+		input_movevalues_y = 0;
+		input_movevalues_z = 0;
+		input_buttons = input_buttons & ~PM_BTN_JUMP;
 	}
 
 	// Dead: build freecam input from live directional state, then block server-bound movement
@@ -2244,6 +2813,31 @@ const string PLAYER_VISUAL_MODEL = "models/player/leet/leet.mdl";
 // Custom fields only (no engine equivalents to shadow).
 // vis_owner_entnum is forward-declared in client/cl_customdefs.qc so
 // CSQC_SendHitclaim (in sh_weapon_logic.qc, compiled earlier) can read it.
+
+// Duration of the inter-sequence anim blend on the proxy.
+//
+// CAVEAT — for HL/GoldSrc studio MDLs (which all this mod's player
+// models are), FTE's renderer does NOT honor the .frame2/.lerpfrac
+// mechanism: gl_hlmdl.c:HLMDL_GetBoneData_Internal only passes
+// frame[0]/frametime[0] to HL_SetupBones, so the OLD anim and the
+// blend weight are silently ignored.  The transition snaps.
+//
+// The fields are still being written below because:
+//   1. The infrastructure is correct for Quake-MDL / IQM models if
+//      a future change swaps the player format, no rewrite needed.
+//   2. Server-side hitbox traces (MOVE_HITMODEL) do read these
+//      fields for some FTE paths.  Harmless either way.
+//
+// The "proper" fix for HL studio sequence lerping is skel_build_ptr,
+// but that would replace the engine's automatic frame+baseframe
+// split (basebone) with a manual rebuild — a much larger refactor.
+float() PlayerVis_LerpDuration =
+{
+    float d = cvar("cl_player_anim_lerp_time");
+    if (d <= 0) return 0;
+    return d;
+};
+
 .float vis_anim_top;
 .float vis_anim_bottom;
 .float vis_anim_top_time;
@@ -2257,6 +2851,59 @@ const string PLAYER_VISUAL_MODEL = "models/player/leet/leet.mdl";
 .float vis_aim_yaw;          // server-sent aim direction (never modified by predraw)
 .float vis_anim_top_gen;     // fire/reload generation counter — detects re-fires
 .float vis_last_anim_top_gen;
+
+// --- Inter-sequence anim blending (lerpfrac transitions) ---
+//
+// When the proxy's selected anim changes (e.g. RUN → IDLE_STATIC on
+// the legs, or AIM → SHOOT on the torso), the legs / hands snap to
+// the new pose in one frame.  Setting `.frame2` (OLD anim) and
+// `.lerpfrac` (blend factor) on top of `.frame` (NEW anim) tells
+// the engine to interpolate between the two during the transition.
+//
+// Per FTE convention (cl_defs.qc L308): lerpfrac=0 → render
+// `.frame` only; lerpfrac=1 → render `.frame2` only.  So we start
+// each transition at lerpfrac=1 (still showing OLD) and animate
+// toward 0 (fully NEW) over PLAYER_ANIM_LERP_DURATION.
+//
+// Per-body-section tracking — bottom (legs) and top (torso) blend
+// independently since they switch on different events (locomotion
+// vs. weapon state).
+.float vis_lerp_bot_start;       // cltime when bottom transition began (0 = no lerp)
+.float vis_lerp_bot_prev_anim;   // OLD sequence — written to .frame2
+.float vis_lerp_bot_prev_time;   // .frame1time of OLD at moment of transition
+.float vis_lerp_top_start;
+.float vis_lerp_top_prev_anim;
+.float vis_lerp_top_prev_time;
+
+// --- Spine deformer skeleton (IQM-only) ---
+//
+// HL studiomdl used `.bonecontrol1..4` to fan a yaw delta across
+// the four spine bones, giving the "lower body twists with movement
+// while the torso stays facing aim" look.  IQM has no bonecontrol;
+// we replicate the effect with a per-proxy skeletonindex that we
+// build from the current anim state each frame, then post-modify
+// the spine bones via skel_set_bone.  The same skeleton object
+// hosts the spine PITCH (aim up/down) deformation in place of HL's
+// subblend2frac.
+//
+// `vis_skel` is the FTE skelobject handle (skel_create return).
+// Created lazily on first predraw, recycled across frames.  Reset
+// to 0 if the model swaps (skel_create binds a model).
+.float vis_skel;
+.float vis_skel_modelindex;     // tracks which modelindex vis_skel was created against
+.float vis_spine_debug_next;
+.float vis_backpedaling;
+
+// --- Flinch override (torso) ---
+//
+// vis_flinch_until / vis_flinch_hitgroup are FORWARD-DECLARED in
+// client/cl_customdefs.qc so shared/sh_weapon_logic.qc (compiled
+// earlier) can predict the flinch in CSQC_SendHitclaim.  While
+// `vis_flinch_until > cltime`, the predraw below overrides anim_top
+// with CSANIM_GUT_FLINCH / CSANIM_HEAD_FLINCH per
+// vis_flinch_hitgroup.  The lerp machinery above handles the blend
+// in and out of the flinch automatically — anim_top changes are
+// detected as normal transitions.
 // extrap_error_* fields live in client/cl_customdefs.qc so
 // CSQC_SmoothSetOrigin (defined earlier in this file) can see them.
 
@@ -2267,6 +2914,21 @@ const string PLAYER_VISUAL_MODEL = "models/player/leet/leet.mdl";
 float spec_target;
 float spec_mode;
 const float SPEC_MODE_FIRSTPERSON_FWD = 0;  // must match cl_spectate.qc
+
+float(entity e) PlayerVis_ModelIsIQM =
+{
+	float len = strlen(e.model);
+	if (len < 4)
+		return FALSE;
+	return (substring(strtolower(e.model), len - 4, 4) == ".iqm");
+};
+
+float(float skel, string name) PlayerVis_FindBone =
+{
+	if (!skel)
+		return 0;
+	return skel_find_bone(skel, name);
+};
 
 // Bone name array for skeleton mirroring (from cstrike/src/shared/skeleton.h).
 // Used to copy bone positions from the player to the weapon attachment.
@@ -2346,8 +3008,171 @@ string g_pbones[] =
 	"Bone15"
 };
 
+// ============================================================
+//  Spine deformer — replaces HL bonecontrol on IQM models
+// ============================================================
+//
+// `PlayerVis_TwistBone` and `PlayerVis_PitchBone` apply an
+// in-place rotation to a single bone in the proxy's skeletonobject.
+// The rotation axis is the bone's OWN local axis.  On the converted
+// CS IQMs, local +X (v_forward) runs up the spine, so rotating around
+// it yaws the upper body.  Local +Z (v_up) is the lateral bend axis;
+// rotating around it pitches the torso up/down.  Local +Y behaves
+// like a roll axis on these files, which is why the first pass leaned
+// left/right when aiming vertically.
+//
+// The bone's origin and the axis NOT being rotated stay untouched,
+// so chained bones (Spine → Spine1 → Spine2 → Spine3 → Neck) can
+// each take a fraction of the total deformation and the result
+// distributes smoothly across the spine.
+//
+// If the bone-axis convention in the user's IQMs is different
+// (e.g. +X is forward instead of up-the-spine), the rotations will
+// bend the model the wrong way.  Easy to spot in-game; in that
+// case swap the cos/sin formula to rotate the other plane.
+
+const float PI_RAD = 3.14159265358979;
+
+float(float f) PlayerVis_FloatGood =
+{
+	return (fabs(f) < 100000);
+};
+
+float(vector v) PlayerVis_VectorGood =
+{
+	return (PlayerVis_FloatGood(v_x)
+	     && PlayerVis_FloatGood(v_y)
+	     && PlayerVis_FloatGood(v_z));
+};
+
+float() PlayerVis_TagBasisGood =
+{
+	if (!PlayerVis_VectorGood(v_forward)
+	    || !PlayerVis_VectorGood(v_right)
+	    || !PlayerVis_VectorGood(v_up)
+	    || vlen(v_forward) < 0.001
+	    || vlen(v_right) < 0.001
+	    || vlen(v_up) < 0.001)
+		return FALSE;
+	return TRUE;
+};
+
+float(float skel, float bone_idx) PlayerVis_LoadBoneBasis =
+{
+	if (bone_idx <= 0 || skel == 0)
+		return FALSE;
+
+	skel_get_bonerel(skel, bone_idx);
+
+	if (!PlayerVis_VectorGood(v_forward)
+	    || !PlayerVis_VectorGood(v_right)
+	    || !PlayerVis_VectorGood(v_up)
+	    || vlen(v_forward) < 0.001
+	    || vlen(v_right) < 0.001
+	    || vlen(v_up) < 0.001)
+		return FALSE;
+
+	// IQM frame blending can leave basis vectors slightly scaled.  Normalize
+	// and orthogonalize before applying extra rotations so addentity/gettaginfo
+	// never see an increasingly squashed bone matrix.
+	vector old_f = v_forward;
+	vector old_r = v_right;
+	vector old_u = v_up;
+	vector lf = normalize(old_f);
+	vector lu = old_u - lf * (old_u * lf);
+	if (vlen(lu) < 0.001)
+		lu = crossproduct(old_r, lf);
+	if (vlen(lu) < 0.001)
+		return FALSE;
+	lu = normalize(lu);
+	vector lr = crossproduct(lf, lu);
+	if (vlen(lr) < 0.001)
+		return FALSE;
+	lr = normalize(lr);
+	if (lr * old_r < 0)
+	{
+		lr = -lr;
+		lu = -lu;
+	}
+
+	v_forward = lf;
+	v_right   = lr;
+	v_up      = lu;
+	return TRUE;
+};
+
+void(float skel) PlayerVis_OrthonormalizeSkeleton =
+{
+	float n = skel_get_numbones(skel);
+	float i;
+	for (i = 1; i <= n; i++)
+	{
+		vector bone_org = skel_get_bonerel(skel, i);
+		if (!PlayerVis_VectorGood(bone_org))
+			bone_org = '0 0 0';
+		if (PlayerVis_LoadBoneBasis(skel, i))
+			skel_set_bone(skel, i, bone_org, v_forward, v_right, v_up);
+		else
+			skel_set_bone(skel, i, bone_org, '1 0 0', '0 1 0', '0 0 1');
+	}
+};
+
+void(float skel) PlayerVis_BuildPoseSkeleton =
+{
+	float splitbone = self.basebone;
+
+	// Build torso/base and legs/regular as separate skel_build calls.
+	// A single call spanning both framestate groups can make FTE's
+	// alias skeleton blender reuse the wrong group's pose data, which
+	// freezes locomotion bones once an explicit skeleton is attached.
+	if (splitbone > 1)
+	{
+		skel_build(skel, self, self.modelindex, 0, 1, splitbone);
+		skel_build(skel, self, self.modelindex, 0, splitbone, 0);
+	}
+	else
+	{
+		skel_build(skel, self, self.modelindex, 0, 0, 0);
+	}
+};
+
+// Twist a bone around its own local +X (v_forward).  HL biped
+// convention: +X runs up the spine, so this rotates yaw around the
+// spine — the per-bone body-twist contribution.
+void(float skel, float bone_idx, float deg) PlayerVis_TwistBone =
+{
+    vector bone_org = skel_get_bonerel(skel, bone_idx);
+    if (!PlayerVis_LoadBoneBasis(skel, bone_idx))
+        return;
+    vector lf = v_forward, lr = v_right, lu = v_up;
+    float c = cos(deg * PI_RAD / 180);
+    float s = sin(deg * PI_RAD / 180);
+    // Rotate (right, up) plane around forward.
+    vector new_right = lr * c + lu * s;
+    vector new_up    = -lr * s + lu * c;
+    skel_set_bone(skel, bone_idx, bone_org, lf, new_right, new_up);
+};
+
+// Pitch a bone around its own local +Z (v_up).  On these converted
+// CS IQMs, local +Y is roll; +Z gives the forward/back torso bend.
+void(float skel, float bone_idx, float deg) PlayerVis_PitchBone =
+{
+    vector bone_org = skel_get_bonerel(skel, bone_idx);
+    if (!PlayerVis_LoadBoneBasis(skel, bone_idx))
+        return;
+    vector lf = v_forward, lr = v_right, lu = v_up;
+    float c = cos(deg * PI_RAD / 180);
+    float s = sin(deg * PI_RAD / 180);
+    // Rotate (forward, right) plane around up.
+    vector new_fwd   = lf * c - lr * s;
+    vector new_right = lf * s + lr * c;
+    skel_set_bone(skel, bone_idx, bone_org, new_fwd, new_right, lu);
+};
+
 float() CSQC_PlayerVisual_Predraw =
 {
+	float spine_debug = cvar("cl_player_spine_debug");
+
 	// Hide the visual proxy when we shouldn't see it:
 	// 1. Own body in first person (not chase cam, not spectating, not death cam)
 	// 2. Spectated player's body in first-person spectate mode
@@ -2362,7 +3187,15 @@ float() CSQC_PlayerVisual_Predraw =
 	    && !self.vis_is_dead
 	    && spec_target == 0 && !cvar("chase_active")
 	    && !Spectate_InDeathCam())
+	{
+		if (spine_debug && cltime >= self.vis_spine_debug_next)
+		{
+			print(sprintf("[spine] local proxy hidden: owner=%g model='%s' chase_active=%g\n",
+			              self.vis_owner_entnum, self.model, cvar("chase_active")));
+			self.vis_spine_debug_next = cltime + 0.5;
+		}
 		return PREDRAW_NEXT;
+	}
 
 	// Hide the spectated player's proxy so it doesn't block the first-
 	// person view. NOT during death-cam: that's a 3rd-person orbit
@@ -2399,15 +3232,51 @@ float() CSQC_PlayerVisual_Predraw =
 
 	if (self.vis_anim_bottom != self.vis_last_anim_bottom)
 	{
+		// Capture OLD anim + its current playback time as frame2
+		// source for the upcoming lerp.  vis_last_anim_bottom == 0
+		// happens on the very first frame after proxy spawn — skip
+		// the lerp there (no prior pose to blend from) so the
+		// initial appearance is a clean snap to the first anim.
+		if (self.vis_last_anim_bottom != 0)
+		{
+			self.vis_lerp_bot_prev_anim = self.vis_last_anim_bottom;
+			self.vis_lerp_bot_prev_time = self.vis_anim_bottom_time;
+			self.vis_lerp_bot_start     = cltime;
+		}
 		self.vis_anim_bottom_time = 0;
 		self.vis_last_anim_bottom = self.vis_anim_bottom;
 	}
-	if (self.vis_anim_top != self.vis_last_anim_top
-	    || self.vis_anim_top_gen != self.vis_last_anim_top_gen)
+
+	// --- Effective torso anim (with flinch override) ---
+	// While vis_flinch_until > cltime, the torso shows the gut /
+	// head flinch sequence instead of the server-sent anim_top.
+	// Compare against the EFFECTIVE value (not vis_anim_top) so the
+	// lerp machinery treats flinch entry/exit as normal transitions
+	// and blends them in / out smoothly.
+	float effective_anim_top = self.vis_anim_top;
+	float effective_anim_top_gen = self.vis_anim_top_gen;
+	if (self.vis_flinch_until > cltime)
 	{
+		effective_anim_top = (self.vis_flinch_hitgroup == HITGROUP_HEAD)
+		                     ? CSANIM_HEAD_FLINCH : CSANIM_GUT_FLINCH;
+		// Hold a constant fake gen while flinching so a server
+		// snapshot bumping the underlying gen doesn't retrigger
+		// change-detection mid-flinch.
+		effective_anim_top_gen = -1;
+	}
+
+	if (effective_anim_top != self.vis_last_anim_top
+	    || effective_anim_top_gen != self.vis_last_anim_top_gen)
+	{
+		if (self.vis_last_anim_top != 0)
+		{
+			self.vis_lerp_top_prev_anim = self.vis_last_anim_top;
+			self.vis_lerp_top_prev_time = self.vis_anim_top_time;
+			self.vis_lerp_top_start     = cltime;
+		}
 		self.vis_anim_top_time = 0;
-		self.vis_last_anim_top = self.vis_anim_top;
-		self.vis_last_anim_top_gen = self.vis_anim_top_gen;
+		self.vis_last_anim_top = effective_anim_top;
+		self.vis_last_anim_top_gen = effective_anim_top_gen;
 	}
 	self.vis_anim_top_time += dt;
 
@@ -2419,6 +3288,13 @@ float() CSQC_PlayerVisual_Predraw =
 	float speed2d = vlen(vel2d);
 	float leg_twist = 0;
 	float backpedaling = FALSE;
+	float backpedal_enter = cvar("cl_player_backpedal_enter_angle");
+	float backpedal_exit = cvar("cl_player_backpedal_exit_angle");
+	if (backpedal_enter <= 0) backpedal_enter = 150;
+	if (backpedal_exit <= 0) backpedal_exit = 100;
+	backpedal_enter = bound(91, backpedal_enter, 179);
+	backpedal_exit = bound(1, backpedal_exit, backpedal_enter - 1);
+
 	if (speed2d > 10)
 	{
 		float vel_yaw = vectoyaw(vel2d);
@@ -2426,9 +3302,19 @@ float() CSQC_PlayerVisual_Predraw =
 		// Normalize to -180..180
 		yaw_diff -= floor((yaw_diff + 180) / 360) * 360;
 
-		// Beyond ±89° = backpedaling. Mirror the angle so legs face
-		// the opposite direction (e.g. moving back-right → legs face forward-left).
-		if (fabs(yaw_diff) > 95)
+		// Hysteresis keeps pure strafing stable while the player makes
+		// small aim corrections near 90 degrees. Enter backpedal late,
+		// leave it earlier, then mirror the leg angle.
+		float abs_yaw_diff = fabs(yaw_diff);
+		if (self.vis_backpedaling)
+		{
+			if (abs_yaw_diff < backpedal_exit)
+				self.vis_backpedaling = FALSE;
+		}
+		else if (abs_yaw_diff > backpedal_enter)
+			self.vis_backpedaling = TRUE;
+
+		if (self.vis_backpedaling)
 		{
 			backpedaling = TRUE;
 			// Flip: 135° becomes -45°, -135° becomes 45°, 180° becomes 0°
@@ -2441,6 +3327,8 @@ float() CSQC_PlayerVisual_Predraw =
 		float speed_frac = bound(0, speed2d / 250, 1);
 		leg_twist = yaw_diff * speed_frac;
 	}
+	else
+		self.vis_backpedaling = FALSE;
 
 	// Rotate whole model toward movement (legs face walk direction)
 	self.angles_y += leg_twist;
@@ -2503,10 +3391,43 @@ float() CSQC_PlayerVisual_Predraw =
 	// Split at first leg bone so:
 	//   .baseframe = aim (torso)       → bones < basebone
 	//   .frame     = locomotion (legs) → bones >= basebone
-	self.frame          = self.vis_anim_bottom;       // legs
+	self.frame          = self.vis_anim_bottom;       // legs (NEW)
 	self.frame1time     = self.vis_anim_bottom_time;
-	self.baseframe      = self.vis_anim_top;          // torso
+	self.baseframe      = effective_anim_top;         // torso (NEW, flinch-overridden)
 	self.baseframe1time = self.vis_anim_top_time;
+
+	// Inter-sequence blend — write the OLD anim + a 1→0 lerpfrac
+	// across `cl_player_anim_lerp_time` so legs/torso transitions
+	// (e.g. run → idle) interpolate instead of snapping.  See the
+	// vis_lerp_* field declarations above for the convention.
+	// frame2time advances during the window so the OLD anim keeps
+	// playing through the blend — limbs continue their motion
+	// while the new pose blends in over the top.
+	float lerp_dur = PlayerVis_LerpDuration();
+	float bot_elapsed = cltime - self.vis_lerp_bot_start;
+	if (lerp_dur > 0 && self.vis_lerp_bot_start > 0 && bot_elapsed < lerp_dur)
+	{
+		self.frame2     = self.vis_lerp_bot_prev_anim;
+		self.frame2time = self.vis_lerp_bot_prev_time + bot_elapsed;
+		self.lerpfrac   = 1 - (bot_elapsed / lerp_dur);
+	}
+	else
+	{
+		// Past the lerp window — fully on the new anim.
+		self.lerpfrac = 0;
+	}
+
+	float top_elapsed = cltime - self.vis_lerp_top_start;
+	if (lerp_dur > 0 && self.vis_lerp_top_start > 0 && top_elapsed < lerp_dur)
+	{
+		self.baseframe2     = self.vis_lerp_top_prev_anim;
+		self.baseframe2time = self.vis_lerp_top_prev_time + top_elapsed;
+		self.baselerpfrac   = 1 - (top_elapsed / lerp_dur);
+	}
+	else
+	{
+		self.baselerpfrac = 0;
+	}
 
 	float bb = cvar("sv_player_basebone");
 	if (bb <= 0) bb = gettagindex(self, "Bip01 L Thigh");
@@ -2517,7 +3438,10 @@ float() CSQC_PlayerVisual_Predraw =
 	float sb = self.vis_pitch / 90;
 	self.subblend2frac = sb;
 
-	// Progressive spine twist via bonecontrol
+	// Progressive spine twist via bonecontrol (HL studio only — IQM
+	// models ignore .bonecontrolN; the skel-based deformer below
+	// replaces it for IQM).  Left as-is so the old MDLs we may load
+	// (sini, chickenman, numberK, Kilmer) still get the spine twist.
 	makevectors([0, self.angles_y, 0]);
 	float fCorrect = dotproduct(self.velocity, v_right) * 0.25;
 	self.bonecontrol1 = fCorrect;
@@ -2525,12 +3449,147 @@ float() CSQC_PlayerVisual_Predraw =
 	self.bonecontrol3 = fCorrect * 0.25;
 	self.bonecontrol4 = fCorrect * 0.125;
 
-	// (Tried locking bone 1's translation here via skel_build +
-	// skel_set_bone — froze the whole model because skel_build replaces
-	// the engine's frame+baseframe blend with a single-track build,
-	// losing the basebone split. The proper fix lives outside the
-	// runtime — strip the root translation from the breathing animation
-	// in the .smd source, or accept the feet drift. See repo notes.)
+	// IQM spine deformer — applies body twist (strafe yaw of the
+	// lower spine) and pitch-aim (torso looking up/down for view
+	// pitch) directly to spine bone matrices via skel_set_bone.
+	// HL bone-controllers and HL aim-pitch subblend do nothing on
+	// mod_alias models; this reproduces both effects in QC.
+	//
+	// Flow per frame:
+	//   1. skel_build populates the skeleton from the current
+	//      frame+frame2+lerpfrac state (engine handles inter-
+	//      sequence blending automatically for IQM via
+	//      Alias_BlendBoneData).
+	//   2. We modify 4 spine bones (Spine, Spine1, Spine2, Spine3)
+	//      with fractional yaw + pitch — fractions distribute the
+	//      twist across the spine like the old HL controllers did
+	//      (bigger fraction on the upper bones for pitch so the
+	//      head ends up looking where you aim).
+	//   3. Engine renders using the skeleton (skeletonindex != 0).
+	//      Weapon attachment further down also sees these modified
+	//      bones via gettaginfo, so the gun follows the twist/pitch.
+	//
+	// Gated on cl_player_spine_deform so users can disable for A/B
+	// testing.  Also skipped on HL studio models (sini etc.) since
+	// they already have working bone-controllers + subblend.
+	float is_iqm_player = PlayerVis_ModelIsIQM(self);
+	if (!is_iqm_player && self.skeletonindex)
+	{
+		skel_delete(self.skeletonindex);
+		self.skeletonindex = 0;
+		self.vis_skel_modelindex = 0;
+	}
+
+	float twist_scale = cvar("cl_player_spine_twist_scale");
+	float twist_max = cvar("cl_player_spine_twist_max");
+	float twist_waist_scale = bound(0, cvar("cl_player_spine_twist_waist_scale"), 2);
+	float twist_upper_scale = bound(0, cvar("cl_player_spine_twist_upper_scale"), 2);
+	float pitch_scale = cvar("cl_player_spine_pitch_scale");
+	float pitch_upper_scale = bound(0, cvar("cl_player_spine_pitch_upper_scale"), 2);
+	if (twist_max <= 0)
+		twist_max = 50;
+	float spine_has_work = (twist_scale != 0 || pitch_scale != 0);
+
+	if (spine_debug
+	    && cltime >= self.vis_spine_debug_next
+	    && (!cvar("cl_player_spine_deform") || !is_iqm_player || !self.modelindex || !spine_has_work))
+	{
+		print(sprintf("[spine] inactive: ent=%g model='%s' modelindex=%g iqm=%g deform=%g scales=%.2f/%.2f\n",
+		              self.vis_owner_entnum, self.model, self.modelindex,
+		              is_iqm_player, cvar("cl_player_spine_deform"),
+		              twist_scale, pitch_scale));
+		self.vis_spine_debug_next = cltime + 0.5;
+	}
+
+	if ((!cvar("cl_player_spine_deform") || !spine_has_work) && self.skeletonindex)
+	{
+		skel_delete(self.skeletonindex);
+		self.skeletonindex = 0;
+		self.vis_skel_modelindex = 0;
+	}
+
+	if (cvar("cl_player_spine_deform") && spine_has_work && is_iqm_player && self.modelindex)
+	{
+		// One-time skeleton allocation per proxy.  Reused across
+		// frames; the proxy entity's remove path tears it down.
+		if (self.skeletonindex && self.vis_skel_modelindex != self.modelindex)
+		{
+			skel_delete(self.skeletonindex);
+			self.skeletonindex = 0;
+			self.vis_skel_modelindex = 0;
+		}
+		if (!self.skeletonindex)
+		{
+			self.skeletonindex = skel_create(self.modelindex);
+			self.vis_skel_modelindex = self.modelindex;
+		}
+
+		if (self.skeletonindex)
+		{
+			// Rebuild the skeleton from the current animated pose.  Split
+			// the baseframe/regular-frame bone ranges so locomotion bones
+			// keep animating while the torso gets its own aim/fire pose.
+			PlayerVis_BuildPoseSkeleton(self.skeletonindex);
+			PlayerVis_OrthonormalizeSkeleton(self.skeletonindex);
+
+			// Body-twist fractions match the old HL controllers
+			// (1.0 / 0.5 / 0.25 / 0.125 — bigger near the waist).
+			//
+			// Use leg_twist, not fCorrect: fCorrect is computed after
+			// self.angles_y has already turned toward movement, which
+			// can zero it out on a pure strafe.  leg_twist is the actual
+			// lower-body yaw delta we need to counter across the spine.
+			float iqm_twist = bound(-twist_max, -leg_twist * twist_scale, twist_max);
+			float sb0 = PlayerVis_FindBone(self.skeletonindex, "Bip01 Spine");
+			float sb1 = PlayerVis_FindBone(self.skeletonindex, "Bip01 Spine1");
+			float sb2 = PlayerVis_FindBone(self.skeletonindex, "Bip01 Spine2");
+			float sb3 = PlayerVis_FindBone(self.skeletonindex, "Bip01 Spine3");
+			float sbn = PlayerVis_FindBone(self.skeletonindex, "Bip01 Neck");
+
+			if (iqm_twist != 0)
+			{
+				// Upper-spine fractions scale by twist_upper_scale so the
+				// head/shoulders rotate less than the waist when strafing.
+				PlayerVis_TwistBone(self.skeletonindex, sb0, iqm_twist * twist_waist_scale);
+				PlayerVis_TwistBone(self.skeletonindex, sb1, iqm_twist * 0.5);
+				PlayerVis_TwistBone(self.skeletonindex, sb2, iqm_twist * 0.25 * twist_upper_scale);
+				PlayerVis_TwistBone(self.skeletonindex, sb3, iqm_twist * 0.125 * twist_upper_scale);
+			}
+
+			// Pitch-aim — distribute the view pitch across the
+			// spine with bigger fractions toward the head.  Map the
+			// full -90..90 view range into -pitch_max..pitch_max; do
+			// not clamp raw view pitch early, or the max pose is hit
+			// halfway through the player's actual aim range.
+			float pitch_max = cvar("cl_player_spine_pitch_max");
+			if (pitch_max <= 0)
+				pitch_max = 35;
+			float pitch_frac = bound(-1, self.vis_pitch / 90, 1);
+			float iqm_pitch = bound(-pitch_max, pitch_frac * pitch_max * pitch_scale, pitch_max);
+			if (iqm_pitch != 0)
+			{
+				PlayerVis_PitchBone(self.skeletonindex, sb0, iqm_pitch * 0.05);
+				PlayerVis_PitchBone(self.skeletonindex, sb1, iqm_pitch * 0.15);
+				PlayerVis_PitchBone(self.skeletonindex, sb2, iqm_pitch * 0.30);
+				PlayerVis_PitchBone(self.skeletonindex, sb3, iqm_pitch * 0.35 * pitch_upper_scale);
+				PlayerVis_PitchBone(self.skeletonindex, sbn, iqm_pitch * 0.15 * pitch_upper_scale);
+			}
+
+			if (spine_debug && cltime >= self.vis_spine_debug_next)
+			{
+				print(sprintf("[spine] ent=%g model='%s' skel=%g\n",
+				              self.vis_owner_entnum, self.model, self.skeletonindex));
+				print(sprintf("        bones=%g/%g/%g/%g/%g\n",
+				              sb0, sb1, sb2, sb3, sbn));
+				print(sprintf("        leg=%.1f twist=%.1f pitch=%.1f scales=%.2f/%.2f max=%.1f\n",
+				              leg_twist, iqm_twist, iqm_pitch,
+				              twist_scale, pitch_scale, pitch_max));
+				print(sprintf("        waist=%.2f bp=%g\n",
+				              twist_waist_scale, backpedaling));
+				self.vis_spine_debug_next = cltime + 0.5;
+			}
+		}
+	}
 
 	addentity(self);
 
@@ -2550,6 +3609,7 @@ float() CSQC_PlayerVisual_Predraw =
 		// Update model if weapon changed
 		if (self.vis_weapon_model != pmdl)
 		{
+			setattachment(wep, world, "");
 			setmodel(wep, pmdl);
 			self.vis_weapon_model = pmdl;
 			if (wep.skeletonindex)
@@ -2567,9 +3627,34 @@ float() CSQC_PlayerVisual_Predraw =
 				// Build the weapon skeleton from its own default pose
 				skel_build(wep.skeletonindex, wep, wep.modelindex, 0, 0, -1);
 
+				// Park the weapon entity at the player's origin BEFORE
+				// the bone-mirror loop runs.  FTE samples the lightmap
+				// at entity.origin — a zeroed origin samples world
+				// (0,0,0), almost always inside a wall or void, so the
+				// gun rendered solid black against whatever room the
+				// player walked into.  Co-locating with the player
+				// origin makes the lightmap sample land on the same
+				// floor / surface lighting the player picks up.
+				//
+				// Safe vs. the bone math: skel_set_bone_world stores
+				// each bone as inv(entity_matrix * parent_matrix) *
+				// world_target (engine/client/pr_skelobj.c:2381-2444),
+				// so the entity origin / angles cancel out at render
+				// time AS LONG AS they match what they were at
+				// skel_set_bone_world call time.  Setting origin here
+				// (before the loop) and leaving it unchanged through
+				// addentity preserves that invariant.  Angles stay
+				// '0 0 0' — including non-zero player angles would
+				// pre-rotate the bone basis and the gun would spin
+				// with the player's yaw on top of the bone pose.
+				setattachment(wep, world, "");
+				setorigin(wep, self.origin);
+				wep.angles = '0 0 0';
+
 				// Mirror player bones → weapon bones (valve pattern)
 				float i, pbone, wbone;
 				vector bpos;
+				float matched = 0;
 				for (i = 0; i < g_pbones.length; i++)
 				{
 					pbone = gettagindex(self, g_pbones[i]);
@@ -2577,16 +3662,35 @@ float() CSQC_PlayerVisual_Predraw =
 					if (wbone > 0 && pbone > 0)
 					{
 						bpos = gettaginfo(self, pbone);
+						if (!PlayerVis_VectorGood(bpos) || !PlayerVis_TagBasisGood())
+							continue;
 						skel_set_bone_world(wep, wbone, bpos, v_forward, v_right, v_up);
+						matched = matched + 1;
 					}
 				}
 
-				// Bones are set in world space via skel_set_bone_world,
-				// so the entity origin must be 0 — otherwise the origin
-				// gets added on top and the weapon double-offsets + lags.
-				setorigin(wep, '0 0 0');
-				wep.angles = '0 0 0';
-				addentity(wep);
+				if (matched > 0)
+				{
+					addentity(wep);
+				}
+				else
+				{
+					// Fallback for pmodels whose mdl skeleton uses bone
+					// names that don't match the Bip01 set (or has no
+					// frame data so the engine doesn't expose tags).
+					// setattachment hangs the weapon entity off the
+					// player's right-hand tag — engine handles the
+					// per-frame follow.  Pose won't track individual
+					// finger bones, but the weapon at least sits in the
+					// hand instead of teleporting to world origin.
+					float hand = gettagindex(self, "Bip01 R Hand");
+					if (hand > 0)
+					{
+						setattachment(wep, self, "Bip01 R Hand");
+						wep.angles = '0 0 0';
+						addentity(wep);
+					}
+				}
 			}
 		}
 	}
@@ -2598,6 +3702,9 @@ float() CSQC_PlayerVisual_Predraw =
 			skel_delete(self.vis_weapon_ent.skeletonindex);
 			self.vis_weapon_ent.skeletonindex = 0;
 		}
+		setattachment(self.vis_weapon_ent, world, "");
+		remove(self.vis_weapon_ent);
+		self.vis_weapon_ent = world;
 		self.vis_weapon_model = "";
 	}
 
@@ -2696,6 +3803,7 @@ void() CSQC_PlayerVisual_Update =
 	float identity_changed = (section_bits & VP_SF_IDENTITY_CL);
 	string mdl_path = self.model;   // default: keep current model when identity didn't change
 
+	float prev_is_dead = self.vis_is_dead;
 	if (identity_changed)
 	{
 		self.vis_weapon_id = readbyte();
@@ -2705,10 +3813,39 @@ void() CSQC_PlayerVisual_Update =
 		// Death byte — server sets when owner.is_dead. Drops proxy
 		// solidity so the corpse stops shoving live players around.
 		self.vis_is_dead = readbyte();
+
+		// Client-side death-anim fallback.  With cl_predict_death 0
+		// and the server's VP_SF_ANIM section dropped or arriving in
+		// a later snapshot than VP_SF_IDENTITY, the proxy can flip to
+		// dead state (vis_is_dead = 1) while vis_anim_bottom still
+		// holds the alive locomotion frame — visible as "the body
+		// stays alive after it dies".  Snap the anim slots to a
+		// generic death pose on the dead transition; the server's
+		// authoritative anim will overwrite when it arrives.  The
+		// CSANIM_DEATH* / CSANIM_DIE_* range starts at CSANIM_DEATH1
+		// (sh_player_anims.qc), so anything below is treated as a
+		// non-death frame that needs the snap.
+		if (!prev_is_dead && self.vis_is_dead
+		    && (self.vis_anim_bottom < CSANIM_DEATH1
+		     || self.vis_anim_bottom > CSANIM_DIE_FORWARD))
+		{
+			self.vis_anim_bottom      = CSANIM_DEATH1;
+			self.vis_anim_top         = CSANIM_DEATH1;
+			self.vis_anim_bottom_time = 0;
+			self.vis_anim_top_time    = 0;
+		}
 		// Health byte (0..255) — used by CSQC_TryPredictDeath to
 		// decide whether a predicted hit is lethal. Server clamps to
 		// the byte range in Player_VisualProxy_Sync.
 		self.vis_health  = readbyte();
+		// Bodygroup bitfield — bit 0 = backpack-visible (C4 carried,
+		// but not actively held). Stored on the proxy and translated
+		// to a "geomset 2 N" line on setcustomskin.
+		self.vis_bodygroup = readbyte();
+		// Life generation mirrored from the server's player slot.
+		// Hitclaims include this so a stale corpse/old-life proxy
+		// cannot damage the newly respawned player in the same slot.
+		self.vis_life_serial = readbyte();
 
 		// Rollback clear: if the server snapshot says alive, our
 		// predicted-death was wrong (target had armor / regen / FF /
@@ -2737,12 +3874,33 @@ void() CSQC_PlayerVisual_Update =
 		}
 
 		if (team_model_byte == 255)
+		{
 			mdl_path = "models/player/sini.mdl";
+			// "Sini" override doesn't carry team info — leave vis_team
+			// at whatever it was (server should still also send this in
+			// the next non-override IDENTITY tick if team changed).
+		}
+		else if (team_model_byte == 254)
+		{
+			mdl_path = "models/player/chickenman.mdl";
+			// Same team-independent sentinel pattern as sini.
+		}
+		else if (team_model_byte == 253)
+		{
+			mdl_path = "models/player/numberk/numberK.iqm";
+			// Same team-independent sentinel pattern as sini / chickenman.
+		}
+		else if (team_model_byte == 252)
+		{
+			mdl_path = "models/player/kilmer/kilmer.iqm";
+			// Same team-independent sentinel pattern as sini / chickenman / numberK.
+		}
 		else
 		{
-			float vis_team  = floor(team_model_byte / 4) + 1;
-			float vis_model = team_model_byte % 4;
-			if (vis_team == TEAM_BLUE)
+			float new_team   = floor(team_model_byte / 4) + 1;
+			float vis_model  = team_model_byte % 4;
+			self.vis_team    = new_team;   // expose for CSQC_TryPredictDeath FF gate
+			if (new_team == TEAM_BLUE)
 				mdl_path = team_blue_models[vis_model];
 			else
 				mdl_path = team_red_models[vis_model];
@@ -2771,6 +3929,12 @@ void() CSQC_PlayerVisual_Update =
 	{
 		string prev_model = self.model;
 		float  prev_mi    = self.modelindex;
+		if (self.skeletonindex)
+		{
+			skel_delete(self.skeletonindex);
+			self.skeletonindex = 0;
+			self.vis_skel_modelindex = 0;
+		}
 		// Explicitly detach any prior model binding before the re-bind.  If
 		// this CSQC entity slot was previously a func_breakable / func_wall,
 		// its BSP-submodel binding otherwise survives the setmodel-over and
@@ -2783,7 +3947,29 @@ void() CSQC_PlayerVisual_Update =
 			              self.entnum, mdl_path, prev_model, prev_mi,
 			              self.model, self.modelindex));
 		}
-		setcustomskin(self, "", "geomset 0 2\n");
+		// Force re-apply on next bodygroup pass — setmodel resets the
+		// custom-skin state, so the cached "last applied" must be cleared
+		// or the bodygroup branch below would skip the re-apply when the
+		// new bodygroup byte happens to match the pre-model-swap value.
+		self.vis_last_applied_bodygroup = -1;
+	}
+
+	// Bodygroup re-apply: pushes both the static "geomset 0 2" body-variant
+	// select AND the dynamic "geomset 2 N" backpack toggle (1 = blank,
+	// 2 = bomb) every time either the model OR the bodygroup byte changes.
+	//
+	// Bodypart 2 = backpack on the standard CT/T player models — these
+	// have three bodyparts in HL .mdl order: $body studio "head&legs" (0),
+	// $body studio "body" (1), $bodygroup backpack (2).  Submodels inside
+	// the backpack bodygroup are 1-indexed: 1 = blank, 2 = bomb.
+	//
+	// Skipped when bodygroup is identical to last applied AND model didn't
+	// change — setcustomskin parses the string each call, no point churning.
+	if (model_changed || (identity_changed && self.vis_bodygroup != self.vis_last_applied_bodygroup))
+	{
+		float backpack_submodel = (self.vis_bodygroup & 1) ? 2 : 1;
+		setcustomskin(self, "", sprintf("geomset 0 2\ngeomset 2 %g\n", backpack_submodel));
+		self.vis_last_applied_bodygroup = self.vis_bodygroup;
 	}
 
 	// Bbox sync — every snapshot, not just on model change.
@@ -2813,7 +3999,26 @@ void() CSQC_PlayerVisual_Update =
 	// (predicted_player, preview models, etc.).  The first remote-
 	// player proxy was reading predicted_player.flags — i.e. the LOCAL
 	// player's duck state — so the wrong proxy resized.
-	float prox_ducking = (self.flags & FL_DUCKING) != 0;
+	//
+	// For the LOCAL player in chase_active, origin comes from
+	// csqc_present_origin (predicted + render-rate preview, line ~3035),
+	// which has already applied the 18qu duck-completion drop.  The
+	// preview saves/restores predicted_player.flags around its sim, so
+	// predicted_player.flags reflects the PRE-preview state while the
+	// origin reflects the POST-preview state.  csqc_present_ducking is
+	// captured INSIDE the preview at the same moment as the origin —
+	// use it here so the bbox sizing stays consistent.  Reading
+	// predicted_player.flags or self.flags here can leave the bbox
+	// standing-tall against a ducked-low origin (feet sink 18qu).
+	float prox_ducking;
+	if (self.vis_owner_entnum == player_localentnum
+	    && !self.vis_is_dead
+	    && predicted_player
+	    && csqc_prediction_valid
+	    && csqc_present_valid)
+		prox_ducking = csqc_present_ducking;
+	else
+		prox_ducking = (self.flags & FL_DUCKING) != 0;
 
 	if (prox_ducking)
 		setsize(self, PM_DUCK_MINS, PM_DUCK_MAXS);
@@ -2898,6 +4103,65 @@ noref void(float netentnum) CSQC_Ent_Spawn =
 // exposes server-side entnum recycling between e.g. func_breakable (type 5)
 // and player_visual_proxy (type 8), which would leak model/origin state.
 .float dbg_last_ent_type;
+
+void(float old_type, float new_type) CSQC_Ent_CleanupTypeChange =
+{
+	// FTE can recycle a CSQC entity slot for a different SendEntity type
+	// without first calling CSQC_Ent_Remove on the old type. Clear the
+	// pieces that are dangerous if they leak across types: explicit IQM
+	// skeletons, player weapon attachments, linked-list membership, and
+	// stale model bindings. This is especially visible when a moving ODE
+	// dropped weapon inherits a player_visual_proxy skeleton for one
+	// frame: unrelated player models can briefly render stretched.
+	if (self.vis_weapon_ent)
+	{
+		entity wep = self.vis_weapon_ent;
+		if (wep.skeletonindex)
+		{
+			skel_delete(wep.skeletonindex);
+			wep.skeletonindex = 0;
+		}
+		setattachment(wep, world, "");
+		remove(wep);
+		self.vis_weapon_ent = world;
+		self.vis_weapon_model = "";
+	}
+
+	if (self.skeletonindex)
+	{
+		skel_delete(self.skeletonindex);
+		self.skeletonindex = 0;
+		self.vis_skel_modelindex = 0;
+	}
+
+	dropped_weapon_list_remove_csqc(self);
+	push_list_remove_csqc(self);
+	tele_list_remove_csqc(self);
+	ladder_list_remove_csqc(self);
+	Conveyor_RemoveFromList(self);
+	RotatingBrush_RemoveFromList(self);
+	MovingBrush_RemoveFromList(self);
+
+	setattachment(self, world, "");
+	setmodel(self, "");
+	self.predraw = __NULL__;
+	self.think = __NULL__;
+	self.nextthink = 0;
+	self.movetype = MOVETYPE_NONE;
+	self.solid = SOLID_NOT;
+	self.drawmask = 0;
+
+	self.vis_is_dead = 0;
+	self.vis_pred_dead_latch = 0;
+	self.vis_pred_dead_at_time = 0;
+	self.vis_pred_gibs_at_time = 0;
+	self.vis_last_applied_bodygroup = -1;
+	self.dropped_weapon_next = world;
+	self.csqc_fake_drop_next = world;
+	self.extrap_error_offset = '0 0 0';
+	self.extrap_error_cltime = 0;
+};
+
 noref void(float isnew) CSQC_Ent_Update =
 {
 	float ent_type;
@@ -2908,15 +4172,18 @@ noref void(float isnew) CSQC_Ent_Update =
 	// CSQC-ent-type changes to diagnose "brush attached to player" slot-reuse
 	// bugs.  Prints on first receive AND on any type change, gated behind
 	// sv_debug_ent_types since the map-join spam isn't useful in normal play.
-	if ((isnew || self.dbg_last_ent_type != ent_type) && cvar("sv_debug_ent_types"))
+	float type_changed = (!isnew && self.dbg_last_ent_type && self.dbg_last_ent_type != ent_type);
+	if ((isnew || type_changed) && cvar("sv_debug_ent_types"))
 	{
 		print(sprintf("[ent %g] type %g%s%s origin=%v model='%s'\n",
 		              self.entnum, ent_type,
 		              isnew ? " (new)" : "",
-		              (self.dbg_last_ent_type && self.dbg_last_ent_type != ent_type)
+		              type_changed
 		                ? sprintf(" (was %g!)", self.dbg_last_ent_type) : "",
 		              self.origin, self.model));
 	}
+	if (type_changed)
+		CSQC_Ent_CleanupTypeChange(self.dbg_last_ent_type, ent_type);
 	self.dbg_last_ent_type = ent_type;
 
 	if (ent_type == CSQC_ENT_PUSH_TRIGGER)
@@ -2969,6 +4236,30 @@ noref void(float isnew) CSQC_Ent_Update =
 	if (ent_type == CSQC_ENT_PROJECTILE)
 	{
 		CSQC_Projectile_Update(isnew);
+		return;
+	}
+
+	if (ent_type == CSQC_ENT_C4)
+	{
+		CSQC_C4_Update(isnew);
+		return;
+	}
+
+	if (ent_type == CSQC_ENT_ENV_BEAM)
+	{
+		CSQC_EnvBeam_Update();
+		return;
+	}
+
+	if (ent_type == CSQC_ENT_FUNC_RAIN)
+	{
+		CSQC_FuncRain_Update(isnew);
+		return;
+	}
+
+	if (ent_type == CSQC_ENT_ENV_SOUND)
+	{
+		CSQC_EnvSound_Update(isnew);
 		return;
 	}
 
@@ -3027,6 +4318,36 @@ noref void(float isnew) CSQC_Ent_Update =
 		self.spread_penalty          = readfloat();
 		self.fire_spread_penalty     = readfloat();
 		self.pm_step_time            = readfloat();
+		// Duck-land slide friction flag.  Mirrors the SSQC write at the
+		// tail of the PM_SF_MOVEMENT section so CSQC's predicted pmove
+		// applies the friction reduction on the same ticks.
+		self.slide_friction_active   = readbyte();
+		// sv_jumplag — server sent remaining seconds; reconstruct the
+		// absolute end-timestamp against the client's local `time` so
+		// PM_CheckJump's `time < pm_jump_lag_end` gate releases in
+		// lockstep with the server.
+		self.pm_jump_lag_end         = time + readfloat();
+		// Grappling-hook rope render: 1 byte + 3 coords matching the
+		// SSQC writer.  Reads onto the proxy entity → flows through
+		// CSQC_StoreConfirmedStateFromEntity into predicted_player so
+		// cl_rope.qc can draw it.
+		self.grapple_rope_active     = readbyte();
+		vector grap_anchor;
+		grap_anchor_x = readcoord();
+		grap_anchor_y = readcoord();
+		grap_anchor_z = readcoord();
+		self.grapple_anchor          = grap_anchor;
+		// Actively-pulling flag (gates ground-snap suppress in pmove).
+		self.grapple_attached        = readbyte();
+		// PM_BTN_GRAPPLE edge-latch baseline (see sv_player.qc writer).
+		self.pm_grapple_held_last    = readbyte();
+		// sv_codstamina state: float pool + byte punish-latch + float
+		// remaining-seconds for pm_fire_suppress_until.  Reconstruct
+		// the absolute-time stamp against the client's local `time`
+		// (mirrors the pm_jump_lag_end wire format above).
+		self.codstamina              = readfloat();
+		self.codstamina_punished     = readbyte();
+		self.pm_fire_suppress_until  = time + readfloat();
 	}
 
 	if (changedflags & PM_SF_WEAPON_STATE)
@@ -3038,7 +4359,62 @@ noref void(float isnew) CSQC_Ent_Update =
 		self.weapon          = readbyte();
 		self.previous_weapon = readbyte();
 		self.weaponstate     = readbyte();
+		// Respawn / team-change detection: server resets wep_action_id to
+		// 0 when a player respawns, so a strictly-monotonic counter going
+		// BACKWARDS is the unambiguous signal. CSQC_ResetPredictionState
+		// only fires on map change / disconnect, NOT on respawn — the
+		// predicted_player ent persists across respawns and CSQC_Ensure-
+		// PredictedPlayer's csgren reset block never re-runs. Without
+		// this hook the stale csgren_fake_spawned_serial from a pre-death
+		// throw collides with the post-respawn action_id (both end up at
+		// 2 after pin-pull + throw), which silently no-ops the fake-
+		// grenade spawn — throw animation plays, ammo decrements, but
+		// no smoke cloud appears for the shooter.
+		float _prev_action_id = self.wep_action_id;
 		self.wep_action_id   = readlong();   // 32-bit — matches server's WriteLong in PM_PredictionProxy_SendEntity
+		if (self.wep_action_id < _prev_action_id)
+		{
+			self.csgren_throw_pending       = 0;
+			self.csgren_fake_spawned_serial = 0;
+			self.csgren_spawn_time          = 0;
+			self.csgren_throw_type          = 0;
+			self.paintball_fake_spawned_serial = 0;
+			// Respawn / team-change / live sv_mintic re-seed —
+			// detected by the server's action_id going backward.
+			// Under the trust=1 fire-state-decouple (Phase 1+2), the
+			// auth-proxy's wep_action_id is no longer reconciled into
+			// predicted_player, so when the server resets to 0 the
+			// predicted_player can be left with a stale-high value
+			// (e.g. 50 from the previous life).  That stale value
+			// permanently closes the ammo-sync gate
+			// `sv_confirmed_wep_action_id >= self.wep_action_id`
+			// (the new ammo-decouple gate in CSQC_ResetToConfirmedState),
+			// so the post-respawn loadout's mag/ammo never reaches the
+			// client and the player spawns with empty guns.  The
+			// equivalent problem hits weaponstate / attack_finished /
+			// wep_anim_start: they get stuck in pre-death values and
+			// the draw animation never plays for the freshly equipped
+			// weapon (sound plays from the server multicast, no anim
+			// because predicted_player.weaponstate != WS_DRAW).
+			//
+			// Fix: when the rewind is detected, also zero the predicted-
+			// player's fire-state fields so they're a clean slate ready
+			// for the snapshot to seed.  The actual seeding (weapon ID,
+			// equipped slot, ammo) flows through CSQC_ResetToConfirmedState
+			// on the next reconcile pass; this branch just makes sure
+			// the gates are open.
+			if (predicted_player)
+			{
+				predicted_player.csqc_fire_effect_action_id = 0;
+				predicted_player.wep_action_id   = 0;
+				predicted_player.attack_finished = 0;
+				predicted_player.wep_anim_start  = 0;
+				predicted_player.weaponstate     = WS_IDLE;
+				predicted_player.csqc_fire_guard   = 0;
+				predicted_player.csqc_reload_guard = 0;
+			}
+			CSQC_ResetCSGrenadeState();
+		}
 		self.attack_finished = cltime + readfloat();   // server sends remaining time
 		{
 			float _elapsed = readfloat();   // server sends time since animation began
@@ -3050,85 +4426,50 @@ noref void(float isnew) CSQC_Ent_Update =
 				self.wep_anim_start = 0;
 		}
 		self.zoomstage       = readbyte();
+		self.snowball_has_slingshot = readbyte();
+		self.snowball_use_slingshot = readbyte();
 		// Speed-factor blend state — paired with WriteFloat in
 		// PM_PredictionProxy_SendEntity.  Preserves in-flight transition
 		// across reconcile so client replay and server pmove stay
 		// synchronized through ping-window weapon switches.
 		self.pm_weapon_blend_progress = readfloat();
 		self.pm_weapon_prev_factor    = readfloat();
+		// sv_gunkick state — proxy v19. Mirrors PM_PredictionProxy_
+		// SendEntity in sv_player.qc. Authoritative server values
+		// overwrite the locally-integrated kick state on every
+		// snapshot; pmove keeps integrating between snapshots so
+		// the camera stays smooth at the per-tick rate.
+		self.view_kick_pitch     = readfloat();
+		self.view_kick_yaw       = readfloat();
+		self.view_kick_pitch_vel = readfloat();
+		self.view_kick_yaw_vel   = readfloat();
+		self.view_kick_burst_idx = readbyte();
 	}
 
 	if (changedflags & PM_SF_AMMO)
 	{
-		// 6-byte bitmask + per-bit conditional readbyte.  Matches the
-		// server write order in PM_PredictionProxy_SendEntity exactly.
+		// Compact slot-ammo bitmask + utility counts. Matches the server
+		// write order in PM_PredictionProxy_SendEntity exactly.
 		// Fields whose bit is clear keep their cached value (server
 		// skipped writing them because they didn't change this send).
 		float m0 = readbyte();
 		float m1 = readbyte();
-		float m2 = readbyte();
-		float m3 = readbyte();
-		float m4 = readbyte();
-		float m5 = readbyte();
 
-		// byte 0
-		if (m0 &   1) self.mag_deagle          = readbyte();
-		if (m0 &   2) self.ammo_deagle         = readbyte();
-		if (m0 &   4) self.mag_ak47            = readbyte();
-		if (m0 &   8) self.ammo_ak47           = readbyte();
-		if (m0 &  16) self.mag_m4a1            = readbyte();
-		if (m0 &  32) self.ammo_m4a1           = readbyte();
-		if (m0 &  64) self.m4a1_silenced       = readbyte();
-		if (m0 & 128) self.mag_flakshotgun     = readbyte();
+		if (m0 &   1) self.slot_primary_mag    = readbyte();
+		if (m0 &   2) self.slot_primary_ammo   = readbyte();
+		if (m0 &   4) self.slot_primary_aux    = readbyte();
+		if (m0 &   8) self.slot_secondary_mag  = readbyte();
+		if (m0 &  16) self.slot_secondary_ammo = readbyte();
+		if (m0 &  32) self.slot_secondary_aux  = readbyte();
+		if (m0 &  64) self.ammo_hlgrenade      = readbyte();
+		if (m0 & 128) self.ammo_snowball       = readbyte();
 
-		// byte 1
-		if (m1 &   1) self.mag_pistol          = readbyte();
-		if (m1 &   2) self.ammo_pistol         = readbyte();
-		if (m1 &   4) self.mag_scout           = readbyte();
-		if (m1 &   8) self.ammo_scout          = readbyte();
-		if (m1 &  16) self.mag_357             = readbyte();
-		if (m1 &  32) self.ammo_357            = readbyte();
-		if (m1 &  64) self.mag_m249            = readbyte();
-		if (m1 & 128) self.ammo_m249           = readbyte();
+		if (m1 &   1) self.ammo_cshegrenade    = readbyte();
+		if (m1 &   2) self.ammo_csflashbang    = readbyte();
+		if (m1 &   4) self.ammo_cssmokegrenade = readbyte();
+		if (m1 &   8) self.ammo_cfc4           = readbyte();
 
-		// byte 2
-		if (m2 &   1) self.mag_awp             = readbyte();
-		if (m2 &   2) self.ammo_awp            = readbyte();
-		if (m2 &   4) self.mag_98k             = readbyte();
-		if (m2 &   8) self.ammo_98k            = readbyte();
-		if (m2 &  16) self.mag_shotgun         = readbyte();
-		if (m2 &  32) self.ammo_shotgun        = readbyte();
-		if (m2 &  64) self.mag_m3              = readbyte();
-		if (m2 & 128) self.ammo_m3             = readbyte();
-
-		// byte 3
-		if (m3 &   1) self.mag_mp5             = readbyte();
-		if (m3 &   2) self.ammo_mp5            = readbyte();
-		if (m3 &   4) self.mag_crossbow        = readbyte();
-		if (m3 &   8) self.ammo_crossbow       = readbyte();
-		if (m3 &  16) self.mag_grenadelauncher = readbyte();
-		if (m3 &  32) self.mag_rebar           = readbyte();
-		if (m3 &  64) self.ammo_gauss          = readbyte();
-		if (m3 & 128) self.mag_glock           = readbyte();
-
-		// byte 4
-		if (m4 &   1) self.ammo_glock          = readbyte();
-		if (m4 &   2) self.mag_g3sg1           = readbyte();
-		if (m4 &   4) self.ammo_g3sg1          = readbyte();
-		if (m4 &   8) self.mag_hlsmg           = readbyte();
-		if (m4 &  16) self.ammo_hlsmg          = readbyte();
-		if (m4 &  32) self.ammo_hlsmg_grenades = readbyte();
-		if (m4 &  64) self.mag_hlrpg           = readbyte();
-		if (m4 & 128) self.ammo_hlrpg          = readbyte();
-
-		// byte 5 (bit 7 unused — 47 fields total)
-		if (m5 &   1) self.ammo_hlgrenade      = readbyte();
-		if (m5 &   2) self.mag_hlglock         = readbyte();
-		if (m5 &   4) self.ammo_hlglock        = readbyte();
-		if (m5 &   8) self.ammo_hlegon         = readbyte();
-		if (m5 &  16) self.mag_csusp           = readbyte();
-		if (m5 &  32) self.ammo_csusp          = readbyte();
-		if (m5 &  64) self.csusp_silenced      = readbyte();
+		W_SlotAmmo_LoadCurrent(self);
 	}
 
 	CSQC_StoreConfirmedStateFromEntity(self);

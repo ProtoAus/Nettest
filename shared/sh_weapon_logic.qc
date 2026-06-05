@@ -8,6 +8,15 @@
 
 // --- Shared utilities ---
 
+// W_PlayersExpandHitboxes / W_PlayersRestoreHitboxes bodies live
+// outside this file:
+//   • SSQC — server/sv_weapons.qc walks the live player chain.
+//   • CSQC — shared/sh_weapons.qc walks the player_visual_proxy chain
+//            (compiled BEFORE this file in cl_progs.src, so callers
+//            here see the symbol without a per-file forward decl).
+// The shared decl that used to live here was duplicating the CSQC body
+// and producing "redeclaration of function body" at link time.
+
 // Flat spread bonus set by SH_GetSpreadScale — add to spread after multiplying by scale.
 float sh_spread_flat;
 
@@ -27,6 +36,302 @@ float(float shot_id, float axis) SH_SpreadJitter =
     return SH_SpreadHash(shot_id + axis * 0.7193) * 2 - 1;
 };
 
+// sv_gunkick — apply a per-shot view-kick impulse. Adds an upward
+// pitch impulse + a small yaw jitter to the player's view-kick
+// integrator; the spring decay in pmove (sh_pmove.qc) then settles
+// it back to zero. Called from each weapon's fire helper BEFORE the
+// hitscan trace, so the trace direction includes the kick the user
+// is about to see (W_StandardHitscanShoot biases v_angle by the
+// integrated kick state right after this).
+//
+// Both client (predict) and server (authority) call this on the same
+// pmove tick with the same wep_action_id — the yaw jitter is
+// SH_SpreadJitter axis 2 so it's deterministic without needing to
+// be replicated. The integrator state IS replicated via PM_CSQC_PROXY
+// (4 floats + 1 byte) for cheap drift insurance under packet loss.
+//
+// Parameters:
+//   kick_pitch    : per-shot pitch impulse magnitude (degrees/sec on the velocity).
+//                   Negative pitch = view rotates UP (Quake convention).
+//   kick_variance : ± degrees/sec yaw jitter range. Random per shot.
+// Cvar accessor — sv_gunkick_* are SV-side cvars. SSQC reads via
+// cvar() (authoritative local lookup). CSQC reads via serverkeyfloat()
+// because the cvars aren't registered on the client; the server
+// publishes them in serverinfo from SV_UpdateMovementServerInfo so
+// both sides see identical values without per-tick replication.
+// Without this split, CSQC's cvar() returns 0 → falls through to
+// defaults → integrator diverges from the server.
+float(string name, float default_val) SH_GunkickCvar =
+{
+#ifdef SSQC
+    return cvar(name);
+#else
+    return serverkeyfloat(name, default_val);
+#endif
+};
+
+void(float kick_pitch, float kick_variance, optional float weapon_strength) SH_ApplyViewKick =
+{
+    if (SH_GunkickCvar("sv_gunkick", 1) <= 0)
+        return;
+
+    float global_strength = SH_GunkickCvar("sv_gunkick_strength", 1.0);
+    if (global_strength <= 0) global_strength = 1.0;
+    // weapon_strength is a per-weapon multiplier on top of the global
+    // — single-shot weapons (snipers, deagle, shotguns) want a larger
+    // kick than auto rifles because the per-shot delay gives the
+    // spring time to fully decay before the next shot. Caller passes
+    // 1.0 (or omits) for a baseline weapon; >1 for heavier kicks.
+    if (weapon_strength <= 0) weapon_strength = 1.0;
+    float strength = global_strength * weapon_strength;
+
+    float pitch_impulse = -kick_pitch    * strength;
+    float yaw_impulse   = SH_SpreadJitter(self.wep_action_id, 2) * kick_variance * strength;
+
+    // Diminishing-returns soft cap. Each shot adds less impulse the
+    // more the view is already kicked — replaces the role the
+    // quadratic spring used to play (capping sustained-fire
+    // accumulation) without the under-damped overshoot it caused.
+    // GUNKICK_SOFT_CAP_DEG is the displacement at which new impulses
+    // contribute zero; the linear ramp from 1.0 at displacement=0 to
+    // 0.0 at the cap is the standard CS-style recoil response.
+    float curr_disp = fabs(self.view_kick_pitch);
+    float diminish  = 1.0 - bound(0, curr_disp / GUNKICK_SOFT_CAP_DEG, 1.0);
+    pitch_impulse = pitch_impulse * diminish;
+    yaw_impulse   = yaw_impulse   * diminish;
+
+    // sv_gunkick_instant: skip the velocity-impulse arch entirely and
+    // jump the displacement straight to where the spring would have
+    // peaked.  Conversion uses the undamped peak formula
+    //     peak_displacement = velocity_impulse / sqrt(k)
+    // (k is the spring constant from sv_gunkick_decay_rate).
+    //
+    // The peak is staged into view_kick_pending_pitch/yaw rather than
+    // applied directly: the hitscan trace runs immediately after this
+    // call and reads view_kick_pitch / view_kick_yaw to bias its
+    // direction.  In velocity-impulse mode the displacement is still
+    // zero on the firing tick (only velocity changed), so the trace
+    // naturally goes through the un-kicked crosshair.  If we wrote
+    // the displacement here, the trace would go through the post-kick
+    // crosshair and bullets would track the visible kick instead of
+    // where the player aimed.  SH_TickViewKickFrame folds the pending
+    // value into the displacement once per frame, AFTER the fire
+    // path runs, so the visible kick still snaps to peak the same
+    // tick — just on the other side of the trace.
+    if (SH_GunkickCvar("sv_gunkick_instant", 0) > 0)
+    {
+        float k_for_peak = SH_GunkickCvar("sv_gunkick_decay_rate", GUNKICK_SPRING_K_DEFAULT);
+        if (k_for_peak <= 0) k_for_peak = GUNKICK_SPRING_K_DEFAULT;
+        float omega = sqrt(k_for_peak);
+        self.view_kick_pending_pitch += pitch_impulse / omega;
+        self.view_kick_pending_yaw   += yaw_impulse   / omega;
+    }
+    else
+    {
+        self.view_kick_pitch_vel += pitch_impulse;
+        self.view_kick_yaw_vel   += yaw_impulse;
+    }
+    self.view_kick_burst_idx += 1;
+    self.view_kick_release_ticks = 0;
+};
+
+// Per-pmove-tick spring-damper integration. Pulls view_kick_pitch /
+// view_kick_yaw back toward zero with rate proportional to current
+// displacement (Hooke), damped to prevent oscillation. Runs every
+// tick on both sides — same dt (pm_frametime = input_timelength)
+// so client live, client replay, and server pmove integrate
+// identically.
+//
+// Spring formulation gives the user-requested non-linear stacking:
+// each shot adds a fixed velocity impulse, but the spring's
+// pull-back grows with displacement so sustained fire reaches a
+// steady-state instead of climbing forever.
+void(float dt) SH_TickViewKickDecay =
+{
+    if (dt <= 0) return;
+
+    // Same SSQC-vs-CSQC cvar source split as SH_ApplyViewKick — see
+    // SH_GunkickCvar comment for why.
+    float k = SH_GunkickCvar("sv_gunkick_decay_rate", GUNKICK_SPRING_K_DEFAULT);
+    if (k <= 0) k = GUNKICK_SPRING_K_DEFAULT;
+    float c = SH_GunkickCvar("sv_gunkick_damping", GUNKICK_DAMPING_DEFAULT);
+    if (c <= 0) c = GUNKICK_DAMPING_DEFAULT;
+
+    // Semi-implicit Euler — LINEAR Hooke spring (force = -k*x).
+    //
+    // Asymmetric damping: full `c` while the kick is being driven
+    // OUTWARD (vel and disp same sign — a fresh shot impulse, or the
+    // sustained-fire phase where new shots keep adding outward
+    // velocity), but ZERO damping during RECOVERY (vel and disp
+    // opposite sign — spring is pulling back to zero). This gives
+    // the snappy "gun returns to rest fast" feel while keeping
+    // sustained fire from oscillating: damping rejects the outward
+    // pump but doesn't slow the bounce-back.
+    //
+    // Without the sign-cross clamp below, no-damping recovery would
+    // overshoot zero and the spring would oscillate forever. The
+    // clamp catches the moment displacement crosses zero on the
+    // recovery half-cycle and snaps the integrator clean.
+    float pitch_outward = (self.view_kick_pitch * self.view_kick_pitch_vel) > 0;
+    float yaw_outward   = (self.view_kick_yaw   * self.view_kick_yaw_vel)   > 0;
+    float c_pitch = pitch_outward ? c : 0;
+    float c_yaw   = yaw_outward   ? c : 0;
+
+    float old_pitch = self.view_kick_pitch;
+    float old_yaw   = self.view_kick_yaw;
+
+    self.view_kick_pitch_vel += (-k * self.view_kick_pitch
+                                 - c_pitch * self.view_kick_pitch_vel) * dt;
+    self.view_kick_yaw_vel   += (-k * self.view_kick_yaw
+                                 - c_yaw   * self.view_kick_yaw_vel)   * dt;
+    self.view_kick_pitch     += self.view_kick_pitch_vel * dt;
+    self.view_kick_yaw       += self.view_kick_yaw_vel   * dt;
+
+    // Sign-cross clamp during recovery: if displacement just crossed
+    // through zero (old and new have opposite signs), the spring is
+    // about to overshoot — kill velocity and snap to zero so we don't
+    // bounce. Only relevant when we were recovering (no damping
+    // applied this tick), but cheap to test unconditionally.
+    if (old_pitch != 0 && (old_pitch * self.view_kick_pitch < 0))
+    { self.view_kick_pitch = 0; self.view_kick_pitch_vel = 0; }
+    if (old_yaw   != 0 && (old_yaw   * self.view_kick_yaw   < 0))
+    { self.view_kick_yaw   = 0; self.view_kick_yaw_vel   = 0; }
+
+    // Snap-to-zero floor — once both displacement and velocity are
+    // imperceptible, clamp to clean zero so the integrator doesn't
+    // chase float dust across snapshots.
+    if (fabs(self.view_kick_pitch) < 0.001 && fabs(self.view_kick_pitch_vel) < 0.01)
+    { self.view_kick_pitch = 0; self.view_kick_pitch_vel = 0; }
+    if (fabs(self.view_kick_yaw) < 0.001 && fabs(self.view_kick_yaw_vel) < 0.01)
+    { self.view_kick_yaw = 0; self.view_kick_yaw_vel = 0; }
+};
+
+// Once-per-frame post-fire hook. Called AFTER fire on both sides
+// (SSQC: PlayerPostThink; CSQC: end of CSQC_PredictPlayer). Putting
+// the decay tick + burst-idx reset here — instead of inside pmove
+// — keeps the trace direction consistent between server and client:
+// fire reads pre-decay state on both sides, then we decay once per
+// frame at the same logical point. Without this, SSQC's
+// pmove-then-fire vs CSQC's fire-then-pmove ordering left the
+// server's trace one decay step ahead of the client's, and bullet
+// impacts landed at the peak of the visible kick instead of where
+// the predicted crosshair pointed.
+void() SH_TickViewKickFrame =
+{
+#ifdef SSQC
+    float gunkick_on = cvar("sv_gunkick");
+#else
+    float gunkick_on = serverkeyfloat("sv_gunkick", 1);
+#endif
+    if (gunkick_on <= 0)
+        return;
+
+    // sv_gunkick_instant: fold any pending displacement (staged by
+    // SH_ApplyViewKick this frame) into the live displacement before
+    // the decay step.  Done here so the prior hitscan trace already
+    // ran against pre-kick angles (see SH_ApplyViewKick comment) but
+    // the visible view still snaps to peak on the same frame.
+    if (self.view_kick_pending_pitch != 0 || self.view_kick_pending_yaw != 0)
+    {
+        self.view_kick_pitch += self.view_kick_pending_pitch;
+        self.view_kick_yaw   += self.view_kick_pending_yaw;
+        self.view_kick_pending_pitch = 0;
+        self.view_kick_pending_yaw   = 0;
+    }
+
+    SH_TickViewKickDecay(input_timelength);
+
+    // Burst-index reset: 2 consecutive frames of !+attack restarts
+    // the per-burst counter so per-weapon recoil patterns sync to
+    // the start of every spray. Bit 1 = +attack on input_buttons —
+    // can't reference PM_BTN_FIRE directly because sh_pmove.qc is
+    // included AFTER this file on the SSQC side (sv_progs.src).
+    if (!(input_buttons & 1))
+    {
+        self.view_kick_release_ticks += 1;
+        if (self.view_kick_release_ticks >= 2)
+            self.view_kick_burst_idx = 0;
+    }
+    else
+    {
+        self.view_kick_release_ticks = 0;
+    }
+};
+
+#ifdef CSQC
+// Forward decls — both reset hooks live in CSQC-only files
+// (cl_bulletholes.qc, cl_bulletimpact.qc) that compile after this
+// one.  The CSQC predict-impact functions below call them at the top
+// of every shot to scope the per-shot caps.  Wrapped in #ifdef CSQC
+// because the symbols don't exist on the SSQC side; the matching
+// call sites are also #ifdef CSQC'd.
+void() CSQC_BulletHoles_ResetShot;
+void() CSQC_Impact_ResetShot;
+// Shotgun-blast bypass flags — see CSQC_PredictedShotgunImpact and the
+// cap / ric gates in cl_bulletholes.qc and cl_bulletimpact.qc.
+float bh_shotgun_blast;
+float bh_shotgun_ric_played;
+#endif
+
+// Both sides compute the same hard ADS state from the live input
+// bits — the CSQC visual envelope in cl_viewfx.qc is purely cosmetic
+// and the spread reduction at fire time uses this gate so server and
+// client agree.  v1 hardwires the weapon list (just HDAK47); extend
+// by adding to the weapon test.
+float() Weapon_IsADSActive =
+{
+    float is_ads_weapon = 0;
+    if (self.weapon == WEP_HDAK47 || self.weapon == WEP_AK47
+        || self.weapon == WEP_DEAGLE
+        || self.weapon == WEP_CFMAC10
+        || self.weapon == WEP_CFFAMAS
+        || self.weapon == WEP_CFFIVESEVEN
+        || self.weapon == WEP_CFDEAGLE
+        || self.weapon == WEP_CFELITE
+        || self.weapon == WEP_CFGALIL
+        || self.weapon == WEP_CFGLOCK
+        || self.weapon == WEP_CFXM1014
+        || self.weapon == WEP_CFM3
+        || self.weapon == WEP_CFMP5
+        || self.weapon == WEP_CFVECTOR
+        || self.weapon == WEP_CFTYPE89)
+        is_ads_weapon = 1;
+    // sv_codscopes opts the sniper lineup into ADS-spread tightening
+    // for the gun-raise portion of the CoD scope sequence.  All snipers
+    // share this hook — bolt-action and semi-auto alike — even though
+    // PSG1 and SVD skip the post-fire scope-out (see cl_codscope.qc).
+    if ((self.weapon == WEP_SCOUT || self.weapon == WEP_CSAWP
+         || self.weapon == WEP_CFAWP || self.weapon == WEP_CFG3SG1
+         || self.weapon == WEP_CFSCOUTM700 || self.weapon == WEP_CFSG550
+         || self.weapon == WEP_CFAUG)
+        && PM_ReadMovevar("sv_codscopes", 0))
+        is_ads_weapon = 1;
+    if (!is_ads_weapon)
+        return 0;
+    if (!(input_buttons & 4))               // +attack2 bit
+        return 0;
+    // Ducking is allowed — CoD-style hold-aim works crouched.
+    if (self.pm_movetype == PM_MOVETYPE_NOCLIP)
+        return 0;
+    // Sprint cancels ADS — same gate the sprint multiplier in
+    // PM_PlayerMoveStep enforces.  Reading sv_shiftspeed via
+    // PM_ReadMovevar so CSQC sees the serverinfo-replicated value.
+    if (PM_ReadMovevar("sv_shiftspeed", 1.0) > 1.001
+        && (input_buttons & PM_BTN_SPRINT)
+        && (self.flags & FL_ONGROUND)
+        && input_movevalues_x > 0)
+        return 0;
+    // Grapple / codladder cancel — the gun has been dropped
+    // off-screen by the lower envelope, ADS spread tightening
+    // shouldn't apply either.
+    if (self.grapple_rope_active)
+        return 0;
+    if (PM_ReadMovevar("sv_codladders", 0)
+        && self.pm_on_ladder_cached)
+        return 0;
+    return 1;
+};
+
 // Returns a spread multiplier based on player stance (crouch, airborne, landing).
 // Also sets sh_spread_flat for a flat additive bonus (ensures low-spread guns still feel penalties).
 // Called by both server hitscan and client prediction to keep spread in sync.
@@ -34,6 +339,13 @@ float() SH_GetSpreadScale =
 {
     float scale = 1.0;
     sh_spread_flat = 0;
+
+    // ADS — tightens spread while the player is aiming.  Multiplicative
+    // so it stacks with the existing crouch / landing / sustained-fire
+    // gates.  Pulled via PM_ReadMovevar so CSQC's predicted fire sees
+    // the same value the server enforces.
+    if (Weapon_IsADSActive())
+        scale *= PM_ReadMovevar("sv_ads_spread_mult", 0.35);
 
     // Crouching: 60% accuracy improvement (only on ground)
     if ((self.flags & FL_DUCKING) && (self.flags & FL_ONGROUND))
@@ -86,6 +398,8 @@ void(vector pos, vector eye_pos, vector colour, float damage, float hitgroup) CS
 void(vector pos, vector normal, float damage) CSQC_BulletImpact;
 void() HUD_TriggerHitmarker;
 void(vector pos, vector normal) CSQC_BulletImpactSilent;
+void(vector pos, vector normal) Impact_SpawnSmokeOnly;
+float() Impact_ParticleOffset;
 // Defined in client/cl_breakable.qc, called from CSQC_TryPredictDeath
 // to mirror the server's CSQC_EVENT_PLAYER_GIBS overkill broadcast.
 void(vector pos, vector dir, float count, float damage_scale) CSQC_SpawnPlayerGibs;
@@ -108,28 +422,45 @@ float(float bone_id) W_BoneToHitgroup =
 
     entity ent = trace_ent;
 
-    if (bone_id == gettagindex(ent, "Bip01 Head"))
+    // Head: HL studio "Bip01 Head" carries over to the IQM rig too.
+    // Neck is folded into HEAD because the IQM player models extend
+    // the head/neck hitbox down to the collarbone — a hit that lands
+    // on the neck bone visually reads as a headshot to the shooter,
+    // so the multiplier should follow.  (Legacy MDLs had a tighter
+    // head hitbox so neck-as-head wasn't a problem there.)
+    if (bone_id == gettagindex(ent, "Bip01 Head")
+     || bone_id == gettagindex(ent, "Bip01 Neck"))
         return HITGROUP_HEAD;
 
     if (bone_id == gettagindex(ent, "Bip01 Spine1")
      || bone_id == gettagindex(ent, "Bip01 Spine2")
-     || bone_id == gettagindex(ent, "Bip01 Spine3")
-     || bone_id == gettagindex(ent, "Bip01 Neck"))
+     || bone_id == gettagindex(ent, "Bip01 Spine3"))
         return HITGROUP_CHEST;
 
     if (bone_id == gettagindex(ent, "Bip01 Pelvis")
      || bone_id == gettagindex(ent, "Bip01 Spine"))
         return HITGROUP_STOMACH;
 
+    // Arms: legacy HL studio rig uses Clavicle/UpperArm/Forearm; the
+    // IQM rig the mod converted to uses Arm/Arm1/Arm2 (see g_pbones
+    // in cl_player.qc).  gettagindex returns 0 for any name that
+    // doesn't exist in the current model, so listing both naming
+    // schemes is safe — only the present bones can ever match.
     if (bone_id == gettagindex(ent, "Bip01 L Clavicle")
      || bone_id == gettagindex(ent, "Bip01 L UpperArm")
      || bone_id == gettagindex(ent, "Bip01 L Forearm")
+     || bone_id == gettagindex(ent, "Bip01 L Arm")
+     || bone_id == gettagindex(ent, "Bip01 L Arm1")
+     || bone_id == gettagindex(ent, "Bip01 L Arm2")
      || bone_id == gettagindex(ent, "Bip01 L Hand"))
         return HITGROUP_LEFTARM;
 
     if (bone_id == gettagindex(ent, "Bip01 R Clavicle")
      || bone_id == gettagindex(ent, "Bip01 R UpperArm")
      || bone_id == gettagindex(ent, "Bip01 R Forearm")
+     || bone_id == gettagindex(ent, "Bip01 R Arm")
+     || bone_id == gettagindex(ent, "Bip01 R Arm1")
+     || bone_id == gettagindex(ent, "Bip01 R Arm2")
      || bone_id == gettagindex(ent, "Bip01 R Hand"))
         return HITGROUP_RIGHTARM;
 
@@ -151,6 +482,99 @@ float(float bone_id) W_BoneToHitgroup =
 };
 
 // Damage multiplier per hitgroup (CS 1.6 style).
+// Classify a hit into a hitgroup using bone names first, falling
+// back to a vertical Z-height bin when bone-name lookup returns
+// GENERIC.  The fallback covers two failure modes:
+//   - trace_bone_id == 0 (engine couldn't refine to a bone — happens
+//     on some IQM rigs depending on weight setup)
+//   - bone_id points at a bone whose name isn't in the classifier
+//     (renamed exports, custom rigs)
+// hit_pos is the world-space impact point (trace_endpos).  target is
+// the entity that was hit — used for its absmin/absmax to normalise
+// the Z fraction across both standing (~56 qu) and crouching (~32 qu)
+// player hulls without a hardcoded height.
+//
+// The Z fallback loses left/right arm distinction; both fold into the
+// "limb" bucket (HITGROUP_LEFTLEG by convention).  That's acceptable
+// because the multipliers for L/R arms + legs are all 0.75 — the
+// distinction only affects flinch animation choice, not damage.
+float(entity target, vector hit_pos, float bone_id) W_HitgroupClassify =
+{
+    if (!target || target == world)
+        return HITGROUP_GENERIC;
+
+    // Hitgroups are a player-anatomy concept (head / chest / stomach /
+    // arms / legs).  Non-player targets — func_breakables, phys props,
+    // dropped weapons, doors, anything else with a bbox — must NOT
+    // route through the Z-zone classifier below, because:
+    //   1. The Z-zone math just inspects the target's bbox; for a
+    //      tall crate it'd report "HEAD" for top-22% hits, "STOMACH"
+    //      for mid-low, etc.  Visually showed up in cl_debug_impacts
+    //      as red/yellow labels on inanimate objects.
+    //   2. Worse: W_HitgroupDamageMultiplier maps HITGROUP_HEAD to
+    //      4× damage, so top-of-bbox hits on breakables were silently
+    //      dealing 4× the intended damage — a stealth "crate
+    //      headshot" buff.
+    // GENERIC has a 1× multiplier and no debug label, which is what
+    // we want for non-player hits.
+    if (target.classname != "player"
+        && target.classname != "player_visual_proxy")
+        return HITGROUP_GENERIC;
+
+    // Z-fraction first.  On the IQM rig the bone-weight engine refine
+    // can route a clean headshot to a neck/upper-spine bone because
+    // the head triangle has higher weight on Bip01 Spine3 than on
+    // Bip01 Head — and the legacy bone-name classifier dutifully
+    // returns CHEST in that case, collapsing the head multiplier.
+    // Use the hit Z relative to the target's vertical bbox to win
+    // the head zone (top ~22%, generous CS-style head hitbox feel)
+    // regardless of what bone the engine picked.
+    float total_h = target.absmax_z - target.absmin_z;
+    float frac = 0;
+    if (total_h > 0)
+    {
+        frac = (hit_pos_z - target.absmin_z) / total_h;
+        if (frac >= 0.78)
+            return HITGROUP_HEAD;
+    }
+
+    // Bone-name lookup picks up specific arm/leg/spine distinctions
+    // the Z fallback would lose.  Swap trace_ent so W_BoneToHitgroup
+    // (which reads it as a global) sees our target without mutating
+    // the caller's trace state.
+    float hg;
+    {
+        entity saved_te = trace_ent;
+        trace_ent = target;
+        hg = W_BoneToHitgroup(bone_id);
+        trace_ent = saved_te;
+    }
+    if (hg != HITGROUP_GENERIC)
+        return hg;
+
+    // Final Z fallback for non-head zones when bone-name returned
+    // GENERIC (bone_id == 0 or unknown bone name).
+    if (total_h <= 0)
+        return HITGROUP_GENERIC;
+    float hg_z;
+    if      (frac >= 0.55) hg_z = HITGROUP_CHEST;
+    else if (frac >= 0.35) hg_z = HITGROUP_STOMACH;
+    else                   hg_z = HITGROUP_LEFTLEG;
+
+    // Optional verbose trace.  Spam-heavy by design — flip
+    // `cl_debug_hitgroup 1` for a shot or two when verifying that
+    // headshots are landing on the head hitgroup at the expected Z.
+    if (cvar("cl_debug_hitgroup"))
+    {
+        float bid_f = bone_id;
+        print(sprintf("[hitgroup] bone=%g name_hg=%g frac=%.2f z=(%.1f..%.1f hit=%.1f) final=%g\n",
+                      bid_f, hg, frac,
+                      target.absmin_z, target.absmax_z, hit_pos_z,
+                      hg_z));
+    }
+    return hg_z;
+};
+
 float(float hitgroup) W_HitgroupDamageMultiplier =
 {
     switch (hitgroup)
@@ -167,6 +591,43 @@ float(float hitgroup) W_HitgroupDamageMultiplier =
 };
 
 #ifdef CSQC
+// Forward decl — bullet tracers, defined in client/cl_tracers.qc
+// (compiled later in cl_progs.src order than this shared file).
+void(vector start_pos, vector end_pos) CSQC_SpawnTracer;
+// Forward decl — muzzle world-position resolver for tracer starts.
+vector() CSQC_MuzzleFlashWorldPos;
+
+void(vector src, vector end, float moveflags, entity ignore) CSQC_WeaponTraceLine =
+{
+    entity mask_ent;
+    int saved_mask;
+
+    if (!cvar("cl_weapontrace_ignore_playerclip"))
+    {
+        traceline(src, end, moveflags, ignore);
+        return;
+    }
+
+    mask_ent = ignore;
+    if (!mask_ent)
+        mask_ent = self;
+
+    if (!mask_ent || mask_ent == world)
+    {
+        traceline(src, end, moveflags, ignore);
+        return;
+    }
+
+    saved_mask = mask_ent.hitcontentsmaski;
+    if (saved_mask == 0i)
+        mask_ent.hitcontentsmaski = CONTENTBITS_POINTSOLID;
+    else
+        mask_ent.hitcontentsmaski = saved_mask & ~CONTENTBIT_PLAYERCLIP;
+
+    traceline(src, end, moveflags, ignore);
+    mask_ent.hitcontentsmaski = saved_mask;
+};
+
 // Hitmarker prediction.  Trust-mode split:
 //   sv_trust_clienthits >= 1 → client owns the hitmarker.  Predicted
 //     trace fires it instantly here; the server's CSQC_EVENT_HITMARKER
@@ -219,9 +680,54 @@ void(entity target, float body_dmg, float bone_id) CSQC_TryPredictDeath =
     if (target.vis_is_dead) return;
     if (target.vis_health <= 0) return;   // no health sample → don't guess
 
-    // Compute final damage the same way the server will
-    float hitgroup = W_BoneToHitgroup(bone_id);
-    float final_dmg = body_dmg * W_HitgroupDamageMultiplier(hitgroup);
+    // Friendly-fire gate: mirror the server's W_ApplyDamage / SV_HandleHitclaim
+    // FF rejection (sv_player.qc:2440, sv_weapons.qc:1039). When teams are
+    // active and FF is off, the server discards friendly hitclaims — so
+    // predicting the death here would flip vis_is_dead + play the death
+    // anim locally even though the teammate keeps moving on the server.
+    // Reads mp_friendlyfire from serverkey (server pushes it via serverinfo
+    // in sv_main.qc); falls back to cvar() for listen-server / pre-handshake.
+    if (!Gamemode_HasUnifiedTeams())
+    {
+        float local_team = getstati(STAT_PLAYERTEAM);
+        if (local_team > TEAM_NONE
+            && target.vis_team == local_team)
+        {
+            float ff = serverkeyfloat("mp_friendlyfire", -1);
+            if (ff < 0) ff = cvar("mp_friendlyfire");
+            if (!ff) return;
+        }
+    }
+
+    // Paintgun gamemode: every player-targeted paintball / snowball
+    // hit is a tag kill regardless of body damage.  Server bumps the
+    // claim to 1000 in SV_HandleHitclaim's paintgun branch; mirror
+    // the lethality decision here so cl_predict_death actually fires
+    // (otherwise body_dmg = ~5 fails the < vis_health check and the
+    // tag prediction never runs, leaving the local view "alive" for
+    // a round-trip while the server already counted the kill).
+    // Resolve hitgroup once.  In paintgun mode the multiplier doesn't
+    // matter (every hit is a fixed-damage kill), but we still need
+    // the hitgroup later to pick the matching death animation.
+    float hitgroup = W_HitgroupClassify(target, trace_endpos, bone_id);
+
+    float is_paintgun_kill = (getstatf(STAT_GAMEMODE) == GAMEMODE_PAINTGUN);
+    float final_dmg;
+    if (is_paintgun_kill)
+    {
+        // Server bumps paintball claims to 1000 in SV_HandleHitclaim's
+        // paintgun branch; mirror it here so cl_predict_death actually
+        // fires.  Without this the body damage (~5) fails the < vis_health
+        // check below and the predicted tag never plays.
+        final_dmg = 1000;
+    }
+    else
+    {
+        // Compute final damage the same way the server will — keeps
+        // the predicted death threshold aligned with the authoritative
+        // hitgroup + multiplier the server applies post-claim.
+        final_dmg = body_dmg * W_HitgroupDamageMultiplier(hitgroup);
+    }
 
     if (final_dmg < target.vis_health) return;   // non-lethal
 
@@ -276,8 +782,8 @@ void(entity target, float body_dmg, float bone_id) CSQC_TryPredictDeath =
         else
             gib_dir = '0 0 1';
 
-        // Same gib-count formula as the server.
-        float gib_count = bound(4, 4 + final_dmg / 25, 12);
+        // Matches the server's fixed gib count in sv_weapons.qc.
+        float gib_count = 6;
         CSQC_SpawnPlayerGibs(target.origin + '0 0 24', gib_dir, gib_count, final_dmg);
 
         // Latch so the server's late CSQC_EVENT_PLAYER_GIBS can be
@@ -343,22 +849,137 @@ void(entity target, float damage, float bone_id) CSQC_SendHitclaim =
         return;
     }
 
-    // Wire format: "hitclaim <slot> <body_damage> <bone_id>". Body damage
-    // is the pre-multiplier falloff value; server applies hitgroup scale.
+    // Ghost-corpse damage gate.  At low listen-server FPS the CSQC can
+    // hold a stale visual proxy in alive pose at the death location
+    // even after the player has respawned elsewhere — vis_is_dead got
+    // flipped by the server's IDENTITY snapshot, but the POSE / origin
+    // update hasn't caught up so the body looks alive and stationary.
+    // Shooting that "ghost" would otherwise forward a hitclaim with
+    // the player's slot to the server, which then damages the live
+    // respawned player at the spawn point.  Refuse to send the claim
+    // when the local proxy reports dead — the server's authoritative
+    // damage trace still works for non-stale paths.
+    if (target.classname == "player_visual_proxy" && target.vis_is_dead)
+    {
+        if (dbg) print(sprintf("[hitclaim-cl] skip: target proxy slot=%g is vis_is_dead (ghost?)\n",
+                               target_slot));
+        return;
+    }
+
+    // Compute the hitgroup right here on the client.  The client has
+    // the player model loaded for rendering so gettagindex works
+    // reliably, and W_HitgroupClassify's Z fallback covers IQM rigs
+    // where bone-name lookup is unreliable.  Sending the classified
+    // hitgroup means the server doesn't need to repeat the work in
+    // a context (post-cmd-parse) where its own model state may not be
+    // ready for tag queries.
+    float claim_hg = W_HitgroupClassify(target, trace_endpos, bone_id);
+
+    // Wire format:
+    //   hitclaim <slot> <body_damage> <bone_id> <hitgroup> <life_serial>
+    // life_serial is mirrored from the visual proxy's owner slot and
+    // lets the server reject stale old-life/corpse proxies after respawn.
+    // Body damage is the pre-multiplier falloff value; the hitgroup
+    // byte drives the multiplier on the server.  Older builds without
+    // the 4th arg fall back to server-side bone lookup.
     if (dbg)
     {
         float bone_f = bone_id;   // coerce int→float for sprintf
-        print(sprintf("[hitclaim-cl] SEND slot=%g dmg=%.0f bone=%g classname='%s'\n",
-                      target_slot, damage, bone_f, target.classname));
+        print(sprintf("[hitclaim-cl] SEND slot=%g dmg=%.0f bone=%g hg=%g life=%g classname='%s'\n",
+                      target_slot, damage, bone_f, claim_hg,
+                      target.vis_life_serial, target.classname));
     }
-    localcmd(sprintf("cmd hitclaim %g %g %g\n", target_slot, damage, bone_id));
+    localcmd(sprintf("cmd hitclaim %g %g %g %g %g\n",
+                     target_slot, damage, bone_id, claim_hg,
+                     target.vis_life_serial));
 
     // Predicted death — runs whenever the helper's lethality check
     // fires. Independent of sv_trust_clienthits because the death is a
     // pure visual (server's authoritative kill arrives ~ping ms later
     // either way). Gated on cl_predict_death so users can disable.
+    // Runs BEFORE the flinch predict below so the flinch can check
+    // vis_is_dead to skip itself on lethal hits.
     if (cvar("cl_predict_death"))
         CSQC_TryPredictDeath(target, damage, bone_id);
+
+    // Predicted flinch — set vis_flinch_until on the target proxy
+    // so the shooter sees the recoil instantly (without waiting for
+    // the server's CSQC_EVENT_PLAYER_FLINCH multicast ~ping ms
+    // later).  Server fires the same event for OTHER clients; the
+    // shooter's prediction here is overwritten by the server event
+    // when it arrives — harmless since both set the same value.
+    //
+    // Gated on:
+    //   - target is a visual proxy
+    //   - cl_player_flinch_time > 0 (cvar opt-out)
+    //   - target is NOT dying — vis_is_dead set by CSQC_TryPredictDeath
+    //     above when the predicted final_dmg >= vis_health.  Without
+    //     this gate, lethal hits flinch the body briefly before the
+    //     death anim kicks in, which the user reported as "the flinch
+    //     messes with the death animation".
+    //
+    // Hitgroup derivation: bone_id 0 means "no bone info" (body shot,
+    // GUT flinch).  We can't run W_BoneToHitgroup client-side, so we
+    // default to GUT and let the server multicast overwrite with
+    // HEAD when applicable.
+    if (target.classname == "player_visual_proxy"
+        && !target.vis_is_dead
+        && cvar("cl_player_flinch_time") > 0)
+    {
+        float fdur = cvar("cl_player_flinch_time");
+        target.vis_flinch_until    = cltime + fdur;
+        target.vis_flinch_hitgroup = HITGROUP_GENERIC;
+    }
+};
+
+// Send a breakclaim to the server.  Mirror of CSQC_SendHitclaim but for
+// func_breakable targets — when sv_trust_clientbreak is ON, client owns
+// the damage source (sends per-shot claims here) and server defers its
+// own trace damage on those targets so they don't double-apply.
+//
+// Pre-conditions checked before sending:
+//   - not in pmove replay (claim was already sent on the live tick)
+//   - server pushed sv_trust_clientbreak >= 1 via serverinfo (otherwise
+//     server would reject and we'd waste a packet)
+//   - cl_predict_hits is on (W_ShouldDeferBreakToClaim mirrors this gate
+//     so a player who opts out of prediction sees server-auth as today)
+//   - target is a real damageable non-player entity with a valid entnum
+//   - damage is positive
+//
+// Wire format: "breakclaim <target_entnum> <damage>".  Server validates
+// classname == func_breakable and applies via W_ApplyDamage.
+void(entity target, float damage) CSQC_SendBreakClaim =
+{
+    float dbg = cvar("cl_debug_hitclaim");
+
+    if (pm_suppress_sounds)
+    {
+        if (dbg) print("[breakclaim-cl] skip: pm_suppress_sounds (replay)\n");
+        return;
+    }
+    if (serverkeyfloat("sv_trust_clientbreak", 0) < 1)
+        return;
+    if (!cvar("cl_predict_hits"))
+    {
+        if (dbg) print("[breakclaim-cl] skip: cl_predict_hits=0\n");
+        return;
+    }
+    if (!target || target == world)
+        return;
+    if (target.classname == "player" || target.classname == "player_visual_proxy")
+        return;
+    if (target.entnum <= 0)
+        return;
+    if (damage <= 0)
+        return;
+
+    if (dbg)
+    {
+        float ent_f = target.entnum;
+        print(sprintf("[breakclaim-cl] SEND ent=%g dmg=%.0f classname='%s'\n",
+                      ent_f, damage, target.classname));
+    }
+    localcmd(sprintf("cmd breakclaim %g %g\n", target.entnum, damage));
 };
 
 // Fire a predicted traceline and show impact effect instantly.
@@ -370,6 +991,16 @@ void(float spread_base, float spread_move, float spread_fullspeed,
 {
     vector src, dir, end, flat_vel;
     float move_speed, spread, sx, sy;
+
+    // Scope the per-shot decal + impact-light caps to THIS predicted
+    // shot.  W_PenetratingHitscanShoot's reset only runs on SSQC, so
+    // without these the local shooter never resets and the very first
+    // post-spawn shot leaves the counter pegged for the rest of the
+    // session.
+#ifdef CSQC
+    CSQC_BulletHoles_ResetShot();
+    CSQC_Impact_ResetShot();
+#endif
 
     CSQC_MuzzleFlash();
 
@@ -402,13 +1033,22 @@ void(float spread_base, float spread_move, float spread_fullspeed,
     // the player MDL — so trace_endpos lands on the actual hit bone if a
     // bone was hit, or continues to the wall behind if all bones were
     // missed. Either way the visual matches reality.
-    traceline(src, end, MOVE_NORMAL | MOVE_HITMODEL, self);
+    //
+    // sv_hitbox_expand widens each remote proxy's bbox for the duration
+    // of the trace so MOVE_HITMODEL can reach outstretched limbs — same
+    // forgiveness the server-auth hitscan path already applies on its
+    // side (server/sv_weapons.qc).  Without it, sv_trust_clienthits 1
+    // shooters were missing limbs the server would have hit.
+    W_PlayersExpandHitboxes();
+    CSQC_WeaponTraceLine(src, end, MOVE_NORMAL | MOVE_HITMODEL, self);
+    W_PlayersRestoreHitboxes();
 
     // Phys props (barrel/can) are CSQC-replicated SOLID_NOT (so pmove
     // ignores them — server uses a tighter trimesh).  This pass does
     // a manual ray-vs-AABB against each prop and overrides the trace
     // globals if any prop sits closer than the current hit.
     CSQC_PhysProp_OverrideTrace(src, end);
+    CSQC_DroppedWeapon_OverrideTrace(src, end);
 
     if (trace_fraction < 1.0)
     {
@@ -457,13 +1097,43 @@ void(float spread_base, float spread_move, float spread_fullspeed,
             CSQC_BulletImpact(trace_endpos, trace_plane_normal, damage);
         }
         if (cvar("cl_debug_impacts"))
-            CSQC_AddDebugImpact(trace_endpos, src, '0 1 0', 0, 0);
+        {
+            // Player hits: report the CLIENT'S predicted damage in
+            // yellow with the resolved hitgroup label.  Under
+            // sv_trust_clienthits the client is the authority on what
+            // damage just landed; showing the server's auth number
+            // would either double-report or worse, contradict the
+            // client's own damage prediction.  Non-player hits keep
+            // the simple green dot (no hitgroup, no damage).
+            if (is_player_hit)
+            {
+                float pred_hg  = W_HitgroupClassify(trace_ent, trace_endpos, trace_bone_id);
+                float pred_dmg = damage * W_HitgroupDamageMultiplier(pred_hg);
+                CSQC_AddDebugImpact(trace_endpos, src, '1 1 0',
+                                    pred_dmg, pred_hg);
+            }
+            else if (!(trace_ent && trace_ent.classname == "csqc_dropped_weapon"))
+                CSQC_AddDebugImpact(trace_endpos, src, '0 1 0', 0, 0);
+        }
     }
     else if (cvar("cl_debug_hitclaim"))
     {
         // Trace went the full 8192 — completely missed. Helps distinguish
         // "missed everything" from "hit a non-player solid".
         print("[predict-impact] trace_fraction=1 (no hit)\n");
+    }
+
+    // Bullet tracer (visual only) — spawn from eye to wherever the
+    // trace ended (impact point on hit, far end on miss).  Suppressed
+    // during reconcile-replay so each shot only emits one ribbon.
+    if (!pm_suppress_sounds)
+    {
+        // Tracer start = muzzle world position (set by the same
+        // weapon's CSQC_MuzzleFlashAtMuzzle call earlier this
+        // tick).  Falls back to camera origin if no muzzle flash
+        // fired — the cl_tracers offset hack handles that case.
+        vector tr_start = CSQC_MuzzleFlashWorldPos();
+        CSQC_SpawnTracer(tr_start, (trace_fraction < 1.0) ? trace_endpos : end);
     }
 };
 
@@ -474,15 +1144,34 @@ void(float spread_base, float spread_move, float spread_fullspeed,
 // MOVE_NORMAL only (no MOVE_HITMODEL) — re-traces are BSP-vs-bsp.
 void(float spread_base, float spread_move, float spread_fullspeed,
      float close_dmg, float min_dmg, float falloff_range,
-     float pen_power, float pen_dmg_mult) CSQC_PredictedPenetratingImpact =
+     float pen_power, float pen_dmg_mult,
+     optional float kick_pitch, optional float kick_variance,
+     optional float kick_strength) CSQC_PredictedPenetratingImpact =
 {
     vector src, dir, end, flat_vel, entry_pos, exit_pos, exit_normal, nudge_pos;
     float move_speed, spread, sx, sy, dist, damage, wall_thick;
     float pen_remaining, pen_count, is_player_hit;
 
+    // Per-shot reset — see comment in CSQC_PredictedImpact.
+#ifdef CSQC
+    CSQC_BulletHoles_ResetShot();
+    CSQC_Impact_ResetShot();
+#endif
+
     CSQC_MuzzleFlash();
 
+    // Apply the per-shot kick impulse first so the trace direction
+    // below uses the kicked aim (matches W_PenetratingHitscanShoot on
+    // the server side). Without this, decals predicted on the client
+    // would appear at the un-kicked direction and snap to the kicked
+    // direction when the server snapshot arrives.
+    SH_ApplyViewKick(kick_pitch, kick_variance, kick_strength);
+
+    vector saved_input = input_angles;
+    input_angles_x += self.view_kick_pitch;
+    input_angles_y += self.view_kick_yaw;
     makevectors(input_angles);
+    input_angles = saved_input;
     vector fwd = v_forward;
     vector rt  = v_right;
     vector up  = v_up;
@@ -506,11 +1195,35 @@ void(float spread_base, float spread_move, float spread_fullspeed,
         dir = fwd;
     end = src + dir * 8192;
 
-    traceline(src, end, MOVE_NORMAL | MOVE_HITMODEL, self);
+    // sv_hitbox_expand around the MOVE_HITMODEL initial trace so the
+    // engine's bbox-cull doesn't reject reach bones (outstretched
+    // arms/legs that poke past the strict movement hull).  Mirrors
+    // the wrapping already done in CSQC_PredictedImpact.  Penetration
+    // back-traces below are MOVE_NORMAL only — they probe wall
+    // thickness, not player hits, so they stay unexpanded to avoid
+    // spurious hits on expanded bbox empty air.
+    W_PlayersExpandHitboxes();
+    CSQC_WeaponTraceLine(src, end, MOVE_NORMAL | MOVE_HITMODEL, self);
+    W_PlayersRestoreHitboxes();
     CSQC_PhysProp_OverrideTrace(src, end);
+    CSQC_DroppedWeapon_OverrideTrace(src, end);
 
     pen_remaining = pen_power;
     pen_count = 0;
+
+    // Tracer from the muzzle to the FIRST impact (or the far end on
+    // a clean miss).  Penetration re-traces overwrite trace_endpos
+    // and `src` later in the loop, so capture it here.  Suppressed
+    // during reconcile-replay.
+    if (!pm_suppress_sounds)
+    {
+        // Tracer start = muzzle world position (set by the same
+        // weapon's CSQC_MuzzleFlashAtMuzzle call earlier this
+        // tick).  Falls back to camera origin if no muzzle flash
+        // fired — the cl_tracers offset hack handles that case.
+        vector tr_start = CSQC_MuzzleFlashWorldPos();
+        CSQC_SpawnTracer(tr_start, (trace_fraction < 1.0) ? trace_endpos : end);
+    }
 
     while (trace_fraction < 1.0 && pen_count < 4)
     {
@@ -547,7 +1260,8 @@ void(float spread_base, float spread_move, float spread_fullspeed,
         // exit decal pinned to world space would slide off.
         float entry_was_physprop =
             (trace_ent.classname == "phys_barrel" ||
-             trace_ent.classname == "phys_can");
+             trace_ent.classname == "phys_can" ||
+             trace_ent.classname == "csqc_dropped_weapon");
 
         dist   = vlen(trace_endpos - src);
         damage = W_LinearDamageFalloff(dist, close_dmg, min_dmg, falloff_range);
@@ -558,13 +1272,25 @@ void(float spread_base, float spread_move, float spread_fullspeed,
             CSQC_BulletImpactSilent(trace_endpos, trace_plane_normal);
             CSQC_SendHitclaim(trace_ent, damage, trace_bone_id);
             if (cvar("cl_debug_impacts"))
-                CSQC_AddDebugImpact(trace_endpos, src, '0 1 0', 0, 0);
+            {
+                // Player hit in the penetration path — use the same
+                // yellow + hitgroup-damage report the non-penetration
+                // impact uses, so the user reads the actual landed damage.
+                float pen_hg  = W_HitgroupClassify(trace_ent, trace_endpos, trace_bone_id);
+                float pen_dmg = damage * W_HitgroupDamageMultiplier(pen_hg);
+                CSQC_AddDebugImpact(trace_endpos, src, '1 1 0', pen_dmg, pen_hg);
+            }
             break;   // bullets stop on player (matches server)
         }
         else
         {
             CSQC_BulletImpact(trace_endpos, trace_plane_normal, damage);
-            if (cvar("cl_debug_impacts"))
+            // Skip the green-dot debug marker when the trace stopped on a
+            // dropped weapon's AABB.  The bullet didn't really hit the
+            // mesh; flagging it visually would just add noise around
+            // every gun on the ground.
+            if (cvar("cl_debug_impacts")
+                && !(trace_ent && trace_ent.classname == "csqc_dropped_weapon"))
                 CSQC_AddDebugImpact(trace_endpos, src, '0 1 0', 0, 0);
         }
 
@@ -572,12 +1298,13 @@ void(float spread_base, float spread_move, float spread_fullspeed,
 
         entry_pos = trace_endpos;
         nudge_pos = entry_pos + dir * pen_remaining;
-        traceline(nudge_pos, entry_pos, MOVE_NORMAL, self);
+        CSQC_WeaponTraceLine(nudge_pos, entry_pos, MOVE_NORMAL, self);
         // CSQC traceline can't see phys props (server-replicated, .solid=0
         // on the client side).  Reuse the cylinder hit-test here so the
         // back-trace lands on the prop's back face — lets penetration
         // continue past a barrel/can with the correct wall_thick chord.
         CSQC_PhysProp_OverrideBackTrace(nudge_pos, entry_pos);
+        CSQC_DroppedWeapon_OverrideTrace(nudge_pos, entry_pos);
         if (trace_fraction >= 1.0) break;
 
         exit_pos    = trace_endpos;
@@ -593,16 +1320,18 @@ void(float spread_base, float spread_move, float spread_fullspeed,
 
         if (!entry_was_physprop)
             CSQC_BulletImpact(exit_pos, exit_normal, close_dmg);
-        if (cvar("cl_debug_impacts"))
+        if (cvar("cl_debug_impacts")
+            && !(trace_ent && trace_ent.classname == "csqc_dropped_weapon"))
             CSQC_AddDebugImpact(exit_pos, src, '0 1 0', 0, 0);
 
         src = exit_pos + dir * 1;
         pen_count++;
-        traceline(src, end, MOVE_NORMAL, self);
+        CSQC_WeaponTraceLine(src, end, MOVE_NORMAL, self);
         // Cylinder check on the post-pen forward trace too — without it,
         // a bullet that pierces a wall and then hits a barrel beyond
         // would dead-end on the wall behind the barrel and decal there.
         CSQC_PhysProp_OverrideTrace(src, end);
+        CSQC_DroppedWeapon_OverrideTrace(src, end);
     }
 
     // If the loop exited without an `is_player_hit` break, the bullet
@@ -617,19 +1346,49 @@ void(float spread_base, float spread_move, float spread_fullspeed,
 // Fire N predicted pellets (shotgun). Damage params match the server's
 // per-pellet falloff so break prediction agrees with authoritative HP math.
 void(float pellets, float spread_val,
-     float close_dmg, float min_dmg, float falloff_range) CSQC_PredictedShotgunImpact =
+     float close_dmg, float min_dmg, float falloff_range,
+     optional float kick_pitch, optional float kick_variance,
+     optional float kick_strength) CSQC_PredictedShotgunImpact =
 {
     vector src, dir, end;
     vector fwd, rt, up;
     float sx, sy, i;
 
+    // Per-shot reset — shotgun pellets are one shot.  See comment in
+    // CSQC_PredictedImpact.
+#ifdef CSQC
+    CSQC_BulletHoles_ResetShot();
+    CSQC_Impact_ResetShot();
+#endif
+
     CSQC_MuzzleFlash();
 
+    // sv_gunkick — one impulse per trigger pull (not per pellet),
+    // mirroring the server's W_*FirePellets path. Bias input_angles
+    // before makevectors so every predicted pellet uses the kicked
+    // aim — same as the penetrating-hitscan equivalent.
+    SH_ApplyViewKick(kick_pitch, kick_variance, kick_strength);
+
+    vector saved_input = input_angles;
+    input_angles_x += self.view_kick_pitch;
+    input_angles_y += self.view_kick_yaw;
     makevectors(input_angles);
+    input_angles = saved_input;
     fwd = v_forward;
     rt  = v_right;
     up  = v_up;
     src = self.origin + self.view_ofs;
+
+#ifdef CSQC
+    // Bypass cl_bulletholes_per_shot for the pellet loop — the user-
+    // intuitive "shot" here is the trigger pull, not the individual
+    // pellet trace.  Without this gate a per_shot_cap of 1 leaves only
+    // the first pellet's decal and the rest of the spray invisible.
+    // Also reset the ric-played latch so the FIRST pellet of this
+    // blast plays its ricochet, then the rest stay silent.
+    bh_shotgun_blast = 1;
+    bh_shotgun_ric_played = 0;
+#endif
 
     for (i = 0; i < pellets; i++)
     {
@@ -638,8 +1397,16 @@ void(float pellets, float spread_val,
         dir = normalize(fwd + rt * sx + up * sy);
         end = src + dir * 8192;
 
-        traceline(src, end, MOVE_NORMAL | MOVE_HITMODEL, self);
+        // Per-pellet expand/restore.  Slightly redundant inside the
+        // loop (the player bboxes don't change between pellets), but
+        // keeps the bookend pattern consistent with the other CSQC
+        // hitscan paths and avoids leaving the world in expanded
+        // state if a future early-return slips in.
+        W_PlayersExpandHitboxes();
+        CSQC_WeaponTraceLine(src, end, MOVE_NORMAL | MOVE_HITMODEL, self);
+        W_PlayersRestoreHitboxes();
         CSQC_PhysProp_OverrideTrace(src, end);
+        CSQC_DroppedWeapon_OverrideTrace(src, end);
 
         if (trace_fraction < 1.0)
         {
@@ -671,10 +1438,22 @@ void(float pellets, float spread_val,
             {
                 CSQC_BulletImpact(trace_endpos, trace_plane_normal, damage);
             }
-            if (cvar("cl_debug_impacts"))
+            if (cvar("cl_debug_impacts")
+                && !(trace_ent && trace_ent.classname == "csqc_dropped_weapon"))
                 CSQC_AddDebugImpact(trace_endpos, src, '0 1 0', 0, 0);
         }
+
+        // Tracer per pellet — common shotgun look has one streak per
+        // pellet rather than a single ribbon, since each pellet
+        // travels its own path through the spread.  Suppressed during
+        // reconcile-replay so each pellet only emits one ribbon.
+        if (!pm_suppress_sounds)
+            CSQC_SpawnTracer(src, (trace_fraction < 1.0) ? trace_endpos : end);
     }
+
+#ifdef CSQC
+    bh_shotgun_blast = 0;
+#endif
 };
 
 // Fire a predicted melee trace and show hit effect / play hit sound.
@@ -697,7 +1476,12 @@ float(float range, float damage,
     src = self.origin + self.view_ofs;
     end = src + v_forward * range;
 
-    traceline(src, end, MOVE_NORMAL | MOVE_HITMODEL, self);
+    // sv_hitbox_expand around the melee MOVE_HITMODEL trace too —
+    // knife slashes against a player whose arm is mid-swing past the
+    // movement hull were missing for the same bbox-cull reason.
+    W_PlayersExpandHitboxes();
+    CSQC_WeaponTraceLine(src, end, MOVE_NORMAL | MOVE_HITMODEL, self);
+    W_PlayersRestoreHitboxes();
 
     if (trace_fraction < 1.0)
     {
@@ -717,8 +1501,28 @@ float(float range, float damage,
             CSQC_PredictBreakableBreak(trace_ent, damage);
         }
 
-        CSQC_BulletImpactSilent(trace_endpos, trace_plane_normal);
-        if (cvar("cl_debug_impacts"))
+        // Visual impact effect — branch on hit type the same way
+        // sh_wpn_melee.qc / sh_wpn_katana.qc do for their direct
+        // CSQC_PredictMeleeStrike paths:
+        //   player hit → flesh particle burst (CSQC_BulletImpactSilent
+        //                routes via Impact_SpawnParticles, which already
+        //                picks the flesh-lethal variant for players)
+        //   wall hit   → smoke puff only, no sparks / chips, no decal.
+        //                Impact_SpawnSmokeOnly is NOT quality-gated, so
+        //                the smoke shows even at cl_impact_quality 1
+        //                where the bullet-impact "fast" variant is
+        //                sparks-only.
+        if (is_player_hit)
+        {
+            CSQC_BulletImpactSilent(trace_endpos, trace_plane_normal);
+        }
+        else
+        {
+            vector ip_pos = trace_endpos + trace_plane_normal * Impact_ParticleOffset();
+            Impact_SpawnSmokeOnly(ip_pos, trace_plane_normal);
+        }
+        if (cvar("cl_debug_impacts")
+            && !(trace_ent && trace_ent.classname == "csqc_dropped_weapon"))
             CSQC_AddDebugImpact(trace_endpos, src, '0 1 0', 0, 0);
         if (hit_snd2 != "" && random() < 0.5)
             localsound(hit_snd2);
@@ -749,5 +1553,68 @@ void() CSQC_MarkPendingWeaponAck =
 
     csqc_weapon_pending_ack_sequence
         = max(csqc_weapon_pending_ack_sequence, csqc_pred_sequence);
+};
+
+float csqc_fire_effect_restore_suppress;
+
+float() CSQC_BeginFireActionEffects =
+{
+    // High-water-mark dedup on wep_action_id.  See the long comment on
+    // .csqc_fire_effect_action_id in shared/sh_customdefs.qc for why
+    // action_id is the right key (handles multi-fire-within-one-cmd
+    // at high render rates) and why we use strict `>` comparison
+    // (handles snapshot rewind without re-pinning).
+    //
+    // Self-heal for live ticks only.  If something rewound action_id
+    // below the mark without going through the dedicated reset site
+    // (the rewind-detector in cl_player.qc CSQC_Ent_Update), drop the
+    // mark just below the new action_id so the next fire can proceed.
+    // Examples that hit this path: a live `sv_mintic` change that
+    // briefly re-seeds server-confirmed state, an out-of-band weapon
+    // reset, anything else that leaves predicted_player.wep_action_id
+    // stale-low against the mark.
+    //
+    // Reconcile replay must NOT take this branch — during replay the
+    // mark legitimately exceeds the current action_id while replay
+    // re-walks buffered commands oldest→newest, and self-healing
+    // would re-emit effects for already-emitted shots.  Gated on
+    // pm_suppress_sounds (TRUE during replay, FALSE during live —
+    // checked at function entry before BeginFireActionEffects itself
+    // temporarily unsuppresses for the effect block).
+    if (!pm_suppress_sounds
+        && self.wep_action_id < self.csqc_fire_effect_action_id)
+        self.csqc_fire_effect_action_id = self.wep_action_id - 1;
+
+    if (self.wep_action_id <= self.csqc_fire_effect_action_id)
+    {
+        // Verification diagnostic — set cl_debug_hitclaim 1 in console
+        // and a sustained burst should produce ZERO of these lines if
+        // the latch is working correctly.  Remove after confirming.
+        if (cvar("cl_debug_hitclaim"))
+            print(sprintf("[fire-gate-skip] action_id=%g mark=%g cltime=%g pm_suppress=%g\n",
+                  self.wep_action_id, self.csqc_fire_effect_action_id,
+                  cltime, pm_suppress_sounds));
+        return FALSE;
+    }
+    self.csqc_fire_effect_action_id = self.wep_action_id;
+    csqc_weapon_pending_ack_sequence
+        = max(csqc_weapon_pending_ack_sequence, csqc_pred_sequence);
+
+    // Reconcile replay normally runs with pm_suppress_sounds=TRUE so
+    // old commands don't duplicate one-shot effects.  If replay is
+    // the FIRST place we discover this action_id (i.e. it climbs PAST
+    // the high-water mark during a replay tick — the original live
+    // run hadn't seen it yet, e.g. freshly buffered cmds after a
+    // snapshot reset), temporarily unsuppress so the replay-time
+    // trace can spawn visuals and send the trust-client hit/break
+    // claim exactly once.
+    csqc_fire_effect_restore_suppress = pm_suppress_sounds;
+    pm_suppress_sounds = FALSE;
+    return TRUE;
+};
+
+void() CSQC_EndFireActionEffects =
+{
+    pm_suppress_sounds = csqc_fire_effect_restore_suppress;
 };
 #endif

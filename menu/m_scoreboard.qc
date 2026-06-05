@@ -31,16 +31,111 @@ float HUD_SCOREBOARD_OUTER_PADDING = 14;
 float HUD_SCOREBOARD_PICTURE_SIZE = 16;
 float HUD_SCOREBOARD_SHADOW_OFFSET = 1;
 
-float() HUD_ScoreboardVisible =
+// ============================================================
+//  Slide-in / slide-out + fade animation
+// ============================================================
+// The scoreboard rises from below + fades in over SB_ANIM_IN seconds
+// when +scoreboard is held, and falls back down + fades out over
+// SB_ANIM_OUT seconds when released.  Easing curves match the user's
+// described feel:
+//   • Rising:  ease-OUT cubic — moves quickly at first, slows to
+//              a stop at rest position (1 - (1-t)^3).
+//   • Falling: ease-IN cubic  — starts slow, accelerates downward
+//              as it leaves the rest position (t^3).
+//
+// sb_anim_progress is the linear 0..1 progress through the active
+// transition (0 = fully hidden, 1 = fully shown).  The eased value
+// derived from it drives both the Y offset and the alpha multiplier
+// applied across every drawing helper in this file.
+//
+// HUD_ScoreboardVisible reports TRUE while sb_anim_progress > 0 so
+// HUD_DrawScoreboard keeps being invoked during the fade-out tail
+// (even after hud_scoreboard_held returns to 0).
+// Animation timing is driven by cvars so the user can tune it without
+// recompiling.  SB_ANIM_IN_DEFAULT / SB_RISE_DEFAULT are the fallback
+// values used when the cvar is unset or non-positive.  The OUT
+// animation is always 20% slower than the IN — derived rather than
+// surfaced as its own cvar because the two ratios shouldn't drift
+// independently (the close should always have a bit more weight than
+// the open).
+const float SB_ANIM_IN_DEFAULT  = 0.18;
+const float SB_OUT_RATIO        = 1.2;     // OUT = IN * 1.2 = 20% slower
+const float SB_RISE_DEFAULT     = 20;
+
+// cl_scoreboard_time / cl_scoreboard_raise both default to non-zero
+// (set in shared/sh_cvar_table.qc), but EXPLICITLY allowing 0 lets
+// the user disable the animation entirely — board snaps in/out
+// instantly, no rise.  Negative values are clamped to 0 (treated as
+// "disabled").  The animation tick reads these and skips the lerp
+// when the duration is 0.
+float() SB_AnimIn =
 {
-    return hud_scoreboard_held;
+    float v = cvar("cl_scoreboard_time");
+    if (v < 0) v = 0;
+    return v;
 };
 
-// Drop-shadowed text helper
+float() SB_AnimOut = { return SB_AnimIn() * SB_OUT_RATIO; };
+
+float() SB_RiseDistance =
+{
+    float v = cvar("cl_scoreboard_raise");
+    if (v < 0) v = 0;
+    return v;
+};
+float sb_anim_progress;                // 0..1 linear, advances toward target each frame
+float sb_anim_last_cltime;             // dt accumulator anchor
+float sb_alpha_mult;                   // global alpha multiplier — set per-frame in HUD_DrawScoreboard, read by helpers
+float sb_y_offset;                     // px added to board_y this frame (positive = below rest)
+// Latched while the team-select picker is open OR fading out.  Set TRUE
+// each frame TeamMenuIsOpen() is true; only cleared once the animation
+// reaches 0 with the menu closed.  Lets the title stay "Select a Team"
+// and keeps the Join buttons rendering through the fade-out tail (so
+// they fade out via sb_alpha_mult instead of vanishing instantly).
+float sb_anim_is_teamselect;
+
+float() HUD_ScoreboardVisible =
+{
+    // Keep reporting visible during the fade-out so the draw fn
+    // gets called and the animation can finish.  TeamMenuIsOpen() is
+    // the persistent "team picker is up" state — referenced here
+    // (instead of the per-call hud_scoreboard_teamselect flag) so
+    // both the cl_main.qc draw path and the TeamMenuDraw draw path
+    // agree on the showing condition each frame.  Without that
+    // agreement the two paths fight each other within a single
+    // frame: cl_main ticks the anim down (showing=false) and
+    // TeamMenuDraw can't tick it back up because dt=0 the second
+    // time through.
+    return hud_scoreboard_held || TeamMenuIsOpen() || sb_anim_progress > 0;
+};
+
+// Snap the scoreboard's slide / fade animation straight to fully
+// hidden.  Called from CharacterMenuSelect when the user confirms a
+// model — the team menu is about to close as the join completes,
+// and the user wants the picker to vanish instantly rather than
+// playing the usual fade-out tail (which would be a redundant
+// "going-away" animation right when they're trying to spawn).
+//
+// Setting sb_anim_progress to 0 is enough to skip the fade-out, but
+// we must ALSO clear sb_anim_is_teamselect — otherwise the latch carries
+// over into the next +showscores press and the regular scoreboard
+// renders as the team picker (title says "Select a Team" + Join Blue/Red
+// buttons appear) until the bail-out branch finally fires.
+void() HUD_ScoreboardSnapHidden =
+{
+    sb_anim_progress = 0;
+    sb_anim_is_teamselect = FALSE;
+};
+
+// Drop-shadowed text helper.  Multiplies through the scoreboard
+// animation's global alpha multiplier so every text element on the
+// scoreboard fades together — no need to plumb an alpha arg through
+// every call site.
 void(vector pos, string text, vector sz, vector col, float alpha) HUD_ShadowString =
 {
-    drawstring(pos + '1 1 0' * HUD_SCOREBOARD_SHADOW_OFFSET, text, sz, '0 0 0', alpha * 0.5, 0);
-    drawstring(pos, text, sz, col, alpha, 0);
+    float a = alpha * sb_alpha_mult;
+    drawstring(pos + '1 1 0' * HUD_SCOREBOARD_SHADOW_OFFSET, text, sz, '0 0 0', a * 0.5, 0);
+    drawstring(pos, text, sz, col, a, 0);
 };
 
 float(float player_index) HUD_ScoreboardPlayerTeam =
@@ -109,307 +204,298 @@ float(float team_id) HUD_ScoreboardCountTeamPlayers =
     return count;
 };
 
-// FFA single-column draw: same row layout as HUD_DrawScoreboardColumn but
-// includes every player whose backend team is BLUE or RED (skipping SPEC /
-// NONE), draws their actual team's picture (so blue-model and red-model
-// players still render with their matching icon), and uses one shared
-// header. No team filter — FFA presents everyone as one pool.
-void(string label, vector pos, vector size, vector fill_colour, vector border_colour) HUD_DrawScoreboardColumnFFA =
+// Cheap rounded-corner helper — 2 px chamfer built from 3 axis-aligned
+// drawfill rects.  At UI sizes (24 px row height) the eye reads it as
+// "rounded".  Real anti-aliased corners would need an alpha-mask pic
+// per corner; not worth the asset overhead for the scoreboard plates.
+//
+//             top strip (W-2 wide, 1 tall, +1px x)
+//   row 0     ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+//   1..H-2   ░░░░░  middle (W wide, H-2 tall) ░░░░░
+//   H-1       ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+//             bottom strip (W-2 wide, 1 tall, +1px x)
+void(vector pos, vector size, vector colour, float alpha) HUD_DrawChamferRect =
 {
-    float currentindex;
-    float row_index;
-    float row_is_even;
-    float row_y;
-    float text_y;
-    float pic_y;
-    string player_name;
-    float frags;
-    float deaths;
-    float ping;
-    float kills_x;
-    float deaths_x;
-    float ping_x;
-    float header_text_y;
-    float is_local;
-    float pteam;
-    vector text_sz;
-
-    text_sz = [HUD_SCOREBOARD_TEXT_SIZE, HUD_SCOREBOARD_TEXT_SIZE, 0];
-
-    kills_x = pos_x + size_x - 90;
-    deaths_x = pos_x + size_x - 62;
-    ping_x = pos_x + size_x - 34;
-
-    drawfill(pos, size, '0.08 0.09 0.11', 0.94, 0);
-    drawfill(pos, [size_x, HUD_SCOREBOARD_HEADER_HEIGHT, 0], fill_colour, 0.94, 0);
-    drawfill(pos, [size_x, 2, 0], border_colour, 1.0, 0);
-    drawfill([pos_x, pos_y + size_y - 2, 0], [size_x, 2, 0], border_colour, 1.0, 0);
-    drawfill(pos, [2, size_y, 0], border_colour, 1.0, 0);
-    drawfill([pos_x + size_x - 2, pos_y, 0], [2, size_y, 0], border_colour, 1.0, 0);
-
-    drawfont = hud_font;
-    header_text_y = pos_y + (HUD_SCOREBOARD_HEADER_HEIGHT - HUD_SCOREBOARD_TEXT_SIZE) * 0.5 + 3;
-
-    HUD_ShadowString([pos_x + 12, header_text_y, 0], label, text_sz, '1 1 1', 1.0);
-    HUD_ShadowString([kills_x, header_text_y, 0], "K", text_sz, '1 1 1', 1.0);
-    HUD_ShadowString([deaths_x, header_text_y, 0], "D", text_sz, '1 1 1', 1.0);
-    HUD_ShadowString([ping_x, header_text_y, 0], "P", text_sz, '1 1 1', 1.0);
-
-    drawfont = hud_font_regular;
-
-    row_index = 0;
-    row_is_even = TRUE;
-    currentindex = 0;
-    while (currentindex <= maxclients)
-    {
-        player_name = Scoreboard_PlayerName(currentindex);
-        pteam = HUD_ScoreboardPlayerTeam(currentindex);
-        if (player_name != "" && (pteam == TEAM_BLUE || pteam == TEAM_RED))
-        {
-            row_y = pos_y + HUD_SCOREBOARD_HEADER_HEIGHT + (row_index * HUD_SCOREBOARD_ROW_HEIGHT);
-            text_y = row_y + (HUD_SCOREBOARD_ROW_HEIGHT - HUD_SCOREBOARD_TEXT_SIZE) * 0.5;
-            pic_y = row_y + (HUD_SCOREBOARD_ROW_HEIGHT - HUD_SCOREBOARD_PICTURE_SIZE) * 0.5 - 1;
-
-            is_local = (currentindex + 1 == player_localentnum);
-            float is_dead = getplayerkeyfloat(currentindex, "dead", 0);
-
-            if (is_dead)
-                drawfill([pos_x + 2, row_y, 0], [size_x - 4, HUD_SCOREBOARD_ROW_HEIGHT, 0], '0.18 0.05 0.05', 0.55, 0);
-            else if (is_local)
-                drawfill([pos_x + 2, row_y, 0], [size_x - 4, HUD_SCOREBOARD_ROW_HEIGHT, 0], '0.08 0.22 0.08', 0.6, 0);
-            else if (row_is_even)
-                drawfill([pos_x + 2, row_y, 0], [size_x - 4, HUD_SCOREBOARD_ROW_HEIGHT, 0], '0.12 0.13 0.16', 0.48, 0);
-
-            float row_alpha = is_dead ? 0.4 : 1.0;
-
-            // Use the player's actual team picture so the row visually
-            // matches the model they picked. FFA doesn't unify the icon
-            // — it just unifies the layout.
-            drawpic([pos_x + 10, pic_y, 0], HUD_ScoreboardPicturePath(pteam),
-                [HUD_SCOREBOARD_PICTURE_SIZE, HUD_SCOREBOARD_PICTURE_SIZE, 0], '1 1 1', row_alpha, 0);
-
-            vector name_col = is_local ? '0.7 1 0.7' : '1 1 1';
-            HUD_ShadowString([pos_x + 34, text_y, 0], player_name, text_sz, name_col, row_alpha);
-
-            frags = getplayerkeyfloat(currentindex, INFOKEY_P_FRAGS, 0);
-            deaths = getplayerkeyfloat(currentindex, "deaths", 0);
-            ping = getplayerkeyfloat(currentindex, INFOKEY_P_PING, 0);
-
-            HUD_ShadowString([kills_x, text_y, 0], ftos(frags), text_sz, '1 1 1', row_alpha);
-            HUD_ShadowString([deaths_x, text_y, 0], ftos(deaths), text_sz, '1 1 1', row_alpha);
-            HUD_ShadowString([ping_x, text_y, 0], ftos(ping), text_sz, '1 1 1', row_alpha);
-
-            row_index = row_index + 1;
-            row_is_even = !row_is_even;
-        }
-
-        currentindex = currentindex + 1;
-    }
+    float a = alpha * sb_alpha_mult;
+    drawfill([pos_x + 1, pos_y, 0],                 [size_x - 2, 1, 0],          colour, a, 0);
+    drawfill([pos_x,     pos_y + 1, 0],             [size_x,     size_y - 2, 0], colour, a, 0);
+    drawfill([pos_x + 1, pos_y + size_y - 1, 0],    [size_x - 2, 1, 0],          colour, a, 0);
 };
 
-void(string label, vector pos, vector size, vector fill_colour, vector border_colour, float team_id) HUD_DrawScoreboardColumn =
+// Per-player plate: chamfered translucent backdrop tinted by team,
+// with optional 1 px brighter outline if this is the local player,
+// then name + K/D/P stats on top.  Slot index is 0-based (matches
+// the Scoreboard_PlayerName / getplayerkeyfloat convention).
+//
+// `fill` is the plate base colour; `outline` is the brighter team
+// edge tint used for the local-player border ring.
+void(float slot, vector pos, vector size, vector fill, vector outline) HUD_DrawScoreboardPlate =
 {
-    float currentindex;
-    float row_index;
-    float row_is_even;
-    float row_y;
-    float text_y;
-    float pic_y;
-    string player_name;
-    float frags;
-    float deaths;
-    float ping;
-    vector draw_pos;
-    vector draw_size;
-    float kills_x;
-    float deaths_x;
-    float ping_x;
-    float header_text_y;
-    float is_local;
-    vector text_sz;
+    float row_h = size_y;
+    float text_y = pos_y + (row_h - HUD_SCOREBOARD_TEXT_SIZE) * 0.5;
+    float pic_y  = pos_y + (row_h - HUD_SCOREBOARD_PICTURE_SIZE) * 0.5;
 
-    text_sz = [HUD_SCOREBOARD_TEXT_SIZE, HUD_SCOREBOARD_TEXT_SIZE, 0];
+    float kills_x  = pos_x + size_x - 90;
+    float deaths_x = pos_x + size_x - 62;
+    float ping_x   = pos_x + size_x - 34;
 
-    kills_x = pos_x + size_x - 90;
-    deaths_x = pos_x + size_x - 62;
-    ping_x = pos_x + size_x - 34;
+    float is_local = (slot + 1 == player_localentnum);
+    float is_dead  = getplayerkeyfloat(slot, "dead", 0);
+    float pteam    = HUD_ScoreboardPlayerTeam(slot);
 
-    drawfill(pos, size, '0.08 0.09 0.11', 0.94, 0);
-    drawfill(pos, [size_x, HUD_SCOREBOARD_HEADER_HEIGHT, 0], fill_colour, 0.94, 0);
-    drawfill(pos, [size_x, 2, 0], border_colour, 1.0, 0);
-    drawfill([pos_x, pos_y + size_y - 2, 0], [size_x, 2, 0], border_colour, 1.0, 0);
-    drawfill(pos, [2, size_y, 0], border_colour, 1.0, 0);
-    drawfill([pos_x + size_x - 2, pos_y, 0], [2, size_y, 0], border_colour, 1.0, 0);
+    // Plate fill — dim slightly when dead so death visually reads
+    // through the team tint without losing team identification.
+    vector plate_col = is_dead ? (fill * 0.5) : fill;
 
-    // Header — use bold font
-    drawfont = hud_font;
-    header_text_y = pos_y + (HUD_SCOREBOARD_HEADER_HEIGHT - HUD_SCOREBOARD_TEXT_SIZE) * 0.5 + 3;
+    // Local-player outline: draw a chamfer 1 px larger on every side
+    // FIRST in the brighter team-edge colour, then the actual plate
+    // overdraws the centre.  Result: 1 px ring visible only at the
+    // chamfer band — looks like a subtle highlight.
+    if (is_local)
+        HUD_DrawChamferRect([pos_x - 1, pos_y - 1, 0],
+                            [size_x + 2, size_y + 2, 0],
+                            outline, 0.85);
 
-    HUD_ShadowString([pos_x + 12, header_text_y, 0], label, text_sz, '1 1 1', 1.0);
-    HUD_ShadowString([kills_x, header_text_y, 0], "K", text_sz, '1 1 1', 1.0);
-    HUD_ShadowString([deaths_x, header_text_y, 0], "D", text_sz, '1 1 1', 1.0);
-    HUD_ShadowString([ping_x, header_text_y, 0], "P", text_sz, '1 1 1', 1.0);
+    HUD_DrawChamferRect(pos, size, plate_col, 0.55);
 
-    // Player rows — use regular font for names and stats
+    // Dim text on dead rows but keep the plate fully drawn.
+    float row_alpha = is_dead ? 0.45 : 1.0;
+
     drawfont = hud_font_regular;
+    vector text_sz = [HUD_SCOREBOARD_TEXT_SIZE, HUD_SCOREBOARD_TEXT_SIZE, 0];
 
-    row_index = 0;
-    row_is_even = TRUE;
-    currentindex = 0;
-    while (currentindex <= maxclients)
+    // Speaker-state icon sits to the LEFT of the name — replaces
+    // the older team-picture column.  Always shows speaking_off
+    // by default, swaps to speaking while that slot's voipspeaking
+    // flag is 1, replaced by muted whenever this client has muted
+    // that slot.  Resolution lives in HUD_VoIP_PickIcon
+    // (client/cl_voip_hud.qc).
+    string mic_icon;
+    if (HUD_VoIP_IsMuted(slot))             mic_icon = "gfx/mic/muted.png";
+    else if (HUD_VoIP_IsSpeakingNow(slot))  mic_icon = "gfx/mic/speaking.png";
+    else                                    mic_icon = "gfx/mic/speaking_off.png";
+    drawpic([pos_x + 8, pic_y, 0],
+            mic_icon,
+            [HUD_SCOREBOARD_PICTURE_SIZE, HUD_SCOREBOARD_PICTURE_SIZE, 0],
+            '1 1 1', row_alpha * sb_alpha_mult, 0);
+
+    // Click-to-mute hit zone.  Active only while the user has
+    // entered mute mode by pressing +attack2 while the scoreboard
+    // is held — see HUD_VoIP_EnterMuteMode in cl_voip_hud.qc.
+    // Gated by hud_voipmute_mode so the rest of the scoreboard
+    // doesn't register stray SUI elements every frame.  Click
+    // toggles the slot's mute; HUD_VoIP_ToggleMute also forwards
+    // to the engine's cl_voip_mute command so audio is silenced.
+    // Allow muting slot 0 (listen-server host from a connecting
+    // client's POV — the host is their slot 0).  Only block your
+    // OWN slot (player_localnum), since muting yourself is a no-op.
+    if (hud_voipmute_mode && slot != player_localnum)
     {
-        player_name = Scoreboard_PlayerName(currentindex);
-        if (player_name != "" && HUD_ScoreboardPlayerTeam(currentindex) == team_id)
-        {
-            row_y = pos_y + HUD_SCOREBOARD_HEADER_HEIGHT + (row_index * HUD_SCOREBOARD_ROW_HEIGHT);
-            text_y = row_y + (HUD_SCOREBOARD_ROW_HEIGHT - HUD_SCOREBOARD_TEXT_SIZE) * 0.5;
-            pic_y = row_y + (HUD_SCOREBOARD_ROW_HEIGHT - HUD_SCOREBOARD_PICTURE_SIZE) * 0.5 - 1;
-
-            is_local = (currentindex + 1 == player_localentnum);
-            float is_dead = getplayerkeyfloat(currentindex, "dead", 0);
-
-            // Row background
-            if (is_dead)
-            {
-                // Dead — dark red/brown tint so the row visibly reads as "out"
-                drawfill([pos_x + 2, row_y, 0], [size_x - 4, HUD_SCOREBOARD_ROW_HEIGHT, 0], '0.18 0.05 0.05', 0.55, 0);
-            }
-            else if (is_local)
-            {
-                // Local player — dark green highlight
-                drawfill([pos_x + 2, row_y, 0], [size_x - 4, HUD_SCOREBOARD_ROW_HEIGHT, 0], '0.08 0.22 0.08', 0.6, 0);
-            }
-            else if (row_is_even)
-            {
-                drawfill([pos_x + 2, row_y, 0], [size_x - 4, HUD_SCOREBOARD_ROW_HEIGHT, 0], '0.12 0.13 0.16', 0.48, 0);
-            }
-
-            // Dead players dim everything on their row (picture, name, stats)
-            // to about 40%; otherwise full brightness.
-            float row_alpha = is_dead ? 0.4 : 1.0;
-
-            // Team picture
-            drawpic([pos_x + 10, pic_y, 0], HUD_ScoreboardPicturePath(team_id), [HUD_SCOREBOARD_PICTURE_SIZE, HUD_SCOREBOARD_PICTURE_SIZE, 0], '1 1 1', row_alpha, 0);
-
-            // Player name
-            vector name_col = is_local ? '0.7 1 0.7' : '1 1 1';
-            HUD_ShadowString([pos_x + 34, text_y, 0], player_name, text_sz, name_col, row_alpha);
-
-            // Stats
-            frags = getplayerkeyfloat(currentindex, INFOKEY_P_FRAGS, 0);
-            deaths = getplayerkeyfloat(currentindex, "deaths", 0);
-            ping = getplayerkeyfloat(currentindex, INFOKEY_P_PING, 0);
-
-            HUD_ShadowString([kills_x, text_y, 0], ftos(frags), text_sz, '1 1 1', row_alpha);
-            HUD_ShadowString([deaths_x, text_y, 0], ftos(deaths), text_sz, '1 1 1', row_alpha);
-            HUD_ShadowString([ping_x, text_y, 0], ftos(ping), text_sz, '1 1 1', row_alpha);
-
-            row_index = row_index + 1;
-            row_is_even = !row_is_even;
-        }
-
-        currentindex = currentindex + 1;
+        string mute_id = sprintf("sb_mute_%d", slot);
+        sui_action_element(pos, size, mute_id, sui_noop);
+        if (sui_is_clicked(mute_id))
+            HUD_VoIP_ToggleMute(slot);
     }
+
+    // Name (slight green tint for the local player, else white).
+    string name = Scoreboard_PlayerName(slot);
+    vector name_col = is_local ? '0.7 1 0.7' : '1 1 1';
+    HUD_ShadowString([pos_x + 30, text_y, 0], name, text_sz, name_col, row_alpha);
+
+    // Stats — same column anchor positions the old code used so all
+    // rows line up with the K/D/P header drawn above the plate list.
+    float frags  = getplayerkeyfloat(slot, INFOKEY_P_FRAGS, 0);
+    float deaths = getplayerkeyfloat(slot, "deaths", 0);
+    float ping   = getplayerkeyfloat(slot, INFOKEY_P_PING, 0);
+    HUD_ShadowString([kills_x,  text_y, 0], ftos(frags),  text_sz, '1 1 1', row_alpha);
+    HUD_ShadowString([deaths_x, text_y, 0], ftos(deaths), text_sz, '1 1 1', row_alpha);
+    HUD_ShadowString([ping_x,   text_y, 0], ftos(ping),   text_sz, '1 1 1', row_alpha);
 };
 
 void() HUD_DrawScoreboard =
 {
-    float blue_count;
-    float red_count;
-    float row_count;
-    float board_width;
-    float board_height;
-    float column_height;
-    float header_height;
-    float outer_x;
-    float outer_y;
-    float title_width;
-    vector pos;
-    vector sz;
-    float prev_font;
-    string title_text;
-    string map_name;
-    string map_timer_str;
-    string round_str;
-    float map_timeleft;
-    float map_minutes;
-    float map_seconds;
-    float cur_round;
-    float max_rounds;
-    float info_y;
-    float text_w;
-    float columns_y;
-    float join_btn_height;
-
-    prev_font = drawfont;
+    float prev_font = drawfont;
     drawfont = hud_font;
 
-    // FFA collapses both teams into a single scoreboard column. Detected
-    // via the engine clientstat (server-pushed authoritative gamemode).
-    // Unified-team modes (FFA + Bhop) collapse to a single scoreboard
-    // column with no team-score badges and no Join-Blue/Join-Red buttons.
-    // The variable is still named ffa_mode for git-blame readability;
-    // the helper covers both modes.
+    // ---- Tick the slide-in / fade animation ----
+    // sb_anim_progress is the linear 0..1 advance through the active
+    // transition.  hud_scoreboard_held drives the target: 1 while
+    // held (rising), 0 once released (falling).  dt is wall-clock
+    // since the previous draw; clamp to 0.5 to absorb pauses /
+    // first-frame initialization without making the scoreboard
+    // teleport open.
+    float dt = cltime - sb_anim_last_cltime;
+    sb_anim_last_cltime = cltime;
+    if (dt < 0 || dt > 0.5) dt = 0;
+
+    // The "show" condition combines +showscores AND the persistent
+    // TeamMenuIsOpen() state — using TeamMenuIsOpen() (set by
+    // TeamMenuOpen / cleared by TeamMenuClose) instead of the per-
+    // call hud_scoreboard_teamselect flag is critical because
+    // HUD_DrawScoreboard runs from TWO paths each frame: cl_main's
+    // generic visibility check, AND TeamMenuDraw's team-pick path.
+    // The two paths must agree on the showing state, otherwise
+    // they fight: cl_main ticks down (teamselect flag is briefly
+    // off), TeamMenuDraw ticks up but with dt=0 second time
+    // through, and the animation never makes progress in either
+    // direction.
+    float showing = hud_scoreboard_held || TeamMenuIsOpen();
+
+    // Latch the team-select state: TRUE while the picker is up, and
+    // hold it through the fade-out tail (until sb_anim_progress hits 0)
+    // so the title + join buttons keep rendering as team-select while
+    // the menu is closing.
+    if (TeamMenuIsOpen())
+        sb_anim_is_teamselect = TRUE;
+
+    if (showing)
+    {
+        float in_dur = SB_AnimIn();
+        if (in_dur <= 0)
+            sb_anim_progress = 1;          // snap mode — instant show
+        else
+            sb_anim_progress = sb_anim_progress + (dt / in_dur);
+        if (sb_anim_progress > 1) sb_anim_progress = 1;
+    }
+    else
+    {
+        float out_dur = SB_AnimOut();
+        if (out_dur <= 0)
+            sb_anim_progress = 0;          // snap mode — instant hide
+        else
+            sb_anim_progress = sb_anim_progress - (dt / out_dur);
+        if (sb_anim_progress < 0) sb_anim_progress = 0;
+    }
+
+    // Eased visibility:
+    //   • Rising  (showing): visual = 1 - (1 - p)^3   — fast then slow
+    //   • Falling (hidden):  visual = p^3             — slow then fast
+    // The cube curve gives a satisfying "lifts up and settles" feel
+    // on the way in and a "drops away with weight" feel on the way out.
+    float visual;
+    if (showing)
+    {
+        float inv = 1.0 - sb_anim_progress;
+        visual = 1.0 - inv * inv * inv;
+    }
+    else
+    {
+        visual = sb_anim_progress * sb_anim_progress * sb_anim_progress;
+    }
+
+    // Bail out completely once fully hidden — no draws, no blur.
+    // Reset sb_alpha_mult so the helpers fall back to no-op if any
+    // late-binding path tries to draw outside this guard.
+    if (sb_anim_progress <= 0 && !showing)
+    {
+        sb_alpha_mult = 0;
+        sb_y_offset = SB_RiseDistance();
+        sb_anim_is_teamselect = FALSE;
+        drawfont = prev_font;
+        return;
+    }
+
+    sb_alpha_mult = visual;
+    sb_y_offset   = (1.0 - visual) * SB_RiseDistance();
+
+    // Backdrop blur — chained drawpic of two GLSL shaders runs a
+    // 2-pass separable Gaussian blur of $currentrender (the scene +
+    // HUD as drawn so far this frame).  Engine refreshes
+    // $currentrender between drawpic calls (SHADER_HASCURRENTRENDER
+    // in gl_shader.c), so the second pass sees the first pass's
+    // output and the result is a true 2D Gaussian, not a cross-
+    // sample approximation.
+    //
+    // Blur RADIUS glides between 0 and the user's target each frame
+    // — at visual=0 the kernel collapses to all-samples-at-center
+    // (identity, no perceptible blur), at visual=1 it samples at the
+    // full target offset.  Drawpic alpha stays at 1.0 because the
+    // shader ALREADY produces the right intensity (identity → fully
+    // blurred).  This avoids the "translucent blur ghost over a
+    // sharp underlying image" look you'd get from blending instead
+    // of ramping the kernel itself.
+    //
+    // Cost: O(2N) = 18 samples per screen pixel for the 9-tap kernel,
+    // run only while the scoreboard is open OR fading.  At 1080p that's
+    // ~37 M samples per frame — sub-millisecond on any GPU made this
+    // decade.  Skipped entirely when cl_scoreboard_blur == 0.
+    if (cvar("cl_scoreboard_blur"))
+    {
+        // Drive the shader-bound dynamic radius from the user's
+        // target * eased visibility.  cvar_set is cheap (a hash
+        // lookup + string write); doing it once per frame while the
+        // scoreboard is open is negligible.
+        float target_r = cvar("cl_scoreboard_blur_radius");
+        cvar_set("sb_blur_radius_dyn", ftos(target_r * visual));
+
+        drawpic([0, 0], "screen_blur_h", [g_width, g_height, 0], '1 1 1', 1.0, 0);
+        drawpic([0, 0], "screen_blur_v", [g_width, g_height, 0], '1 1 1', 1.0, 0);
+    }
+
     float gamemode_now = getstatf(STAT_GAMEMODE);
     float ffa_mode = Gamemode_HasUnifiedTeams();
 
-    blue_count = HUD_ScoreboardCountTeamPlayers(TEAM_BLUE);
-    red_count = HUD_ScoreboardCountTeamPlayers(TEAM_RED);
-    if (ffa_mode)
-        row_count = max(1, blue_count + red_count);
-    else
-        row_count = max(1, max(blue_count, red_count));
+    // ---- Layout dimensions ----
+    // Reuse FFA's 1.5× column width as the floating board width — wider
+    // than the old per-team column, narrower than the old two-column
+    // board.  All plates and floating text render inside this band.
+    float board_w  = floor(HUD_SCOREBOARD_COLUMN_WIDTH * 1.5);
+    float plate_h  = 18;                                // slimmer than HUD_SCOREBOARD_ROW_HEIGHT (24): 12 px text + 3 px top/bottom padding
+    float intra_gap = 2;                                // gap between plates within a team
+    float inter_gap = 4;                                // gap between blue and red sections
 
-    header_height = 40;
-    join_btn_height = 0;   // buttons go outside the board now
-    column_height = (row_count * HUD_SCOREBOARD_ROW_HEIGHT) + HUD_SCOREBOARD_HEADER_HEIGHT;
-    float top_pad = 10;
+    // Header strip above the plate list: title (18) + gamemode (12) +
+    // map/timer/round line (12) + K/D/P column header line (12) + paddings.
+    float header_h = 70;
 
-    // Count spectators for the bottom section
+    // ---- Player counts ----
+    float blue_count = HUD_ScoreboardCountTeamPlayers(TEAM_BLUE);
+    float red_count  = HUD_ScoreboardCountTeamPlayers(TEAM_RED);
+
+    // Spectators (rendered as a small line under the plate list).
     float spec_count = 0;
     float si;
     for (si = 0; si < maxclients; si++)
     {
-        if (HUD_ScoreboardPlayerTeam(si) == TEAM_SPEC)
-        {
-            string sn = Scoreboard_PlayerName(si);
-            if (sn != "")
-                spec_count++;
-        }
+        if (HUD_ScoreboardPlayerTeam(si) == TEAM_SPEC
+            && Scoreboard_PlayerName(si) != "")
+            spec_count++;
     }
-    float spec_section_height = (spec_count > 0) ? 14 : 0;
+    float spec_h = (spec_count > 0) ? 16 : 0;
 
-    // FFA uses a single column ~1.5x the team-column width — narrower than
-    // the 2-team layout (which had wasteful center padding per row), but
-    // wider than a plain single column (which felt squished for FFA's
-    // longer name + frag listings).
-    float ffa_col_w = floor(HUD_SCOREBOARD_COLUMN_WIDTH * 1.5);
+    // ---- Total content height + vertical centering ----
+    float plates_h;
     if (ffa_mode)
-        board_width = ffa_col_w + (HUD_SCOREBOARD_OUTER_PADDING * 2);
+    {
+        float ffa_count = blue_count + red_count;
+        plates_h = ffa_count * (plate_h + intra_gap);
+    }
     else
-        board_width = (HUD_SCOREBOARD_COLUMN_WIDTH * 2) + HUD_SCOREBOARD_COLUMN_GAP + (HUD_SCOREBOARD_OUTER_PADDING * 2);
-    board_height = header_height + column_height + top_pad + join_btn_height + spec_section_height;
-    outer_x = (g_width - board_width) * 0.5;
-    outer_y = (g_height - board_height) * 0.5;
+    {
+        plates_h = blue_count * (plate_h + intra_gap)
+                 + red_count  * (plate_h + intra_gap);
+        // Bump the final blue→red gap from intra to inter (only if both
+        // teams actually have players to separate).
+        if (blue_count > 0 && red_count > 0)
+            plates_h = plates_h + (inter_gap - intra_gap);
+    }
+    float board_h = header_h + plates_h + spec_h;
 
-    // Full-screen dim (gated on cl_menu_backdrop so it can be disabled).
-    if (cvar("cl_menu_backdrop"))
-        drawfill('0 0 0', [g_width, g_height, 0], '0.01 0.01 0.02', 0.64, 0);
+    float board_x = (g_width  - board_w) * 0.5;
+    // Add sb_y_offset (set by the animation tick above) so the board
+    // visually rises into place when shown and slides back down when
+    // hidden.  At rest (visual == 1) sb_y_offset == 0.
+    float board_y = ((g_height - board_h) * 0.5) + sb_y_offset;
 
-    // Board drop shadow
-    drawfill([outer_x + 4, outer_y + 4, 0], [board_width, board_height, 0], '0 0 0', 0.35, 0);
-
-    // Board background + border
-    pos = [outer_x, outer_y, 0];
-    sz = [board_width, board_height, 0];
-    drawfill(pos, sz, '0.08 0.09 0.11', 0.96, 0);
-    drawfill(pos, [board_width, 2, 0], '0.35 0.37 0.4', 1.0, 0);
-    drawfill([outer_x, outer_y + board_height - 2, 0], [board_width, 2, 0], '0.35 0.37 0.4', 1.0, 0);
-    drawfill(pos, [2, board_height, 0], '0.35 0.37 0.4', 1.0, 0);
-    drawfill([outer_x + board_width - 2, outer_y, 0], [2, board_height, 0], '0.35 0.37 0.4', 1.0, 0);
-
-    // Title — "Select a Team" when in team select mode, else server name
-    if (hud_scoreboard_teamselect)
+    // ---- Title (hostname OR "Select a Team") — floating ----
+    // Use the latched flag so "Select a Team" stays during the fade-out
+    // tail.  The per-call hud_scoreboard_teamselect arg is only set when
+    // TeamMenuDraw drives the draw — once the menu closes, that path
+    // stops firing, but cl_main keeps drawing the fade-out frames and
+    // would otherwise revert the title to the server hostname.
+    float as_teamselect = hud_scoreboard_teamselect || sb_anim_is_teamselect;
+    string title_text;
+    if (as_teamselect)
         title_text = "Select a Team";
     else
     {
@@ -417,88 +503,121 @@ void() HUD_DrawScoreboard =
         if (title_text == "")
             title_text = "Server";
     }
-    title_width = stringwidth(title_text, 1, [HUD_SCOREBOARD_TITLE_SIZE, HUD_SCOREBOARD_TITLE_SIZE, 0]);
-    HUD_ShadowString([outer_x + ((board_width - title_width) * 0.5), outer_y + 6, 0],
-        title_text, [HUD_SCOREBOARD_TITLE_SIZE, HUD_SCOREBOARD_TITLE_SIZE, 0], '1 1 1', 1.0);
+    vector title_sz = [HUD_SCOREBOARD_TITLE_SIZE, HUD_SCOREBOARD_TITLE_SIZE, 0];
+    float title_width = stringwidth(title_text, 1, title_sz);
+    HUD_ShadowString([board_x + (board_w - title_width) * 0.5, board_y + 4, 0],
+        title_text, title_sz, '1 1 1', 1.0);
 
-    // Gamemode label
+    // ---- Gamemode label — floating, dim cyan ----
     string gamemode_str;
-    if (gamemode_now == GAMEMODE_ELIMINATION)
-        gamemode_str = "Elimination";
-    else if (gamemode_now == GAMEMODE_BHOP)
-        gamemode_str = "Bhop";
-    else if (gamemode_now == GAMEMODE_FFA)
-        gamemode_str = "Free For All";
-    else
-        gamemode_str = "Team Deathmatch";
-    text_w = stringwidth(gamemode_str, 1, [HUD_SCOREBOARD_TEXT_SIZE, HUD_SCOREBOARD_TEXT_SIZE, 0]);
-    HUD_ShadowString([outer_x + ((board_width - text_w) * 0.5), outer_y + 24, 0],
-        gamemode_str, [HUD_SCOREBOARD_TEXT_SIZE, HUD_SCOREBOARD_TEXT_SIZE, 0], '0.6 0.7 0.8', 0.8);
+    if      (gamemode_now == GAMEMODE_ELIMINATION) gamemode_str = "Elimination";
+    else if (gamemode_now == GAMEMODE_BHOP)        gamemode_str = "Bhop";
+    else if (gamemode_now == GAMEMODE_FFA)         gamemode_str = "Free For All";
+    else if (gamemode_now == GAMEMODE_PAINTGUN)    gamemode_str = "Paintball";
+    else if (gamemode_now == GAMEMODE_DEFUSE)      gamemode_str = "Defuse";
+    else                                           gamemode_str = "Team Deathmatch";
+    vector text_sz = [HUD_SCOREBOARD_TEXT_SIZE, HUD_SCOREBOARD_TEXT_SIZE, 0];
+    float text_w = stringwidth(gamemode_str, 1, text_sz);
+    HUD_ShadowString([board_x + (board_w - text_w) * 0.5, board_y + 24, 0],
+        gamemode_str, text_sz, '0.6 0.7 0.8', 0.85);
 
-    // Time left — top right
-    map_timeleft = getstatf(STAT_MAPTIMELEFT);
-    map_minutes = floor(map_timeleft / 60);
-    map_seconds = floor(map_timeleft - map_minutes * 60);
-    map_timer_str = sprintf("%g:%02g", map_minutes, map_seconds);
-    text_w = stringwidth(map_timer_str, 1, [HUD_SCOREBOARD_TEXT_SIZE, HUD_SCOREBOARD_TEXT_SIZE, 0]);
-    HUD_ShadowString([outer_x + board_width - HUD_SCOREBOARD_OUTER_PADDING - text_w, outer_y + 10, 0],
-        map_timer_str, [HUD_SCOREBOARD_TEXT_SIZE, HUD_SCOREBOARD_TEXT_SIZE, 0], '0.8 0.8 0.8', 0.9);
+    // ---- Map name (left), timer (center), round (right) — floating row ----
+    float info_y = board_y + 40;
 
-    // Info line: map name on left, round on right
-    info_y = outer_y + 24;
-    map_name = serverkey("mapname");
-    if (map_name == "")
-        map_name = serverkey("map");
-    if (map_name == "")
-        map_name = infokey(world, "mapname");
-    if (map_name == "")
-        map_name = infokey(world, "map");
-    if (map_name == "")
-        map_name = "unknown";
-    HUD_ShadowString([outer_x + HUD_SCOREBOARD_OUTER_PADDING, info_y, 0],
-        map_name, [HUD_SCOREBOARD_TEXT_SIZE, HUD_SCOREBOARD_TEXT_SIZE, 0], '0.8 0.8 0.8', 0.9);
+    string map_name = serverkey("mapname");
+    if (map_name == "") map_name = serverkey("map");
+    if (map_name == "") map_name = infokey(world, "mapname");
+    if (map_name == "") map_name = infokey(world, "map");
+    if (map_name == "") map_name = "unknown";
+    HUD_ShadowString([board_x, info_y, 0], map_name, text_sz, '0.8 0.8 0.8', 0.9);
 
-    cur_round = getstatf(STAT_ROUNDNUM);
-    max_rounds = getstatf(STAT_MAXROUNDS);
-    round_str = sprintf("Round: %g / %g", cur_round, max_rounds);
-    text_w = stringwidth(round_str, 1, [HUD_SCOREBOARD_TEXT_SIZE, HUD_SCOREBOARD_TEXT_SIZE, 0]);
-    HUD_ShadowString([outer_x + board_width - HUD_SCOREBOARD_OUTER_PADDING - text_w, info_y, 0],
-        round_str, [HUD_SCOREBOARD_TEXT_SIZE, HUD_SCOREBOARD_TEXT_SIZE, 0], '0.8 0.8 0.8', 0.9);
+    float map_timeleft = getstatf(STAT_MAPTIMELEFT);
+    float map_minutes  = floor(map_timeleft / 60);
+    float map_seconds  = floor(map_timeleft - map_minutes * 60);
+    string map_timer_str = sprintf("%g:%02g", map_minutes, map_seconds);
+    text_w = stringwidth(map_timer_str, 1, text_sz);
+    HUD_ShadowString([board_x + (board_w - text_w) * 0.5, info_y, 0],
+        map_timer_str, text_sz, '0.8 0.8 0.8', 0.9);
 
-    // Team columns
-    columns_y = outer_y + header_height;
+    float cur_round  = getstatf(STAT_ROUNDNUM);
+    float max_rounds = getstatf(STAT_MAXROUNDS);
+    string round_str = sprintf("Round: %g / %g", cur_round, max_rounds);
+    text_w = stringwidth(round_str, 1, text_sz);
+    HUD_ShadowString([board_x + board_w - text_w, info_y, 0],
+        round_str, text_sz, '0.8 0.8 0.8', 0.9);
 
-    float blue_col_x = outer_x + HUD_SCOREBOARD_OUTER_PADDING;
-    float red_col_x = outer_x + HUD_SCOREBOARD_OUTER_PADDING + HUD_SCOREBOARD_COLUMN_WIDTH + HUD_SCOREBOARD_COLUMN_GAP;
+    // ---- K / D / P column headers — floating, dim ----
+    float header_y = board_y + 56;
+    float kills_x  = board_x + board_w - 90;
+    float deaths_x = board_x + board_w - 62;
+    float ping_x   = board_x + board_w - 34;
+    HUD_ShadowString([kills_x,    header_y, 0], "K",    text_sz, '0.65 0.65 0.7', 0.85);
+    HUD_ShadowString([deaths_x,   header_y, 0], "D",    text_sz, '0.65 0.65 0.7', 0.85);
+    HUD_ShadowString([ping_x,     header_y, 0], "P",    text_sz, '0.65 0.65 0.7', 0.85);
 
+    // ---- Player plates ----
+    // Palette per the design spec: dark navy blue plate + brighter team
+    // edge tint (used for the local-player outline ring).  Same red
+    // counterparts.  FFA mode uses a neutral grey palette and skips
+    // the inter-team gap.
+    vector blue_fill    = '0.05 0.12 0.30';
+    vector blue_outline = '0.45 0.7 1';
+    vector red_fill     = '0.30 0.06 0.08';
+    vector red_outline  = '1 0.42 0.42';
+    vector ffa_fill     = '0.18 0.21 0.25';     // dark steel
+    vector ffa_outline  = '0.55 0.62 0.70';     // brighter steel for local-player ring
+
+    float plate_x = board_x;
+    float plate_y = board_y + header_h;
+    vector plate_sz = [board_w, plate_h, 0];
+
+    // Single shared loop counter — QC function-scope locals don't allow
+    // re-declaring `i` in each branch (Q207 warning).
+    float i;
     if (ffa_mode)
     {
-        // Single column at 1.5× team-column width. Width computed once at
-        // the top so the column matches the board (see board_width branch).
-        HUD_DrawScoreboardColumnFFA("PLAYERS",
-            [blue_col_x, columns_y, 0],
-            [ffa_col_w, column_height, 0],
-            '0.18 0.18 0.22', '0.55 0.55 0.6');
+        // Single neutral list — both teams collapsed (FFA / Bhop /
+        // Paintgun).  No team separator gap.
+        for (i = 0; i < maxclients; i = i + 1)
+        {
+            if (Scoreboard_PlayerName(i) == "") continue;
+            float t = HUD_ScoreboardPlayerTeam(i);
+            if (t != TEAM_BLUE && t != TEAM_RED) continue;
+            HUD_DrawScoreboardPlate(i, [plate_x, plate_y, 0], plate_sz, ffa_fill, ffa_outline);
+            plate_y = plate_y + plate_h + intra_gap;
+        }
     }
     else
     {
-        float bs = getstatf(STAT_BLUE_SCORE);
-        float rs = getstatf(STAT_RED_SCORE);
-        string blue_label = sprintf("BLUE TEAM - %.0f", bs);
-        string red_label = sprintf("RED TEAM - %.0f", rs);
-
-        HUD_DrawScoreboardColumn(blue_label,
-            [blue_col_x, columns_y, 0],
-            [HUD_SCOREBOARD_COLUMN_WIDTH, column_height, 0],
-            '0.12 0.22 0.5', '0.45 0.7 1', TEAM_BLUE);
-
-        HUD_DrawScoreboardColumn(red_label,
-            [red_col_x, columns_y, 0],
-            [HUD_SCOREBOARD_COLUMN_WIDTH, column_height, 0],
-            '0.46 0.1 0.12', '1 0.42 0.42', TEAM_RED);
+        // Blue first
+        for (i = 0; i < maxclients; i = i + 1)
+        {
+            if (Scoreboard_PlayerName(i) == "") continue;
+            if (HUD_ScoreboardPlayerTeam(i) != TEAM_BLUE) continue;
+            HUD_DrawScoreboardPlate(i, [plate_x, plate_y, 0], plate_sz, blue_fill, blue_outline);
+            plate_y = plate_y + plate_h + intra_gap;
+        }
+        // Bump intra to inter gap before the first red plate (only if
+        // both teams have players — otherwise we'd add a phantom gap).
+        if (blue_count > 0 && red_count > 0)
+            plate_y = plate_y + (inter_gap - intra_gap);
+        // Red second
+        for (i = 0; i < maxclients; i = i + 1)
+        {
+            if (Scoreboard_PlayerName(i) == "") continue;
+            if (HUD_ScoreboardPlayerTeam(i) != TEAM_RED) continue;
+            HUD_DrawScoreboardPlate(i, [plate_x, plate_y, 0], plate_sz, red_fill, red_outline);
+            plate_y = plate_y + plate_h + intra_gap;
+        }
     }
 
-    // --- "In Spectate:" section at the bottom of the board ---
+    // Local layout vars used by the spectator + team-select sections
+    // below — they originally referenced the deleted column layout.
+    float blue_col_x = board_x;
+    float red_col_x  = board_x + (board_w * 0.5) + 4;   // right half of the board
+    float column_w   = (board_w * 0.5) - 4;             // half-width per join button
+
+    // --- "In Spectate:" section under the plate list ---
     if (spec_count > 0)
     {
         string spec_names = "";
@@ -519,67 +638,105 @@ void() HUD_DrawScoreboard =
 
         string spec_line = strcat("In Spectate: ", spec_names);
         vector spec_sz = [12, 12, 0];
-        float spec_x = outer_x + HUD_SCOREBOARD_OUTER_PADDING;
-        float spec_y = outer_y + board_height - 18;
+        float spec_x = board_x;
+        float spec_y = board_y + board_h - 14;
         drawstring([spec_x + 1, spec_y + 1], spec_line, spec_sz, '0 0 0', 0.4, 0);
         drawstring([spec_x, spec_y], spec_line, spec_sz, '0.6 0.6 0.6', 0.75, 0);
     }
 
-    // Team select join buttons — placed UNDER the scoreboard board.
+    // Team select join buttons — placed UNDER the floating board.
     // Skipped in FFA: the team-select panel is the only entry path and
     // there's no Join Blue / Join Red split for the user to make.
-    if (hud_scoreboard_teamselect && !ffa_mode)
+    if (as_teamselect && !ffa_mode)
     {
-        float btn_y = outer_y + board_height + 8;
-        float btn_h = 30;
-        float btn_text_sz = 14;
-        vector btn_sz = [HUD_SCOREBOARD_COLUMN_WIDTH, btn_h, 0];
+        float btn_y = board_y + board_h + 8;
+        // Match the player plate height so the buttons read as "two more
+        // plates" attached to the bottom of the list.  Text fits cleanly
+        // at 12 px inside an 18 px button.
+        float btn_h = plate_h;
+        // EB font at one of its prerasterised native sizes (8 / 12 / 16
+        // / 18 / 24 …) — the previous 14 px request fell between native
+        // sizes and the engine had to scale, hence the blurry look.
+        // 12 reads close to the old visual weight without scaling.
+        float btn_text_sz = 12;
+        vector btn_sz = [column_w, btn_h, 0];
 
-        drawfont = hud_font;   // EB font for buttons
+        drawfont = hud_font;   // EB — native sizes only, no scaling
 
         vector btn_text_size = [btn_text_sz, btn_text_sz, 0];
         float blue_tw = stringwidth("Join Blue Team", 1, btn_text_size);
         float red_tw = stringwidth("Join Red Team", 1, btn_text_size);
-        float blue_tx = blue_col_x + (HUD_SCOREBOARD_COLUMN_WIDTH - blue_tw) * 0.5;
-        float red_tx = red_col_x + (HUD_SCOREBOARD_COLUMN_WIDTH - red_tw) * 0.5;
-        float btn_text_y = btn_y + (btn_h - btn_text_sz) * 0.5;
+        float blue_tx = blue_col_x + (column_w - blue_tw) * 0.5;
+        float red_tx = red_col_x + (column_w - red_tw) * 0.5;
+        float btn_text_y = btn_y + (btn_h - btn_text_sz) * 0.5 + 1;
 
-        // Blue button box shadow
-        drawfill([blue_col_x + 3, btn_y + 3, 0], btn_sz, '0 0 0', 0.3, 0);
-        // Blue join button
-        sui_push_frame([blue_col_x, btn_y], btn_sz);
-        {
-            vector btn_col = sui_is_hovered("ts_join_blue") ? '0.18 0.32 0.6' : '0.12 0.22 0.5';
-            if (sui_is_held("ts_join_blue")) btn_col = btn_col * 0.85;
-            sui_fill([0, 0], btn_sz, btn_col, 0.92, 0);
-            sui_border_box([0, 0], btn_sz, 2, '0.45 0.7 1', 1.0, 0);
-            sui_action_element([0, 0], btn_sz, "ts_join_blue", sui_noop);
-        }
-        sui_pop_frame();
-        // Text with drop shadow (drawn outside sui_push_frame so coordinates are absolute)
+        // Join buttons styled to match the scoreboard player plates:
+        // chamfered translucent backdrop (HUD_DrawChamferRect) with
+        // the same dark navy / dark crimson team palette + brighter
+        // outline ring, instead of the old opaque SUI box look.
+        // Hover / held states tint the fill brighter / darker so the
+        // button still feels clickable.
+        //
+        // Drop shadow is gone — the chamfer outline ring serves the
+        // same visual depth purpose at lower fill cost.  All alpha
+        // values flow through HUD_DrawChamferRect (which already
+        // multiplies by sb_alpha_mult) so the buttons fade in/out
+        // with the rest of the scoreboard automatically.
+
+        // Same palette as the scoreboard plates above.
+        vector blue_plate_fill    = '0.05 0.12 0.30';
+        vector blue_plate_outline = '0.45 0.7 1';
+        vector red_plate_fill     = '0.30 0.06 0.08';
+        vector red_plate_outline  = '1 0.42 0.42';
+
+        // SUI input registration (sui_action_element / sui_is_*) MUST be
+        // bracketed by sui_pre_draw / sui_draw — that bracket is only set
+        // up by TeamMenuDraw's path while TeamMenuIsOpen() is true.
+        // During the fade-out tail cl_main becomes the draw path (no SUI
+        // bracket), so we draw the buttons visually for the fade but
+        // skip the input registration.  Calling sui_action_element
+        // outside the bracket spams "adding sui elements before
+        // sui_pre_draw" to the console every frame.
+        float sui_active = TeamMenuIsOpen();
+
+        // --- Blue Join Button ---
+        if (sui_active)
+            sui_action_element([blue_col_x, btn_y], btn_sz, "ts_join_blue", sui_noop);
+
+        vector b_fill = blue_plate_fill;
+        if (sui_active && sui_is_hovered("ts_join_blue")) b_fill = blue_plate_fill + '0.06 0.10 0.18';
+        if (sui_active && sui_is_held("ts_join_blue"))    b_fill = b_fill * 0.65;
+        // Outline ring drawn 1 px larger, then fill on top — gives a
+        // subtle 1 px brighter rim around the chamfer.
+        HUD_DrawChamferRect([blue_col_x - 1, btn_y - 1, 0],
+                            [btn_sz_x + 2, btn_sz_y + 2, 0],
+                            blue_plate_outline, 0.85);
+        HUD_DrawChamferRect([blue_col_x, btn_y, 0], btn_sz, b_fill, 0.55);
+
         HUD_ShadowString([blue_tx, btn_text_y, 0], "Join Blue Team", btn_text_size, '1 1 1', 1.0);
 
-        if (sui_is_clicked("ts_join_blue"))
+        if (sui_active && sui_is_clicked("ts_join_blue"))
             TeamMenuSelect(TEAM_BLUE);
 
-        // Red button box shadow
-        drawfill([red_col_x + 3, btn_y + 3, 0], btn_sz, '0 0 0', 0.3, 0);
-        // Red join button
-        sui_push_frame([red_col_x, btn_y], btn_sz);
-        {
-            vector btn_col_r = sui_is_hovered("ts_join_red") ? '0.56 0.18 0.2' : '0.46 0.1 0.12';
-            if (sui_is_held("ts_join_red")) btn_col_r = btn_col_r * 0.85;
-            sui_fill([0, 0], btn_sz, btn_col_r, 0.92, 0);
-            sui_border_box([0, 0], btn_sz, 2, '1 0.42 0.42', 1.0, 0);
-            sui_action_element([0, 0], btn_sz, "ts_join_red", sui_noop);
-        }
-        sui_pop_frame();
+        // --- Red Join Button ---
+        if (sui_active)
+            sui_action_element([red_col_x, btn_y], btn_sz, "ts_join_red", sui_noop);
+
+        vector r_fill = red_plate_fill;
+        if (sui_active && sui_is_hovered("ts_join_red")) r_fill = red_plate_fill + '0.18 0.06 0.06';
+        if (sui_active && sui_is_held("ts_join_red"))    r_fill = r_fill * 0.65;
+        HUD_DrawChamferRect([red_col_x - 1, btn_y - 1, 0],
+                            [btn_sz_x + 2, btn_sz_y + 2, 0],
+                            red_plate_outline, 0.85);
+        HUD_DrawChamferRect([red_col_x, btn_y, 0], btn_sz, r_fill, 0.55);
+
         HUD_ShadowString([red_tx, btn_text_y, 0], "Join Red Team", btn_text_size, '1 1 1', 1.0);
 
-        if (sui_is_clicked("ts_join_red"))
+        if (sui_active && sui_is_clicked("ts_join_red"))
             TeamMenuSelect(TEAM_RED);
 
-        sui_set_default_kb_focus("ts_join_blue");
+        if (sui_active)
+            sui_set_default_kb_focus("ts_join_blue");
     }
 
     drawfont = prev_font;
@@ -597,9 +754,21 @@ float(float evtype, float scanx, float chary, float devid) HUD_ScoreboardInputEv
         return FALSE;
 
     if (evtype == IE_KEYDOWN)
+    {
+        // Always restart the fade-in animation on every fresh press,
+        // even when the panel is mid-fade-out — reset progress to 0
+        // so the user always sees the full fade-in sweep instead of
+        // a snap or a half-way ease.  Gated on !hud_scoreboard_held
+        // so OS-level auto-repeat KEYDOWNs while the key is held
+        // don't continuously reset the animation mid-fade-in.
+        if (!hud_scoreboard_held)
+            sb_anim_progress = 0;
         hud_scoreboard_held = TRUE;
+    }
     else
+    {
         hud_scoreboard_held = FALSE;
+    }
 
     return TRUE;
 };

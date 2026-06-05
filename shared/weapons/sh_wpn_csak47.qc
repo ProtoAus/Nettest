@@ -35,13 +35,31 @@ const float MAX_MAG_AK47             = 30;
 const float MAX_AMMO_AK47            = 90;
 
 // --- Balance ---
-const float AK47_BASE_SPREAD          = 0.012;
+const float AK47_BASE_SPREAD          = 0.01;
 const float AK47_MOVE_SPREAD          = 0.07;
 const float AK47_FULL_SPREAD_SPEED    = 320;
 const float AK47_CLOSE_DAMAGE         = 34;
 const float AK47_MIN_DAMAGE           = 20;
 const float AK47_DAMAGE_FALLOFF_RANGE = 2304;
 const float AK47_DRYFIRE_DELAY        = 0.2;
+
+// sv_gunkick — heavy rifle, sustained-fire upward climb with notable
+// horizontal jitter. AK is the headline auto rifle; kick should
+// dominate the spread system after ~3 shots into a burst so users
+// must drag down to keep the cone on target.
+const float AK47_KICK_PITCH    = 1.6;
+const float AK47_KICK_VARIANCE = 1.5;
+const float AK47_KICK_STRENGTH = 1.0;   // baseline auto rifle.
+
+// Camera-local muzzle offset for the two-frame sprite muzzle flash
+// (cl_muzzleflash.qc CSQC_MuzzleFlashAtMuzzle). Tune to align the
+// flash with where v_ak47.mdl's barrel sits in screen space.
+//   FORWARD  qu in front of the camera origin
+//   RIGHT    qu to the right (cl_lefthand mirrors)
+//   DOWN     qu below the camera origin
+const float AK47_MUZZLE_FORWARD = 42;
+const float AK47_MUZZLE_RIGHT   = 10;
+const float AK47_MUZZLE_DOWN    = 7;
 
 // --- Pre-computed state durations ---
 const float AK47_DRAW_DURATION      = (AK47_DRAW_END - AK47_DRAW_START) * AK47_FRAME_INTERVAL;
@@ -90,7 +108,8 @@ void(entity player) W_AK47PickupCopy =
 void() W_AK47Shoot =
 {
     W_PenetratingHitscanShoot(AK47_BASE_SPREAD, AK47_MOVE_SPREAD, AK47_FULL_SPREAD_SPEED,
-        AK47_CLOSE_DAMAGE, AK47_MIN_DAMAGE, AK47_DAMAGE_FALLOFF_RANGE, 64, 0.97);
+        AK47_CLOSE_DAMAGE, AK47_MIN_DAMAGE, AK47_DAMAGE_FALLOFF_RANGE, 64, 0.97,
+        AK47_KICK_PITCH, AK47_KICK_VARIANCE, AK47_KICK_STRENGTH);
 };
 
 void() W_AK47Fire =
@@ -109,7 +128,7 @@ void() W_AK47Fire =
         else
             sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csak47/fire2.wav", 1, ATTN_NORM);
 
-        W_ShellEffect(SHELL_RIFLE, '8 -6 -4', '6 46 36', '240 720 120');
+        W_ShellEffect(SHELL_RIFLE, '8 6 -4', '6 46 36', '240 720 120');
     }
     else if (r == -1)
     {
@@ -177,7 +196,7 @@ void() W_AK47Drop =
     self.ammo_ak47 = 0;
 
     setmodel(tgt, "models/weapons/wpn_csak47/w_ak47.mdl");
-    setsize(tgt, '-16 -16 0', '16 16 32');
+    setsize(tgt, '-16 -16 0', '16 16 48');
     tgt.classname    = "weapon_ak47";
     tgt.solid        = SOLID_NOT;
     tgt.movetype     = MOVETYPE_TOSS;
@@ -194,7 +213,7 @@ void() W_AK47Drop =
 void() weapon_ak47 =
 {
     setmodel(self, "models/weapons/wpn_csak47/w_ak47.mdl");
-    setsize(self, '-16 -16 0', '16 16 32');
+    setsize(self, '-16 -16 0', '16 16 48');
     self.classname     = "weapon_ak47";
     self.solid         = SOLID_TRIGGER;
     self.movetype      = MOVETYPE_TOSS;
@@ -251,7 +270,7 @@ void() CSQC_PredictAK47Command =
         if (r == 1)
         {
             CSQC_MarkPendingWeaponAck();
-            if (!pm_suppress_sounds)
+            if (CSQC_BeginFireActionEffects())
             {
                 // CHAN_WEAPON cuts previous fire sound (no overlap)
                 if (random() < 0.5)
@@ -260,9 +279,18 @@ void() CSQC_PredictAK47Command =
                     sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csak47/fire2.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
                 CSQC_PredictedPenetratingImpact(AK47_BASE_SPREAD, AK47_MOVE_SPREAD, AK47_FULL_SPREAD_SPEED,
-                    AK47_CLOSE_DAMAGE, AK47_MIN_DAMAGE, AK47_DAMAGE_FALLOFF_RANGE, 64, 0.97);
+                    AK47_CLOSE_DAMAGE, AK47_MIN_DAMAGE, AK47_DAMAGE_FALLOFF_RANGE, 64, 0.97,
+                    AK47_KICK_PITCH, AK47_KICK_VARIANCE, AK47_KICK_STRENGTH);
                 CSQC_SpawnCasing("models/weapons/riflecasing.mdl",
-                    '8 -6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
+                    '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
+                // Two-frame additive muzzle flash at the rifle's
+                // muzzle. Tune via AK47_MUZZLE_* constants at the top
+                // of this file.
+                CSQC_MuzzleFlashAtMuzzle(AK47_MUZZLE_FORWARD, AK47_MUZZLE_RIGHT,
+                    AK47_MUZZLE_DOWN, self.wep_action_id);
+                CSQC_MuzzleSmokeAtMuzzle(AK47_MUZZLE_FORWARD, AK47_MUZZLE_RIGHT,
+                    AK47_MUZZLE_DOWN, self.wep_action_id, 1);
+                CSQC_EndFireActionEffects();
             }
         }
         else if (r == -1)
@@ -324,18 +352,22 @@ void() CSQC_AK47Equip =
 	self.csqc_predict_reload = CSQC_PredictAK47Reload;
 	self.csqc_display_frame  = CSQC_AK47DisplayFrame;
 	self.csqc_drop_clear     = CSQC_AK47DropClear;
+    self.weapon_viewmodel_flip = TRUE;
 
-	// First-spawn dedup: if the equip arrives via reconcile with WS_DRAW
-	// already past the boltpull frame, the server's sound() was delivered
-	// in the same snapshot packet — the engine played it BEFORE any
-	// predict tick could set csqc_last_predicted_auto_sound_time, so the
-	// CHAN_AUTO dedup window was empty and didn't suppress it. Latch the
-	// per-weapon flag so the next predict tick doesn't fire a second
-	// localsound on top. Latch only — never clears — so an in-progress
-	// draw that's pre-boltpull keeps its existing flag state (FALSE so
-	// predict can fire normally, then dedup the server echo).
-	if (self.weaponstate == WS_DRAW && self.wep_anim_start > 0
-	    && (cltime - self.wep_anim_start) >= AK47_DRAW_BOLTPULL_TIME)
+	// Snapshot-driven equip suppresses the predicted boltpull sound.
+	// CSQC_PredictSelectWeapon (cl_weapons.qc) sets weaponstate=WS_DRAW
+	// BEFORE calling CSQC_WeaponEquip, so on a LOCAL switch we see
+	// WS_DRAW here.  The snapshot reconcile path (cl_player.qc:830)
+	// calls CSQC_WeaponEquip BEFORE setting WS_DRAW — at this point
+	// weaponstate is the prior frame's (WS_DEAD on respawn, WS_IDLE
+	// on fresh spawn, etc.).  When the server is the driver, its
+	// W_AK47Frame already emits the boltpull on CHAN_AUTO; that
+	// sound rides the same snapshot packet as the WS_DRAW state and
+	// gets played by the engine BEFORE any CSQC predict tick can
+	// stamp csqc_last_predicted_auto_sound_time, so the dedup window
+	// is empty.  Latching here means the next predict tick skips its
+	// own localsound, avoiding the double boltpull.
+	if (self.weaponstate != WS_DRAW)
 		csqc_ak47_draw_snd_played = TRUE;
 };
 

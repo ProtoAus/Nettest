@@ -1,5 +1,5 @@
 // ============================================================
-//  shared/weapons/sh_wpn_357.qc  -  .357 Revolver
+//  shared/weapons/sh_wpn_hl357.qc  -  HL .357 Revolver
 //
 //  Slot  : SLOT_SECONDARY  (impulse 2 / key 2)
 //  Stats : 6-round cylinder, 18 reserve, semi-auto
@@ -33,13 +33,21 @@ const float MAX_MAG_357               = 6;
 const float MAX_AMMO_357              = 18;
 
 // --- Balance ---
-const float W357_BASE_SPREAD          = 0.004;
+const float W357_BASE_SPREAD          = 0.01;
 const float W357_MOVE_SPREAD          = 0.03;
 const float W357_FULL_SPREAD_SPEED    = 320;
 const float W357_CLOSE_DAMAGE         = 70;
 const float W357_MIN_DAMAGE           = 45;
 const float W357_DAMAGE_FALLOFF_RANGE = 4096;
 const float W357_DRYFIRE_DELAY        = 0.2;
+const float W357_KICK_PITCH    = 1.6;   // sv_gunkick — heavy magnum, one big kick per shot.
+const float W357_KICK_VARIANCE = 0.5;
+const float W357_KICK_STRENGTH = 1.4;   // single-shot pistol — long delay, big kick.
+
+// Muzzle offset — see cl_debug_muzzle for live-tune marker.
+const float W357_MUZZLE_FORWARD = 38;
+const float W357_MUZZLE_RIGHT   = 9.25;
+const float W357_MUZZLE_DOWN    = 7.9;
 
 // --- Pre-computed state durations ---
 const float W357_DRAW_DURATION      = (W357_DRAW_END - W357_DRAW_START) * W357_FRAME_INTERVAL;
@@ -65,7 +73,8 @@ float(float now) SH_357TickState =
 
 float(float now) SH_357TryFire =
 {
-    return SH_StandardTryFire(now, mag_357, W357_FIRE_DELAY, W357_DRYFIRE_DELAY);
+    // Semi-auto: revolver — must release +attack between shots.
+    return SH_StandardTryFireSemiAuto(now, mag_357, W357_FIRE_DELAY, W357_DRYFIRE_DELAY);
 };
 
 float(float now) SH_357TryReload =
@@ -91,7 +100,8 @@ void(entity player) W_357PickupCopy =
 void() W_357Shoot =
 {
     W_PenetratingHitscanShoot(W357_BASE_SPREAD, W357_MOVE_SPREAD, W357_FULL_SPREAD_SPEED,
-        W357_CLOSE_DAMAGE, W357_MIN_DAMAGE, W357_DAMAGE_FALLOFF_RANGE, 48, 0.97);
+        W357_CLOSE_DAMAGE, W357_MIN_DAMAGE, W357_DAMAGE_FALLOFF_RANGE, 48, 0.97,
+        W357_KICK_PITCH, W357_KICK_VARIANCE, W357_KICK_STRENGTH);
 };
 
 void() W_357Fire =
@@ -168,7 +178,7 @@ void() W_357Drop =
     self.ammo_357 = 0;
 
     setmodel(tgt, "models/weapons/wpn_hl357/w_357.mdl");
-    setsize(tgt, '-12 -12 0', '12 12 24');
+    setsize(tgt, '-12 -12 0', '12 12 40');
     tgt.classname    = "weapon_357";
     tgt.solid        = SOLID_NOT;
     tgt.movetype     = MOVETYPE_TOSS;
@@ -185,7 +195,7 @@ void() W_357Drop =
 void() weapon_357 =
 {
     setmodel(self, "models/weapons/wpn_hl357/w_357.mdl");
-    setsize(self, '-12 -12 0', '12 12 24');
+    setsize(self, '-12 -12 0', '12 12 40');
     self.classname     = "weapon_357";
     self.solid         = SOLID_TRIGGER;
     self.movetype      = MOVETYPE_TOSS;
@@ -221,7 +231,7 @@ void() CSQC_Predict357Command =
         if (r == 1)
         {
             CSQC_MarkPendingWeaponAck();
-            if (!pm_suppress_sounds)
+            if (CSQC_BeginFireActionEffects())
             {
                 if (random() < 0.5)
                     sound(self, CHAN_WEAPON, "sounds/weapons/wpn_hl357/fire1.wav", 1, ATTN_NONE);
@@ -229,7 +239,14 @@ void() CSQC_Predict357Command =
                     sound(self, CHAN_WEAPON, "sounds/weapons/wpn_hl357/fire2.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
                 CSQC_PredictedPenetratingImpact(W357_BASE_SPREAD, W357_MOVE_SPREAD, W357_FULL_SPREAD_SPEED,
-                    W357_CLOSE_DAMAGE, W357_MIN_DAMAGE, W357_DAMAGE_FALLOFF_RANGE, 48, 0.97);
+                    W357_CLOSE_DAMAGE, W357_MIN_DAMAGE, W357_DAMAGE_FALLOFF_RANGE, 48, 0.97,
+                    W357_KICK_PITCH, W357_KICK_VARIANCE, W357_KICK_STRENGTH);
+                // Pistol muzzle flash — DEAGLE_MUZZLE_* shared default.
+                CSQC_MuzzleFlashAtMuzzle(W357_MUZZLE_FORWARD, W357_MUZZLE_RIGHT,
+                    W357_MUZZLE_DOWN, self.wep_action_id);
+                CSQC_MuzzleSmokeAtMuzzle(W357_MUZZLE_FORWARD, W357_MUZZLE_RIGHT,
+                    W357_MUZZLE_DOWN, self.wep_action_id, 1);
+                CSQC_EndFireActionEffects();
             }
         }
         else if (r == -1)

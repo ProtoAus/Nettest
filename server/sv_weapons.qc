@@ -10,8 +10,24 @@ void() W_DeagleEquip;         // defined in wpn_deagle.qc
 void() W_DeagleDrop;          // defined in wpn_deagle.qc
 void() W_KnifeEquip;
 void() W_KnifeDrop;
+void() W_ButterflyEquip;
+void() W_ButterflyDrop;
+void() W_MeleeEquip;
+void() W_MeleeDrop;
+void() W_KatanaEquip;
+void() W_KatanaDrop;
+void() W_CFAugEquip;
+void() W_CFAugDrop;
+void() W_CFFamasEquip;
+void() W_CFFamasDrop;
+void() W_CFMac10Equip;
+void() W_CFMac10Drop;
+void() W_CFC4Equip;
+void() W_CFC4Drop;
 void() W_AK47Equip;
 void() W_AK47Drop;
+void() W_HDAK47Equip;
+void() W_HDAK47Drop;
 void() W_M4A1Equip;
 void() W_M4A1Drop;
 void() W_FlakShotgunEquip;
@@ -56,16 +72,66 @@ void() W_RPGEquip;
 void() W_RPGDrop;
 void() W_HLGrenadeEquip;
 void() W_HLGrenadeDrop;
+void() W_SnowballEquip;
+void() W_SnowballDrop;
+void() W_CSHEGrenadeEquip;
+void() W_CSHEGrenadeDrop;
+void() W_CSFlashbangEquip;
+void() W_CSFlashbangDrop;
+void() W_CSSmokeGrenadeEquip;
+void() W_CSSmokeGrenadeDrop;
+void() W_PaintballEquip;
+void() W_PaintballDrop;
 void() W_HLGlockEquip;
 void() W_HLGlockDrop;
 void() W_EgonEquip;
 void() W_EgonDrop;
-void() W_CSUSPEquip;
-void() W_CSUSPDrop;
-void() weapon_csusp;
+void() W_CFFiveSevenEquip;
+void() W_CFFiveSevenDrop;
+void() weapon_cffiveseven;
+void() W_CFDeagleEquip;
+void() W_CFDeagleDrop;
+void() weapon_cfdeagle;
+void() W_CFAwpEquip;
+void() W_CFAwpDrop;
+void() weapon_cfawp;
+void() W_CFG3SG1Equip;
+void() W_CFG3SG1Drop;
+void() weapon_cfg3sg1;
+void() W_CFEliteEquip;
+void() W_CFEliteDrop;
+void() weapon_cfelite;
+void() W_CFXM1014Equip;
+void() W_CFXM1014Drop;
+void() weapon_cfxm1014;
+void() W_CFScoutM700Equip;
+void() W_CFScoutM700Drop;
+void() weapon_cfscoutm700;
+void() W_CFM3Equip;
+void() W_CFM3Drop;
+void() weapon_cfm3;
+void() W_CFGalilEquip;
+void() W_CFGalilDrop;
+void() weapon_cfgalil;
+void() W_CFGlockEquip;
+void() W_CFGlockDrop;
+void() weapon_cfglock;
+void() W_CFSG550Equip;
+void() W_CFSG550Drop;
+void() weapon_cfsg550;
+void() W_CFMp5Equip;
+void() W_CFMp5Drop;
+void() weapon_cfmp5;
+void() W_CFVectorEquip;
+void() W_CFVectorDrop;
+void() weapon_cfvector;
+void() W_CFType89Equip;
+void() W_CFType89Drop;
+void() weapon_cftype89;
 void() weapon_deagle;
 void() weapon_m4a1;
 void() weapon_ak47;
+void() weapon_hdak47;
 void() weapon_pistol;
 void() weapon_flakshotgun;
 void() weapon_scout;
@@ -87,14 +153,44 @@ void() weapon_g3sg1;
 void() weapon_hlsmg;
 void() weapon_hlrpg;
 void() weapon_hlgrenade;
+void() weapon_snowball;
+void() weapon_slingshot;
+void() weapon_cshegrenade;
+void() weapon_csflashbang;
+void() weapon_cssmokegrenade;
+void() weapon_paintball;
 void() weapon_hlglock;
 void() weapon_hlegon;
+void() weapon_butterfly;
+void() weapon_melee;
+void() weapon_katana;
+void() weapon_cfaug;
+void() weapon_cffamas;
+void() weapon_cfmac10;
+void() weapon_cfc4;
 void() PlayerSpawn;           // defined in sv_player.qc
 void(float) W_SelectWeapon;   // defined later in this file
 void() weapon_become_solid;   // defined later in this file
 void() weapon_settle_think;   // defined later in this file
+void() W_UtilityRefreshSlotBinding; // defined later in this file
+float(float) W_UtilityWeaponSelectable; // defined in sh_wpn_snowball.qc
+float(float) W_UtilityWeaponPickup;
+float(entity, float) W_UtilityEntityHasWeapon;
+float(float) W_UtilityPlayerHasWeapon;
+float(float) W_UtilityNextCarried;
+float(float, float) W_UtilityCycleCarried;
+void() W_PhysDropThink;       // defined later in this file
+float(float) W_PhysDropAllowed; // defined later in this file
+void(entity, float) W_PhysDropStart; // defined later in this file
+float() RoundToss_NextThinkInterval; // defined later in this file
 float(entity, float) dropped_weapon_SendEntity;  // defined later in this file
 void() W_DropAllWeaponsOnDeath;  // defined later in this file
+void(entity player, float wep) W_SlotAmmo_LoadLegacy;
+void(entity player, float wep) W_SlotAmmo_SaveLegacy;
+void(entity player) W_SlotAmmo_SaveCurrent;
+void(entity drop, entity player, float wep) W_SlotAmmo_CopyPlayerToDrop;
+void(entity player, entity drop) W_SlotAmmo_CopyDropToPlayer;
+void(entity player, float wep) W_SlotAmmo_ClearForWeapon;
 
 // Global set by W_DropCurrentWeapon before calling the slot drop function.
 // The drop function reads this to know which entity to populate.
@@ -107,11 +203,32 @@ entity weapon_drop_target;
 
 // Absolute server time at which a dropped weapon transitions from the
 // toss phase (SOLID_NOT, players can't grab it) to the settled-trigger
-// phase.  Set to (spawn_time + 0.7) when the drop is created.  Driven
+// phase. Set to (spawn_time + WEAPON_DROP_PICKUP_DELAY) for player
+// drops. Driven
 // by weapon_become_solid's dual-phase logic — while time < this value
 // the function just bumps SendFlags and reschedules; once crossed it
 // finalises the solid state and hands off to weapon_settle_think.
 .float weapon_solid_time;
+.float weapon_round_toss;
+
+// Physics-drop startup probe. If an ODE body fails to start (for example a
+// model cannot produce a usable physics mesh), the server origin stays frozen
+// while CSQC extrapolates falling motion. Probe once and fall back to TOSS.
+.vector weapon_physdrop_last_origin;
+.float weapon_physdrop_probe_time;
+.float weapon_physdrop_rest_start;
+// Saved tight-ODE bbox while a trace-time inflate is in flight.  Set by
+// W_PhysDropsExpandTraceBboxes, consumed by the matching Restore — see
+// the helpers in this file.
+.vector weapon_physdrop_trace_mins_save;
+.vector weapon_physdrop_trace_maxs_save;
+.float  weapon_physdrop_trace_inflated;
+// Server-time of first "embedded in BSP" detection on this entity, or
+// 0 when the entity is currently clear. W_PhysDropStuckDuration uses
+// this to surface "stuck for N seconds" without per-tick tracebox cost.
+// Used by W_PhysDropThink + PhysProp_VoidWatchdog to despawn props
+// that ODE can't free.
+.float phys_stuck_since;
 
 // ============================================================
 //  Map weapon registration — call from weapon_*() spawn functions
@@ -119,6 +236,105 @@ entity weapon_drop_target;
 // ============================================================
 
 float sv_debug_weapon_spawning;   // TRUE during debug weapon spawn — skips map registration
+
+// Snap a phys-eligible map weapon to the surface immediately below it,
+// using the entity's pickup bbox (sized by weapon_*() via setsize). Adds
+// 1 u clearance so SOLID_PHYSICS_TRIMESH can activate without ODE
+// detecting mesh-below-bbox penetration and ejecting the body upward —
+// the source of the bounce-on-spawn cascade at round-restart with
+// sv_phys_drops on.  droptofloor() snaps absmin to the floor, but the
+// trimesh used by ODE is the model mesh (not the bbox) and weapon meshes
+// often have geometry below the bbox bottom.  Returns TRUE on success;
+// FALSE if no floor was found within the search distance.
+//
+// Trace distance is generous (256 u) because debug-spawn places weapons
+// in a grid in front of the player — the player's origin can be elevated
+// above the local floor (stairs, ramps, stack of crates) and the spawn
+// grid extends out into space where the ground sits well below the
+// player's feet.  64 u was too short and left those weapons in mid-air
+// at round-restart, falling under gravity instead of snapping flat.
+float() W_PhysDropGroundSnap =
+{
+    vector probe_start = self.origin;
+    vector probe_end   = self.origin - '0 0 256';
+    tracebox(probe_start, self.mins, self.maxs, probe_end, MOVE_NORMAL, self);
+    if (trace_fraction >= 1)
+        return FALSE;
+
+    setorigin(self, trace_endpos + '0 0 1');
+    self.velocity  = '0 0 0';
+    self.avelocity = '0 0 0';
+    return TRUE;
+};
+
+// True only when the entity's CENTER is inside solid BSP. We use
+// pointcontents (not tracebox-startsolid) because the latter trips on
+// a resting prop's bbox skimming the floor — that produced a "weapons
+// fly into the air after landing" loop in the first cut of this
+// system. Embedded-against-a-wall cases reliably put the center in
+// solid, so this catches the cases that matter.
+float(entity ent) W_PhysDropIsEmbedded =
+{
+    return pointcontents(ent.origin) == CONTENT_SOLID;
+};
+
+// "How long has this entity been embedded for?" detector. Returns
+// elapsed seconds, with the timer self-resetting whenever the prop
+// becomes clear. Caller picks a despawn threshold (e.g. 2s for drops,
+// 5s for barrels). Stores state on .phys_stuck_since.
+float(entity ent) W_PhysDropStuckDuration =
+{
+    if (!W_PhysDropIsEmbedded(ent))
+    {
+        ent.phys_stuck_since = 0;
+        return 0;
+    }
+    if (ent.phys_stuck_since == 0)
+    {
+        ent.phys_stuck_since = time;
+        return 0;
+    }
+    return time - ent.phys_stuck_since;
+};
+
+// Output of W_PhysDropFindClearBackstep. Read by caller after the
+// helper returns TRUE.
+vector w_physdrop_clear_pos;
+
+// Pre-spawn back-step search. Given a starting position that may be
+// inside a wall (e.g. player drops while facing a wall), step BACK
+// along -dir in 4-unit increments until a clear position is found.
+// Returns TRUE + sets w_physdrop_clear_pos if found within 64u.
+// Returns FALSE when no clear spot exists in that range — caller
+// should abort the drop and tell the player.
+//
+// Uses pointcontents only (not tracebox) because the bbox isn't fully
+// known until the drop_func runs and sets it. The 4-unit increment is
+// fine-grained enough that the prop almost always lands in clear
+// space inside the player's first body-radius from the wall.
+float(vector start_pos, vector dir) W_PhysDropFindClearBackstep =
+{
+    // Already clear?
+    if (pointcontents(start_pos) != CONTENT_SOLID)
+    {
+        w_physdrop_clear_pos = start_pos;
+        return TRUE;
+    }
+
+    vector back = -1 * normalize(dir);
+    float step;
+    for (step = 4; step <= 64; step = step + 4)
+    {
+        vector cand = start_pos + back * step;
+        if (pointcontents(cand) != CONTENT_SOLID)
+        {
+            w_physdrop_clear_pos = cand;
+            return TRUE;
+        }
+    }
+    w_physdrop_clear_pos = start_pos;
+    return FALSE;
+};
 
 void(void() spawn_func) W_RegisterMapWeapon =
 {
@@ -139,19 +355,37 @@ void(void() spawn_func) W_RegisterMapWeapon =
 
     self.map_weapon = TRUE;
     self.map_weapon_spawn = spawn_func;
+    W_SlotAmmo_SaveLegacy(self, self.weapon);
+    W_SlotAmmo_CopyPlayerToDrop(self, self, self.weapon);
 
     // mp_nomapweapons: hide the entity (no model, no collision, no
-    // CSQC replication, no think).  The bookkeeping above still stands
-    // so W_RespawnMapWeapons can revive us on round restart when the
-    // cvar is off.
+    // think).  The bookkeeping above still stands so
+    // W_RespawnMapWeapons can revive us on round restart when the
+    // cvar is off.  KEEP SendEntity wired and bump SendFlags so the
+    // engine broadcasts the empty-model state once — without that,
+    // clients hold their last-known visible copy of the weapon and
+    // the visual diverges from the server.  Idle resends with the
+    // same empty payload after that are cheap; the alternative
+    // (null SendEntity, hope the client guesses) is the source of
+    // the "mp_nomapweapons feels inconsistent" reports.
     if (cvar("mp_nomapweapons") > 0)
     {
+        if (self.movetype == MOVETYPE_PHYSICS || self.weapon_physdrop_sleeping)
+            physics_enable(self, FALSE);
+        self.weapon_physdrop_sleeping = FALSE;
+        self.weapon_physdrop_rest_start = 0;
+        self.weapon_round_toss = FALSE;
         setmodel(self, "");
         self.modelindex = 0;
         self.solid      = SOLID_NOT;
         self.movetype   = MOVETYPE_NONE;
-        self.SendEntity = __NULL__;
-        self.SendFlags  = 0;
+        self.dimension_solid = dimension_default;
+        self.dimension_hit   = dimension_default;
+        // Wire SendEntity (idempotent if already wired) and force a
+        // resend so the empty-model payload reaches every client.
+        self.pvsflags   = PVSF_NOREMOVE;
+        self.SendEntity = dropped_weapon_SendEntity;
+        self.SendFlags |= 1;
         self.think      = __NULL__;
         self.nextthink  = 0;
         return;
@@ -160,11 +394,31 @@ void(void() spawn_func) W_RegisterMapWeapon =
     // Snap to the floor at spawn time. W_RespawnMapWeapons does the
     // same on round restart, which is why round-2+ weapons appeared
     // grounded while the round-1 (initial map load) ones floated.
-    // Fallback velocity if droptofloor fails (e.g. mapper placed in a
-    // void) — matches the W_RespawnMapWeapons fallback pattern.
-    self.velocity = '0 0 -100';
-    if (!droptofloor())
-        self.velocity = '0 0 -200';
+    //
+    // Branch the snap on whether ODE is about to take over: phys-drop
+    // eligible weapons get the mesh-aware tracebox + 1 u clearance so
+    // SOLID_PHYSICS_TRIMESH activates without penetration; everything
+    // else uses droptofloor() (engine TOSS settles any residual).
+    float will_phys_drop = (cvar("sv_phys_drops") > 0
+        && Weapon_PhysDropEligible(self.weapon)
+        && cvar("sv_ode_loaded") > 0
+        && W_PhysDropAllowed(self.weapon));
+
+    if (will_phys_drop)
+    {
+        if (!W_PhysDropGroundSnap())
+        {
+            // Mapper placed weapon in the void — fall back to a
+            // velocity-driven engine TOSS so it lands somewhere.
+            self.velocity = '0 0 -200';
+        }
+    }
+    else
+    {
+        self.velocity = '0 0 -100';
+        if (!droptofloor())
+            self.velocity = '0 0 -200';
+    }
 
     // Enable CSQC replication for pickup prediction. Unlike player-
     // dropped weapons, map weapons are pickup-ready immediately, so we
@@ -172,14 +426,28 @@ void(void() spawn_func) W_RegisterMapWeapon =
     self.pvsflags = PVSF_NOREMOVE;
     self.SendEntity = dropped_weapon_SendEntity;
     self.SendFlags = 1;
+    self.weapon_round_toss = TRUE;
 
-    // Run settle_think to bump SendFlags every 0.2s while the engine
-    // TOSS physics still has residual motion (from droptofloor's
-    // fallback velocity or if it failed). Once motion stops, settle
-    // aligns angles to the floor normal and halts the think.
+    if (will_phys_drop)
+    {
+        // Map weapons are already floor-snapped above; start them as quiet
+        // ODE bodies so shooting/using them can wake and move them.
+        // (Snap helper already zeroed velocity/avelocity; left here as
+        // defence-in-depth for any future caller that lands here without
+        // going through W_PhysDropGroundSnap.)
+        self.owner = world;
+        self.velocity = '0 0 0';
+        self.avelocity = '0 0 0';
+        W_PhysDropStart(self, 0);
+        return;
+    }
+
+    // Run settle_think to bump SendFlags while the engine TOSS physics still
+    // has residual motion (from droptofloor's fallback velocity or if it
+    // failed). Once motion stops, settle keeps the pickup upright.
     self.weapon_settle_deadline = time + 10;
     self.think     = weapon_settle_think;
-    self.nextthink = time + 0.2;
+    self.nextthink = time + RoundToss_NextThinkInterval();
 };
 
 // Respawn all map weapons — called from RoundRestart
@@ -205,13 +473,25 @@ void() W_RespawnMapWeapons =
                     // mp_nomapweapons on — hide the entity but keep all
                     // map_weapon bookkeeping (origin/angles/spawn_func)
                     // intact so a later round can revive it verbatim.
-                    // Mirrors the hide path in W_RegisterMapWeapon.
+                    // Mirrors the hide path in W_RegisterMapWeapon —
+                    // KEEPS SendEntity + bumps SendFlags so clients get
+                    // the empty-model payload broadcast (otherwise CSQC
+                    // holds the last-known visible state and the panel
+                    // looks like it's still there).
+                    if (self.movetype == MOVETYPE_PHYSICS || self.weapon_physdrop_sleeping)
+                        physics_enable(self, FALSE);
+                    self.weapon_physdrop_sleeping = FALSE;
+                    self.weapon_physdrop_rest_start = 0;
+                    self.weapon_round_toss = FALSE;
                     setmodel(self, "");
                     self.modelindex = 0;
                     self.solid      = SOLID_NOT;
                     self.movetype   = MOVETYPE_NONE;
-                    self.SendEntity = __NULL__;
-                    self.SendFlags  = 0;
+                    self.dimension_solid = dimension_default;
+                    self.dimension_hit   = dimension_default;
+                    self.pvsflags   = PVSF_NOREMOVE;
+                    self.SendEntity = dropped_weapon_SendEntity;
+                    self.SendFlags |= 1;
                     self.think      = __NULL__;
                     self.nextthink  = 0;
                 }
@@ -225,18 +505,23 @@ void() W_RespawnMapWeapons =
                     setorigin(self, self.map_weapon_origin);
                     self.angles = self.map_weapon_angles;
                     self.map_weapon_spawn();     // re-runs weapon_ak47() etc.
-                    // Ensure weapon falls to the ground after respawn.
-                    // The spawn sets MOVETYPE_TOSS; give it a real downward
-                    // velocity so it visibly drops and settles.
-                    self.velocity = '0 0 -100';
-                    if (!droptofloor())
-                        self.velocity = '0 0 -200';
+                    // Non-physics spawns keep the old fallback floor-snap.
+                    // Physics spawns have already been floor-snapped and
+                    // handed to ODE by W_RegisterMapWeapon.
+                    if (self.movetype != MOVETYPE_PHYSICS)
+                    {
+                        self.velocity = '0 0 -100';
+                        if (!droptofloor())
+                            self.velocity = '0 0 -200';
+                    }
                 }
                 self = saved;
             }
             else
             {
                 // Remove dropped weapons
+                if (e.movetype == MOVETYPE_PHYSICS)
+                    physics_enable(e, FALSE);
                 remove(e);
             }
         }
@@ -356,6 +641,57 @@ void() W_PlayersRestoreHitboxes =
     }
 };
 
+// Phys-drop bbox bookends — split traceline AABB from the ODE collision
+// shape.  ODE keeps a tight gun-shaped box (so dropped guns rest on the
+// silhouette), but hitscan needs a larger AABB to catch the rotated mesh
+// at any orientation.  Walk every phys-drop, swap .mins/.maxs to the
+// inflated traceline volume just before the trace, restore right after.
+//
+// Safe vs ODE because the engine compares cached vs current mins/maxs
+// at the next physics step (com_phys_ode.c:2155-2167) — destroying and
+// recreating the geom (and losing velocity) if they differ.  We restore
+// synchronously inside the same QC frame before ODE's next tick, so
+// ODE never observes the inflated size.
+void() W_PhysDropsExpandTraceBboxes =
+{
+    float tx = cvar("sv_physdrop_trace_bbox_x");
+    float ty = cvar("sv_physdrop_trace_bbox_y");
+    float tz = cvar("sv_physdrop_trace_bbox_z");
+    if (tx <= 0 || ty <= 0 || tz <= 0) return;
+
+    entity e = nextent(world);
+    while (e)
+    {
+        if (e.weapon
+            && (e.solid == SOLID_PHYSICS_BOX || e.solid == SOLID_PHYSICS_TRIMESH))
+        {
+            // Stash the live ODE size so restore is exact even if
+            // multiple traces stack within one frame (they won't, but
+            // delta math via cvar would drift if cvars change mid-shot).
+            e.weapon_physdrop_trace_mins_save = e.mins;
+            e.weapon_physdrop_trace_maxs_save = e.maxs;
+            setsize(e, [-tx, -ty, -tz], [tx, ty, tz]);
+            e.weapon_physdrop_trace_inflated = TRUE;
+        }
+        e = nextent(e);
+    }
+};
+
+void() W_PhysDropsRestoreTraceBboxes =
+{
+    entity e = nextent(world);
+    while (e)
+    {
+        if (e.weapon_physdrop_trace_inflated)
+        {
+            setsize(e, e.weapon_physdrop_trace_mins_save,
+                       e.weapon_physdrop_trace_maxs_save);
+            e.weapon_physdrop_trace_inflated = FALSE;
+        }
+        e = nextent(e);
+    }
+};
+
 // Send the server's view of a target's hitbox state to the shooter.
 // The client creates a ghost entity from this and draws orange hitbox wireframes.
 // Mode 1 = per-shot snapshot (this function). Mode 2 = continuous, handled
@@ -404,7 +740,10 @@ void(vector src, vector end) W_WeaponTraceLine =
     // rewound every other player to the shooter's view-time before
     // this trace runs. Passing the engine flag would trigger a second,
     // independent rewind on top of ours.
+    float saved_dim_hit = self.dimension_hit;
+    self.dimension_hit = saved_dim_hit | PHYSDROP_DIM;
     Lagcomp_TraceLine(src, end, MOVE_NORMAL | MOVE_HITMODEL, self);
+    self.dimension_hit = saved_dim_hit;
 };
 
 // ============================================================
@@ -429,16 +768,22 @@ float(entity hit) W_ClassifyImpactMaterial =
     {
         float s = hit.style;
         if (s == BREAKABLE_FLESH)                                         return IMPACT_MAT_FLESH;
-        if (s == BREAKABLE_GLASS)                                         return IMPACT_MAT_GLASS;
-        if (s == BREAKABLE_WOOD)                                          return IMPACT_MAT_WOOD;
-        if (s == BREAKABLE_METAL || s == BREAKABLE_MACHINE
-                                 || s == BREAKABLE_CIRCUIT)               return IMPACT_MAT_METAL;
+        // GLASS + UNBREAKABLE_GLASS share the glass impact look —
+        // the unbreakable variant takes the same FX, just doesn't
+        // actually break.
+        if (s == BREAKABLE_GLASS || s == BREAKABLE_UNBREAKABLE_GLASS)     return IMPACT_MAT_GLASS;
+        // WOOD + TILE share the wood impact look (TILE aliases wood
+        // for assets per the user spec).
+        if (s == BREAKABLE_WOOD || s == BREAKABLE_TILE)                   return IMPACT_MAT_WOOD;
+        // METAL + COMPUTER share the metal impact look.
+        if (s == BREAKABLE_METAL || s == BREAKABLE_COMPUTER)              return IMPACT_MAT_METAL;
+        // CINDER and ROCKS fall through to IMPACT_MAT_DEFAULT
+        // (concrete-dust) below — that's the right look.
     }
-    // Physics props — sparks + metal ric, no hole decal. The hole
-    // spawn is already blocked by CSQC_SpawnBulletHole's
-    // `solid != SOLID_BSP` guard (phys props are SOLID_PHYSICS_BOX).
-    if (hit && (hit.classname == "phys_barrel" || hit.classname == "phys_can"))
-        return IMPACT_MAT_METAL;
+    // Physics props and physics weapon drops — sparks + metal ric, no decal.
+    if (hit && ((hit.classname == "phys_barrel" || hit.classname == "phys_can")
+        || (hit.weapon && (hit.movetype == MOVETYPE_PHYSICS || hit.weapon_physdrop_sleeping))))
+        return IMPACT_MAT_METAL_NODECAL;
     return IMPACT_MAT_DEFAULT;
 };
 
@@ -473,6 +818,10 @@ void(vector pos) W_ImpactEffect =
             // remove them on CSQC_EVENT_BRUSH_DESTROY. 0 = world /
             // non-BSP hit (client treats as stationary world decal).
             WriteShort(MSG_ONE, num_for_edict(trace_ent));
+            // Shooter entnum — used by remote clients to anchor the
+            // bullet tracer's start at the shooter's eye position.
+            // Players never exceed maxclients so a byte is enough.
+            WriteByte(MSG_ONE, num_for_edict(self));
         }
         p = p.player_chain_next;
     }
@@ -507,6 +856,7 @@ void(vector pos, vector normal) W_ImpactEffectAll =
             WriteByte(MSG_ONE, bound(0, rint(127 + normal_z * 127), 255));
             WriteByte(MSG_ONE, mat);
             WriteShort(MSG_ONE, num_for_edict(trace_ent));   // target entnum for decal attach
+            WriteByte(MSG_ONE, num_for_edict(self));         // shooter entnum for tracer start
         }
         p = p.player_chain_next;
     }
@@ -539,6 +889,7 @@ void(vector pos, vector normal, float mat) W_ImpactEffectAllMat =
             WriteByte(MSG_ONE, bound(0, rint(127 + normal_z * 127), 255));
             WriteByte(MSG_ONE, mat);
             WriteShort(MSG_ONE, num_for_edict(trace_ent));   // target entnum for decal attach
+            WriteByte(MSG_ONE, num_for_edict(self));         // shooter entnum for tracer start
         }
         p = p.player_chain_next;
     }
@@ -660,7 +1011,18 @@ float(entity target) W_CanDamageTarget =
     if (target.classname == "player")
         return TRUE;
     if (target.takedamage != DAMAGE_YES)
+    {
+        // BREAKABLE_ONLY_EXPLOSION brushes deliberately have
+        // takedamage = DAMAGE_NO so hitscan can't touch them — but
+        // the whole point of the flag is that explosions CAN.
+        // sv_in_radius_explosion is set TRUE while W_RadiusExplode
+        // is iterating its breakable list, so accept here.
+        if (sv_in_radius_explosion
+            && target.classname == "func_breakable"
+            && (target.spawnflags & BREAKABLE_ONLY_EXPLOSION))
+            return TRUE;
         return FALSE;
+    }
     return TRUE;
 };
 
@@ -718,7 +1080,10 @@ void(entity attacker, entity victim) PlayerKilled =
     victim.death_time = time;
     victim.solid = SOLID_NOT;
     victim.health = 0;
-    victim.velocity = '0 0 0';
+    // NOTE: do NOT zero victim.velocity yet — Player_VisualProxy_DetachAsCorpse
+    // reads it to seed the corpse's ballistic motion (so a player who dies
+    // mid-air completes the fall, an explosive blast sends the body flying).
+    // Velocity is zeroed AFTER the detach copy below.
 
     // Play death animation + scatter carried weapons, all with self = victim
     {
@@ -744,7 +1109,13 @@ void(entity attacker, entity victim) PlayerKilled =
     // corpse sweep). Works in both TDM (PlayerSpawn's Ensure spawns a
     // fresh proxy at the respawn point) and Elimination (PlayerJoinSpectate
     // sees player_visual_proxy == world and skips its remove).
+    // Detach reads victim.velocity for the corpse's initial fall vector,
+    // so this MUST run before the velocity zero below.
     Player_VisualProxy_DetachAsCorpse(victim);
+
+    // Now safe to wipe the live player's velocity — corpse already has
+    // its copy.  The dead player entity stays at rest until respawn.
+    victim.velocity = '0 0 0';
 };
 
 // ============================================================
@@ -858,12 +1229,82 @@ void(entity victim) DamageReport_Send =
     }
 };
 
+// Re-entrancy flag: SV_HandleBreakclaim sets this TRUE around its own
+// W_ApplyDamage call so the breakable-defer gate below doesn't fire
+// recursively and reject the very claim it's processing.  Globals (not
+// a parameter) so the dozen-plus weapon files calling W_ApplyDamage
+// don't all need a refactor.
+float sv_in_breakclaim_apply;
+// sv_in_radius_explosion is declared in sh_weapon_standard.qc so
+// W_RadiusExplode can set/clear it.  Used here in W_ApplyDamage to
+// bypass the sv_trust_clientbreak deferral on explosion hits, and in
+// W_CanDamageTarget to accept BREAKABLE_ONLY_EXPLOSION brushes.
+
+void(entity victim, float damage, float fall_twist) SV_SendDamageViewKick =
+{
+    if (victim.classname != "player")
+        return;
+    if (damage <= 0)
+        return;
+    if (cvar("sv_headkick") <= 0)
+        return;
+
+    float pitch = 0;
+    float roll = 0;
+
+    if (fall_twist)
+    {
+        float roll_strength = cvar("sv_headkick_fall_roll_strength");
+        if (roll_strength <= 0) roll_strength = 0.18;
+        float roll_max = cvar("sv_headkick_fall_roll_max");
+        if (roll_max <= 0) roll_max = 14;
+
+        roll = bound(0, damage * roll_strength, roll_max);
+        if (random() < 0.5)
+            roll = 0 - roll;
+    }
+    else
+    {
+        float pitch_strength = cvar("sv_headkick_strength");
+        if (pitch_strength <= 0) pitch_strength = 0.12;
+        float pitch_max = cvar("sv_headkick_max");
+        if (pitch_max <= 0) pitch_max = 8;
+
+        // Negative pitch looks upward in Quake/FTE angle convention.
+        pitch = 0 - bound(0, damage * pitch_strength, pitch_max);
+    }
+
+    if (pitch == 0 && roll == 0)
+        return;
+
+    msg_entity = victim;
+    WriteByte(MSG_ONE, SVC_CGAMEPACKET);
+    WriteByte(MSG_ONE, CSQC_EVENT_DAMAGE_VIEWKICK);
+    WriteShort(MSG_ONE, bound(-32768, rint(pitch * 100), 32767));
+    WriteShort(MSG_ONE, bound(-32768, rint(roll * 100), 32767));
+};
+
 float(entity attacker, entity target, float damage) W_ApplyDamage =
 {
     entity saved;
     entity old_activator;
 
     if (!W_CanDamageTarget(target))
+        return 0;
+
+    // sv_trust_clientbreak: when ON, the client owns breakable damage
+    // (sends `cmd breakclaim` per shot, server applies via
+    // SV_HandleBreakclaim).  Skip server-auth damage here so the same
+    // shot doesn't double up.  Centralized inside W_ApplyDamage to
+    // cover all hitscan / pellet / melee / projectile call sites
+    // without per-weapon edits.  The breakclaim handler itself sets
+    // sv_in_breakclaim_apply so this gate doesn't reject its own call.
+    // Radius explosions also bypass — no client-side prediction path
+    // exists for them, so deferral would silently drop the damage.
+    if (!sv_in_breakclaim_apply
+        && !sv_in_radius_explosion
+        && target.classname == "func_breakable"
+        && W_ShouldDeferBreakToClaim(attacker))
         return 0;
 
     // Friendlyfire check: block teammate damage if disabled.
@@ -885,6 +1326,39 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
     target.health       = target.health - damage;
     target.dmg_inflictor = attacker;
 
+    // sv_debug_hitclaim (and the existing cl_debug_hitclaim on the
+    // client) — single chokepoint for "what damage just landed".
+    // Covers every code path that reaches W_ApplyDamage:
+    //   server-auth hitscan (sh_weapon_standard.qc),
+    //   trust_clienthits 1 hitclaim (sv_player.qc:SV_HandleHitclaim),
+    //   melee / projectile / breakclaim handlers, etc.
+    // Prints attacker, weapon, target, hitgroup, and final damage so
+    // a user diffing trust 0 vs trust 1 can confirm the exact damage
+    // each path lands on each shot.  Wrap in the cvar so production
+    // play isn't polluted.
+    if (cvar("sv_debug_hitclaim"))
+    {
+        string atk_name = (attacker && attacker.classname == "player")
+                          ? attacker.netname : attacker.classname;
+        string tgt_name = (target.classname == "player")
+                          ? target.netname : target.classname;
+        float hg_byte = target.death_hitgroup;
+        print(sprintf("[hit] %s wep=%g -> %s hg=%g dmg=%.1f hp=%.1f trust=%g\n",
+                      atk_name, attacker.weapon, tgt_name,
+                      hg_byte, damage, target.health,
+                      cvar("sv_trust_clienthits")));
+    }
+
+    // Snap sub-1 HP slivers to 0 so a player who'd otherwise sit at
+    // 0.3 HP (displayed as 0 on the HUD because the byte rounds
+    // down) is counted as killed.  Only applies to player targets —
+    // func_breakable and other damageables keep their full float
+    // precision so the prediction layer can show "almost broken"
+    // states accurately.
+    if (target.classname == "player"
+        && target.health > 0 && target.health < 1)
+        target.health = 0;
+
     // Damage report — record (attacker, target, damage) for the
     // death-screen "Given/Taken" panel. Skips self-damage and
     // non-player attackers (world / fall damage) inside the helper.
@@ -899,13 +1373,50 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
         attacker.last_damaged_time   = time;
     }
 
-    // Send pain flash only to the victim
+    // Send pain flash only to the victim.  Attacker origin trails
+    // the damage byte so the CSQC hit indicator can rotate toward
+    // the source.  Falls back to target.origin (zero relative
+    // direction → indicator suppresses itself) when there's no
+    // meaningful external attacker.
     if (target.classname == "player")
     {
+        vector atk_pos = attacker ? attacker.origin : target.origin;
         msg_entity = target;
         WriteByte(MSG_ONE, SVC_CGAMEPACKET);
         WriteByte(MSG_ONE, CSQC_EVENT_DAMAGE_FLASH);
         WriteByte(MSG_ONE, bound(1, damage, 255));
+        WriteCoord(MSG_ONE, atk_pos_x);
+        WriteCoord(MSG_ONE, atk_pos_y);
+        WriteCoord(MSG_ONE, atk_pos_z);
+        SV_SendDamageViewKick(target, damage, FALSE);
+    }
+
+    // Visual flinch broadcast — all clients in PVS see the victim's
+    // proxy play CSANIM_GUT_FLINCH / CSANIM_HEAD_FLINCH for ~0.3 s.
+    // Gated on the hit being non-fatal (lethal hits play the death
+    // sequence instead) and the attacker being some external entity
+    // (so falling / void / status damage doesn't flinch).  Covers
+    // BOTH the no-trust path (server-auth W_ApplyDamage IS the
+    // single source of damage) and the trust path (server damage is
+    // deferred, but the hitclaim handler also routes through
+    // W_ApplyDamage — same code).  The shooter additionally predicts
+    // the flinch locally in CSQC_SendHitclaim so they see it without
+    // the server round-trip; that local predict is overwritten by
+    // this multicast harmlessly.
+    if (target.classname == "player"
+        && target.health > 0
+        && attacker != target
+        && attacker
+        && attacker != world
+        && damage > 0)
+    {
+        float hg = (target.death_hitgroup == HITGROUP_HEAD)
+                   ? HITGROUP_HEAD : HITGROUP_GENERIC;
+        WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
+        WriteByte(MSG_MULTICAST, CSQC_EVENT_PLAYER_FLINCH);
+        WriteByte(MSG_MULTICAST, num_for_edict(target));
+        WriteByte(MSG_MULTICAST, hg);
+        multicast(target.origin, MULTICAST_PVS);
     }
 
     // Hitmarker: server-confirmed hit on any damageable.
@@ -948,9 +1459,11 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
             else
                 gib_dir = '0 0 1';
 
-            // Gib count scales with damage so a tiny pistol headshot gibs
-            // less dramatically than an AWP headshot. 4 minimum, 12 cap.
-            float gib_count = bound(4, 4 + damage / 25, 12);
+            // Fixed at 6 — readable spray volume without overwhelming
+            // the per-gib blood-drip particle budget (6 gibs × 25-drop
+            // spray + 8-drop trickle ≈ 200 simultaneous polygons at
+            // peak vs ~1200 under the old 12-gib × 100-drop scheme).
+            float gib_count = 6;
 
             WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
             WriteByte(MSG_MULTICAST, CSQC_EVENT_PLAYER_GIBS);
@@ -1038,6 +1551,508 @@ float() Toss_NextThinkInterval =
     return 1.0 / bound(5, cvar("sv_toss_tickrate"), 100);
 };
 
+float() RoundToss_NextThinkInterval =
+{
+    return 1.0 / bound(1, cvar("sv_roundtoss_tickrate"), 100);
+};
+
+float(entity drop_ent) WeaponDrop_NextThinkInterval =
+{
+    if (drop_ent.weapon_round_toss)
+        return RoundToss_NextThinkInterval();
+    return Toss_NextThinkInterval();
+};
+
+// Optional ODE-backed weapon drops/spawns.
+// (Pickup zone constants WEAPON_PICKUP_HALF_W / *_HEIGHT_* / *_PAD live
+// in shared/sh_weapons.qc so client predict and server +use agree.)
+
+// Void-Z threshold: a prop whose origin drops below this is despawned.
+// -10000 ≈ 5s of free-fall (0.5 * 800 * 5²) — gives a fall-through-floor
+// case enough time to notice + react without sitting in the void
+// forever. Far below any legit map gameplay floor (most maps bottom-out
+// around -1024). Bump further if a future map has gameplay below this
+// depth. Keep in sync with PHYSPROP_VOID_Z (sv_physprop.qc) and the
+// void clamp in CSQC's Toss_PredictedNow (cl_tosssmooth.qc).
+const float PHYSDROP_VOID_Z = -10000;
+const float PHYSDROP_COORD_CAP = 65536;
+const float PHYSDROP_SLEEP_POLL = 0.2;     // polling cadence, not a feel knob
+
+// Phys-drop tunables — float globals refreshed from cvars at each
+// W_PhysDropEnable call.  Bake-at-enable fields (mass/friction/bounce/
+// damping) read these directly; the per-tick sleep checks in
+// W_PhysDropThink also read them so a live cvar tweak takes effect on
+// the next think (~0.2 s latency, fine for tuning).
+float PHYSDROP_MASS;
+float PHYSDROP_FRICTION;
+float PHYSDROP_BOUNCE;
+float PHYSDROP_BOUNCESTOP;
+float PHYSDROP_DAMP_LINEAR;
+float PHYSDROP_DAMP_ANGULAR;
+float PHYSDROP_SLEEP_SPEED;
+float PHYSDROP_SLEEP_ANGSPEED;
+float PHYSDROP_SLEEP_DELAY;
+
+// Fallback used by W_PhysDropRefreshCvars below.  cvar() returns 0
+// both for "set to 0 by admin" and "cvar string is empty" — distinguish
+// via cvar_string() and substitute the default only when the string
+// is literally "" (unregistered, or blanked by a stale data/server.cfg
+// exec).  Without this, dedicated servers were spawning weapons with
+// zeroed mass / friction / sleep thresholds because registercvar
+// didn't override values the engine already knew about.
+float(string name, float def) W_PhysDropCvarOrDefault =
+{
+    string s = cvar_string(name);
+    if (s == "")
+        return def;
+    return stof(s);
+};
+
+void() W_PhysDropRefreshCvars =
+{
+    PHYSDROP_MASS           = W_PhysDropCvarOrDefault("sv_physdrop_mass",          1.5);
+    PHYSDROP_FRICTION       = W_PhysDropCvarOrDefault("sv_physdrop_friction",      0.18);
+    PHYSDROP_BOUNCE         = W_PhysDropCvarOrDefault("sv_physdrop_bounce",        0);
+    PHYSDROP_BOUNCESTOP     = W_PhysDropCvarOrDefault("sv_physdrop_bouncestop",    0.5);
+    PHYSDROP_DAMP_LINEAR    = W_PhysDropCvarOrDefault("sv_physdrop_damp_lin",      0.005);
+    PHYSDROP_DAMP_ANGULAR   = W_PhysDropCvarOrDefault("sv_physdrop_damp_ang",      0.005);
+    PHYSDROP_SLEEP_SPEED    = W_PhysDropCvarOrDefault("sv_physdrop_sleep_speed",   8);
+    PHYSDROP_SLEEP_ANGSPEED = W_PhysDropCvarOrDefault("sv_physdrop_sleep_angspeed",12);
+    PHYSDROP_SLEEP_DELAY    = W_PhysDropCvarOrDefault("sv_physdrop_sleep_delay",   0.2);
+};
+
+float(float wep) W_PhysDropAllowed =
+{
+    if (cvar("sv_phys_drops") <= 0)
+        return FALSE;
+    if (!Weapon_PhysDropEligible(wep))
+        return FALSE;
+    if (!physics_supported(TRUE))
+    {
+        cvar_set("sv_ode_loaded", "-1");
+        if (cvar("sv_debug_physprops"))
+            dprint("[physdrop] sv_phys_drops is on, but ODE physics is unavailable\n");
+        return FALSE;
+    }
+    cvar_set("sv_ode_loaded", "1");
+    return TRUE;
+};
+
+float(entity drop_ent) W_PhysDropRadius =
+{
+    vector mn = drop_ent.mins;
+    vector mx = drop_ent.maxs;
+    float r;
+
+    r = max(fabs(mn_x), fabs(mx_x));
+    r = max(r, fabs(mn_y));
+    r = max(r, fabs(mx_y));
+    r = max(r, fabs(mn_z));
+    r = max(r, fabs(mx_z));
+
+    // Trimesh collision uses the model surface; this cube is just the broad
+    // ODE/entity AABB, so keep it generous enough for rotated weapon meshes.
+    return bound(12, r + 4, 64);
+};
+
+void(entity drop_ent) W_PhysDropEnable =
+{
+    // Refresh tunables from cvars so live tweaks (sv_physdrop_*) apply
+    // to the next phys-enable without a map restart.
+    W_PhysDropRefreshCvars();
+
+    // Geometry shape — TRIMESH uses the model's triangle mesh as the
+    // collision surface (visually accurate rest, but unreliable on
+    // GoldSrc .mdl files whose mesh data has gaps / duplicate verts,
+    // causing the "flickers in place / stuck on nothing / stuck on
+    // player" symptoms the user reported on the CF series).
+    //
+    // SOLID_PHYSICS_BOX uses the entity's bbox as the collision shape —
+    // strictly an AABB, simpler, ODE-stable across model formats, and
+    // sized from the model's natural $bbox (which setmodel stamps into
+    // mins/maxs).  Default to BOX for that reason; flip
+    // sv_physdrop_geom to 1 to opt back into TRIMESH per-server.
+    float use_trimesh = cvar("sv_physdrop_geom") > 0.5;
+
+    if (use_trimesh)
+    {
+        // Trimesh path — broad AABB is a generous cube around the
+        // model's bounding sphere so any rotation stays inside.
+        float r = W_PhysDropRadius(drop_ent);
+        setsize(drop_ent, [-r, -r, -r], [r, r, r]);
+        drop_ent.solid = SOLID_PHYSICS_TRIMESH;
+    }
+    else
+    {
+        // Box path — the natural $bbox in GoldSrc .mdl world models is
+        // basically always tiny (1-2 units around the origin) because
+        // the original engine never used it for collision on dropped
+        // weapons.  Trusting it means dropped guns rest with the model
+        // sunk into the floor.  Force a tight gun-shaped half-extent box
+        // that matches the silhouette so ODE rests the body on the gun
+        // shape.  Hitscan AABB is grown separately at trace time by
+        // W_PhysDropsExpandTraceBboxes (mirrors the sv_hitbox_expand
+        // playermodel pattern) — keeping the ODE shape tight here.
+        // Tunable per-server via sv_physdrop_bbox_(x|y|z); 0 means
+        // "use model's natural".
+        float bx = W_PhysDropCvarOrDefault("sv_physdrop_bbox_x", 12);
+        float by = W_PhysDropCvarOrDefault("sv_physdrop_bbox_y", 5);
+        float bz = W_PhysDropCvarOrDefault("sv_physdrop_bbox_z", 3);
+        if (bx > 0 && by > 0 && bz > 0)
+            setsize(drop_ent, [-bx, -by, -bz], [bx, by, bz]);
+        else if (drop_ent.maxs == drop_ent.mins)
+            setsize(drop_ent, '-8 -8 -2', '8 8 2');
+        drop_ent.solid = SOLID_PHYSICS_BOX;
+    }
+    drop_ent.movetype = MOVETYPE_PHYSICS;
+    drop_ent.dimension_solid = PHYSDROP_DIM;
+    drop_ent.dimension_hit = dimension_default | PHYSDROP_DIM;
+    drop_ent.mass = PHYSDROP_MASS;
+    drop_ent.friction = PHYSDROP_FRICTION;
+    drop_ent.bouncefactor = PHYSDROP_BOUNCE;
+    drop_ent.bouncestop = PHYSDROP_BOUNCESTOP;
+    drop_ent.erp = cvar("sv_physprop_erp");
+    drop_ent.damp_linear = PHYSDROP_DAMP_LINEAR;
+    drop_ent.damp_angular = PHYSDROP_DAMP_ANGULAR;
+    drop_ent.max_angular = 35;
+    drop_ent.weapon_physdrop_sleeping = FALSE;
+    drop_ent.weapon_physdrop_rest_start = 0;
+
+    // Physics drops must use server angles, not CSQC's classic spin path.
+    drop_ent.dropped_spin = 0;
+    if (drop_ent.avelocity == '0 0 0' && (drop_ent.velocity * drop_ent.velocity) > 1)
+        drop_ent.avelocity = [random() * 360 - 180, random() * 600 - 300, random() * 360 - 180];
+
+    drop_ent.weapon_physdrop_last_origin = drop_ent.origin;
+    if ((drop_ent.velocity * drop_ent.velocity) > 1)
+        drop_ent.weapon_physdrop_probe_time = time + 0.25;
+    else
+        drop_ent.weapon_physdrop_probe_time = 0;
+
+    physics_enable(drop_ent, TRUE);
+
+    if (cvar("sv_debug_physprops"))
+    {
+        float r_dbg = use_trimesh ? W_PhysDropRadius(drop_ent) : 0;
+        dprint(sprintf("[physdrop] enabled %s wep=%g ent=%g origin=%v vel=%v shape=%s r=%.1f\n",
+            drop_ent.classname, drop_ent.weapon, num_for_edict(drop_ent),
+            drop_ent.origin, drop_ent.velocity,
+            use_trimesh ? "trimesh" : "box", r_dbg));
+    }
+
+    // (No immediate-sleep flip here.  An earlier version called
+    // W_PhysDropSleep right after physics_enable(TRUE) when velocity
+    // was zero — wake/sleep in the same tick crashed dedicated
+    // servers via dxNormalize4 / LCP "s <= 0" when the body sat
+    // partially embedded in the floor at activation time.  Let ODE
+    // simulate naturally for ~PHYSDROP_SLEEP_DELAY seconds; the
+    // sleep path inside W_PhysDropThink takes over once the body's
+    // velocity drops below the sleep threshold.)
+};
+
+void(entity drop_ent) W_PhysDropSleep =
+{
+    drop_ent.weapon_physdrop_sleeping = TRUE;
+    drop_ent.weapon_physdrop_rest_start = 0;
+    drop_ent.velocity = '0 0 0';
+    drop_ent.avelocity = '0 0 0';
+    drop_ent.SendFlags |= 1;
+
+    physics_enable(drop_ent, FALSE);
+    drop_ent.movetype = MOVETYPE_NONE;
+    // Keep the physics-solid shape while asleep so hitscan traces still
+    // use the model bbox / mesh instead of the broad pickup bbox.
+    drop_ent.solid = (cvar("sv_physdrop_geom") > 0.5)
+                   ? SOLID_PHYSICS_TRIMESH : SOLID_PHYSICS_BOX;
+    drop_ent.dimension_solid = PHYSDROP_DIM;
+    drop_ent.dimension_hit = dimension_default | PHYSDROP_DIM;
+    drop_ent.think = W_PhysDropThink;
+    drop_ent.nextthink = time + PHYSDROP_SLEEP_POLL;
+
+    if (cvar("sv_debug_physprops"))
+        dprint(sprintf("[physdrop] slept %s ent=%g origin=%v\n",
+            drop_ent.classname, num_for_edict(drop_ent), drop_ent.origin));
+};
+
+void(entity drop_ent) W_PhysDropWake =
+{
+    if (!drop_ent.weapon_physdrop_sleeping)
+        return;
+
+    drop_ent.weapon_physdrop_sleeping = FALSE;
+    drop_ent.weapon_physdrop_rest_start = 0;
+    // Clear the embedded-since stamp on every wake. Otherwise a prop
+    // that sat sleeping at a position whose pointcontents was solid
+    // (e.g. settled with origin barely below floor — common for low-
+    // hull weapons like the shotgun/crossbow/rebar) carries a stale
+    // phys_stuck_since across the sleep, and the very first awake
+    // tick reports time-vs-stale-arm-time as way over the 2 s
+    // threshold and despawns the prop instantly. Resetting here
+    // makes the 2-s clock measure only "embedded time WHILE awake",
+    // which is what the stuck-detector was meant to gate on.
+    drop_ent.phys_stuck_since = 0;
+    drop_ent.weapon_round_toss = FALSE;
+    // Mirror the W_PhysDropEnable geometry choice on wake — see that
+    // function for why BOX is the default.
+    drop_ent.solid = (cvar("sv_physdrop_geom") > 0.5)
+                   ? SOLID_PHYSICS_TRIMESH : SOLID_PHYSICS_BOX;
+    drop_ent.movetype = MOVETYPE_PHYSICS;
+    drop_ent.dimension_solid = PHYSDROP_DIM;
+    drop_ent.dimension_hit = dimension_default | PHYSDROP_DIM;
+    physics_enable(drop_ent, TRUE);
+    drop_ent.think = W_PhysDropThink;
+    drop_ent.nextthink = time + WeaponDrop_NextThinkInterval(drop_ent);
+    drop_ent.SendFlags |= 1;
+
+    if (cvar("sv_debug_physprops"))
+        dprint(sprintf("[physdrop] woke %s ent=%g origin=%v\n",
+            drop_ent.classname, num_for_edict(drop_ent), drop_ent.origin));
+};
+
+void(entity drop_ent, float pickup_delay) W_PhysDropStart =
+{
+    drop_ent.pvsflags = PVSF_NOREMOVE;
+    drop_ent.SendEntity = dropped_weapon_SendEntity;
+    drop_ent.SendFlags |= 1;
+    drop_ent.nodrawtoclient = world;
+    drop_ent.weapon_solid_time = time + pickup_delay;
+    W_PhysDropEnable(drop_ent);
+    drop_ent.think = W_PhysDropThink;
+    drop_ent.nextthink = time + WeaponDrop_NextThinkInterval(drop_ent);
+};
+
+void() W_SyncMapWeaponPhysics =
+{
+    entity e = nextent(world);
+    entity saved = self;
+
+    while (e)
+    {
+        if (e.map_weapon
+            && e.weapon != WEP_NONE
+            && e.model != ""
+            && Weapon_PhysDropEligible(e.weapon)
+            && e.movetype != MOVETYPE_PHYSICS
+            && !e.weapon_physdrop_sleeping)
+        {
+            self = e;
+            if (W_PhysDropAllowed(e.weapon))
+            {
+                e.owner = world;
+                e.velocity = '0 0 0';
+                e.avelocity = '0 0 0';
+                e.weapon_round_toss = TRUE;
+                W_PhysDropStart(e, 0);
+            }
+        }
+        e = nextent(e);
+    }
+
+    self = saved;
+};
+
+void() W_PhysDropFallbackToToss =
+{
+    if (cvar("sv_debug_physprops"))
+        dprint(sprintf("[physdrop] fallback to TOSS for %s ent=%g origin=%v vel=%v\n",
+            self.classname, num_for_edict(self), self.origin, self.velocity));
+
+    physics_enable(self, FALSE);
+    self.weapon_physdrop_sleeping = FALSE;
+    self.weapon_physdrop_rest_start = 0;
+    self.solid = SOLID_NOT;
+    self.movetype = MOVETYPE_TOSS;
+    self.dimension_solid = dimension_default;
+    self.dimension_hit = dimension_default;
+    self.owner = world;
+    self.think = weapon_become_solid;
+    self.nextthink = time + WeaponDrop_NextThinkInterval(self);
+};
+
+float() W_PhysDropEscapedWorld =
+{
+    if (self.origin_z < PHYSDROP_VOID_Z)
+        return TRUE;
+    if (fabs(self.origin_x) > PHYSDROP_COORD_CAP)
+        return TRUE;
+    if (fabs(self.origin_y) > PHYSDROP_COORD_CAP)
+        return TRUE;
+    if (fabs(self.origin_z) > PHYSDROP_COORD_CAP)
+        return TRUE;
+    if (self.origin_x != self.origin_x)
+        return TRUE;
+    if (self.origin_y != self.origin_y)
+        return TRUE;
+    if (self.origin_z != self.origin_z)
+        return TRUE;
+    return FALSE;
+};
+
+// Pickup-overlap test against the custom WEAPON_PICKUP_* zone, NOT the
+// physics body. ODE-backed drops have a setsize hull that can be much
+// larger than the visible weapon (e.g. AWP's trimesh cube), and rotates
+// with the body — neither of which we want driving pickup feel. Anchor
+// a fixed cube at the prop's origin instead so every weapon picks up
+// from the same zone and the client-predicted reach stays in sync.
+float(entity player) W_PhysDropPlayerClose =
+{
+    vector zone_mins = self.origin + [-WEAPON_PICKUP_HALF_W, -WEAPON_PICKUP_HALF_W, -WEAPON_PICKUP_HEIGHT_DN];
+    vector zone_maxs = self.origin + [ WEAPON_PICKUP_HALF_W,  WEAPON_PICKUP_HALF_W,  WEAPON_PICKUP_HEIGHT_UP];
+
+    vector wmins = zone_mins - [WEAPON_PICKUP_PAD, WEAPON_PICKUP_PAD, WEAPON_PICKUP_PAD];
+    vector wmaxs = zone_maxs + [WEAPON_PICKUP_PAD, WEAPON_PICKUP_PAD, WEAPON_PICKUP_PAD];
+
+    if (player.absmax_x < wmins_x || player.absmin_x > wmaxs_x) return FALSE;
+    if (player.absmax_y < wmins_y || player.absmin_y > wmaxs_y) return FALSE;
+    if (player.absmax_z < wmins_z || player.absmin_z > wmaxs_z) return FALSE;
+    return TRUE;
+};
+
+float() W_PhysDropTryPickup =
+{
+    entity oldself = self;
+    entity oldother = other;
+    entity p = player_chain_head;
+
+    while (p)
+    {
+        if (p.classname == "player"
+            && p.player_team != TEAM_NONE
+            && !p.is_dead
+            && p.solid == SOLID_SLIDEBOX
+            && W_PhysDropPlayerClose(p))
+        {
+            other = p;
+            self = oldself;
+            if (self.touch)
+                self.touch();
+            other = oldother;
+            return TRUE;
+        }
+        p = p.player_chain_next;
+    }
+
+    self = oldself;
+    other = oldother;
+    return FALSE;
+};
+
+void() W_PhysDropThink =
+{
+    if (self.weapon_physdrop_sleeping)
+    {
+        if (W_PhysDropEscapedWorld())
+        {
+            if (cvar("sv_debug_physprops"))
+                dprint(sprintf("[physdrop] removing escaped sleeping %s at %v\n", self.classname, self.origin));
+            remove(self);
+            return;
+        }
+
+        self.nextthink = time + PHYSDROP_SLEEP_POLL;
+
+        if (time < self.weapon_solid_time)
+            return;
+
+        self.owner = world;
+        self.nodrawtoclient = world;
+        if (W_PhysDropTryPickup())
+            return;
+        return;
+    }
+
+    self.SendFlags |= 1;
+
+    if (W_PhysDropEscapedWorld())
+    {
+        if (cvar("sv_debug_physprops"))
+            dprint(sprintf("[physdrop] removing escaped %s at %v\n", self.classname, self.origin));
+        physics_enable(self, FALSE);
+        remove(self);
+        return;
+    }
+
+    // Runtime stuck-despawn — if a moving brush or an explosion has
+    // shoved the prop's center into solid BSP and it's been there for
+    // more than 2 seconds, ODE isn't going to free it. Despawn rather
+    // than try to nudge it (the per-tick unstick attempts in an
+    // earlier version misclassified resting-on-floor as embedded and
+    // launched weapons into the air every tick). Cheap: pointcontents
+    // is one engine call, runs only on the awake-think tick rate.
+    if (cvar("sv_phys_unstick") && W_PhysDropStuckDuration(self) > 2)
+    {
+        if (cvar("sv_debug_physprops"))
+            dprint(sprintf("[physdrop] removing %s at %v (stuck in BSP > 2s)\n",
+                self.classname, self.origin));
+        physics_enable(self, FALSE);
+        remove(self);
+        return;
+    }
+
+    self.nextthink = time + WeaponDrop_NextThinkInterval(self);
+
+    if (self.weapon_physdrop_probe_time > 0 && time >= self.weapon_physdrop_probe_time)
+    {
+        self.weapon_physdrop_probe_time = 0;
+        if (vlen(self.origin - self.weapon_physdrop_last_origin) < 4)
+        {
+            W_PhysDropFallbackToToss();
+            return;
+        }
+    }
+
+    if (time < self.weapon_solid_time)
+        return;
+
+    self.owner = world;
+    self.nodrawtoclient = world;
+
+    if (vlen(self.velocity) <= PHYSDROP_SLEEP_SPEED
+        && vlen(self.avelocity) <= PHYSDROP_SLEEP_ANGSPEED)
+    {
+        if (self.weapon_physdrop_rest_start <= 0)
+            self.weapon_physdrop_rest_start = time;
+        else if (time - self.weapon_physdrop_rest_start >= PHYSDROP_SLEEP_DELAY)
+        {
+            W_PhysDropSleep(self);
+            if (W_PhysDropTryPickup())
+                return;
+            return;
+        }
+    }
+    else
+    {
+        self.weapon_physdrop_rest_start = 0;
+    }
+
+    // Physics solids are not trigger pickups, so manually run the normal
+    // weapon_touch path when a live player overlaps the pickup hull.
+    if (W_PhysDropTryPickup())
+        return;
+};
+
+void() W_PhysDropDeferredRemove =
+{
+    physics_enable(self, FALSE);
+    remove(self);
+};
+
+void(entity drop_ent) W_PhysDropBeginRemove =
+{
+    // Hide from CSQC immediately, but defer the actual remove so we never
+    // dSpaceRemove a geom from inside ODE's locked collision callback.
+    drop_ent.model = "";
+    drop_ent.touch = __NULL__;
+    drop_ent.solid = SOLID_NOT;
+    drop_ent.SendFlags |= 1;
+    drop_ent.owner = world;
+    physics_enable(drop_ent, FALSE);
+    drop_ent.weapon_physdrop_sleeping = FALSE;
+    drop_ent.weapon_physdrop_rest_start = 0;
+    drop_ent.think = W_PhysDropDeferredRemove;
+    drop_ent.nextthink = time + 0.1;
+};
+
 // Shared CSQC SendEntity for every server-spawned projectile (HL grenade,
 // GL grenade, RPG rocket, crossbow bolt). Returning FALSE for the shooter
 // hides the entity from them — they see only their CSQC-predicted fake.
@@ -1064,6 +2079,15 @@ float(entity playerent, float changedflags) projectile_SendEntity =
     WriteCoord(MSG_ENTITY, self.avelocity_x);
     WriteCoord(MSG_ENTITY, self.avelocity_y);
     WriteCoord(MSG_ENTITY, self.avelocity_z);
+    // Paintball projectiles carry per-shot colormod so remote viewers
+    // see the same tinted ball the shooter does. Other types skip
+    // the bytes entirely — wire stays compact for the common case.
+    if (self.proj_type == PROJ_TYPE_PAINTBALL)
+    {
+        WriteByte(MSG_ENTITY, bound(0, floor(self.colormod_x * 255 + 0.5), 255));
+        WriteByte(MSG_ENTITY, bound(0, floor(self.colormod_y * 255 + 0.5), 255));
+        WriteByte(MSG_ENTITY, bound(0, floor(self.colormod_z * 255 + 0.5), 255));
+    }
     return TRUE;
 };
 
@@ -1081,14 +2105,14 @@ void() weapon_become_solid =
         // origin + velocity as the TOSS physics carries the drop through
         // the air. Faster send rate → less per-snapshot snap to absorb in
         // the CSQC smoothing layer.
-        self.nextthink = time + Toss_NextThinkInterval();
+        self.nextthink = time + WeaponDrop_NextThinkInterval(self);
         return;
     }
 
-    // +0.7 s crossed: finalise the transition.  Flip solid so the
+    // Pickup grace crossed: finalise the transition. Flip solid so the
     // dropper (and everyone else) can now touch for pickup, unhide
     // from the dropper, and hand off to weapon_settle_think which
-    // will watch for motion to stop and then align to the floor.
+    // will watch for motion to stop and then lock the pickup upright.
     self.solid = SOLID_TRIGGER;
     self.nodrawtoclient = world;
     self.pvsflags = PVSF_NOREMOVE;
@@ -1102,17 +2126,15 @@ void() weapon_become_solid =
     // convergence within this window.
     self.weapon_settle_deadline = time + 3;
     self.think = weapon_settle_think;
-    self.nextthink = time + Toss_NextThinkInterval();
+    self.nextthink = time + WeaponDrop_NextThinkInterval(self);
 };
 
-// Polled every 0.2s once the weapon is solid.  Waits until motion drops
-// below a threshold (or the 10s deadline hits), then traces down for the
-// floor normal and aligns the model flat on the surface.  No further
-// think is scheduled afterward — the pickup remains a static trigger.
+// Polled once the weapon is solid. Waits until motion drops below a
+// threshold (or the deadline hits), then keeps the pickup upright. No
+// further think is scheduled afterward — the pickup remains a static trigger.
 void() weapon_settle_think =
 {
     vector flat_vel;
-    vector floor_normal;
     float yaw;
 
     // Push a fresh CSQC snapshot on every poll tick so the client's
@@ -1139,34 +2161,14 @@ void() weapon_settle_think =
 
         // Still moving — keep ticking at sv_toss_tickrate so the CSQC
         // smoothing layer always has fresh samples to extrapolate from.
-        self.nextthink = time + Toss_NextThinkInterval();
+        self.nextthink = time + WeaponDrop_NextThinkInterval(self);
         return;
     }
 
-    // Trace down for the floor normal — fall back to flat if we're in the
-    // air (mid-bounce at deadline) so we still get a sane orientation.
-    floor_normal = '0 0 1';
-    traceline(self.origin, self.origin - '0 0 32', TRUE, self);
-    if (trace_fraction < 1)
-        floor_normal = trace_plane_normal;
-
+    // Non-physics drops stay upright like classic Quake pickups. ODE drops
+    // use their physics-driven angles and never enter this settle path.
     yaw = self.angles_y;
-    if (floor_normal_z > 0.99)
-    {
-        self.angles = [0, yaw, 0];
-    }
-    else
-    {
-        // Sloped surface — pitch/roll to match using the same math as
-        // CSQC_ShellSettle in cl_shells.qc.
-        vector fwd, rt;
-        makevectors([0, yaw, 0]);
-        fwd = v_forward;
-        rt = v_right;
-        self.angles_x = -asin(floor_normal * fwd) * (180.0 / M_PI);
-        self.angles_z = asin(floor_normal * rt) * (180.0 / M_PI);
-        self.angles_y = yaw;
-    }
+    self.angles = [0, yaw, 0];
 
     self.movetype = MOVETYPE_NONE;
     self.velocity = '0 0 0';
@@ -1200,11 +2202,25 @@ void() weapon_touch =
 
     slot = pickup.weapon_slot;
 
-    // Reject if player already has a weapon in this slot — must drop first
+    // Reject if player already has a weapon in this slot — utility is a
+    // small inventory, so only duplicate utility pickups are blocked.
+    // SLOT_MELEE has a special case for WEP_MELEE (fists): fists are
+    // INTRINSIC so the slot is effectively "empty" for pickup purposes
+    // — walking over a katana / knife / crowbar while only carrying
+    // fists overwrites the slot with the real weapon.  Without this
+    // exception the player would be stuck with fists forever since
+    // the drop key can't drop them.
     if (slot == SLOT_PRIMARY   && player.slot_primary)   return;
     if (slot == SLOT_SECONDARY && player.slot_secondary) return;
-    if (slot == SLOT_MELEE     && player.slot_melee)     return;
-    if (slot == SLOT_UTILITY   && player.slot_utility)   return;
+    if (slot == SLOT_MELEE
+        && player.slot_melee
+        && player.slot_melee != WEP_MELEE)               return;
+    if (slot == SLOT_UTILITY)
+    {
+        if (!W_UtilityWeaponPickup(pickup.weapon)) return;
+        if (pickup.weapon == WEP_SLINGSHOT && player.snowball_has_slingshot) return;
+        if (W_UtilityEntityHasWeapon(player, pickup.weapon)) return;
+    }
 
     // Copy ammo from world entity to player (self = pickup for pickupcopy)
     saved = self;
@@ -1212,6 +2228,7 @@ void() weapon_touch =
     if (self.pickupcopy)
         self.pickupcopy(player);
     self = saved;
+    W_SlotAmmo_CopyDropToPlayer(player, pickup);
 
     // Register weapon in the correct player slot
     if (slot == SLOT_PRIMARY)
@@ -1234,17 +2251,25 @@ void() weapon_touch =
     }
     else if (slot == SLOT_UTILITY)
     {
-        player.slot_utility       = pickup.weapon;
-        player.slot_utility_equip = pickup.weap_draw;
-        player.slot_utility_drop  = pickup.weap_drop_func;
+        if (pickup.weapon != WEP_SLINGSHOT)
+        {
+            if (!W_UtilityEntityHasWeapon(player, player.slot_utility))
+                player.slot_utility = pickup.weapon;
+            saved = self;
+            self = player;
+            W_UtilityRefreshSlotBinding();
+            self = saved;
+        }
     }
 
     // Auto-equip if this is a better weapon than what we're holding.
-    // Primary > Secondary > Melee.
+    // Primary > Secondary > Melee.  Holding WEP_MELEE (fists) counts
+    // as "nothing equipped" for this decision — any real melee
+    // pickup immediately swaps off the intrinsic fists.
     {
         float should_equip = FALSE;
 
-        if (player.weapon == WEP_NONE)
+        if (player.weapon == WEP_NONE || player.weapon == WEP_MELEE)
             should_equip = TRUE;
         else if (slot == SLOT_PRIMARY)
             should_equip = TRUE;   // primary is always best
@@ -1292,7 +2317,10 @@ void() weapon_touch =
     }
     else
     {
-        remove(pickup);
+        if (pickup.movetype == MOVETYPE_PHYSICS)
+            W_PhysDropBeginRemove(pickup);
+        else
+            remove(pickup);
     }
 };
 
@@ -1320,7 +2348,91 @@ void(float slot_weapon, void() slot_equip) W_TryEquipSlot =
     if (self.weapon != slot_weapon || !slot_equip)
         return;
     W_ClearWeaponBindings();
+    W_SlotAmmo_LoadLegacy(self, slot_weapon);
     slot_equip();   // sets weaponmodel, fire, reload, wepframe, initial frame/state
+};
+
+void() W_UtilityRefreshSlotBinding =
+{
+    self.slot_utility = W_UtilityNextCarried(WEP_NONE);
+    self.slot_utility_equip = __NULL__;
+    self.slot_utility_drop = __NULL__;
+
+    if (self.slot_utility == WEP_HLGRENADE)
+    {
+        self.slot_utility_equip = W_HLGrenadeEquip;
+        self.slot_utility_drop = W_HLGrenadeDrop;
+    }
+    else if (self.slot_utility == WEP_SNOWBALL)
+    {
+        self.slot_utility_equip = W_SnowballEquip;
+        self.slot_utility_drop = W_SnowballDrop;
+    }
+    else if (self.slot_utility == WEP_CSHEGRENADE)
+    {
+        self.slot_utility_equip = W_CSHEGrenadeEquip;
+        self.slot_utility_drop = W_CSHEGrenadeDrop;
+    }
+    else if (self.slot_utility == WEP_CSFLASHBANG)
+    {
+        self.slot_utility_equip = W_CSFlashbangEquip;
+        self.slot_utility_drop = W_CSFlashbangDrop;
+    }
+    else if (self.slot_utility == WEP_CSSMOKEGRENADE)
+    {
+        self.slot_utility_equip = W_CSSmokeGrenadeEquip;
+        self.slot_utility_drop = W_CSSmokeGrenadeDrop;
+    }
+};
+
+void(float utility_wep) W_UtilitySetCurrentSlot =
+{
+    // C4 lives outside slot_utility entirely — it has its own dedicated
+    // impulse (5) and HUD slot.  Skip here so selecting the C4 doesn't
+    // clobber the player's actual carried utility (HE/flash/smoke).
+    if (utility_wep == WEP_CFC4)
+        return;
+
+    if (!W_UtilityWeaponSelectable(utility_wep)
+        || !W_UtilityPlayerHasWeapon(utility_wep))
+        return;
+
+    self.slot_utility = utility_wep;
+    W_UtilityRefreshSlotBinding();
+};
+
+void() W_TryEquipUtility =
+{
+    // C4 lives entirely outside slot_utility — has its own impulse (5)
+    // and HUD slot.  Bind self.fire/wepframe/etc. via W_CFC4Equip()
+    // directly without touching slot_utility (which keeps tracking the
+    // actual carried utility, e.g. HE/flash/smoke).  Drop uses the
+    // direct WEP_CFC4 dispatch in W_DropCurrentWeapon, not
+    // slot_utility_drop, so we don't bind that either.
+    if (self.weapon == WEP_CFC4 && self.ammo_cfc4 > 0)
+    {
+        W_ClearWeaponBindings();
+        W_CFC4Equip();
+        return;
+    }
+
+    if (!W_UtilityWeaponSelectable(self.weapon)
+        || !W_UtilityPlayerHasWeapon(self.weapon))
+        return;
+
+    W_UtilitySetCurrentSlot(self.weapon);
+    W_ClearWeaponBindings();
+
+    if (self.weapon == WEP_HLGRENADE)
+        W_HLGrenadeEquip();
+    else if (self.weapon == WEP_SNOWBALL)
+        W_SnowballEquip();
+    else if (self.weapon == WEP_CSHEGRENADE)
+        W_CSHEGrenadeEquip();
+    else if (self.weapon == WEP_CSFLASHBANG)
+        W_CSFlashbangEquip();
+    else if (self.weapon == WEP_CSSMOKEGRENADE)
+        W_CSSmokeGrenadeEquip();
 };
 
 void() W_ChangeWeapon =
@@ -1328,7 +2440,7 @@ void() W_ChangeWeapon =
     W_TryEquipSlot(self.slot_primary,   self.slot_primary_equip);
     W_TryEquipSlot(self.slot_secondary, self.slot_secondary_equip);
     W_TryEquipSlot(self.slot_melee,     self.slot_melee_equip);
-    W_TryEquipSlot(self.slot_utility,   self.slot_utility_equip);
+    W_TryEquipUtility();
 };
 
 void(float new_weapon) W_SelectWeapon =
@@ -1341,7 +2453,7 @@ void(float new_weapon) W_SelectWeapon =
     if (self.slot_primary   != new_weapon &&
         self.slot_secondary != new_weapon &&
         self.slot_melee     != new_weapon &&
-        self.slot_utility   != new_weapon)
+        !(W_UtilityWeaponSelectable(new_weapon) && W_UtilityPlayerHasWeapon(new_weapon)))
         return;
 
     if (cur != WEP_NONE)
@@ -1361,6 +2473,8 @@ void(float new_weapon) W_SelectWeapon =
     self.pm_weapon_blend_progress = 0;
 
     self.weapon = new_weapon;
+    if (W_UtilityWeaponSelectable(new_weapon))
+        W_UtilitySetCurrentSlot(new_weapon);
     W_ChangeWeapon();
 };
 
@@ -1370,6 +2484,18 @@ void(float new_weapon) W_SelectWeapon =
 
 void() W_SelectNextWeapon =
 {
+    // Mirror of CSQC_PredictSelectNextWeapon — when on a utility,
+    // step through carried grenades before falling out to primary.
+    if (W_UtilityWeaponSelectable(self.weapon))
+    {
+        float u = W_UtilityCycleCarried(self.weapon, 1);
+        if (u != WEP_NONE) { W_SelectWeapon(u); return; }
+        if (self.slot_primary)   { W_SelectWeapon(self.slot_primary);   return; }
+        if (self.slot_secondary) { W_SelectWeapon(self.slot_secondary); return; }
+        if (self.slot_melee)     { W_SelectWeapon(self.slot_melee);     return; }
+        return;
+    }
+
     if (self.weapon == self.slot_primary)
     {
         if (self.slot_secondary) { W_SelectWeapon(self.slot_secondary); return; }
@@ -1389,13 +2515,6 @@ void() W_SelectNextWeapon =
         if (self.slot_utility)   { W_SelectWeapon(self.slot_utility);   return; }
         if (self.slot_primary)   { W_SelectWeapon(self.slot_primary);   return; }
         if (self.slot_secondary) { W_SelectWeapon(self.slot_secondary); return; }
-        return;
-    }
-    if (self.weapon == self.slot_utility)
-    {
-        if (self.slot_primary)   { W_SelectWeapon(self.slot_primary);   return; }
-        if (self.slot_secondary) { W_SelectWeapon(self.slot_secondary); return; }
-        if (self.slot_melee)     { W_SelectWeapon(self.slot_melee);     return; }
         return;
     }
     // No weapon equipped - pick first available
@@ -1407,6 +2526,16 @@ void() W_SelectNextWeapon =
 
 void() W_SelectPrevWeapon =
 {
+    if (W_UtilityWeaponSelectable(self.weapon))
+    {
+        float u = W_UtilityCycleCarried(self.weapon, -1);
+        if (u != WEP_NONE) { W_SelectWeapon(u); return; }
+        if (self.slot_melee)     { W_SelectWeapon(self.slot_melee);     return; }
+        if (self.slot_secondary) { W_SelectWeapon(self.slot_secondary); return; }
+        if (self.slot_primary)   { W_SelectWeapon(self.slot_primary);   return; }
+        return;
+    }
+
     if (self.weapon == self.slot_primary)
     {
         if (self.slot_utility)   { W_SelectWeapon(self.slot_utility);   return; }
@@ -1428,13 +2557,6 @@ void() W_SelectPrevWeapon =
         if (self.slot_utility)   { W_SelectWeapon(self.slot_utility);   return; }
         return;
     }
-    if (self.weapon == self.slot_utility)
-    {
-        if (self.slot_melee)     { W_SelectWeapon(self.slot_melee);     return; }
-        if (self.slot_secondary) { W_SelectWeapon(self.slot_secondary); return; }
-        if (self.slot_primary)   { W_SelectWeapon(self.slot_primary);   return; }
-        return;
-    }
     // No weapon - pick last available
     if (self.slot_utility)   { W_SelectWeapon(self.slot_utility);   return; }
     if (self.slot_melee)     { W_SelectWeapon(self.slot_melee);     return; }
@@ -1442,21 +2564,47 @@ void() W_SelectPrevWeapon =
     if (self.slot_primary)   { W_SelectWeapon(self.slot_primary);   return; }
 };
 
+// Pick the player's strongest carried weapon, in slot priority:
+// primary > secondary > melee > utility.  Used after dropping the
+// currently-held weapon (W_DropCurrentWeapon) so the player always
+// ends up holding the best thing they still have.
+void() W_SelectStrongest =
+{
+    if (self.slot_primary)   { W_SelectWeapon(self.slot_primary);   return; }
+    if (self.slot_secondary) { W_SelectWeapon(self.slot_secondary); return; }
+    if (self.slot_melee)     { W_SelectWeapon(self.slot_melee);     return; }
+    if (self.slot_utility)   { W_SelectWeapon(self.slot_utility);   return; }
+};
+
 void() W_SelectLastWeapon =
 {
-    if (self.previous_weapon == WEP_NONE)
+    // Standard "last inventory" path: switch back to previous_weapon
+    // if it's still in our inventory.
+    if (self.previous_weapon != WEP_NONE
+        && self.previous_weapon != self.weapon
+        && (self.slot_primary   == self.previous_weapon
+         || self.slot_secondary == self.previous_weapon
+         || self.slot_melee     == self.previous_weapon
+         || (W_UtilityWeaponSelectable(self.previous_weapon)
+             && W_UtilityPlayerHasWeapon(self.previous_weapon))))
+    {
+        W_SelectWeapon(self.previous_weapon);
         return;
-    if (self.previous_weapon == self.weapon)
-        return;
+    }
 
-    // Make sure we still have the previous weapon
-    if (self.slot_primary   != self.previous_weapon &&
-        self.slot_secondary != self.previous_weapon &&
-        self.slot_melee     != self.previous_weapon &&
-        self.slot_utility   != self.previous_weapon)
-        return;
-
-    W_SelectWeapon(self.previous_weapon);
+    // Spawn fallback (previous_weapon never set, or it was dropped /
+    // consumed): jump to secondary first, then melee, then utility,
+    // then primary as a last resort.  Mirror of
+    // CSQC_PredictSelectLastWeapon's fallback so prediction and
+    // server reach the same destination.
+    if (self.slot_secondary && self.slot_secondary != self.weapon)
+    { W_SelectWeapon(self.slot_secondary); return; }
+    if (self.slot_melee     && self.slot_melee     != self.weapon)
+    { W_SelectWeapon(self.slot_melee);     return; }
+    if (self.slot_utility   && self.slot_utility   != self.weapon)
+    { W_SelectWeapon(self.slot_utility);   return; }
+    if (self.slot_primary   && self.slot_primary   != self.weapon)
+    { W_SelectWeapon(self.slot_primary);   return; }
 };
 
 // ============================================================
@@ -1468,6 +2616,7 @@ void() W_DropCurrentWeapon =
     void() drop_func;
     entity drop_ent;
     float  cur;
+    float  phys_drop;
 
     cur = self.weapon;
     if (cur == WEP_NONE)
@@ -1477,49 +2626,150 @@ void() W_DropCurrentWeapon =
     if (cur == self.slot_primary   && self.slot_primary_drop)   drop_func = self.slot_primary_drop;
     if (cur == self.slot_secondary && self.slot_secondary_drop) drop_func = self.slot_secondary_drop;
     if (cur == self.slot_melee     && self.slot_melee_drop)     drop_func = self.slot_melee_drop;
-    if (cur == self.slot_utility   && self.slot_utility_drop)   drop_func = self.slot_utility_drop;
+    if (cur == WEP_HLGRENADE && self.ammo_hlgrenade > 0)        drop_func = W_HLGrenadeDrop;
+    if (cur == WEP_SNOWBALL  && self.ammo_snowball > 0)         drop_func = W_SnowballDrop;
+    if (cur == WEP_CSHEGRENADE && self.ammo_cshegrenade > 0)    drop_func = W_CSHEGrenadeDrop;
+    if (cur == WEP_CSFLASHBANG && self.ammo_csflashbang > 0)    drop_func = W_CSFlashbangDrop;
+    if (cur == WEP_CSSMOKEGRENADE && self.ammo_cssmokegrenade > 0) drop_func = W_CSSmokeGrenadeDrop;
+    if (cur == WEP_CFC4 && self.ammo_cfc4 > 0)                  drop_func = W_CFC4Drop;
 
     if (!drop_func)
         return;
 
-    // Spawn the world entity, toss it forward from view
-    drop_ent = spawn();
+    // Compute spawn position + velocity, with a wall-close check so a
+    // player facing geometry doesn't get a "throw" that just slams the
+    // prop into the wall in front of them.
+    //   1. Trace forward from view by 48u — if we hit a wall under
+    //      ~32u away, there's no throw room. Spawn at chest height
+    //      with player-velocity only (no forward kick) — looks like a
+    //      release rather than a throw, and the prop falls straight
+    //      down past the player's feet.
+    //   2. Otherwise normal throw (24u forward + forward/up velocity),
+    //      with the back-step guard in case the spawn position itself
+    //      lands in solid (tight corners, partial cover). If even the
+    //      back-step can't find a clear spot, fall back to the chest
+    //      drop instead of aborting — the player still loses the
+    //      weapon either way.
     makevectors(self.v_angle);
-    setorigin(drop_ent, self.origin + self.view_ofs + v_forward * 24);
-    drop_ent.velocity = self.velocity + v_forward * 200 + '0 0 80';
+    vector view_pos  = self.origin + self.view_ofs;
+    vector throw_dir = v_forward;
+    float  wall_close = FALSE;
+
+    // Compute a safe drop-at-feet position. Trace DOWN from view to
+    // find the actual floor and spawn 32u above it — this clears the
+    // trimesh of even the chunkiest weapon (AWP radius ~32, USP ~28
+    // per the [physdrop] enable logs). The previous "self.origin +
+    // '0 0 24'" hardcode put the USP's trimesh 4u inside the floor on
+    // a ducking-look-down drop, ODE's contact solver flung it
+    // downward through the BSP, and the void watchdog only fired
+    // 10-20s later when free-fall reached Z=-16384. Trace-then-clear
+    // makes it physically impossible to spawn embedded.
+    vector chest_pos;
+    traceline(view_pos, view_pos - '0 0 1024', MOVE_NORMAL, self);
+    if (trace_fraction < 1)
+        chest_pos = trace_endpos + '0 0 32';
+    else
+        chest_pos = view_pos;   // no floor found in 1024u — just use eye
+
+    if (cvar("sv_phys_unstick"))
+    {
+        // 64u trace, trigger if wall is within 48u — long-barrelled
+        // weapons (AWP especially) extend far enough that the prop
+        // model still clips even when the bbox CENTER is well clear.
+        // Bumped from the original 32u threshold to give 16u of extra
+        // breathing room.
+        traceline(view_pos, view_pos + throw_dir * 64, MOVE_NORMAL, self);
+        if (trace_fraction < 0.75)   // hit within ~48u
+            wall_close = TRUE;
+    }
+
+    vector spawn_pos;
+    vector spawn_vel;
+
+    if (wall_close)
+    {
+        spawn_pos = chest_pos;
+        spawn_vel = self.velocity;
+    }
+    else
+    {
+        spawn_pos = view_pos + throw_dir * 24;
+        spawn_vel = self.velocity + throw_dir * 200 + '0 0 80';
+
+        if (cvar("sv_phys_unstick"))
+        {
+            if (W_PhysDropFindClearBackstep(spawn_pos, throw_dir))
+                spawn_pos = w_physdrop_clear_pos;
+            else
+            {
+                // Even the back-step couldn't find a clear spot —
+                // chest-drop fallback. Player still drops the weapon
+                // (no slot-keep) so the action isn't silently swallowed.
+                spawn_pos = chest_pos;
+                spawn_vel = self.velocity;
+            }
+        }
+    }
+
+    // Spawn the world entity at the resolved position.
+    drop_ent = spawn();
+    drop_ent.owner = self;
+    drop_ent.weapon_round_toss = FALSE;
+    setorigin(drop_ent, spawn_pos);
+    drop_ent.velocity = spawn_vel;
 
     weapon_drop_target = drop_ent;
+    W_SlotAmmo_SaveLegacy(self, cur);
     drop_func();          // populates drop_ent (ammo, model, solid, touch, etc.)
+    W_SlotAmmo_CopyPlayerToDrop(drop_ent, self, cur);
     weapon_drop_target = world;
+    phys_drop = W_PhysDropAllowed(drop_ent.weapon);
+
+    // Drop SFX — fires only once per committed drop (after the
+    // drop_func != NULL early-out at the top of this function).
+    // CHAN_VOICE so it doesn't step on weapon-fire sounds.  Attached
+    // to the player so remote listeners hear it positioned correctly.
+    sound(self, CHAN_VOICE, "sounds/player/weapondrop.wav", 1, ATTN_NORM);
 
     // Wire CSQC replication IMMEDIATELY rather than waiting for
-    // weapon_become_solid at +0.7s.  If we let the engine do
+    // weapon_become_solid after the pickup grace.  If we let the engine do
     // standard replication during the toss phase and then bolt
-    // SendEntity on at +0.7s, observers see BOTH the engine-side
-    // flying entity AND the new CSQC entity simultaneously — the
+    // SendEntity on after the pickup grace, observers see BOTH the engine-side
+    // flying entity AND the new CSQC entity simultaneously - the
     // "double drop" bug.  Map weapons avoid this by wiring
     // SendEntity at spawn (W_RegisterMapWeapon); death drops do
     // the same in W_DropAllWeaponsOnDeath; this matches.
-    // weapon_become_solid at +0.7s still fires to flip solidity
+    // weapon_become_solid still fires to flip solidity
     // (the re-wiring of SendEntity it does is idempotent).
     drop_ent.pvsflags = PVSF_NOREMOVE;
     drop_ent.SendEntity = dropped_weapon_SendEntity;
     drop_ent.SendFlags = 1;
 
-    // Hide from dropper — their client-side fake drop covers the visual.
-    // weapon_become_solid fires at +0.7s; we unhide at +1.5s after that.
-    drop_ent.nodrawtoclient = self;
+    // Show the real server entity to the dropper immediately. CSQC swaps
+    // out the local fake as soon as this confirmation arrives, while
+    // weapon_solid_time still prevents early re-pickup.
+    drop_ent.nodrawtoclient = world;
 
     // Override the drop_func's think schedule so weapon_become_solid
     // runs at 20 Hz from spawn.  Its dual-phase logic bumps SendFlags
     // each call so CSQC observers see the toss animate smoothly, then
-    // at +0.7 s it finalises solidity and hands off to
+    // after the pickup grace it finalises solidity and hands off to
     // weapon_settle_think (also at 20 Hz).  Stores the solidify
     // threshold separately so the function can tell which phase
     // it's in without relying on tick counting.
-    drop_ent.weapon_solid_time = time + 0.7;
-    drop_ent.think = weapon_become_solid;   // idempotent
-    drop_ent.nextthink = time + 0.05;
+    drop_ent.weapon_solid_time = time + WEAPON_DROP_PICKUP_DELAY;
+    if (phys_drop)
+    {
+        // The spawn position was already moved out of solid by the
+        // pre-spawn back-step check at the top of this function, so
+        // ODE sees a clear bbox here. No additional unstick needed.
+        W_PhysDropStart(drop_ent, WEAPON_DROP_PICKUP_DELAY);
+    }
+    else
+    {
+        drop_ent.think = weapon_become_solid;   // idempotent
+        drop_ent.nextthink = time + 0.05;
+    }
 
     // Clear the vacated slot
     if (cur == self.slot_primary)
@@ -1527,29 +2777,38 @@ void() W_DropCurrentWeapon =
         self.slot_primary       = WEP_NONE;
         self.slot_primary_equip = __NULL__;
         self.slot_primary_drop  = __NULL__;
+        W_SlotAmmo_ClearForWeapon(self, cur);
     }
     else if (cur == self.slot_secondary)
     {
         self.slot_secondary       = WEP_NONE;
         self.slot_secondary_equip = __NULL__;
         self.slot_secondary_drop  = __NULL__;
+        W_SlotAmmo_ClearForWeapon(self, cur);
     }
     else if (cur == self.slot_melee)
     {
-        self.slot_melee       = WEP_NONE;
-        self.slot_melee_equip = __NULL__;
+        // Fists are intrinsic — after dropping the equipped melee
+        // (knife, katana, etc.), fall back to WEP_MELEE so the
+        // player always has SOMETHING in slot_melee.  Mirrors the
+        // slot dispatch in sv_player.qc (WEP_NONE → WEP_MELEE).
+        self.slot_melee       = WEP_MELEE;
+        self.slot_melee_equip = W_MeleeEquip;
         self.slot_melee_drop  = __NULL__;
     }
-    else if (cur == self.slot_utility)
+    else if (W_UtilityWeaponSelectable(cur))
     {
-        self.slot_utility       = WEP_NONE;
-        self.slot_utility_equip = __NULL__;
-        self.slot_utility_drop  = __NULL__;
+        self.slot_utility = W_UtilityNextCarried(cur);
+        W_UtilityRefreshSlotBinding();
     }
 
     self.weapon = WEP_NONE;
     W_ClearWeaponBindings();
-    W_SelectNextWeapon();
+    // Mirror of CSQC drop-then-equip: pick the strongest remaining
+    // slot (primary > secondary > melee > utility) instead of the
+    // cycle-order next, so dropping secondary leaves you on primary
+    // rather than melee.
+    W_SelectStrongest();
 };
 
 // ============================================================
@@ -1562,20 +2821,67 @@ void() W_DropAllWeaponsOnDeath =
     float slot_wep;
     entity drop_ent;
     float yaw, pitch;
+    float phys_drop;
 
-    for (slot_idx = 0; slot_idx < 4; slot_idx++)
+    // mp_dropweapons gate (default 2 = drop everything):
+    //   0 — drop nothing.  Bail before the slot loop entirely.
+    //   1 — drop primary + secondary only.  Loop runs only over
+    //       slot_idx 0 and 1.
+    //   2 — drop everything (existing behaviour).  Loop runs the
+    //       full 9-slot range.
+    float drop_mode = cvar("mp_dropweapons");
+    if (drop_mode <= 0)
+        return;
+    float slot_max = (drop_mode == 1) ? 2 : 9;
+
+    for (slot_idx = 0; slot_idx < slot_max; slot_idx++)
     {
         drop_func = __NULL__;
         slot_wep = 0;
         if (slot_idx == 0)      { slot_wep = self.slot_primary;   drop_func = self.slot_primary_drop; }
         else if (slot_idx == 1) { slot_wep = self.slot_secondary; drop_func = self.slot_secondary_drop; }
         else if (slot_idx == 2) { slot_wep = self.slot_melee;     drop_func = self.slot_melee_drop; }
-        else if (slot_idx == 3) { slot_wep = self.slot_utility;   drop_func = self.slot_utility_drop; }
+        else if (slot_idx == 3)
+        {
+            slot_wep = self.slot_utility;
+            if (slot_wep == WEP_HLGRENADE && self.ammo_hlgrenade > 0) drop_func = W_HLGrenadeDrop;
+            else if (slot_wep == WEP_SNOWBALL && self.ammo_snowball > 0) drop_func = W_SnowballDrop;
+            else if (slot_wep == WEP_CSHEGRENADE && self.ammo_cshegrenade > 0) drop_func = W_CSHEGrenadeDrop;
+            else if (slot_wep == WEP_CSFLASHBANG && self.ammo_csflashbang > 0) drop_func = W_CSFlashbangDrop;
+            else if (slot_wep == WEP_CSSMOKEGRENADE && self.ammo_cssmokegrenade > 0) drop_func = W_CSSmokeGrenadeDrop;
+        }
+        else if (slot_idx == 4)
+        {
+            if (self.slot_utility != WEP_HLGRENADE && self.ammo_hlgrenade > 0)
+            { slot_wep = WEP_HLGRENADE; drop_func = W_HLGrenadeDrop; }
+        }
+        else if (slot_idx == 5)
+        {
+            if (self.slot_utility != WEP_SNOWBALL && self.ammo_snowball > 0)
+            { slot_wep = WEP_SNOWBALL; drop_func = W_SnowballDrop; }
+        }
+        else if (slot_idx == 6)
+        {
+            if (self.slot_utility != WEP_CSHEGRENADE && self.ammo_cshegrenade > 0)
+            { slot_wep = WEP_CSHEGRENADE; drop_func = W_CSHEGrenadeDrop; }
+        }
+        else if (slot_idx == 7)
+        {
+            if (self.slot_utility != WEP_CSFLASHBANG && self.ammo_csflashbang > 0)
+            { slot_wep = WEP_CSFLASHBANG; drop_func = W_CSFlashbangDrop; }
+        }
+        else if (slot_idx == 8)
+        {
+            if (self.slot_utility != WEP_CSSMOKEGRENADE && self.ammo_cssmokegrenade > 0)
+            { slot_wep = WEP_CSSMOKEGRENADE; drop_func = W_CSSmokeGrenadeDrop; }
+        }
 
         if (!slot_wep || !drop_func)
             continue;
 
         drop_ent = spawn();
+        drop_ent.owner = self;
+        drop_ent.weapon_round_toss = FALSE;
 
         yaw   = random() * 360;
         pitch = -40 + random() * 20;   // upward-ish toss
@@ -1583,66 +2889,75 @@ void() W_DropAllWeaponsOnDeath =
 
         setorigin(drop_ent, self.origin + self.view_ofs * 0.5 + v_forward * 8);
         drop_ent.velocity = self.velocity + v_forward * (150 + random() * 150) + [0, 0, 100 + random() * 120];
-        drop_ent.avelocity = [random() * 600 - 300, random() * 600 - 300, random() * 600 - 300];
+        drop_ent.avelocity = '0 0 0';
 
         weapon_drop_target = drop_ent;
+        W_SlotAmmo_SaveLegacy(self, slot_wep);
         drop_func();
+        W_SlotAmmo_CopyPlayerToDrop(drop_ent, self, slot_wep);
         weapon_drop_target = world;
+        phys_drop = W_PhysDropAllowed(drop_ent.weapon);
 
         // Wire CSQC replication IMMEDIATELY rather than waiting for
-        // weapon_become_solid at +0.7s.  If we let the engine do
+        // weapon_become_solid after the pickup grace.  If we let the engine do
         // standard replication during the toss phase and then bolt
-        // SendEntity on at +0.7s, observers see BOTH the engine-side
-        // flying entity AND the new CSQC entity simultaneously — the
+        // SendEntity on after the pickup grace, observers see BOTH the engine-side
+        // flying entity AND the new CSQC entity simultaneously - the
         // "double drop" bug.  Map weapons avoid this by wiring
         // SendEntity at spawn (W_RegisterMapWeapon); we do the same
         // here so death drops never have an engine-standard phase.
-        // weapon_become_solid at +0.7s still fires to flip solidity
+        // weapon_become_solid still fires to flip solidity
         // (the re-wiring of SendEntity it does is idempotent).
         drop_ent.pvsflags = PVSF_NOREMOVE;
         drop_ent.SendEntity = dropped_weapon_SendEntity;
         drop_ent.SendFlags = 1;
 
-        // Hide from dropper during the 0.7s toss phase — matches
-        // W_DropCurrentWeapon.  With SendEntity already wired above,
-        // nodrawtoclient still has the intended effect: it stops the
-        // CSQC replication from being sent to the dropper until
-        // weapon_become_solid clears it back to world at +0.7s.  The
-        // dropper instead sees the CSQC fake-drop visual fired by
-        // CSQC_EVENT_DEATH_DROP below.
-        drop_ent.nodrawtoclient = self;
+        // Show the real server entity to the victim immediately. Non-physics
+        // fake scatter remains only until this SendEntity confirmation lands.
+        drop_ent.nodrawtoclient = world;
 
         // Override the drop_func's think schedule so weapon_become_solid
         // runs at 20 Hz from spawn — its dual-phase logic bumps
         // SendFlags each call so the CSQC-replicated toss animates
-        // smoothly for observers, instead of freezing until +0.7 s.
-        drop_ent.weapon_solid_time = time + 0.7;
-        drop_ent.think = weapon_become_solid;  // idempotent
-        drop_ent.nextthink = time + 0.05;
+        // smoothly for observers, instead of freezing until the pickup grace ends.
+        drop_ent.weapon_solid_time = time + WEAPON_DROP_PICKUP_DELAY;
+        if (phys_drop)
+            W_PhysDropStart(drop_ent, WEAPON_DROP_PICKUP_DELAY);
+        else
+        {
+            drop_ent.think = weapon_become_solid;  // idempotent
+            drop_ent.nextthink = time + 0.05;
+        }
 
-        // Unicast the victim a CSQC fake-drop event so they see the
-        // scatter visually during the 0.7s window.  Matching the
-        // server's rng origin+velocity keeps the toss arc in sync
-        // with where the real pickup settles, so the fake→real
-        // swap at +0.7s doesn't jump visibly.
-        msg_entity = self;
-        WriteByte(MSG_ONE, SVC_CGAMEPACKET);
-        WriteByte(MSG_ONE, CSQC_EVENT_DEATH_DROP);
-        WriteByte(MSG_ONE, slot_wep);
-        WriteByte(MSG_ONE, drop_ent.weapon_slot);
-        WriteCoord(MSG_ONE, drop_ent.origin_x);
-        WriteCoord(MSG_ONE, drop_ent.origin_y);
-        WriteCoord(MSG_ONE, drop_ent.origin_z);
-        WriteCoord(MSG_ONE, drop_ent.velocity_x);
-        WriteCoord(MSG_ONE, drop_ent.velocity_y);
-        WriteCoord(MSG_ONE, drop_ent.velocity_z);
-        WriteString(MSG_ONE, drop_ent.model);
+        if (!phys_drop)
+        {
+            // Unicast the victim a CSQC fake-drop event so they see the
+            // scatter visually during the pickup-grace window. Physics drops skip
+            // this so the ODE body is the only visual source.
+            msg_entity = self;
+            WriteByte(MSG_ONE, SVC_CGAMEPACKET);
+            WriteByte(MSG_ONE, CSQC_EVENT_DEATH_DROP);
+            WriteByte(MSG_ONE, slot_wep);
+            WriteByte(MSG_ONE, drop_ent.weapon_slot);
+            WriteCoord(MSG_ONE, drop_ent.origin_x);
+            WriteCoord(MSG_ONE, drop_ent.origin_y);
+            WriteCoord(MSG_ONE, drop_ent.origin_z);
+            WriteCoord(MSG_ONE, drop_ent.velocity_x);
+            WriteCoord(MSG_ONE, drop_ent.velocity_y);
+            WriteCoord(MSG_ONE, drop_ent.velocity_z);
+            WriteString(MSG_ONE, drop_ent.model);
+        }
 
-        if (slot_idx == 0)      { self.slot_primary   = WEP_NONE; self.slot_primary_equip   = __NULL__; self.slot_primary_drop   = __NULL__; }
-        else if (slot_idx == 1) { self.slot_secondary = WEP_NONE; self.slot_secondary_equip = __NULL__; self.slot_secondary_drop = __NULL__; }
+        if (slot_idx == 0)      { self.slot_primary   = WEP_NONE; self.slot_primary_equip   = __NULL__; self.slot_primary_drop   = __NULL__; W_SlotAmmo_ClearForWeapon(self, slot_wep); }
+        else if (slot_idx == 1) { self.slot_secondary = WEP_NONE; self.slot_secondary_equip = __NULL__; self.slot_secondary_drop = __NULL__; W_SlotAmmo_ClearForWeapon(self, slot_wep); }
         else if (slot_idx == 2) { self.slot_melee     = WEP_NONE; self.slot_melee_equip     = __NULL__; self.slot_melee_drop     = __NULL__; }
         else if (slot_idx == 3) { self.slot_utility   = WEP_NONE; self.slot_utility_equip   = __NULL__; self.slot_utility_drop   = __NULL__; }
     }
+
+    self.slot_utility = WEP_NONE;
+    self.slot_utility_equip = __NULL__;
+    self.slot_utility_drop = __NULL__;
+    self.snowball_use_slingshot = FALSE;
 };
 
 // ============================================================
@@ -1667,16 +2982,38 @@ void() W_CheckImpulses =
         if (self.slot_melee) W_SelectWeapon(self.slot_melee);
         break;
     case 4:   // Utility slot
-        if (self.slot_utility) W_SelectWeapon(self.slot_utility);
+    {
+        float utility_wep = W_UtilityNextCarried(self.weapon);
+        if (utility_wep) W_SelectWeapon(utility_wep);
         break;
+    }
     case WEAPON_IMPULSE_DROP:   // Drop current weapon
         W_DropCurrentWeapon();
+        break;
+    case WEAPON_IMPULSE_GRAPPLE: // sv_grappling — fire / re-press release
+        W_GrappleImpulse();
+        break;
+    case WEAPON_IMPULSE_GRAPPLE_RELEASE:
+        // Press-and-hold release half — fired by the -grapple alias
+        // on key release.  Force-releases the hook if one is live;
+        // no-op otherwise (e.g. hook already auto-released via
+        // timeout or arrived-at-anchor while the user kept holding).
+        if (cvar("sv_grappling") && self.grapple_hook)
+            W_GrappleRelease(self);
         break;
     case WEAPON_IMPULSE_RELOAD:   // Reload
         if (self.reload) self.reload();
         break;
     case WEAPON_IMPULSE_SPECIAL:  // Weapon-specific action (menu "Weapon Special")
-        if (self.special) self.special();
+        if (self.special)
+        {
+            self.special();
+            W_SlotAmmo_SaveCurrent(self);
+        }
+        break;
+    case WEAPON_IMPULSE_C4:  // Dedicated C4 select (impulse 5)
+        if (self.ammo_cfc4 > 0)
+            W_SelectWeapon(WEP_CFC4);
         break;
     case WEAPON_IMPULSE_NEXT:  // Next weapon (bind mwheelup "impulse 12")
         W_SelectNextWeapon();
@@ -1703,8 +3040,34 @@ void() W_WeaponFrame =
 {
     float prev_state = self.prev_weaponstate_anim;
 
-    // Check fire button (attack_finished debounce)
-    if (self.button0 && time >= self.attack_finished)
+    // Check fire button (attack_finished debounce).
+    //
+    // Under sv_trust_clienthits >= 1 the server's autonomous fire is
+    // disabled — the client drives fire timing via a `cmd cs`
+    // notification (SH_StandardTryFire in shared/sh_weapon_standard.qc
+    // → SV_ParseClientCommand "cs" handler in server/sv_player.qc).
+    // Without this gate the server fires whenever IT observes button0
+    // held and attack_finished elapsed, which diverges from the
+    // client's count whenever input-cmd timestamps straddle a server-
+    // tick boundary differently from the client's local clock —
+    // visible as the "client mag empty, server fires an extra shot"
+    // burst-trick symptom.  Under trust=1 the cs cmd is the sole
+    // entry point for self.fire(); under trust=0 the existing
+    // autonomous path is the sole entry point.  Exactly one source
+    // of truth either way.
+    // Hand-thrown grenades (HL hand, CS HE/Flash/Smoke) use button0
+    // for pin-pull / pre-throw — those entry points DON'T go through
+    // SH_StandardTryFire, so they never emit a `cmd cs` notification.
+    // Under trust>=1 the autonomous fire path is the ONLY way they
+    // run server-side; gating them on trust would silently drop every
+    // throw (CSQC fake explosion plays for the shooter, no real
+    // projectile spawns, no damage to anyone).  Always allow these.
+    float wep_is_thrown_grenade = (self.weapon == WEP_HLGRENADE
+                                || self.weapon == WEP_CSHEGRENADE
+                                || self.weapon == WEP_CSFLASHBANG
+                                || self.weapon == WEP_CSSMOKEGRENADE);
+    if ((cvar("sv_trust_clienthits") < 1 || wep_is_thrown_grenade)
+        && self.button0 && time >= self.attack_finished)
     {
         if (self.fire)
             self.fire();
@@ -1744,4 +3107,6 @@ void() W_WeaponFrame =
 
         self.prev_weaponstate_anim = self.wep_action_id;
     }
+
+    W_SlotAmmo_SaveCurrent(self);
 };

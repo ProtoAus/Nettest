@@ -41,8 +41,22 @@ float  PM_MAX_CLIP_PLANES  = 8;   // raised from 5 to match ramp-fix bump count
 float  PM_MAX_JUMPFIX_DP   = -0.1;  // ramp-fix dot-product threshold
 float  PM_BTN_JUMP         = 2;     // bit in input_buttons
 float  PM_BTN_DUCK         = 32;    // +button6 via DP_INPUTBUTTONS
-float  PM_BTN_SPRINT       = 8;     // +button4  — speed modifier (sv_shiftspeed multiplier)
+float  PM_BTN_SPRINT       = 8;     // +button4  — sv_shiftspeed multiplier: >1 sprint, <1 walk
 float  PM_BTN_USE          = 128;   // +button8 / +use     — high friction
+float  PM_BTN_FIRE         = 1;     // +attack — bit 0 of input_buttons
+// Grapple held-bit — when set, the player is holding the +grapple bind
+// (a.k.a. +button9, bit 256 in DP_INPUTBUTTONS).  Rising edge engages
+// the hook (sv_grapple.qc), falling edge releases it.  Coexists with
+// the legacy `impulse 9` toggle for users who bound that; the two
+// systems share the same .grapple_hook / .grapple_rope_active state.
+float  PM_BTN_GRAPPLE      = 256;   // +button9 / +grapple — press-and-hold
+
+// Forward decl — sh_weapon_logic.qc is included AFTER sh_pmove.qc on
+// the CSQC side (cl_progs.src), so the per-tick gunkick decay call
+// inside PM_PlayerMove needs an explicit forward declaration here.
+// SSQC progs.src has weapon_logic before pmove so the decl is
+// redundant but harmless there.
+void(float dt) SH_TickViewKickDecay;
 float  PM_DUCK_TIME        = 0.4;
 float  PM_DUCKING_MULTIPLIER = 0.333;
 float  PM_FIXEDSTEP_EPSILON = 0.000001;
@@ -74,23 +88,153 @@ float  PM_MOVETYPE_NOCLIP    = 5;
 .float pm_waterjumptime;  // seconds remaining in water-jump launch
 .float pm_jump_held;      // true while jump button is held (prevent pogo)
 .float pm_jump_msec;      // msec accumulator for jump timer (0 = expired)
+.float pm_jump_strict_block;  // sv_jumpstyle 0 latch: TRUE between a successful jump and an on-ground release
 .float pm_in_duck;        // true while transitioning into a crouch
 .float pm_duck_msec;      // GoldSrc-style duck transition timer
 .float pm_oldbuttons;     // previous input_buttons state for edge detection
 .float pm_timecarry;      // leftover command time for fixed-step simulation
 .entity pm_prediction_proxy; // owner-only SSQC->CSQC authoritative snapshot proxy
 
-// Per-field ammo-changed bitmask stored on the prediction proxy.  Six
-// bytes cover 47 mag/ammo/silencer fields — bit N in mbK corresponds to
-// the same field order the PM_SF_AMMO write section (and the matching
-// client read) serialises.  Only fields whose bit is set get a WriteByte
-// — the rest keep their cached value on the client.
+// Duck-land slide state.  Shared field: CSQC reads slide_friction_active
+// during prediction so the friction reduction is mirrored locally;
+// SSQC drives it authoritatively.  The slide sound is fire-and-forget
+// — SSQC just picks a random slide1-5.wav at engage on CHAN_BODY and
+// the engine handles playback length — so there's no phase state.
+.float slide_friction_active;
+.float slide_was_onground;   // tick-local edge tracker for landing detect
+
+// Grappling hook (sv_grappling) rope-render state.  Synced via the
+// prediction proxy so CSQC's cl_rope.qc can draw a rope from the local
+// player to the anchor without depending on standard server-entity
+// broadcast (which doesn't reliably reach CSQC for ad-hoc projectile
+// entities — see notes in sv_grapple.qc).  Owner-only by construction:
+// the proxy lives on the local predicted player.  Server-only state
+// (.entity grapple_hook etc.) stays in sv_customdefs.qc.
+.float  grapple_rope_active;
+.vector grapple_anchor;
+// True only while the hook is anchored AND the player is being
+// actively reeled in (post-touch).  Distinct from grapple_rope_active
+// which is also set during the hook's flight phase.  Replicated via
+// the prediction proxy so CSQC's PM_CategorizePosition can gate the
+// ground-snap suppress on actual pulling rather than rope-existence.
+.float  grapple_attached;
+// PM_BTN_GRAPPLE edge-detection latch.  Stored on the player ent so
+// both SSQC (sv_grapple.qc W_GrappleHeldTick) and CSQC (rope-flag
+// prediction mirror in cl_weapons.qc CSQC_PredictGrappleHeldEdge)
+// read/write the same field — the field's value at the end of one
+// tick is the "was held" reference for the next tick's edge check.
+// Distinct from .grapple_hook so a hook that auto-released (timeout
+// or arrived-at-anchor) while the button is still held doesn't
+// re-engage every tick — held_last latches the button-state itself,
+// not the rope state.
+.float  pm_grapple_held_last;
+
+// sv_jumplag — absolute world-time when the next jump becomes legal.
+// Stamped to (time + cvar("sv_jumplag")) at every landing edge.  Stored
+// as a timestamp rather than a remaining-duration so CSQC and SSQC
+// can't accumulate per-tick decay drift; both sides gate against the
+// same `time < self.pm_jump_lag_end` comparison and the wire format
+// converts to relative-remaining at send time (mirroring
+// attack_finished) so the value survives across-clock transmission.
+.float pm_jump_lag_end;
+
+// Ground-snap suppress window — absolute world-time until which
+// PM_CategorizePosition will refuse to grab the ground.  Stamped
+// inside PM_CheckJump's accepted-jump block to give the impulse a
+// few ticks of "guaranteed airborne" so the snap-to-ground floor
+// (pm_velocity_z <= 180 → onground) can't yank an underpowered or
+// low-impulse jump back to the floor before it can climb.
+// Also force-suppressed while grapple_rope_active is set so a
+// player being yanked airborne by the grapple isn't fighting the
+// snap on every tick.  See PM_CategorizePosition for the read site.
+.float pm_jump_groundstick_off_until;
+
+#ifdef CSQC
+// Forward decl — pm_suppress_sounds is defined further down at line
+// ~4044 inside its own #ifdef block, but PM_CheckJump (~1610) needs
+// it earlier for the sv_codstamina jump-cost replay gate.
+float pm_suppress_sounds;
+#endif
+
+// ----------------------------------------------------------------
+//  Sprint-fire gate
+//  Returns 1 when the player is currently in a sprinting stance AND
+//  sv_sprintdisableshooting is on — used by every fire-entry function
+//  (SH_StandardTryFire, the three grenade TryPinPull / TryReady
+//  entries) so the block applies uniformly across hitscan, projectile
+//  and grenade weapons without each weapon needing to know.
+//
+//  Conditions mirror the sprint multiplier in PM_PlayerMoveStep and
+//  the cl_viewfx sprint envelope, so visual sprint state, the speed
+//  boost, and the fire block all engage together.  cvar() reads keep
+//  this self-contained — no dependency on mv_shiftspeed being live
+//  (it's only populated inside the pmove tick).
+// ----------------------------------------------------------------
+float() Weapon_SprintBlocksFire =
+{
+    if (!cvar("sv_sprintdisableshooting"))
+        return 0;
+    if (!(input_buttons & PM_BTN_SPRINT))
+        return 0;
+    if (cvar("sv_shiftspeed") <= 1.001)
+        return 0;
+    if (self.flags & FL_DUCKING)
+        return 0;
+    if (input_movevalues_x <= 0)
+        return 0;
+    if (self.pm_movetype == PM_MOVETYPE_NOCLIP)
+        return 0;
+    return 1;
+};
+
+// ----------------------------------------------------------------
+//  Lower-pose fire gate
+//  Returns 1 when the player is doing something that visually drops
+//  the viewmodel off-screen and should also block the trigger:
+//    - grapple_rope_active: hook is in flight or attached and pulling
+//    - sv_codladders + pm_on_ladder_cached: ladder climb, server gate
+//  Mirrors Weapon_SprintBlocksFire's shape so SH_StandardTryFire and
+//  the three grenade TryPinPull entries share the same one-line
+//  insertion.  Both grapple_rope_active and pm_on_ladder_cached live
+//  on self so CSQC and SSQC see the same value — CSQC reads them out
+//  of predicted_player via the prediction-proxy sync + PM_PlayerMoveStep
+//  latch; SSQC reads them off the player entity directly.  cvar()
+//  for sv_codladders works on SSQC; CSQC uses PM_ReadMovevar so it
+//  picks up the serverinfo value pushed from SV_UpdateMovementServerInfo.
+// ----------------------------------------------------------------
+float() Weapon_LowerBlocksFire =
+{
+    // Noclip bypass — mirrors Weapon_SprintBlocksFire's MOVETYPE_NOCLIP
+    // escape so admin debug workflows keep working.  Without this, an
+    // admin who fired a grapple before going noclip would have firing
+    // disabled until manually releasing the grapple (because
+    // W_GrappleImpulse has no noclip check either).
+    if (self.pm_movetype == PM_MOVETYPE_NOCLIP)
+        return 0;
+    if (self.grapple_rope_active)
+        return 1;
+#ifdef CSQC
+    if (self.pm_on_ladder_cached
+        && PM_ReadMovevar("sv_codladders", 0))
+        return 1;
+#else
+    if (self.pm_on_ladder_cached
+        && cvar("sv_codladders"))
+        return 1;
+#endif
+    return 0;
+};
+
+// Ammo-changed bitmask stored on the prediction proxy.  v18 uses mb0/mb1
+// for canonical primary/secondary slot ammo plus utility counts; the
+// remaining bytes are kept as spare scratch fields for future expansion.
 .float pm_ammo_mb0;
 .float pm_ammo_mb1;
 .float pm_ammo_mb2;
 .float pm_ammo_mb3;
 .float pm_ammo_mb4;
 .float pm_ammo_mb5;
+.float pm_ammo_mb6;
 
 // ============================================================================
 //  Per-move working globals  (loaded from self at the start of PM_PlayerMove)
@@ -114,7 +258,7 @@ vector pm_ladder_normal;  // outward-facing normal of the active ladder surface
 
 float  mv_gravity;
 float  mv_maxspeed;
-float  mv_shiftspeed;     // absolute speed cap (qu/s) applied when PM_BTN_SPRINT is held (0 = disabled)
+float  mv_shiftspeed;     // multiplier on input_movevalues + mv_maxspeed while PM_BTN_SPRINT held. >1 sprint, <1 walk, 1 = no-op, 0 = disabled.
 float  mv_stopspeed;
 float  mv_friction;
 float  mv_waterfriction;
@@ -125,12 +269,22 @@ float  mv_entgravity;
 float  mv_spectatormaxspeed;
 float  mv_stamina;              // 1 = CS 1.6 landing-fatigue enabled, 0 = disabled
 float  mv_autohop;              // 1 = jump re-fires every landing while held, 0 = require release
+float  mv_jumpstyle;            // 0 = GoldSrc strict (require on-ground release between jumps), 1 = Source lenient
 
 void() PM_CategorizePosition;
 void() PM_PlayerMove;
 void() PM_PlayerMoveStep;
 void() PM_CheckLadder;
+void() PM_InheritRotatorTangent;
 void(float snd_idx, float vol) PM_EmitStepSound;
+// Forward decl — PM_Friction and the stamina-slide-bypass block call
+// this before its definition further down the file (CSQC-side reads
+// serverinfo-replicated values, SSQC-side falls through to cvar()).
+float(string name, float fallback) PM_ReadMovevar;
+// Forward decl — both the landing-edge handler and the crouch-press
+// handler in PM_PlayerMoveStep call this; defined just before
+// PM_PlayerMoveStep so it sees pm_* working globals.
+float() PM_TryEngageSlide;
 
 // Footstep sound catalogue — a flat byte enum so CSQC_EVENT_FOOTSTEP_SOUND
 // can carry a 1-byte index instead of the full ~24-byte sound path.
@@ -405,6 +559,54 @@ void PM_CheckDuck()
         if ((self.flags & FL_DUCKING) || self.pm_in_duck)
             PM_UnDuck();
         return;
+    }
+
+    // ---- sv_slidingcrouch: press-crouch-while-fast slide entry ----
+    // Unified path that combines "crouch-press trigger" and the
+    // instant-crouch-jump lift.  When sv_slidingcrouch is on AND the
+    // player presses crouch from standing on flat ground AND their
+    // horizontal speed is already at slide threshold, skip the smooth
+    // pm_duck_msec transition: lift the origin so the new ducked
+    // hull's bottom sits at standing-eye-level, set view_ofs to
+    // PM_DUCK_VIEW_OFS (camera ends up at the same world Y so it does
+    // not visually snap), and clear pm_onground so gravity engages.
+    // The player falls a short distance and the existing landing-edge
+    // handler in PM_PlayerMoveStep engages the slide when their feet
+    // touch down.
+    //
+    // Below sv_sliding_start_speed — or under a ceiling that won't fit
+    // the lifted hull — we fall through to the normal smooth duck
+    // path, so this never punishes a regular slow crouch.
+    // Punished: fall through to normal smooth duck, no slide entry.
+    if ((buttons_pressed & PM_BTN_DUCK)
+        && !(self.flags & FL_DUCKING)
+        && pm_onground
+        && self.pm_movetype != PM_MOVETYPE_NOCLIP
+        && PM_ReadMovevar("sv_sliding", 0)
+        && PM_ReadMovevar("sv_slidingcrouch", 0)
+        && !(PM_ReadMovevar("sv_codstamina", 0) > 0 && self.codstamina_punished))
+    {
+        vector cj_hvel = pm_velocity;
+        cj_hvel_z = 0;
+        if (vlen(cj_hvel) >= PM_ReadMovevar("sv_sliding_start_speed", 100))
+        {
+            float lift = PM_VIEW_OFS_z - PM_DUCK_VIEW_OFS_z;
+            vector lifted = pm_origin;
+            lifted_z += lift;
+            if (PM_TestPositionExt(lifted, PM_DUCK_MINS, PM_DUCK_MAXS))
+            {
+                pm_origin = lifted;
+                self.flags |= FL_DUCKING;
+                self.pm_in_duck = FALSE;
+                self.pm_duck_msec = 0;
+                self.view_ofs = PM_DUCK_VIEW_OFS;
+                PM_SyncHull();
+                pm_onground = FALSE;
+                return;
+            }
+            // Low ceiling — fall through to smooth duck.
+        }
+        // Below sv_sliding_start_speed — fall through to smooth duck.
     }
 
     if (!duck_down && !self.pm_in_duck && !(self.flags & FL_DUCKING))
@@ -970,6 +1172,18 @@ void PM_Friction()
         if (input_buttons & PM_BTN_USE)
             friction = friction * 4;
 
+        // Duck-land slide: drop friction sharply while the slide is
+        // active.  Triggered / cleared in PM_PlayerMoveStep's landing
+        // block.  Multiplier so the single sv_sliding_friction_mult cvar
+        // does all the tuning; placed AFTER the +use boost so leaning on
+        // a wall still bites harder than coasting in a slide.
+        // PM_ReadMovevar for the same CSQC-side reason as the trigger.
+        // Punished: skip the glide multiplier — full normal ground
+        // friction so the latch clears naturally as hspeed bleeds off.
+        if (self.slide_friction_active
+            && !(PM_ReadMovevar("sv_codstamina", 0) > 0 && self.codstamina_punished))
+            friction = friction * PM_ReadMovevar("sv_sliding_friction_mult", 0.1);
+
         drop = 0;
         control = max(speed, mv_stopspeed);
         drop += control * friction * pm_frametime;
@@ -1237,7 +1451,25 @@ float PM_AirMove()
         // factor_ref is the per-tick multiplier CS uses at 100 Hz (dt=0.01).
         // Raising it to (pm_frametime/0.01) makes the effect framerate-independent:
         // same net slowdown regardless of tickrate.
-        if (mv_stamina && self.pm_fuser2 > 0)
+        //
+        // sv_sliding bypass: skip the fatigue drag when the player is in
+        // a slide stance (ducked, fast, on ground, master toggle on).
+        // Tested inline so the bypass kicks in on the landing tick itself
+        // — slide_friction_active isn't set until end-of-tick, but the
+        // movement state we're testing is true the moment they land.
+        float slide_bypass = 0;
+        if (PM_ReadMovevar("sv_sliding", 0) && (self.flags & FL_DUCKING))
+        {
+            vector slide_hv = pm_velocity;
+            slide_hv_z = 0;
+            if (vlen(slide_hv) >= PM_ReadMovevar("sv_sliding_start_speed", 100))
+                slide_bypass = 1;
+        }
+        // codstamina owns the landing horizontal cost via a single-tick
+        // velocity cut at the landing edge in PM_PlayerMoveStep, so skip
+        // the CS 1.6 multi-tick taper when sv_codstamina is on.
+        if (mv_stamina && self.pm_fuser2 > 0 && !slide_bypass
+            && PM_ReadMovevar("sv_codstamina", 0) <= 0)
         {
             float factor_ref = (100 - self.pm_fuser2 * 0.001 * 19) * 0.01;
             float factor = pow(factor_ref, pm_frametime * 100);
@@ -1339,7 +1571,23 @@ void PM_CategorizePosition()
     // ground detection, reducing ground-state flicker on uneven surfaces)
     PM_Trace(pm_origin, pm_origin - '0 0 2');
 
-    if (pm_velocity_z > 180)
+    // Ground-snap suppress — force airborne under three conditions:
+    //   - briefly after PM_CheckJump fires (pm_jump_groundstick_off_until),
+    //     so the impulse can clear the floor before the 180 u/s
+    //     threshold yanks it back (low-impulse punished jumps, etc.).
+    //   - while actively being reeled in by the grapple AND the player
+    //     isn't pressing jump.  grapple_attached (not grapple_rope_active)
+    //     scopes the suppress to the pull phase only: hook flight keeps
+    //     normal ground stick so the player can still walk / jump while
+    //     waiting for the hook to land.  The jump-button override lets
+    //     the player jump off the ground mid-pull — categorize allows
+    //     normal ground detection on this tick, PM_CheckJump fires, and
+    //     the impulse + the post-jump grace window takes them airborne.
+    float groundsnap_off = (time < self.pm_jump_groundstick_off_until)
+                        || (self.grapple_attached
+                            && !(input_buttons & PM_BTN_JUMP));
+
+    if (pm_velocity_z > 180 || groundsnap_off)
     {
         pm_onground    = FALSE;
         pm_groundnormal = '0 0 1';
@@ -1442,10 +1690,17 @@ void PM_CheckJump()
         return;
     }
 
-    // button released – clear the held latch
+    // button released – clear the held latch.  In sv_jumpstyle 0 (GoldSrc
+    // strict) we additionally require the release to happen WHILE on the
+    // ground before another jump is allowed: that's what kills the
+    // "tap jump exactly on landing tick" buffered-jump trick that the
+    // edge check alone can't catch (release happens 1 tick airborne, press
+    // happens 1 tick after touchdown — both ticks see jump_held=FALSE).
     if (!jump_down)
     {
         self.pm_jump_held = FALSE;
+        if (pm_onground)
+            self.pm_jump_strict_block = FALSE;
         return;
     }
 
@@ -1509,14 +1764,38 @@ void PM_CheckJump()
         return;
     }
 
+    // sv_jumplag: post-landing jump cooldown.  Stamped on every
+    // landing edge in PM_PlayerMoveStep as an absolute end-timestamp
+    // (time + sv_jumplag).  Both CSQC prediction and SSQC compare
+    // against the same `time`, eliminating the per-tick decay drift
+    // the old remaining-duration version produced under fast CSQC
+    // prediction (which let 1-2 predicted jumps slip through before
+    // the server gate released).
+    if (time < self.pm_jump_lag_end)
+        return;
+
     // pogo prevention: require button release between jumps unless autohop is on
     if (self.pm_jump_held && !mv_autohop)
+        return;
+
+    // sv_jumpstyle 0 (GoldSrc strict): block until we've observed an
+    // on-ground release since the last jump.  Source-style (default, 1)
+    // skips this gate so the canonical "press right at landing" buffer
+    // works.  Autohop forces lenient regardless.
+    if (mv_jumpstyle == 0 && !mv_autohop && self.pm_jump_strict_block)
         return;
 
     // ramp fix: if we have downward momentum along the ground normal, clip it
     dp = pm_velocity * pm_groundnormal;
     if (pm_velocity_z < 0 && dp < PM_MAX_JUMPFIX_DP)
         pm_velocity = PM_ClipVelocity(pm_velocity, pm_groundnormal, 1);
+
+    // Inherit tangent velocity from a rotating ground brush — runs
+    // BEFORE the jump-impulse Z bump so the launch trajectory carries
+    // the orbital component into the air (lands offset from launch
+    // by ω·r·airtime, the natural feel for a player jumping off a
+    // spinning platform).  No-op if the surface isn't rotating.
+    PM_InheritRotatorTangent();
 
     // jump sound: step at full volume (water sound if feet are wet)
     if (pm_waterlevel >= 1)
@@ -1530,16 +1809,123 @@ void PM_CheckJump()
     pm_velocity_z    += sqrt(2 * mv_gravity * 45);
     self.spread_penalty = SPREAD_PENALTY_JUMP;
 
-    // CS 1.6 stamina: penalise jump height if still fatigued, then reset timer
+    // sv_codstamina: jumps eat a fixed slice of the pool (the user
+    // spec says jumps should cost stamina too), and the per-jump
+    // height is scaled while the player is in the punish window so
+    // an exhausted player can't bunny-hop their way out of trouble.
+    //
+    // Spam guard: if the punish-scaled impulse would leave the player
+    // BELOW the PM_CategorizePosition airborne threshold (~180 u/s at
+    // default gravity), the categorize sticks them back on the ground
+    // immediately — and under autohop + held +jump that means
+    // PM_CheckJump re-fires every tick (user-reported "spam every
+    // frame at sv_codstamina_punish_jump_scale 0.5 or below").  When
+    // we'd fall below the threshold, REWIND the impulse and force a
+    // pm_jump_held latch so the press is "spent" and the player has
+    // to release to try again (or wait for the bar to refill).
+    //
+    // Replay gate: skip the cost during CSQC reconcile-replay and
+    // preview steps.  Halving the *impulse* DOES need to run on
+    // replays (otherwise the predicted apex would diverge from the
+    // server), so the halve sits OUTSIDE the skip_drain guard.
+    // sv_codstamina drain block — cost only (the apex-scale override
+    // for the punished case is applied AFTER the CS 1.6 stamina taper
+    // below so it determines the FINAL velocity instead of being
+    // re-tapered into the ground-snap region).
+    if (PM_ReadMovevar("sv_codstamina", 0) > 0)
+    {
+        float jump_skip = 0;
+#ifdef CSQC
+        if (pm_suppress_sounds) jump_skip = 1;
+#endif
+        if (!jump_skip)
+        {
+            float jc = PM_ReadMovevar("sv_codstamina_jump_cost", 0.10);
+            if (jc < 0) jc = 0;
+            self.codstamina -= jc;
+            if (self.codstamina < 0) self.codstamina = 0;
+            if (self.codstamina <= 0)
+                self.codstamina_punished = 1;
+        }
+    }
+
+    // CS 1.6 stamina latch + landing movement cap.  The Z velocity
+    // taper at line ~1798 was previously compounding with sv_codstamina
+    // (multiplying the codstamina punish-scale until the player
+    // couldn't clear the 180 u/s ground-snap floor).  User asked to
+    // decouple the two: keep the landing movement cap (pm_fuser2 still
+    // latches → consumed in PM_AirMove at line 1430-1436 for the
+    // horizontal-speed reduction) but let codstamina handle the
+    // jump-height reduction exclusively when it's on.
     if (mv_stamina)
     {
-        if (self.pm_fuser2 > 0)
+        if (self.pm_fuser2 > 0
+            && PM_ReadMovevar("sv_codstamina", 0) <= 0)
             pm_velocity_z *= (100 - self.pm_fuser2 * 0.001 * 19) * 0.01;
         self.pm_fuser2 = 1315.7894;
     }
 
+    // sv_codstamina punish jump-scale — applied LAST so its absolute
+    // target velocity isn't tapered down by anything.  Apex
+    // multiplier semantics: 0.5 = half-apex height.
+    if (PM_ReadMovevar("sv_codstamina", 0) > 0 && self.codstamina_punished)
+    {
+        float jh = PM_ReadMovevar("sv_codstamina_punish_jump_scale", 0.5);
+        if (jh < 0) jh = 0;
+        if (jh > 1) jh = 1;
+        float target_vel = sqrt(2 * mv_gravity * 45 * jh);
+        if (target_vel < 180)
+        {
+            // Below the 180 u/s ground-snap floor — block the jump
+            // entirely (no spam, press is spent until release).
+            pm_velocity_z -= sqrt(2 * mv_gravity * 45);
+            pm_onground = TRUE;
+            self.pm_jump_held = TRUE;
+            return;
+        }
+        // Set absolute target: subtract the line-1751 impulse to
+        // recover pre-jump z, then add the apex-derived target.
+        // No CS taper inversion needed — it's gated off above.
+        float pre_jump_z = pm_velocity_z - sqrt(2 * mv_gravity * 45);
+        pm_velocity_z = pre_jump_z + target_vel;
+    }
+
     self.pm_jump_held  = TRUE;
     self.pm_jump_msec  = pm_frametime * 1000;
+    self.pm_jump_strict_block = TRUE;   // sv_jumpstyle 0 latch: needs on-ground release before next jump
+
+    // sv_jumplag: stamp the cooldown stamp HERE on the jump itself,
+    // not only on the landing edge in PM_PlayerMoveStep.  The landing-
+    // edge stamp covered the typical "land → wait 150 ms → jump" flow,
+    // but it left a hole open for the user-reported "double jump that
+    // goes higher than a regular jump" symptom:
+    //   - autohop bypasses the pm_jump_held early-return at line 1714
+    //   - if PM_StayOnGround / PM_CategorizePosition re-categorises the
+    //     player as grounded within the SAME input frame's later
+    //     substeps (clip-brush stairs, ramp-fix clip, low-impulse
+    //     punished jumps that barely clear 180 u/s), the next PM_CheckJump
+    //     call sees pm_onground == TRUE, autohop bypasses pm_jump_held,
+    //     pm_jump_lag_end was still 0 because landing hadn't fired,
+    //     and a second impulse stacks on the first.
+    // Stamping at jump time closes that window: any re-entry within
+    // sv_jumplag seconds of the original jump is rejected at line 1709-1710.
+    float jl_jump = PM_ReadMovevar("sv_jumplag", 0);
+    if (jl_jump > 0)
+        self.pm_jump_lag_end = time + jl_jump;
+
+    // Ground-snap suppress: block PM_CategorizePosition's snap-to-
+    // ground for a short window so the impulse actually leaves the
+    // floor.  User-reported "low impulse / punished jump sticks to
+    // ground" cases:
+    //   - sv_codstamina_punish_jump_scale 0.5 leaves the jump just
+    //     under the 180 u/s airborne threshold → categorize re-grabs
+    //     the ground on the same tick.
+    //   - grapple yank can drop pm_velocity_z below 180 before
+    //     leaving the ground; the categorize then locks the player.
+    // Window default tracks the user's "0.05 s after jumping" ask.
+    float gs_off = PM_ReadMovevar("pm_groundstick_suppress_jump", 0.05);
+    if (gs_off > 0)
+        self.pm_jump_groundstick_off_until = time + gs_off;
 }
 
 // ============================================================================
@@ -1903,6 +2289,7 @@ float pm_mv_cache_wateraccelerate;
 float pm_mv_cache_spectatormaxspeed;
 float pm_mv_cache_stamina;
 float pm_mv_cache_autohop;
+float pm_mv_cache_jumpstyle;
 float pm_mv_cache_mintic;
 
 float(string name, float fallback) PM_ReadMovevarUncached =
@@ -1930,7 +2317,7 @@ void() PM_RefreshMovevarCache =
     pm_mv_cache_eye_height          = PM_ReadMovevarUncached("sv_eye_height", 56);
     pm_mv_cache_gravity             = PM_ReadMovevarUncached("sv_gravity", 800);
     pm_mv_cache_maxspeed            = PM_ReadMovevarUncached("sv_maxspeed", 270);
-    pm_mv_cache_shiftspeed          = PM_ReadMovevarUncached("sv_shiftspeed", 135);
+    pm_mv_cache_shiftspeed          = PM_ReadMovevarUncached("sv_shiftspeed", 1.0);
     pm_mv_cache_wepswap_transition  = PM_ReadMovevarUncached("sv_wepswap_speed_transition", 0.15);
     pm_mv_cache_stopspeed           = PM_ReadMovevarUncached("sv_stopspeed", 100);
     pm_mv_cache_friction            = PM_ReadMovevarUncached("sv_friction", 4);
@@ -1941,6 +2328,7 @@ void() PM_RefreshMovevarCache =
     pm_mv_cache_spectatormaxspeed   = PM_ReadMovevarUncached("sv_spectatormaxspeed", 500);
     pm_mv_cache_stamina             = PM_ReadMovevarUncached("sv_stamina", 0);
     pm_mv_cache_autohop             = PM_ReadMovevarUncached("sv_autohop", 0);
+    pm_mv_cache_jumpstyle           = PM_ReadMovevarUncached("sv_jumpstyle", 1);
     pm_mv_cache_mintic              = PM_ReadMovevarUncached("sv_mintic", 0.01);
 };
 #endif
@@ -1965,6 +2353,7 @@ float(string name, float fallback) PM_ReadMovevar =
     if (name == "sv_spectatormaxspeed")        return pm_mv_cache_spectatormaxspeed;
     if (name == "sv_stamina")                  return pm_mv_cache_stamina;
     if (name == "sv_autohop")                  return pm_mv_cache_autohop;
+    if (name == "sv_jumpstyle")                return pm_mv_cache_jumpstyle;
     if (name == "sv_mintic")                   return pm_mv_cache_mintic;
     val = PM_ReadMovevarUncached(name, fallback);
 #else
@@ -2029,7 +2418,7 @@ void PM_ReadMovevars()
 #else
     mv_gravity           = PM_ReadMovevar("sv_gravity", 800);
     mv_maxspeed          = PM_ReadMovevar("sv_maxspeed", 270);
-    mv_shiftspeed        = PM_ReadMovevar("sv_shiftspeed", 135);
+    mv_shiftspeed        = PM_ReadMovevar("sv_shiftspeed", 1.0);
 #endif
 
     // Per-weapon weight scaling.  self is the player entity in both
@@ -2063,7 +2452,12 @@ void PM_ReadMovevars()
 
     float wep_spd_factor = Weapon_SpeedFactor_Smooth();
     mv_maxspeed   *= wep_spd_factor;
-    mv_shiftspeed *= wep_spd_factor;
+    // mv_shiftspeed is a sprint/walk multiplier; only let the weapon
+    // speed factor scale it when it's actually active (away from the
+    // 1.0 no-op zone), otherwise a heavy weapon with wep_spd_factor < 1
+    // would silently turn the no-op default into a slow-walk.
+    if (mv_shiftspeed > 1.001 || (mv_shiftspeed > 0 && mv_shiftspeed < 0.999))
+        mv_shiftspeed *= wep_spd_factor;
 #ifdef CSQC
     mv_stopspeed         = pm_mv_cache_stopspeed;
     mv_friction          = pm_mv_cache_friction;
@@ -2091,11 +2485,13 @@ void PM_ReadMovevars()
     mv_spectatormaxspeed = pm_mv_cache_spectatormaxspeed;
     mv_stamina           = pm_mv_cache_stamina;
     mv_autohop           = pm_mv_cache_autohop;
+    mv_jumpstyle         = pm_mv_cache_jumpstyle;
 #else
     mv_wateraccelerate   = PM_ReadMovevar("sv_wateraccelerate", 10);
     mv_spectatormaxspeed = PM_ReadMovevar("sv_spectatormaxspeed", 500);
     mv_stamina           = PM_ReadMovevar("sv_stamina", 0);
     mv_autohop           = PM_ReadMovevar("sv_autohop", 0);
+    mv_jumpstyle         = PM_ReadMovevar("sv_jumpstyle", 1);
 #endif
 #ifdef CSQC
     // Client-side autohop: predicts bunnyhop locally even when the server
@@ -2159,6 +2555,1115 @@ float(entity trig) PM_BoxInTriggerBrush =
 };
 
 // ============================================================================
+//  Conveyor list management — shared between SSQC and CSQC.  Both add to
+//  the same list (server during func_conveyor spawn, client during
+//  CSQC_SolidBrush_Update when btype == BRUSH_TYPE_CONVEYOR).  Idempotent
+//  add lets the brushsync wire re-fire CSQC_Ent_Update on visibility
+//  transitions without re-adding.  Cycle-safe iteration on remove
+//  mirrors push_list_remove_csqc.
+// ============================================================================
+
+void(entity c) Conveyor_AddToList =
+{
+    entity scan;
+    float i = 0;
+    for (scan = conveyor_list; scan; scan = scan.conveyor_next)
+    {
+        if (scan == c) return;
+        i = i + 1;
+        if (i > 4096) { dprint("Conveyor_AddToList: cycle\n"); return; }
+    }
+    c.conveyor_next = conveyor_list;
+    conveyor_list   = c;
+};
+
+void(entity c) Conveyor_RemoveFromList =
+{
+    entity cur, prev;
+    float i = 0;
+    if (conveyor_list == c)
+    {
+        conveyor_list   = c.conveyor_next;
+        c.conveyor_next = world;
+        return;
+    }
+    prev = world;
+    for (cur = conveyor_list; cur; cur = cur.conveyor_next)
+    {
+        if (cur == c)
+        {
+            if (prev) prev.conveyor_next = cur.conveyor_next;
+            cur.conveyor_next = world;
+            return;
+        }
+        prev = cur;
+        i = i + 1;
+        if (i > 4096)
+        {
+            dprint("Conveyor_RemoveFromList: cycle\n");
+            if (prev) prev.conveyor_next = world;
+            return;
+        }
+    }
+};
+
+// ============================================================================
+//  PM_CheckConveyors  –  per-frame positional displacement from conveyors
+//
+//  Mirrors HL's basevelocity behaviour: each pmove tick that the player
+//  overlaps a conveyor's bbox, displace pm_origin by movedir*speed*dt
+//  along the conveyor.  Bypasses friction (the velocity field isn't
+//  touched), so even slow conveyors actually push the player at the
+//  configured speed.  Tracebox guards against shoving them through
+//  walls — partial movement on hit, no movement on stuck-against.
+//
+//  Runs on both SSQC (authoritative) and CSQC (predicted) in pmove,
+//  reading the same conveyor_list in both, so the predicted client
+//  position matches the server's before any reconciliation.
+// ============================================================================
+
+void() PM_CheckConveyors =
+{
+    entity conv;
+    vector player_absmin, player_absmax;
+    vector cmin, cmax;
+
+    player_absmin = pm_origin + PM_CurrentMins();
+    player_absmax = pm_origin + PM_CurrentMaxs();
+
+    float iter = 0;
+    for (conv = conveyor_list; conv; conv = conv.conveyor_next)
+    {
+        iter = iter + 1;
+        if (iter > 256) break;
+
+        if (conv.spawnflags & 1)              // SF_CONVEYOR_NOPUSH
+            continue;
+
+        // Inflate bbox same as the server-side scan: 8 qu sideways
+        // and 2/16 in Z, generous on top so a player whose feet are
+        // exactly at the brush top still register.
+        cmin = conv.absmin - '8 8 2';
+        cmax = conv.absmax + '8 8 16';
+
+        if (player_absmin_x >= cmax_x) continue;
+        if (player_absmax_x <= cmin_x) continue;
+        if (player_absmin_y >= cmax_y) continue;
+        if (player_absmax_y <= cmin_y) continue;
+        if (player_absmin_z >= cmax_z) continue;
+        if (player_absmax_z <= cmin_z) continue;
+
+        // Hybrid (HL basevelocity model): do BOTH positional
+        // displacement AND a per-tick velocity bump.
+        //
+        // Positional is required for slow conveyors (e.g. speed=10
+        // for shoving AFK players into a death pit).  The per-tick
+        // velocity bump alone (speed * pm_frametime per tick) is
+        // drained by ground friction as fast as it's added — at
+        // friction=4 and ~72 Hz, an AFK player reaches a steady
+        // state of ~5 qu/s no matter how high the configured speed
+        // is.  Positional bypasses friction entirely so the player
+        // travels at exactly conv.speed while on the belt.
+        //
+        // Velocity-add still runs so jumping off carries momentum:
+        // the player accumulates ~conv.speed of velocity per second
+        // of contact (minus friction drain), which becomes free
+        // velocity the moment they leave the ground.  Lets the
+        // ride-jump-ride speed-stacking pattern survive.
+        //
+        // Tracebox guards positional from shoving players through
+        // walls — partial move on hit, no move on stuck-against.
+        vector cstep = conv.movedir * (conv.speed * pm_frametime);
+        vector cnew  = pm_origin + cstep;
+        tracebox(pm_origin, PM_CurrentMins(), PM_CurrentMaxs(),
+                 cnew, MOVE_NORMAL, self);
+        if (trace_fraction >= 1.0)
+            pm_origin = cnew;
+        else if (trace_fraction > 0)
+            pm_origin = trace_endpos;
+
+        pm_velocity = pm_velocity + conv.movedir * (conv.speed * pm_frametime);
+    }
+};
+
+// ============================================================================
+//  Rotating-brush carry list  –  shared SSQC + CSQC.  Server adds the
+//  brush in Mover_RotateStart and removes in rotdoor_hit_top /
+//  rotdoor_hit_bottom; CSQC adds in CSQC_SolidBrush_Update whenever
+//  avelocity is non-zero and removes when it returns to zero.  Idempotent
+//  add and cycle-safe remove mirror Conveyor_Add/RemoveFromList.
+// ============================================================================
+
+void(entity c) RotatingBrush_AddToList =
+{
+    entity scan;
+    float i = 0;
+    for (scan = rotating_brush_list; scan; scan = scan.rotating_brush_next)
+    {
+        if (scan == c) return;
+        i = i + 1;
+        if (i > 4096) { dprint("RotatingBrush_AddToList: cycle\n"); return; }
+    }
+    c.rotating_brush_next = rotating_brush_list;
+    rotating_brush_list   = c;
+};
+
+void(entity c) RotatingBrush_RemoveFromList =
+{
+    entity cur, prev;
+    float i = 0;
+    if (rotating_brush_list == c)
+    {
+        rotating_brush_list   = c.rotating_brush_next;
+        c.rotating_brush_next = world;
+        return;
+    }
+    prev = world;
+    for (cur = rotating_brush_list; cur; cur = cur.rotating_brush_next)
+    {
+        if (cur == c)
+        {
+            if (prev) prev.rotating_brush_next = cur.rotating_brush_next;
+            cur.rotating_brush_next = world;
+            return;
+        }
+        prev = cur;
+        i = i + 1;
+        if (i > 4096)
+        {
+            dprint("RotatingBrush_RemoveFromList: cycle\n");
+            if (prev) prev.rotating_brush_next = world;
+            return;
+        }
+    }
+};
+
+// ============================================================================
+//  Linear-motion brush list  –  shared SSQC + CSQC.  Sliding func_door
+//  and func_button add to this list when Mover_Start sets velocity and
+//  remove when motion completes.  Mirrors RotatingBrush_*.
+// ============================================================================
+
+void(entity c) MovingBrush_AddToList =
+{
+    entity scan;
+    float i = 0;
+    for (scan = moving_brush_list; scan; scan = scan.moving_brush_next)
+    {
+        if (scan == c) return;
+        i = i + 1;
+        if (i > 4096) { dprint("MovingBrush_AddToList: cycle\n"); return; }
+    }
+    c.moving_brush_next = moving_brush_list;
+    moving_brush_list   = c;
+};
+
+void(entity c) MovingBrush_RemoveFromList =
+{
+    entity cur, prev;
+    float i = 0;
+    if (moving_brush_list == c)
+    {
+        moving_brush_list   = c.moving_brush_next;
+        c.moving_brush_next = world;
+        return;
+    }
+    prev = world;
+    for (cur = moving_brush_list; cur; cur = cur.moving_brush_next)
+    {
+        if (cur == c)
+        {
+            if (prev) prev.moving_brush_next = cur.moving_brush_next;
+            cur.moving_brush_next = world;
+            return;
+        }
+        prev = cur;
+        i = i + 1;
+        if (i > 4096)
+        {
+            dprint("MovingBrush_RemoveFromList: cycle\n");
+            if (prev) prev.moving_brush_next = world;
+            return;
+        }
+    }
+};
+
+// Rotate `pt` around `pivot` by `deg` on the picked axis.  Mirrors
+// the server-side RotDoor_RotateAround in sv_doors_rotating.qc so
+// client carry prediction lands at the same position the server's
+// Brush_RotateCarry pass produces.
+//   ax_idx 0 = pitch (X), 1 = yaw (Y, default), 2 = roll (Z)
+vector(vector pt, vector pivot, float deg, float ax_idx) PM_RotateAroundPivot =
+{
+    float rad = deg * 0.017453293;
+    float c = cos(rad);
+    float s = sin(rad);
+    vector rel = pt - pivot;
+    vector r;
+
+    if (ax_idx == 0)
+    {
+        r_x = rel_x * c + rel_z * s;
+        r_y = rel_y;
+        r_z = -rel_x * s + rel_z * c;
+    }
+    else if (ax_idx == 2)
+    {
+        r_x = rel_x;
+        r_y = rel_y * c - rel_z * s;
+        r_z = rel_y * s + rel_z * c;
+    }
+    else
+    {
+        r_x = rel_x * c - rel_y * s;
+        r_y = rel_x * s + rel_y * c;
+        r_z = rel_z;
+    }
+
+    return pivot + r;
+};
+
+vector(entity rb) PM_RotatorPivot =
+{
+    if (rb.has_custom_pivot)
+        return rb.custom_pivot;
+    return rb.origin;
+};
+
+// Tangent velocity inheritance — when the player leaves a rotating
+// brush (jump or step-off), they should retain the orbital velocity
+// they had while attached, otherwise the launch / drop happens with
+// zero horizontal velocity (the carry is setorigin-based, doesn't
+// touch pm_velocity).  Trace the hull down 4 qu, find the brush we're
+// standing on, compute v_tan = ω × r at the player's offset from the
+// brush pivot, and add to pm_velocity.  Same axis-pick convention as
+// PM_CheckRotatingCarry.  Runs on both SSQC and CSQC pmove so the
+// predicted launch trajectory matches the authoritative one.
+void() PM_InheritRotatorTangent =
+{
+    if (!pm_onground) return;
+    PM_TraceHull(pm_origin, PM_CurrentMins(), PM_CurrentMaxs(),
+                 pm_origin - '0 0 4');
+    if (trace_fraction >= 1) return;
+    if (trace_ent == world || trace_ent.avelocity == '0 0 0') return;
+
+    float ax_idx;
+    if (fabs(trace_ent.avelocity_x) >= fabs(trace_ent.avelocity_y)
+     && fabs(trace_ent.avelocity_x) >= fabs(trace_ent.avelocity_z))
+        ax_idx = 0;
+    else if (fabs(trace_ent.avelocity_z) >= fabs(trace_ent.avelocity_y))
+        ax_idx = 2;
+    else
+        ax_idx = 1;
+
+    float omega_rad =
+        (ax_idx == 1) ? trace_ent.avelocity_y :
+        (ax_idx == 0) ? trace_ent.avelocity_x :
+                        trace_ent.avelocity_z;
+    omega_rad = omega_rad * 0.017453293;
+    vector rel = pm_origin - PM_RotatorPivot(trace_ent);
+    vector tangent = '0 0 0';
+    if (ax_idx == 1)
+    {
+        tangent_x = -rel_y * omega_rad;
+        tangent_y =  rel_x * omega_rad;
+    }
+    else if (ax_idx == 0)
+    {
+        tangent_y = -rel_z * omega_rad;
+        tangent_z =  rel_y * omega_rad;
+    }
+    else
+    {
+        tangent_x =  rel_y * omega_rad;
+        tangent_y = -rel_x * omega_rad;
+    }
+    pm_velocity = pm_velocity + tangent;
+};
+
+#ifdef CSQC
+// CSQC-only client-side prediction of the rotating-brush carry pass.
+//
+// Server runs Brush_RotateCarry once per server tick (RotDoor_CarryTick
+// in sv_doors_rotating.qc) which authoritatively rotates carried
+// players around the brush's pivot.  Without a client-side mirror,
+// predicted_player.origin sat still while the server-acked origin
+// rotated each snapshot — every reconcile captured the rotation as
+// an "err" that the smoother in CSQC_SmoothLocal then faded over up
+// to 1.5 s.  Visible to the user as the player pulling around the
+// platform with a long catch-up tail after the rotation stopped.
+//
+// This pass mirrors the server math via PM_RotateAroundPivot at
+// pmove cadence so predicted_player.origin advances in lockstep
+// with the visible brush.  Reconcile err stays at zero, smoother
+// stays idle, position is in tight lockstep with the brush visual.
+//
+// Gated to CSQC: the SERVER's pmove (running on input commands)
+// must NOT also apply this carry — the server's separate
+// physics-tick RotDoor_CarryTick is the authoritative carry, and
+// running both would double-apply.
+void() PM_CheckRotatingCarry =
+{
+    entity rb;
+    vector p_min, p_max;
+    p_min = pm_origin + PM_CurrentMins();
+    p_max = pm_origin + PM_CurrentMaxs();
+
+    float iter = 0;
+    for (rb = rotating_brush_list; rb; rb = rb.rotating_brush_next)
+    {
+        iter = iter + 1;
+        if (iter > 256) break;
+        if (rb.avelocity == '0 0 0') continue;
+
+        // Strict "standing on this brush" gate — bbox overlap alone
+        // grabs jumping players whose hulls still overlap the brush
+        // volume (or sit just above the slim z inflation we use), and
+        // the user expectation is the natural one: jump off → no
+        // carry.  Trace the player's hull down a few units and accept
+        // only when rb is the surface immediately under us.  Mirrors
+        // the server's `p.flags & FL_ONGROUND && p.groundentity == self`
+        // gate (added to Brush_RotateCarry alongside this).
+        PM_TraceHull(pm_origin, PM_CurrentMins(), PM_CurrentMaxs(),
+                     pm_origin - '0 0 4');
+        entity ground_ent      = trace_ent;
+        float  ground_frac     = trace_fraction;
+        float  on_this_brush   = (ground_frac < 1 && ground_ent == rb);
+        // "Standing on a DIFFERENT rotating brush" gate for Phase 3.
+        // Without this, two adjacent func_rotating barrels (e.g. an
+        // X-axis row) both act on a player straddling them: barrel A
+        // Phase-1-carries them around its pivot AND barrel B Phase-3-
+        // slides them tangentially.  Combined motion is the random
+        // fling the user reported.  When the player is already on a
+        // currently-rotating brush other than rb, skip Phase 3 — the
+        // stand-on brush's own iteration will handle them via Phase 1.
+        float on_other_rotator = (ground_frac < 1
+                                  && ground_ent != world
+                                  && ground_ent != rb
+                                  && ground_ent.avelocity != '0 0 0');
+
+        // Pick dominant axis — matches Mover_RotateStart's selection.
+        float ax_idx;
+        if (fabs(rb.avelocity_x) >= fabs(rb.avelocity_y)
+         && fabs(rb.avelocity_x) >= fabs(rb.avelocity_z))
+            ax_idx = 0;
+        else if (fabs(rb.avelocity_z) >= fabs(rb.avelocity_y))
+            ax_idx = 2;
+        else
+            ax_idx = 1;
+
+        float avel_a = (ax_idx == 0) ? rb.avelocity_x :
+                       (ax_idx == 1) ? rb.avelocity_y : rb.avelocity_z;
+        float deg_step = avel_a * pm_frametime;
+        if (deg_step == 0) continue;
+        vector rb_pivot = PM_RotatorPivot(rb);
+
+        if (on_this_brush)
+        {
+            // === Phase 1: standing on the brush — lockstep carry ===
+            //
+            // Overlap test.  Mirrors the server's Brush_RotateCarry
+            // pattern: for func_door_rotating we have pos1 (closed
+            // angles) replicated, so we can transform the player into
+            // the brush's local frame at angles=pos1 and AABB-test
+            // against the brush's local mins/maxs.  This correctly
+            // captures players standing on parts of the brush that
+            // stick OUTSIDE the static AABB once the brush has rotated
+            // past 90° (e.g., a small protruding platform on a big disc):
+            // the static absmin/absmax on a brushmodel are the model's
+            // angles=0 bounds, which DON'T sweep with rotation.
+            //
+            // For non-door rotating brushes (func_rotating /
+            // func_pendulum, BRUSH_TYPE_STATIC) pos1 isn't shipped via
+            // brushsync, so we fall back to a swept-sphere bound around
+            // the brush's pivot — over-permissive but still gated by
+            // the tracebox check below.
+            float on_brush;
+            if (rb.brush_type == BRUSH_TYPE_DOOR)
+            {
+                float local_unrot;
+                if (ax_idx == 0)      local_unrot = rb.angles_x - rb.pos1_x;
+                else if (ax_idx == 2) local_unrot = rb.angles_z - rb.pos1_z;
+                else                  local_unrot = rb.angles_y - rb.pos1_y;
+                while (local_unrot > 180)  local_unrot = local_unrot - 360;
+                while (local_unrot < -180) local_unrot = local_unrot + 360;
+
+                vector local_pos = PM_RotateAroundPivot(pm_origin, rb_pivot,
+                                                         -local_unrot, ax_idx);
+                vector lp_min = local_pos + PM_CurrentMins();
+                vector lp_max = local_pos + PM_CurrentMaxs();
+                vector dmin = rb.origin + rb.mins;
+                vector dmax = rb.origin + rb.maxs + '0 0 4';
+                on_brush = (lp_min_x <= dmax_x && lp_max_x >= dmin_x
+                         && lp_min_y <= dmax_y && lp_max_y >= dmin_y
+                         && lp_min_z <= dmax_z && lp_max_z >= dmin_z);
+            }
+            else
+            {
+                // Swept-sphere bound for non-door rotators.
+                vector model_size = rb.maxs - rb.mins;
+                float sphere_radius = vlen(model_size) * 0.5 + 32;
+                vector pivot_offset = pm_origin - rb_pivot;
+                on_brush = (vlen(pivot_offset) <= sphere_radius);
+                if (on_brush)
+                {
+                    float z_min = rb.absmin_z - 4;
+                    float z_max = rb.absmax_z + 4;
+                    if (p_max_z <= z_min) on_brush = 0;
+                    if (p_min_z >= z_max) on_brush = 0;
+                }
+            }
+            if (!on_brush) continue;
+
+            // Apply rotation, traced against geometry to avoid clipping
+            // the player into a wall on the inside of the swept arc.
+            // Temporarily un-solid the brush itself (mirrors the server's
+            // Brush_RotateCarry pattern) so a player's bbox sitting at the
+            // brush surface doesn't make the trace hit the brush from the
+            // inside and falsely report blocked.
+            vector new_origin = PM_RotateAroundPivot(pm_origin, rb_pivot,
+                                                      deg_step, ax_idx);
+            float saved_solid = rb.solid;
+            rb.solid = SOLID_NOT;
+            tracebox(pm_origin, PM_CurrentMins(), PM_CurrentMaxs(),
+                     new_origin, MOVE_NORMAL, self);
+            rb.solid = saved_solid;
+            if (cvar("cl_debug_rotcarry"))
+                print(sprintf("[rotcarry] avel=%v ax=%g step=%g traced frac=%g org=%v -> %v\n",
+                              rb.avelocity, ax_idx, deg_step, trace_fraction,
+                              pm_origin, new_origin));
+            if (trace_fraction >= 1.0)
+                pm_origin = new_origin;
+            else if (trace_fraction > 0)
+                // Partial motion — carry the player as far as the tracebox
+                // allowed.  Mirrors PM_CheckConveyors: refusing motion
+                // entirely on a partial block leaves the player visibly
+                // detached from the brush, which is exactly the "I'm not
+                // being taken with the rotation" symptom on slow rotators
+                // where the per-substep arc is small but the trace can
+                // still nick adjacent geometry on tight rotations.
+                pm_origin = trace_endpos;
+            // else: trace_fraction == 0 (started solid) — leave in place.
+
+            // Mark rotator contact so reconcile suppresses smoother
+            // fade for the small per-snapshot rate-mismatch err.
+            self.rotcarry_active_cltime = cltime;
+        }
+        else if ((self.flags & FL_ONGROUND) && !on_other_rotator)
+        {
+            // === Phase 3: ground player swept by the rotating mesh ===
+            //
+            // Mirrors server-side Brush_RotateCarry Phase 3
+            // (sv_doors_rotating.qc:442-521).  Without this, a player
+            // standing on the floor while the brush's swept arc moves
+            // into them gets phased through on the client — the server
+            // detects the overlap and slides them tangentially every
+            // RotDoor_CarryTick (sv_func_tickrate, ~15ms at 64Hz), but
+            // the client never applies the slide so prediction stays
+            // inside the brush until the next snapshot reconciles with
+            // a visible snap.  User-reported "low tickrate = pushed,
+            // high tickrate = phase through and desync" is exactly
+            // this gap.
+            //
+            // Detect mesh overlap at pm_origin (brush is SOLID_BSP at
+            // this point — we did NOT hide it for this trace).
+            tracebox(pm_origin, PM_CurrentMins(), PM_CurrentMaxs(),
+                     pm_origin, MOVE_NORMAL, self);
+            if (!(trace_startsolid && trace_ent == rb))
+                continue;     // mesh isn't intersecting our bbox
+
+            // Tangent at the player's position relative to the pivot,
+            // using the same axis convention as the server.
+            vector rel = pm_origin - rb_pivot;
+            float omega_rad = avel_a * 0.017453293;
+            vector tangent = '0 0 0';
+            if (ax_idx == 1)        // yaw
+            {
+                tangent_x = -rel_y * omega_rad;
+                tangent_y =  rel_x * omega_rad;
+            }
+            else if (ax_idx == 0)   // pitch
+            {
+                tangent_y = -rel_z * omega_rad;
+                tangent_z =  rel_y * omega_rad;
+            }
+            else                    // roll
+            {
+                tangent_x =  rel_y * omega_rad;
+                tangent_y = -rel_x * omega_rad;
+            }
+            float tan_speed = vlen(tangent);
+            if (tan_speed <= 0.01)
+                continue;
+
+            // Slide displacement & velocity-add scaling.  Server applies
+            // (tan_speed / func_hz + 4qu) of slide + tangent velocity
+            // once per func_tickrate tick.  To produce the same per-
+            // second slide rate at arbitrary client pmove tickrates,
+            // scale by (pm_frametime * func_hz) so num_substeps_per_sec
+            // * per_substep_amount equals the server's per_second_amount.
+            //
+            // Read the server's sv_func_tickrate via STAT_FUNC_TICKRATE
+            // — cvar("sv_func_tickrate") on CSQC returns 0 because the
+            // cvar is registered CVAR_SIDE_SV (sh_cvar_table.qc:996).
+            // The stat is set per-frame in sv_main.qc's per-player loop
+            // so it reflects the server's authoritative value within
+            // one snapshot.  Fallback 64 covers the initial-snapshot
+            // warmup before the first stat arrives.
+            float func_hz = getstatf(STAT_FUNC_TICKRATE);
+            if (func_hz <= 0)  func_hz = 64;
+            if (func_hz > 200) func_hz = 200;
+            float rate_scale = pm_frametime * func_hz;
+
+            vector tan_dir = tangent * (1.0 / tan_speed);
+            float slide_dist = (tan_speed / func_hz + 4) * rate_scale;
+            vector new_pos = pm_origin + tan_dir * slide_dist;
+
+            float saved_solid_3 = rb.solid;
+            rb.solid = SOLID_NOT;
+            tracebox(pm_origin, PM_CurrentMins(), PM_CurrentMaxs(),
+                     new_pos, MOVE_NORMAL, self);
+            rb.solid = saved_solid_3;
+
+            if (cvar("cl_debug_rotcarry"))
+                print(sprintf("[rotcarry-p3] tan_speed=%g slide=%g frac=%g pm_org=%v -> %v\n",
+                              tan_speed, slide_dist, trace_fraction,
+                              pm_origin, new_pos));
+
+            if (trace_fraction >= 1.0)
+            {
+                // Full slide — player cleared the brush's swept arc
+                // into free space.  Origin-only slide; NO velocity
+                // addition.  The previous code added `tangent *
+                // rate_scale` to pm_velocity per substep, which at
+                // 100-300 Hz pmove accumulated into a huge tangent
+                // velocity that pmove integration carried between
+                // Phase 3 calls — producing the "I get flung across
+                // the map" symptom on rotating barrels in a row.
+                // Sliding the origin is sufficient to prevent
+                // phase-through; the player's existing pmove velocity
+                // (gravity / input) is preserved.
+                pm_origin = new_pos;
+            }
+            else
+            {
+                // Partial or fully stuck — player can't be slid to a
+                // free spot.  Snap to trace_endpos for a clean visual
+                // (flush against the obstacle) but DON'T add tangent
+                // velocity and DON'T continue advancing.  The server
+                // mirrors this by setting blocked=1 in Brush_RotateCarry
+                // Phase 3 → RotDoor_CarryPlayers halts the rotation
+                // for this tick.  Brushsync ships zero avelocity (or
+                // unchanged-this-tick angles) so client's next pmove
+                // substep sees avel == 0 and skips Phase 3 entirely.
+                if (trace_fraction > 0)
+                    pm_origin = trace_endpos;
+                // else: leave in place (fully stuck).
+            }
+
+            // Mark rotator contact for reconcile smoother filter
+            // regardless of slide outcome — the server still applies
+            // its (matching) Phase 3 this moment, so a per-snapshot
+            // delta is expected; suppress the fade to avoid the
+            // push/snap-back oscillation.
+            self.rotcarry_active_cltime = cltime;
+        }
+    }
+};
+#endif    // end CSQC-only block opened above for PM_CheckRotatingCarry
+
+// PM_CheckMovingPushers — runs on BOTH server and client pmove.
+//
+//   TRAIN branch (any side):
+//     - Carry + geometry-push for func_train / func_tracktrain.
+//     - Server-side runs the same code as client-side so player.origin
+//       converges per pmove substep on both sides — no reconcile snap.
+//     - Replaces the previous server-tick `Mover_PlatformCarry` /
+//       `Mover_GeometryBlockPush` calls from func_train_move_tick:
+//       running carry from two different tick rates (train tick 64Hz
+//       + pmove 60-300Hz) double-applied deltas at snapshot boundaries
+//       and produced visible jitter on a riding player.  Single
+//       source on pmove fixes it.
+//
+//   DOOR / BUTTON branch (CSQC only):
+//     - Bbox-overlap push prediction.  Server runs the authoritative
+//       push from each door's Mover_TravelTick (sv_doors.qc); running
+//       it from server pmove too would double-apply, so the door
+//       branch stays gated.
+//
+// Both branches walk the same moving_brush_list.  Static brushes
+// (BRUSH_TYPE_STATIC) and conveyors (BRUSH_TYPE_CONVEYOR) are
+// untouched by either branch — conveyors use PM_CheckConveyors, and
+// static brushes never have velocity != 0 anyway.
+void() PM_CheckMovingPushers =
+{
+    entity rb;
+    float iter = 0;
+    for (rb = moving_brush_list; rb; rb = rb.moving_brush_next)
+    {
+        iter = iter + 1;
+        if (iter > 256) break;
+        if (rb.velocity == '0 0 0') continue;
+
+        // ----- TRAIN branch: carry + geometry-push prediction -----
+        // Mirrors the server-side Mover_PlatformCarry + Mover_GeometryBlockPush
+        // pass that runs from the train's tick (sv_func_train.qc /
+        // sv_func_tracktrain.qc).  Without a CSQC predictor the
+        // player only saw carry/push effects via snapshot reconcile,
+        // which produced the lurch-on-jump and drift-on-landing the
+        // user reported.  This pass keeps pm_origin / pm_velocity in
+        // lockstep with the train each pmove substep.
+        if (rb.brush_type == BRUSH_TYPE_TRAIN)
+        {
+            // Skip carry/push entirely for noclip / spectator / non-
+            // pmove states (matches the server-side gate).
+            if (self.pm_movetype == PM_MOVETYPE_NOCLIP
+             || self.pm_movetype == PM_MOVETYPE_SPECTATOR
+             || self.pm_movetype == PM_MOVETYPE_NONE)
+            {
+                if (self.platform_carry == rb)
+                {
+                    self.platform_carry          = world;
+                    self.platform_carry_velocity = '0 0 0';
+                }
+                rb.platform_prev_origin = rb.origin;
+                rb.platform_prev_yaw    = rb.angles_y;
+                rb.platform_prev_seeded = 1;
+                continue;
+            }
+
+            // "Standing on this brush" probe — same ground trace the
+            // server's carry helper uses (Brush_RotateCarry pattern).
+            tracebox(pm_origin, PM_CurrentMins(), PM_CurrentMaxs(),
+                     pm_origin - '0 0 4', MOVE_NORMAL, self);
+            float on_this_brush = (trace_fraction < 1 && trace_ent == rb);
+
+            if ((self.flags & FL_ONGROUND) && on_this_brush)
+            {
+                // === CARRY: apply translation + yaw delta ===
+                // First tick of a new carry has zero delta — just seed.
+                float just_started_carry = (self.platform_carry != rb);
+
+                // PER-SUBSTEP MOTION is velocity-based, not origin-based.
+                //   delta = rb.velocity * pm_frametime
+                // velocity * frametime is smooth at INPUT rate.  Using
+                // origin-delta (rb.origin - prev) would jitter at render
+                // rate, because rb.origin only updates when predraw
+                // fires (and predraw runs at render rate, not input
+                // rate).  Multiple pmove substeps between two render
+                // frames would see prev_origin == rb.origin (delta=0),
+                // then one substep gets the full render-frame's worth
+                // of motion in a single tick — visible as back-and-forth
+                // jitter at low fps.
+                //
+                // The downside of pure velocity-based: when the brush's
+                // velocity changes (corner turns, speed ramps), CSQC's
+                // extrapolation was using OLD velocity for one snapshot
+                // window after the actual server-side change.  When the
+                // new-velocity snapshot finally arrives, rb.origin
+                // jumps to the authoritative position — but the player
+                // has only been advancing at OLD velocity, so the cab
+                // visually lurches forward (or back) while the player
+                // stays put → "player drifts backward in the cab on
+                // every speed change".  The snap-jump consumer below
+                // captures exactly that discontinuity and applies it
+                // to the player too, keeping them locked through
+                // velocity transitions.  See sh_customdefs comments on
+                // brush_snap_origin_cumulative for details.
+                vector origin_delta = rb.velocity * pm_frametime;
+
+                // Yaw delta — uses PER-PLAYER prev_yaw (not per-brush)
+                // so the CSQC preview pmove doesn't poison the next
+                // real pmove's tracking.  CSQC_BuildPresentationView
+                // save/restores platform_carry_prev_yaw around the
+                // preview loop so previews don't leak forward.
+                float yaw_delta = 0;
+                if (!just_started_carry)
+                {
+                    yaw_delta = rb.angles_y - self.platform_carry_prev_yaw;
+                    if (yaw_delta > 180)  yaw_delta = yaw_delta - 360;
+                    if (yaw_delta < -180) yaw_delta = yaw_delta + 360;
+                }
+
+#ifdef CSQC
+                // === SNAP-JUMP CONSUMPTION (CSQC only) ===
+                // Each brushsync snapshot arrival records the
+                // discontinuous jump in rb.origin / rb.angles_y on the
+                // brush's brush_snap_origin_cumulative /
+                // brush_snap_yaw_cumulative counters.  In the
+                // constant-velocity case the jump is ~0 (extrapolation
+                // matched authoritative); when velocity changes between
+                // snapshots, the cumulative grows by exactly the amount
+                // the cab's authoritative position diverged from what
+                // CSQC's velocity-based predicted.  Applying that
+                // discontinuity here keeps the carried player locked
+                // to the cab through velocity transitions.
+                //
+                // On first carry tick we seed `_consumed` to the
+                // current cumulative so we don't replay every jump
+                // since map-start when a new player mounts the cab.
+                //
+                // ORIGIN vs YAW asymmetry: jump_origin is added to
+                // origin_delta because the player's per-substep advance
+                // (`rb.velocity * pm_frametime`) is integrated
+                // INDEPENDENTLY of rb.origin's extrapolation — both use
+                // the same velocity but accumulate separately, and
+                // jump_origin captures the snap-time discrepancy.
+                // jump_yaw is NOT added to yaw_delta because yaw_delta
+                // is computed directly from `rb.angles_y - prev_yaw`,
+                // and rb.angles_y already reflects the snap jump
+                // (brushsync updates it on snapshot arrival).  Adding
+                // jump_yaw on top double-counts the discontinuity —
+                // user-reported as "player drifts through cab walls
+                // when func_tracktrain turns on tracks": tracktrain
+                // sets avelocity_y = 0 and changes angles directly per
+                // tick, so the snap delta = entire rotation that tick,
+                // and the previous code rotated the player around the
+                // cab pivot by 2x the cab's actual rotation each snap.
+                // Still update _consumed each substep so the counter
+                // tracks for any future use.
+                if (just_started_carry)
+                {
+                    self.platform_carry_jump_origin_consumed = rb.brush_snap_origin_cumulative;
+                    self.platform_carry_jump_yaw_consumed    = rb.brush_snap_yaw_cumulative;
+                }
+                else
+                {
+                    vector jump_origin = rb.brush_snap_origin_cumulative
+                                       - self.platform_carry_jump_origin_consumed;
+                    origin_delta = origin_delta + jump_origin;
+                    self.platform_carry_jump_origin_consumed = rb.brush_snap_origin_cumulative;
+                    self.platform_carry_jump_yaw_consumed    = rb.brush_snap_yaw_cumulative;
+                }
+#endif
+
+                vector new_origin = pm_origin + origin_delta;
+                if (yaw_delta != 0)
+                    new_origin = PM_RotateAroundPivot(new_origin, rb.origin,
+                                                      yaw_delta, 1);
+
+                // Un-solid the brush during the destination trace
+                // so the player's bbox sitting on the train floor
+                // doesn't false-block on its own surface.
+                float t_saved_solid = rb.solid;
+                rb.solid = SOLID_NOT;
+                tracebox(pm_origin, PM_CurrentMins(), PM_CurrentMaxs(),
+                         new_origin, MOVE_NORMAL, self);
+                rb.solid = t_saved_solid;
+
+                if (trace_fraction >= 1.0)
+                    pm_origin = new_origin;
+                else if (trace_fraction > 0)
+                    pm_origin = trace_endpos;
+                // else: blocked — leave pm_origin (server crushes).
+
+#ifdef SSQC
+                // Server-side: send view-yaw event to this player so
+                // their CSQC accumulates input_angles and the camera
+                // rotates with the cab.
+                if (yaw_delta != 0 && self.classname == "player")
+                {
+                    msg_entity = self;
+                    WriteByte(MSG_ONE, SVC_CGAMEPACKET);
+                    WriteByte(MSG_ONE, CSQC_EVENT_DOOR_VIEWROT);
+                    WriteShort(MSG_ONE, yaw_delta * 100);
+                }
+#endif
+
+                self.platform_carry          = rb;
+                self.platform_carry_velocity = rb.velocity;
+                self.platform_carry_prev_yaw = rb.angles_y;
+            }
+            else if (self.platform_carry == rb)
+            {
+                // === OFF-TRANSITION: inherit train's xy velocity ===
+                // (preserve z so the jump impulse / fall stays intact).
+                // Replace not add — matches the server-side semantics
+                // the user explicitly asked for ("you should go only
+                // as fast as the train, not get more speed").
+                pm_velocity_x = self.platform_carry_velocity_x;
+                pm_velocity_y = self.platform_carry_velocity_y;
+                self.platform_carry          = world;
+                self.platform_carry_velocity = '0 0 0';
+            }
+            else
+            {
+                // === GEOMETRY PUSH: BSP-aware push for players in
+                // the train's path (not riding on top).  AABB cull
+                // first to skip the expensive dimension-bit trace.
+                vector t_pmin = pm_origin + PM_CurrentMins();
+                vector t_pmax = pm_origin + PM_CurrentMaxs();
+                float aabb_overlap = 1;
+                if (t_pmax_x <= rb.absmin_x || t_pmin_x >= rb.absmax_x) aabb_overlap = 0;
+                if (t_pmax_y <= rb.absmin_y || t_pmin_y >= rb.absmax_y) aabb_overlap = 0;
+                if (t_pmax_z <= rb.absmin_z || t_pmin_z >= rb.absmax_z) aabb_overlap = 0;
+
+                if (aabb_overlap)
+                {
+                    // Dimension-bit probe — only fires if the brush's
+                    // BSP geometry actually intersects the player
+                    // bbox, NOT just the AABB.  This is what makes
+                    // hollow trains stop spuriously shoving players
+                    // who are inside the cabin's empty interior.
+                    float t_g_solid    = rb.solid;
+                    float t_g_dimsolid = rb.dimension_solid;
+                    float t_g_dimhit   = self.dimension_hit;
+                    rb.solid             = SOLID_BSP;
+                    rb.dimension_solid  |= PM_TRIGGER_PROBE_DIM;
+                    self.dimension_hit   = PM_TRIGGER_PROBE_DIM;
+
+                    tracebox(pm_origin, PM_CurrentMins(), PM_CurrentMaxs(),
+                             pm_origin, MOVE_NORMAL, self);
+
+                    rb.solid            = t_g_solid;
+                    rb.dimension_solid  = t_g_dimsolid;
+                    self.dimension_hit  = t_g_dimhit;
+
+                    if (trace_startsolid && trace_ent == rb)
+                    {
+                        // Geometry-overlap confirmed → push along
+                        // velocity by exactly one tick + 1 qu bias
+                        // (tight to wall, no per-tick padding
+                        // accumulation).
+                        float t_pspeed = vlen(rb.velocity);
+                        if (t_pspeed > 0)
+                        {
+                            vector t_pdir = rb.velocity * (1.0 / t_pspeed);
+                            vector t_newpos = pm_origin
+                                + t_pdir * (t_pspeed * pm_frametime + 1);
+
+                            rb.solid = SOLID_NOT;
+                            tracebox(pm_origin, PM_CurrentMins(), PM_CurrentMaxs(),
+                                     t_newpos, MOVE_NORMAL, self);
+                            rb.solid = t_g_solid;
+
+                            if (trace_fraction >= 1.0)
+                            {
+                                pm_origin   = t_newpos;
+                                pm_velocity = pm_velocity + t_pdir * t_pspeed;
+                            }
+                            // else: blocked, leave.
+                        }
+                    }
+                }
+            }
+
+            // Update brush snapshot for next tick's delta calc.
+            rb.platform_prev_origin = rb.origin;
+            rb.platform_prev_yaw    = rb.angles_y;
+            rb.platform_prev_seeded = 1;
+            continue;        // skip the door-style processing below
+        }
+
+#ifdef CSQC
+        // ----- DOOR / BUTTON branch (CSQC-only) -----
+        // Server runs the authoritative geometry push from
+        // sv_doors.qc Mover_TravelTick → Mover_GeometryBlockPush;
+        // running it here on the server would double-apply.  This
+        // block predicts the same push client-side so predicted_
+        // player.origin advances in lockstep with the door's push,
+        // eliminating the snapshot-reconcile delay.
+        //
+        // Geometry-aware: the dimension-bit tracebox confirms the
+        // player's bbox actually intersects the door's BSP geometry
+        // before applying a push.  Previously this branch used a
+        // raw absmin/absmax overlap test, which on a thin sliding
+        // door pushed players standing in the door's AABB even
+        // when their bbox wasn't touching the brush — felt like a
+        // trigger volume rather than a mover.  Mirrors the TRAIN
+        // branch's pattern above.
+        if (rb.brush_type == BRUSH_TYPE_DOOR
+         || rb.brush_type == BRUSH_TYPE_BUTTON)
+        {
+            // Skip prediction during noclip / spectator / non-pmove
+            // (engine handles those entirely on its own).
+            if (self.pm_movetype == PM_MOVETYPE_NOCLIP
+             || self.pm_movetype == PM_MOVETYPE_SPECTATOR
+             || self.pm_movetype == PM_MOVETYPE_NONE)
+                continue;
+
+            // Don't predict push if the door has already reached
+            // (or crossed) its destination.  The engine's
+            // MOVETYPE_NOCLIP extrapolates rb.origin via velocity
+            // until the server's stop-snap arrives, so without this
+            // the client keeps shoving the player past the door's
+            // intended endpoint and the next snapshot snaps both
+            // back — the previously-reported overshoot.  pos1 /
+            // pos2 / mover_state are replicated for
+            // BRUSH_TYPE_DOOR / BUTTON, so we know where the door is
+            // headed.
+            vector dest;
+            if (rb.mover_state == MOVER_STATE_UP)
+                dest = rb.pos2;
+            else if (rb.mover_state == MOVER_STATE_DOWN)
+                dest = rb.pos1;
+            else
+                dest = rb.origin;          // unknown — don't gate
+            if (dest != rb.origin)
+            {
+                vector to_dest = dest - rb.origin;
+                if (to_dest * rb.velocity <= 0.5)
+                    continue;              // at/past dest, push is over
+            }
+
+            // Velocity resolves push direction.  No fallback here —
+            // a door with zero velocity isn't moving, so nothing to
+            // predict.
+            float push_speed = vlen(rb.velocity);
+            if (push_speed <= 0) continue;
+            vector push_dir = rb.velocity * (1.0 / push_speed);
+
+            // ===== PLATFORM CARRY: standing on top of the door =====
+            // Player whose feet trace down to this brush rides 1:1
+            // with the brush's per-tick translation.  If the swept
+            // path is partially blocked (wall in front), the player
+            // stops at trace_endpos; the door keeps moving past
+            // them and the ground trace eventually misses the
+            // brush, dropping the carry latch → they fall.  Doors
+            // don't have angular motion or velocity transitions, so
+            // no yaw rotation or snap-jump consumption is needed
+            // — simpler than the train carry above.
+            float d_saved_solid = rb.solid;
+            tracebox(pm_origin, PM_CurrentMins(), PM_CurrentMaxs(),
+                     pm_origin - '0 0 4', MOVE_NORMAL, self);
+            // Standing-on-brush detection.  Must EXCLUDE trace_startsolid:
+            // when the player's bbox is overlapping the brush's BSP (e.g.
+            // the door's mesh is intersecting the player because they're
+            // wedged inside), tracebox returns trace_fraction=0 +
+            // trace_startsolid=1.  Without the startsolid exclusion, a
+            // wedged-inside player would test as "on this brush" and the
+            // carry would yank them up and down with the door's
+            // oscillation — exactly the "I follow it up and down" report.
+            float d_on_this_brush = (trace_fraction < 1
+                                  && trace_ent == rb
+                                  && !trace_startsolid);
+
+            if ((self.flags & FL_ONGROUND) && d_on_this_brush)
+            {
+                vector d_origin_delta = rb.velocity * pm_frametime;
+                vector d_new_origin   = pm_origin + d_origin_delta;
+
+                // Un-solid the brush during the destination trace so
+                // standing on its top surface doesn't false-block
+                // the carry's tracebox against itself.
+                rb.solid = SOLID_NOT;
+                tracebox(pm_origin, PM_CurrentMins(), PM_CurrentMaxs(),
+                         d_new_origin, MOVE_NORMAL, self);
+                rb.solid = d_saved_solid;
+
+                if (trace_fraction >= 1.0)
+                    pm_origin = d_new_origin;
+                else if (trace_fraction > 0)
+                    pm_origin = trace_endpos;
+                // else: blocked completely (player at wall).  Leave
+                // pm_origin alone — the door slides past below; on
+                // a later substep the ground trace will miss the
+                // brush and the player drops off the back.
+
+                self.platform_carry          = rb;
+                self.platform_carry_velocity = rb.velocity;
+                continue;        // carry handled this player — skip geometry push
+            }
+            else if (self.platform_carry == rb)
+            {
+                // Was riding last substep, no longer on the brush —
+                // inherit the door's xy velocity once so they leave
+                // with the door's motion (preserve z for jump/fall).
+                pm_velocity_x = self.platform_carry_velocity_x;
+                pm_velocity_y = self.platform_carry_velocity_y;
+                self.platform_carry          = world;
+                self.platform_carry_velocity = '0 0 0';
+            }
+
+            // ===== GEOMETRY PUSH: bbox intersects brush BSP =====
+            // Players NOT on top — pressed against the brush face.
+            // Dimension-bit probe: save + restore brush solid /
+            // dimension_solid and player dimension_hit.  Zero-length
+            // swept-box trace at pm_origin returns
+            // trace_startsolid + trace_ent == rb iff the brush's
+            // BSP body is overlapping the player's bbox THIS
+            // substep.  AABB overlap alone is no longer enough.
+            float d_g_solid    = rb.solid;
+            float d_g_dimsolid = rb.dimension_solid;
+            float d_g_dimhit   = self.dimension_hit;
+            rb.solid             = SOLID_BSP;
+            rb.dimension_solid  |= PM_TRIGGER_PROBE_DIM;
+            self.dimension_hit   = PM_TRIGGER_PROBE_DIM;
+
+            tracebox(pm_origin, PM_CurrentMins(), PM_CurrentMaxs(),
+                     pm_origin, MOVE_NORMAL, self);
+
+            rb.solid            = d_g_solid;
+            rb.dimension_solid  = d_g_dimsolid;
+            self.dimension_hit  = d_g_dimhit;
+
+            if (!(trace_startsolid && trace_ent == rb))
+                continue;        // no geometry intersection → no push
+
+            // Push along velocity by exactly one substep's worth of
+            // motion — no bias, no velocity addition.  This MUST
+            // match the server's Mover_GeometryBlockPush_Player
+            // (sv_platform_carry.qc:281), which does only:
+            //
+            //   advance       = mover_planned_velocity / sv_func_tickrate
+            //   pushed_origin = p.origin + advance
+            //   setorigin(p, pushed_origin)
+            //
+            // No +1u bias and no `pm_velocity += push_speed`.  Earlier
+            // versions of this branch had both, which produced two
+            // bugs:
+            //   (a) +1u accumulates ~Hz qu/second extra push (e.g.
+            //       100 substeps × 1u = 100 qu/s) over the server.
+            //       Visible as client over-shoots door's intended
+            //       endpoint, then snap-back on reconcile.
+            //   (b) Velocity addition stacks `push_speed` per
+            //       substep into pm_velocity, growing >> sv_maxvel
+            //       and getting clamped — when the door stops,
+            //       leftover velocity drives the player past the
+            //       floor edge or wedges them in odd places (the
+            //       "I don't fall / sink slowly / unstick when the
+            //       door moves back" symptom).
+            //
+            // The +1 was historical surface clearance; without bias
+            // the player sits flush against the brush face, which is
+            // fine — they're not pushed back into the brush because
+            // pmove's own slide handling keeps them out.
+            vector new_pos = pm_origin + push_dir * (push_speed * pm_frametime);
+
+            rb.solid = SOLID_NOT;
+            tracebox(pm_origin, PM_CurrentMins(), PM_CurrentMaxs(),
+                     new_pos, MOVE_NORMAL, self);
+            rb.solid = d_g_solid;
+
+            if (trace_fraction >= 1.0)
+            {
+                // Cleanly slid out — match the server's clean-slide
+                // branch (sv_platform_carry.qc).  Origin only,
+                // velocity untouched.
+                pm_origin = new_pos;
+            }
+
+            // Mark mover-push contact for reconcile lock skip + err
+            // zero filter.  Drift-lock would otherwise hold the
+            // camera at pre-reset while pmove pushes the player,
+            // visibly sinking them into the door brush even though
+            // server has them in the right place.  Mark unconditionally
+            // (even on partial / blocked) — we're in contact with the
+            // brush this substep regardless of slide outcome.
+            self.mover_push_active_cltime = cltime;
+            // else: player can't fully escape this substep.  Server-
+            // side Mover_GeometryBlockPush will invoke the door's
+            // .blocked callback (damage + reverse-or-grind).  We
+            // leave pm_origin alone here so the predicted client
+            // stays in sync with the server's authoritative crush
+            // location; the door slides past via its own motion
+            // (no longer pauses on block).
+        }
+#endif    // end DOOR/BUTTON CSQC-only branch
+    }
+};
+
+// ============================================================================
 //  25.  PM_CheckTriggerPushes  –  velocity impulse from overlapping push triggers
 // ============================================================================
 
@@ -2169,20 +3674,95 @@ void(entity trig) PM_ApplyTriggerPush =
 
     if (trig.spawnflags & PUSH_SOURCE)
     {
-        // boost along movedir only up to speed; don't reduce existing speed
-        current = pm_velocity * trig.movedir;
-        delta   = trig.speed - current;
-        if (delta > 0)
-            pm_velocity = pm_velocity + trig.movedir * delta;
+        // Jump-pad style — uncapped velocity add along movedir.  The
+        // previous "set to max(current, speed)" clamp held player
+        // velocity at exactly `speed` even when the player was
+        // already moving fast in the launch direction, which felt
+        // like the trigger "stopped them early" mid-arc.  Adding
+        // unconditionally gives a real throw: a thin one-frame
+        // trigger imparts +speed, a thicker volume stacks more
+        // bumps, and existing velocity (jump impulse, fall speed)
+        // is preserved instead of being trimmed.  Mappers tune the
+        // arc by the trigger's `speed` key + brush thickness; the
+        // pmove gravity / friction passes carry the rest.
+        pm_velocity = pm_velocity + trig.movedir * trig.speed;
     }
     else if (trig.spawnflags & PUSH_ADDITIVE)
+    {
+        // Additive — keep adding velocity each tick.  Velocity path
+        // because the mapper's intent here is sustained acceleration
+        // (e.g. a wind that ramps the player up).
         pm_velocity = pm_velocity + trig.movedir * trig.speed;
+    }
     else
-        pm_velocity = trig.movedir * trig.speed;
+    {
+        // Default (HL basevelocity model).  Always do positional
+        // displacement so slow horizontal triggers (e.g. speed=10 for
+        // shoving AFK players into a death pit) actually push the
+        // player at exactly the configured speed.  The velocity
+        // treatment then splits on movedir.z because vertical and
+        // horizontal pushes want fundamentally different things:
+        //
+        //  - Vertical pushes (jumppads, updrafts): need a velocity
+        //    FLOOR along movedir, not a per-tick add.  Per-tick add
+        //    can never overcome gravity (gravity = 800 qu/s² vs a
+        //    push of speed*dt per tick), so the player exits with
+        //    large negative vz and drops.  Floor sets the upward
+        //    component of velocity to >= trig.speed each tick the
+        //    player is in the trigger; on exit, they keep that
+        //    upward velocity and arc back down naturally under
+        //    gravity.  Mid-air players falling into a jumppad get
+        //    their fall cancelled (vz bumped up to trig.speed)
+        //    instead of riding through with downward momentum.
+        //    max(current, trig.speed) — never slows a player who
+        //    was already moving along movedir faster than the pad's
+        //    rated speed.
+        //
+        //  - Horizontal pushes: per-tick cumulative add.  Player
+        //    input adds independently and friction drains on the
+        //    ground, so pushes stay fightable; the positional
+        //    component is what actually moves AFK players.  A
+        //    floor here would harshly wipe opposite motion (e.g.
+        //    walking west against an east-pointing trigger would
+        //    snap velocity to +trig.speed east — the "can't fight
+        //    at all" symptom this code exists to avoid).
+        //
+        // Threshold 0.5 = 30° above horizontal — anything steeper
+        // is treated as a vertical push.  Mappers angle their push
+        // brushes either flat or straight up in practice; the
+        // diagonal case is rare and 0.5 covers both intuitively.
+        //
+        // Tracebox guards positional from shoving players through
+        // walls — partial move on hit, no move on stuck-against.
+        vector tstep = trig.movedir * (trig.speed * pm_frametime);
+        vector tnew  = pm_origin + tstep;
+        tracebox(pm_origin, PM_CurrentMins(), PM_CurrentMaxs(),
+                 tnew, MOVE_NORMAL, self);
+        if (trace_fraction >= 1.0)
+            pm_origin = tnew;
+        else if (trace_fraction > 0)
+            pm_origin = trace_endpos;
+
+        if (trig.movedir_z >= 0.5)
+        {
+            // Vertical-ish — velocity floor along movedir.
+            float along = pm_velocity * trig.movedir;
+            if (along < trig.speed)
+                pm_velocity = pm_velocity + trig.movedir * (trig.speed - along);
+        }
+        else
+        {
+            // Horizontal-ish — cumulative velocity-add.
+            pm_velocity = pm_velocity + trig.movedir * (trig.speed * pm_frametime);
+        }
+    }
 
     if (trig.spawnflags & PUSH_TUNNEL)
     {
-        // pull toward the trigger's centerline while pushing
+        // Tunnel — corrective force toward centerline, kept on the
+        // velocity path so it's a gentle drift over many ticks rather
+        // than a positional snap.  Stacks with whichever main mode
+        // (velocity or positional) the trigger above already applied.
         offset = (trig.origin + (trig.mins + trig.maxs) * 0.5) - pm_origin;
         offset = offset - trig.movedir * (offset * trig.movedir);
         pm_velocity = pm_velocity + offset * trig.speed * 0.1;
@@ -2273,6 +3853,27 @@ void() PM_CheckTeleportTriggers =
         // snap to destination
         pm_origin   = trig.tele_dest_origin;
         pm_onground = FALSE;
+
+        // GoldSrc info_teleport_destination convention is "origin at
+        // the player's FEET", not hull center.  Quake-style players
+        // have origin at the bbox center, so dest entities authored
+        // for HL maps can leave us startsolid in the floor.  Probe
+        // the snapped position; if our hull is in solid, trace
+        // straight down a hull-height-and-change to find the surface
+        // just below and lift the bbox onto it (+1 qu so we're not
+        // resting exactly on the plane).  No-op when the dest origin
+        // is already valid (Quake-authored maps and any HL map that
+        // placed the dest at hull center).
+        tracebox(pm_origin, PM_CurrentMins(), PM_CurrentMaxs(),
+                 pm_origin, MOVE_NORMAL, self);
+        if (trace_startsolid)
+        {
+            vector probe = pm_origin - '0 0 80';
+            tracebox(pm_origin, PM_CurrentMins(), PM_CurrentMaxs(),
+                     probe, MOVE_NORMAL, self);
+            if (trace_fraction < 1)
+                pm_origin = trace_endpos + '0 0 1';
+        }
 
         if (!(trig.spawnflags & TELEPORT_KEEPVEL))
             pm_velocity = '0 0 0';
@@ -2398,6 +3999,29 @@ vector PM_FindLadderNormal(vector probe_origin, float probe_dist)
     return flat_fwd;
 }
 
+// Derive the ladder's face normal from the brush's own geometry — no
+// `angle` key required.  Picks the thinnest horizontal axis (a typical
+// ladder is thin in one X/Y direction and tall in Z) and returns the
+// outward-facing unit vector on that axis based on which side of the
+// brush centre the player is on.  This replaces the old fallback to
+// player view direction (PM_DefaultLadderNormal), which gave a
+// face-normal unrelated to the brush whenever the player wasn't
+// looking exactly at it.
+vector(entity trig) PM_LadderNormalFromBrush =
+{
+    vector size   = trig.maxs - trig.mins;
+    vector centre = trig.origin + (trig.mins + trig.maxs) * 0.5;
+
+    // Compare absolute X vs Y extents — the smaller one is the face axis.
+    if (fabs(size_x) < fabs(size_y))
+    {
+        if (pm_origin_x < centre_x) return '-1 0 0';
+        return '1 0 0';
+    }
+    if (pm_origin_y < centre_y) return '0 -1 0';
+    return '0 1 0';
+};
+
 void() PM_CheckLadder =
 {
     entity trig;
@@ -2462,14 +4086,17 @@ void() PM_CheckLadder =
 
         pm_on_ladder = TRUE;
 
-        if (trig.movedir != '0 0 0')
-        {
-            pm_ladder_normal = trig.movedir;
-        }
-        else
-        {
-            pm_ladder_normal = PM_DefaultLadderNormal();
-        }
+        // Always derive the ladder face from brush geometry —
+        // user spec: "angle of the func_ladder doesn't affect the
+        // way you climb it".  Previously a mapper-supplied `angle`
+        // keyvalue on the func_ladder entity would override the
+        // brush-geometry derivation and force a specific normal,
+        // which made identically-shaped ladders climb differently
+        // depending on whether the mapper had remembered to clear
+        // the angle.  Now the climb is purely a function of the
+        // brush's shape + the player's position relative to it,
+        // independent of any mapper-set angle.
+        pm_ladder_normal = PM_LadderNormalFromBrush(trig);
         return;
     }
 };
@@ -2509,13 +4136,18 @@ void() PM_LadderMove =
     along_normal = wishvel * pm_ladder_normal;
     climb        = wishvel - pm_ladder_normal * along_normal;
 
-    // GoldSrc: the into-wall component drives vertical movement.
-    // Our pm_ladder_normal is outward (toward player), so:
-    //   along_normal < 0 = pressing INTO wall  → downward (climb_z decreases)
-    //   along_normal > 0 = pressing AWAY wall  → upward   (climb_z increases)
-    // Derived from PM_LadderMove: final.z = lateral.z - dot(velocity, N_inward)
-    //                                     = lateral.z + dot(velocity, N_outward)
-    climb_z += along_normal;
+    // GoldSrc: the into-wall component drives upward motion, the
+    // away-from-wall component drives downward.  pm_ladder_normal
+    // points OUTWARD (toward the player), so:
+    //   wishvel · outward < 0  ⇔  player pressing INTO wall  → up
+    //   wishvel · outward > 0  ⇔  player pressing AWAY       → down
+    // Hence subtract along_normal from climb.z so the negative
+    // (into-wall) value bumps climb.z UP and the positive (away)
+    // value drives it DOWN.  The previous + had it inverted, which
+    // forced mappers to set angle pointing INTO the wall to
+    // accidentally get the right behaviour — `angle` is no longer
+    // required, see PM_LadderNormalFromBrush below.
+    climb_z -= along_normal;
 
     pm_velocity = climb;
     PM_StepSlideMove(FALSE);
@@ -2706,6 +4338,70 @@ void() PM_UpdateStepSound =
 };
 
 // ============================================================================
+//  PM_TryEngageSlide  –  shared engage path for both slide triggers
+//
+//  Returns 1 if the slide was engaged this call.  Both the landing-edge
+//  handler (duck-land) and the crouch-press handler (sv_slidingcrouch)
+//  call this so the engage state — flag, boost velocity, sound chain —
+//  stays consistent across both entry points.  Idempotent: returns 0
+//  if the slide is already active or any condition fails, without
+//  touching pm_velocity or emitting the random slide sound.
+// ============================================================================
+
+float() PM_TryEngageSlide =
+{
+    if (self.slide_friction_active)
+        return 0;
+    if (!PM_ReadMovevar("sv_sliding", 0))
+        return 0;
+    if (!(self.flags & FL_DUCKING))
+        return 0;
+    if (!pm_onground)
+        return 0;
+    if (self.pm_movetype == PM_MOVETYPE_NOCLIP)
+        return 0;
+
+    vector engage_hvel = pm_velocity;
+    engage_hvel_z = 0;
+    float engage_hspeed = vlen(engage_hvel);
+    if (engage_hspeed < PM_ReadMovevar("sv_sliding_start_speed", 100))
+        return 0;
+
+    self.slide_friction_active = 1;
+
+    // Boost: stamp once at engage along the current horizontal
+    // direction.  Guard against /0 (engage_hspeed >= start_speed so
+    // it's already nonzero in practice — defensive check costs nothing).
+    // sv_codstamina punish lockout: zero the boost while the player
+    // is in the punish window so an exhausted player can't slide-
+    // boost their way out of the lockout — matches the sprint /
+    // hold-breath / jump lockouts already applied elsewhere.
+    float boost = PM_ReadMovevar("sv_sliding_boost", 0);
+    if (PM_ReadMovevar("sv_codstamina", 0) > 0 && self.codstamina_punished)
+        boost = 0;
+    if (boost != 0 && engage_hspeed > 0.001)
+    {
+        vector hdir = engage_hvel * (1 / engage_hspeed);
+        pm_velocity_x += hdir_x * boost;
+        pm_velocity_y += hdir_y * boost;
+    }
+
+#ifdef SSQC
+    // Random one-shot slide sound.  Picks a random sounds/player/slideN.wav
+    // (N = 1..5) on CHAN_BODY; no chain, no loop — slides longer than the
+    // sample just go silent for the remainder.  Cheap to vary so it
+    // doesn't get monotonous when the player slides repeatedly.
+    float sl_pick = 1 + floor(random() * 5);
+    if (sl_pick > 5) sl_pick = 5;
+    sound(self, CHAN_BODY,
+        sprintf("sounds/player/slide%g.wav", sl_pick),
+        1, ATTN_NORM);
+#endif
+
+    return 1;
+};
+
+// ============================================================================
 //  28.  PM_PlayerMoveStep  –  single fixed-size simulation slice
 // ============================================================================
 
@@ -2721,6 +4417,16 @@ void PM_PlayerMoveStep()
     pm_onground = (self.flags & FL_ONGROUND) ? TRUE : FALSE;
     was_onground = pm_onground;
 
+    // Reset the per-step ladder global so the NONE/SPECTATOR/NOCLIP
+    // goto-done paths below — which skip PM_CheckLadder — latch FALSE
+    // into self.pm_on_ladder_cached at done: instead of inheriting the
+    // value from a prior PM_PlayerMoveStep call (which on SSQC could
+    // be a DIFFERENT player from the per-frame player chain).  Without
+    // this, a noclipping admin would inherit a ladder-climber's TRUE
+    // and a freshly-spectated player would see the fire gate fire
+    // until their next non-early-out tick.
+    pm_on_ladder = FALSE;
+
     pm_frametime = input_timelength;
     if (pm_frametime <= 0)
         return;
@@ -2728,22 +4434,68 @@ void PM_PlayerMoveStep()
     // --- read cvars ---
     PM_ReadMovevars();
 
-    // Shift speed cap (+button4): clamps the player's input magnitude AND
-    // max speed to sv_shiftspeed (an absolute speed in qu/s).  Applied on
-    // both CSQC prediction and SSQC, so the client and server agree.
-    // sv_shiftspeed 0 = disabled.  Crouch bypasses it.
-    // Noclip also bypasses it — in noclip +button4 is purely a speed-up key
-    // (PM_NOCLIP_SPRINT multiplier in PM_NoclipMove); applying the walk cap
-    // here would fight that and net out to a speed drop.
+    // Shift speed multiplier (+button4): scales input magnitude AND
+    // max speed by sv_shiftspeed.  Applied on both CSQC prediction and
+    // SSQC so client/server agree.
+    //   sv_shiftspeed  >1   = sprint  (e.g. 1.5 → 50 % faster)
+    //   sv_shiftspeed  <1   = walk    (e.g. 0.5 → half speed)
+    //   sv_shiftspeed  =1   = no-op   (key armed but no speed change)
+    //   sv_shiftspeed  =0   = disabled (key has no effect)
+    // Crouch bypasses it.  Noclip bypasses it — noclip uses its own
+    // PM_NOCLIP_SPRINT multiplier in PM_NoclipMove; doubling up here
+    // would compound them.  The 0.001 deadzone around 1.0 keeps float
+    // round-off (and heavy-weapon factor stacking) from producing a
+    // tiny silent walk/sprint when the user wanted the feature off.
+    float shift_active = (mv_shiftspeed > 1.001) ||
+                         (mv_shiftspeed > 0 && mv_shiftspeed < 0.999);
+    // sv_codstamina lockout: when the player has burned through the
+    // stamina pool while sprinting (codstamina_punished = 1) the
+    // sprint multiplier is gated off until the pool refills past
+    // STAMINA_PUNISH_RECOVER_AT.  Walk (<1) is always allowed.
+    float stamina_lockout = PM_ReadMovevar("sv_codstamina", 0) > 0
+                         && self.codstamina_punished
+                         && mv_shiftspeed > 1.001;
     if ((input_buttons & PM_BTN_SPRINT) && !(self.flags & FL_DUCKING)
-        && mv_shiftspeed > 0
+        && shift_active
+        && !stamina_lockout
         && self.pm_movetype != PM_MOVETYPE_NOCLIP)
     {
-        input_movevalues_x = bound(-mv_shiftspeed, input_movevalues_x, mv_shiftspeed);
-        input_movevalues_y = bound(-mv_shiftspeed, input_movevalues_y, mv_shiftspeed);
-        if (mv_maxspeed > mv_shiftspeed)
-            mv_maxspeed = mv_shiftspeed;
+        if (mv_shiftspeed > 1.0)
+        {
+            // Sprint: forward-only.  Strafing or backing up cancels the
+            // multiplier — the player has to commit to going forward to
+            // get the speed boost.  Walk (<1) intentionally ignores this
+            // gate so a slow-walk shuffle in any direction still works.
+            // Raises both input magnitude and the cap so wishspeed can
+            // actually reach the higher mv_maxspeed.
+            if (input_movevalues_x > 0)
+            {
+                input_movevalues_x *= mv_shiftspeed;
+                input_movevalues_y *= mv_shiftspeed;
+                mv_maxspeed        *= mv_shiftspeed;
+            }
+        }
+        else
+        {
+            // Walk: leave input alone — wishspeed will clamp against the
+            // lowered mv_maxspeed.  Scaling input here too would weaken
+            // accel (which is force = accel*wishspeed*dt) below what
+            // friction takes back each tick, producing speed oscillation.
+            // Pull stopspeed down with the target so friction stays in
+            // its speed-proportional regime instead of acting at the
+            // (un-scaled) 100 u/s floor and dragging slow targets to 0.
+            mv_stopspeed *= mv_shiftspeed;
+            mv_maxspeed  *= mv_shiftspeed;
+        }
     }
+
+    // Sliding suppresses forward (W) acceleration so the player can
+    // steer (A/D) and brake (S) but can't re-extend the slide by holding
+    // forward — keeps the mechanic from devolving into an infinite glide.
+    // Strafe + backward are left alone.  Runs after the sprint multiplier
+    // so neither feature can leak into the other.
+    if (self.slide_friction_active && input_movevalues_x > 0)
+        input_movevalues_x = 0;
 
     // --- build movement axes ---
     makevectors(input_angles);
@@ -2809,6 +4561,10 @@ void PM_PlayerMoveStep()
             self.pm_teleport_time = 0;
     }
 
+    // (sv_jumplag uses pm_jump_lag_end — no decay block, the gate
+    // comparison `time < self.pm_jump_lag_end` in PM_CheckJump handles
+    // expiry naturally.)
+
     if (self.pm_ladder_detach_time > 0)
     {
         self.pm_ladder_detach_time -= pm_frametime;
@@ -2854,7 +4610,15 @@ void PM_PlayerMoveStep()
         // Gated on was_onground so we don't snap a player who jumped off a
         // ledge mid-tick, and on pm_velocity_z to skip mid-jump cases
         // (matches CategorizePosition's own >180 threshold).
-        if (was_onground && pm_velocity_z <= 180)
+        // Also gated on the groundstick suppress window — a low-impulse
+        // punished jump can land just under 180 u/s and would otherwise
+        // be re-snapped here before the impulse leaves the floor, and
+        // players being actively reeled in by the grapple stay airborne
+        // unless they're pressing jump (mirrors the categorize gate).
+        float gs_off_stay = (time < self.pm_jump_groundstick_off_until)
+                         || (self.grapple_attached
+                             && !(input_buttons & PM_BTN_JUMP));
+        if (was_onground && pm_velocity_z <= 180 && !gs_off_stay)
             PM_StayOnGround();
     }
 
@@ -2866,7 +4630,74 @@ void PM_PlayerMoveStep()
     // as hard — matches the intuition that jumping commits you to a bigger
     // disruption than a controlled landing.
     if (pm_onground && !was_onground)
+    {
         self.spread_penalty = SPREAD_PENALTY_LAND;
+
+        // codstamina landing cost: single-tick horizontal velocity cut
+        // (replaces the multi-tick pm_fuser2 taper, which is gated off
+        // in PM_AirMove when sv_codstamina > 0).  Clear pm_fuser2 so
+        // the taper stays suppressed for this jump cycle even if it
+        // got re-latched in the air.
+        // Crouch-slide bypass: if the player is holding +duck on touchdown
+        // with enough horizontal speed to engage the slide, skip the
+        // velocity cut and fuser2 stomp — the slide friction system will
+        // handle deceleration its own way, and the codstamina punch
+        // would steal the slide's starting speed.
+        vector land_hvel = pm_velocity; land_hvel_z = 0;
+        // Mirror PM_TryEngageSlide's full precondition set so we don't
+        // grant a free landing when no slide will actually engage:
+        // master toggle, real ducked state (FL_DUCKING — input bit
+        // alone may not have flipped it yet on a same-tick land), duck
+        // bit, and speed threshold.
+        float land_will_slide = PM_ReadMovevar("sv_sliding", 0)
+                             && (self.flags & FL_DUCKING)
+                             && (input_buttons & PM_BTN_DUCK)
+                             && vlen(land_hvel) >= PM_ReadMovevar("sv_sliding_start_speed", 250);
+        if (PM_ReadMovevar("sv_codstamina", 0) > 0 && !land_will_slide)
+        {
+            float lc = PM_ReadMovevar("sv_codstamina_land_cost", 0.15);
+            if (lc < 0) lc = 0;
+            if (lc > 1) lc = 1;
+            pm_velocity_x *= (1 - lc);
+            pm_velocity_y *= (1 - lc);
+            self.pm_fuser2 = 0;
+        }
+
+        // sv_jumplag — stamp the absolute world-time at which the next
+        // jump press becomes legal.  PM_CheckJump compares against
+        // `time` directly so both CSQC and SSQC agree on the release
+        // moment to within network sync, no per-tick decay drift.
+        float jl = PM_ReadMovevar("sv_jumplag", 0);
+        if (jl > 0)
+            self.pm_jump_lag_end = time + jl;
+    }
+
+    // ---- Duck-land slide (landing-edge trigger) ----
+    // PM_Friction read self.slide_friction_active at the start of this
+    // tick, so the friction reduction begins NEXT tick (~1 server frame
+    // delay, imperceptible).  The sv_slidingcrouch press-while-fast
+    // path runs in PM_CheckDuck — it lifts the player up and clears
+    // pm_onground so this same landing-edge handler engages the slide
+    // when their feet touch down a moment later.
+    if (pm_onground && !was_onground)
+        PM_TryEngageSlide();
+
+    // Cancel: speed gate, duck released, left the ground, or master
+    // toggle turned off mid-slide.  Each is checked every tick.  The
+    // engaged slide sound finishes naturally; we don't cut it short
+    // when the friction releases.
+    if (self.slide_friction_active)
+    {
+        vector pm_hvel2 = pm_velocity;
+        pm_hvel2_z = 0;
+        if (vlen(pm_hvel2) < PM_ReadMovevar("sv_sliding_end_speed", 60)
+            || !(input_buttons & PM_BTN_DUCK)
+            || !pm_onground
+            || !PM_ReadMovevar("sv_sliding", 0))
+        {
+            self.slide_friction_active = 0;
+        }
+    }
 
     // Decay spread penalty over time, quantized to 0.05 steps
     // so client and server converge to the same discrete values
@@ -2879,15 +4710,44 @@ void PM_PlayerMoveStep()
             self.spread_penalty = 0;
     }
 
-    // Decay fire spread penalty (sustained fire inaccuracy)
+    // Decay fire spread penalty (sustained fire inaccuracy).
+    //
+    // Two-component decay:
+    //   - linear floor (FIRE_SPREAD_PENALTY_DECAY) — keeps a single-shot
+    //     bump finite-time decaying instead of an exponential tail that
+    //     never reaches 0.
+    //   - proportional accelerator (FIRE_SPREAD_PENALTY_DECAY_K * penalty)
+    //     — scales decay with the current penalty so sustained fire
+    //     reaches a soft equilibrium below MAX rather than ramping
+    //     linearly to the cap and parking there.
+    //
+    // For 10-shot/sec auto fire (PER_SHOT=3 → +30/sec accumulation), the
+    // equilibrium is the penalty value where decay matches accumulation:
+    //   30 = DECAY + penalty * DECAY_K
+    //   penalty = (30 - DECAY) / DECAY_K = (30 - 2) / 4 = 7.0
+    // i.e. spread asymptotes around penalty=7 instead of ramping to
+    // MAX=10.  Slower-firing weapons settle even lower.
     if (self.fire_spread_penalty > 0)
     {
-        self.fire_spread_penalty -= pm_frametime * FIRE_SPREAD_PENALTY_DECAY;
+        float decay_rate = FIRE_SPREAD_PENALTY_DECAY
+                           + self.fire_spread_penalty * FIRE_SPREAD_PENALTY_DECAY_K;
+        self.fire_spread_penalty -= pm_frametime * decay_rate;
         if (self.fire_spread_penalty > 0)
             self.fire_spread_penalty = floor(self.fire_spread_penalty * 20) / 20;
         else
             self.fire_spread_penalty = 0;
     }
+
+    // sv_gunkick decay was here — moved out into a per-frame
+    // post-fire hook (SH_TickViewKickFrame, called from PlayerPostThink
+    // on SSQC and the end of CSQC_PredictPlayer on CSQC). Reason: SSQC
+    // calls pmove BEFORE PreThink-fire, while CSQC calls predict-fire
+    // BEFORE pmove. With the decay inside pmove, SSQC's trace ran
+    // against state that was already advanced by one (vel*dt) decay
+    // step while CSQC's trace ran against the un-advanced state — the
+    // server's bullet always landed at the peak of the client's
+    // visible kick. Putting the decay AFTER fire on both sides keeps
+    // the trace state synchronised.
 
     // ramp landing fix: if we just landed and had significant downward speed
     if (pm_onground && pm_velocity_z < -300)
@@ -2899,6 +4759,27 @@ void PM_PlayerMoveStep()
 
     // apply any push triggers the player is standing inside
     PM_CheckTriggerPushes();
+
+    // displace by conveyors the player is standing on / inside —
+    // runs after the main movement and before teleport so a conveyor
+    // that pushes a player into a teleport trigger still triggers it.
+    PM_CheckConveyors();
+
+    // Predict the rotating-brush carry pass (CSQC only).  Server runs
+    // its authoritative carry from RotDoor_CarryTick at sv_func_tickrate;
+    // this client-side mirror keeps predicted_player.origin in lockstep
+    // with the visible brush rotation so reconcile error stays at zero
+    // and the smoother doesn't fade in a 0.5–1 s tail after the brush
+    // stops.  Gated to CSQC to avoid double-applying server-side.
+#ifdef CSQC
+    PM_CheckRotatingCarry();
+#endif
+    // PM_CheckMovingPushers runs on BOTH server and client.  Train
+    // branch is unconditional (single source on pmove fixes the
+    // double-source jitter from server-tick + client-pmove carry);
+    // the internal door / button branch is gated CSQC-only to avoid
+    // double-applying on top of the server's Mover_TravelTick push.
+    PM_CheckMovingPushers();
 
     // teleport if inside a trigger_teleport volume
     PM_CheckTeleportTriggers();
@@ -2924,6 +4805,146 @@ done:
         self.flags = self.flags & ~FL_ONGROUND;
 
     self.waterlevel = pm_waterlevel;
+
+    // Latch pm_on_ladder onto the entity so post-pmove consumers
+    // (Weapon_LowerBlocksFire fire-gate, cl_viewfx.qc lower envelope,
+    // anything that doesn't run inside the pmove step) can read it.
+    // Set inside the `done:` block so the early-out paths above
+    // (nullmove etc.) reach here too and the value stays coherent.
+    self.pm_on_ladder_cached = pm_on_ladder;
+
+    // ---- sv_codstamina drain / refill ----
+    // Drains during sprint (4.5 s capacity) AND during hold-breath
+    // while scoped (8 s).  Refills at 1/3 per sec (3 s full refill)
+    // when neither activity is active.  On reaching 0 the punish
+    // flag latches; clears once the bar refills past 0.5.
+    //   Drain heuristic for COD scope mode is "scout/awp +
+    //   sv_codscopes + +attack2 held + +button4 held" — server can't
+    //   see the CSQC state machine, but this matches what the player
+    //   will be doing visually.  Symmetric on both sides so prediction
+    //   tracks.  Disabled entirely when sv_codstamina <= 0.
+    //
+    // GATE: skip during CSQC reconcile-replay AND the render-rate
+    // preview steps (both set pm_suppress_sounds = TRUE).  Without
+    // this the CSQC value drains ~4-8× too fast — each replay tick
+    // re-drains the same buffered command for the live field, and
+    // the preview step on every render frame multiplies the rate
+    // again.  Only the live input frame should advance the field;
+    // replays read the confirmed state instead.  SSQC has no replay
+    // / preview so the flag isn't defined there — gate it out.
+    float skip_drain = 0;
+#ifdef CSQC
+    if (pm_suppress_sounds) skip_drain = 1;
+#endif
+    if (PM_ReadMovevar("sv_codstamina", 0) <= 0)
+    {
+        // Feature off — reset the field so the bar reads full and
+        // the lockout never triggers.  Idempotent during replays
+        // because the value is already 1.  IMPORTANT: this branch is
+        // separate from the skip_drain gate so a replay tick doesn't
+        // clobber the live value back to 1 every reconcile.
+        self.codstamina = 1;
+        self.codstamina_punished = 0;
+    }
+    else if (!skip_drain)
+    {
+        // Refresh the grounded-time stamp so the sprint drain's
+        // grace window survives single-frame FL_ONGROUND drops on
+        // clip-brush stairs.  Only stamp during live ticks (the
+        // outer !skip_drain gate) — replay would otherwise overwrite
+        // the live stamp with a stale buffered-command timestamp.
+        if (pm_onground)
+            self.pm_last_onground_time = time;
+        float grace = PM_ReadMovevar("sv_codstamina_ground_grace", 0.1);
+        float grounded_recent = pm_onground
+                            || (time - self.pm_last_onground_time) < grace;
+        // !codstamina_punished gates BOTH sprint and hold-breath drain
+        // so a player whose pool is empty can't keep tapping +button4
+        // to delay the refill — the bar must come back before the
+        // button does anything (user spec: "let the bar refill before
+        // the button can do anything").
+        float not_punished = !self.codstamina_punished;
+        float st_sprint = (mv_shiftspeed > 1.001)
+                       && (input_buttons & PM_BTN_SPRINT)
+                       && grounded_recent
+                       && input_movevalues_x > 0
+                       && !(self.flags & FL_DUCKING)
+                       && self.pm_movetype != PM_MOVETYPE_NOCLIP
+                       && not_punished;
+        // Fire-suppression window (set by SH_StandardTryFire): treat
+        // the player as un-scoped while we're inside it.  Otherwise
+        // a +attack2-held player firing a shot would keep "scoping"
+        // for stamina-drain purposes even though the gun visually
+        // dropped out of ADS.
+        // Semi-auto snipers (PSG1 / SG550) and the full-auto CFAUG
+        // CoD-scope stay visually scoped through fire — cl_codscope.qc
+        // exempts them from fire_blocks_ads — so suppressing breath
+        // drain here would falsely pause it on every trigger pull
+        // (catastrophic for full-auto CFAUG which bumps the timer every
+        // shot).  Keep them draining.
+        float fire_suppressed = time < self.pm_fire_suppress_until
+                             && self.weapon != WEP_CFG3SG1
+                             && self.weapon != WEP_CFSG550
+                             && self.weapon != WEP_CFAUG;
+        // Cod-scope fallback whitelist mirrors CodScope_Eligible in
+        // cl_codscope.qc — the CF* sniper family drives ADS through
+        // csqc_codscope_phase, never touches zoomstage, so the
+        // zoomstage-only branch above would miss them and stamina
+        // would refill while +button4 is held.
+        float st_scope = !fire_suppressed
+                      && ( (self.zoomstage > 0)
+                        || ((self.weapon == WEP_SCOUT
+                          || self.weapon == WEP_CSAWP
+                          || self.weapon == WEP_G3SG1
+                          || self.weapon == WEP_CFAWP
+                          || self.weapon == WEP_CFG3SG1
+                          || self.weapon == WEP_CFSCOUTM700
+                          || self.weapon == WEP_CFSG550
+                          || self.weapon == WEP_CFAUG)
+                            && PM_ReadMovevar("sv_codscopes", 0)
+                            && (input_buttons & 4)) );
+        float st_holdbreath = st_scope
+                           && (input_buttons & PM_BTN_SPRINT)
+                           && !st_sprint
+                           && not_punished;
+        if (st_sprint)
+            self.codstamina -= pm_frametime / 4.5;
+        else if (st_holdbreath)
+            self.codstamina -= pm_frametime / 8.0;
+        else
+        {
+            // Refill at 1/3 per sec when standing still, half that
+            // (1/6 per sec, ~6 s for a full refill) when the player
+            // has any movement-intent input down.  Counts as movement:
+            //   - WASD / arrows (input_movevalues_x / _y)
+            //   - +jump (PM_BTN_JUMP) — user spec: "include holding of
+            //     +jump as a movement key"
+            // input_movevalues is the engine-normalised intent signal
+            // so external pushes (conveyors, jumppads, knockback)
+            // don't slow the refill on a stationary player.
+            float refill_rate = 1.0 / 3.0;
+            if (input_movevalues_x != 0 || input_movevalues_y != 0
+                || (input_buttons & PM_BTN_JUMP))
+                refill_rate *= 0.5;
+            self.codstamina += pm_frametime * refill_rate;
+        }
+        if (self.codstamina < 0) self.codstamina = 0;
+        if (self.codstamina > 1) self.codstamina = 1;
+        if (self.codstamina <= 0)
+            self.codstamina_punished = 1;
+        // Punish clears only when the pool is FULL again — user spec:
+        // "stamina bar only needs to refill half way before it becomes
+        // white from red, can you make it need to fill up all the
+        // way?".  Floor at 0.999 so a single tick's worth of refill
+        // overshoot doesn't latch the player out forever.
+        if (self.codstamina_punished && self.codstamina >= 0.999)
+            self.codstamina_punished = 0;
+    }
+    // (Removed orphan else — used to reset codstamina=1 when sv_codstamina
+    // > 0 AND skip_drain was true.  That ran on every CSQC reconcile-replay
+    // tick and clobbered the live drain back to full, which is why the bar
+    // never filled / drained on CSQC even though SSQC's value worked.
+    // The sv_codstamina<=0 case is handled by the new if-branch above.)
 }
 
 // ============================================================================
@@ -3120,4 +5141,16 @@ void PM_PlayerMove()
 
     if (noblock_active)
         PM_NoblockRestore();
+
+    // Track +attack button state across pmove ticks for semi-auto
+    // edge detection.  Lives in bit 0 of pm_oldbuttons (PM_BTN_FIRE)
+    // so it rides the existing prediction-proxy sync that already
+    // covers pm_oldbuttons for duck-edge tracking.  Read by
+    // SH_StandardTryFireSemiAuto in sh_weapon_standard.qc — handguns
+    // gate on "fresh press" (held this tick, was NOT held last tick)
+    // so holding +attack doesn't auto-empty the mag.
+    if (input_buttons & PM_BTN_FIRE)
+        self.pm_oldbuttons |= PM_BTN_FIRE;
+    else
+        self.pm_oldbuttons &= ~PM_BTN_FIRE;
 }

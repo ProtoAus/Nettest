@@ -35,12 +35,20 @@ const float MAX_AMMO_PISTOL            = 24;
 const float PISTOL_DRYFIRE_DELAY       = 0.2;
 
 // --- Balance ---
-const float PISTOL_BASE_SPREAD          = 0.004;
+const float PISTOL_BASE_SPREAD          = 0.01;
 const float PISTOL_MOVE_SPREAD          = 0.045;
 const float PISTOL_FULL_SPREAD_SPEED    = 320;
 const float PISTOL_CLOSE_DAMAGE         = 20;
 const float PISTOL_MIN_DAMAGE           = 8;
 const float PISTOL_DAMAGE_FALLOFF_RANGE = 2048;
+const float PISTOL_KICK_PITCH    = 0.5;   // sv_gunkick — basic light pistol.
+const float PISTOL_KICK_VARIANCE = 0.2;
+const float PISTOL_KICK_STRENGTH = 1.5;
+
+// Muzzle offset — see cl_debug_muzzle for live-tune marker.
+const float PISTOL_MUZZLE_FORWARD = 38;
+const float PISTOL_MUZZLE_RIGHT   = 7.75;
+const float PISTOL_MUZZLE_DOWN    = 6.55;
 
 // --- Pre-computed state durations ---
 const float PISTOL_DRAW_DURATION      = (PISTOL_DRAW_END - PISTOL_DRAW_START) * PISTOL_FRAME_INTERVAL;
@@ -66,7 +74,8 @@ float(float now) SH_PistolTickState =
 
 float(float now) SH_PistolTryFire =
 {
-    return SH_StandardTryFire(now, mag_pistol, PISTOL_FIRE_DELAY, PISTOL_DRYFIRE_DELAY);
+    // Semi-auto: 9mm pistol — must release +attack between shots.
+    return SH_StandardTryFireSemiAuto(now, mag_pistol, PISTOL_FIRE_DELAY, PISTOL_DRYFIRE_DELAY);
 };
 
 float(float now) SH_PistolTryReload =
@@ -89,7 +98,8 @@ void(entity player) W_PistolPickupCopy =
 void() W_PistolShoot =
 {
     W_PenetratingHitscanShoot(PISTOL_BASE_SPREAD, PISTOL_MOVE_SPREAD, PISTOL_FULL_SPREAD_SPEED,
-        PISTOL_CLOSE_DAMAGE, PISTOL_MIN_DAMAGE, PISTOL_DAMAGE_FALLOFF_RANGE, 12, 0.94);
+        PISTOL_CLOSE_DAMAGE, PISTOL_MIN_DAMAGE, PISTOL_DAMAGE_FALLOFF_RANGE, 12, 0.94,
+        PISTOL_KICK_PITCH, PISTOL_KICK_VARIANCE, PISTOL_KICK_STRENGTH);
 };
 
 void() W_PistolFire =
@@ -180,7 +190,7 @@ void() W_PistolDrop =
     self.ammo_pistol = 0;
 
     setmodel(tgt, "models/weapons/wpn_pistol/w_pistol.mdl");
-    setsize(tgt, '-12 -12 0', '12 12 24');
+    setsize(tgt, '-12 -12 0', '12 12 40');
     tgt.classname    = "weapon_pistol";
     tgt.solid        = SOLID_NOT;
     tgt.movetype     = MOVETYPE_TOSS;
@@ -190,7 +200,7 @@ void() W_PistolDrop =
     tgt.weap_drop_func = W_PistolDrop;
     tgt.pickupcopy   = W_PistolPickupCopy;
     tgt.touch        = weapon_touch;
-    tgt.dropped_spin = 1;
+    tgt.dropped_spin = 0;
     tgt.think        = weapon_become_solid;
     tgt.nextthink    = time + 0.7;
 };
@@ -198,7 +208,7 @@ void() W_PistolDrop =
 void() weapon_pistol =
 {
     setmodel(self, "models/weapons/wpn_pistol/w_pistol.mdl");
-    setsize(self, '-12 -12 0', '12 12 24');
+    setsize(self, '-12 -12 0', '12 12 40');
     self.classname     = "weapon_pistol";
     self.solid         = SOLID_TRIGGER;
     self.movetype      = MOVETYPE_TOSS;
@@ -208,7 +218,7 @@ void() weapon_pistol =
     self.weap_drop_func = W_PistolDrop;
     self.pickupcopy    = W_PistolPickupCopy;
     self.touch         = weapon_touch;
-    self.dropped_spin  = 1;
+    self.dropped_spin  = 0;
     self.mag_pistol    = MAX_MAG_PISTOL;
     self.ammo_pistol   = MAX_AMMO_PISTOL;
     W_RegisterMapWeapon(weapon_pistol);
@@ -235,7 +245,7 @@ void() CSQC_PredictPistolCommand =
         if (r == 1)
         {
             CSQC_MarkPendingWeaponAck();
-            if (!pm_suppress_sounds)
+            if (CSQC_BeginFireActionEffects())
             {
                 r = random();
                 if (r < 0.25)
@@ -248,9 +258,16 @@ void() CSQC_PredictPistolCommand =
                     localsound("sounds/weapons/wpn_pistol/fire4.wav");
                 CSQC_RecordPredictedWeaponSound();
                 CSQC_PredictedPenetratingImpact(PISTOL_BASE_SPREAD, PISTOL_MOVE_SPREAD, PISTOL_FULL_SPREAD_SPEED,
-                    PISTOL_CLOSE_DAMAGE, PISTOL_MIN_DAMAGE, PISTOL_DAMAGE_FALLOFF_RANGE, 12, 0.94);
+                    PISTOL_CLOSE_DAMAGE, PISTOL_MIN_DAMAGE, PISTOL_DAMAGE_FALLOFF_RANGE, 12, 0.94,
+                    PISTOL_KICK_PITCH, PISTOL_KICK_VARIANCE, PISTOL_KICK_STRENGTH);
                 CSQC_SpawnCasing("models/weapons/9mmcasing.mdl",
                     '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
+                // Pistol muzzle flash — DEAGLE_MUZZLE_* shared default.
+                CSQC_MuzzleFlashAtMuzzle(PISTOL_MUZZLE_FORWARD, PISTOL_MUZZLE_RIGHT,
+                    PISTOL_MUZZLE_DOWN, self.wep_action_id);
+                CSQC_MuzzleSmokeAtMuzzle(PISTOL_MUZZLE_FORWARD, PISTOL_MUZZLE_RIGHT,
+                    PISTOL_MUZZLE_DOWN, self.wep_action_id, 1);
+                CSQC_EndFireActionEffects();
             }
         }
         else if (r == -1)

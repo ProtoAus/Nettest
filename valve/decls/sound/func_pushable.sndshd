@@ -1,8 +1,0 @@
-scrape.default
-{
-	no_repeat
-	follow
-	sample debris/pushbox1.wav
-	sample debris/pushbox2.wav
-	sample debris/pushbox3.wav
-}

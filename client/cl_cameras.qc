@@ -52,30 +52,97 @@ const float SNIPERSWAY_PITCH_RATE = 0.28;
 
 vector(vector base) CSQC_ApplySniperSway =
 {
-    // Server-side master toggle — read once per frame.  Default 0
-    // (off); enable per-server with `sv_snipersway 1` while testing.
-    if (serverkeyfloat("sv_snipersway", 0) <= 0)
+    // The classic + breathing sway is composed once per input frame
+    // in cl_codscope.qc UpdateState and cached in csqc_codscope_sway_*.
+    // That ensures the camera (this function) and the predicted /
+    // authoritative trace (CSQC_PredictWeaponCommand + the SSQC cs
+    // handler) all use the SAME bias values, so the bullet lands
+    // exactly where the scoped crosshair appears.  This function is
+    // now a thin wrapper that just adds the cached values to the
+    // camera angles.  sv_snipersway / scope-eligibility / velocity
+    // intensity / hold-breath scaling are all baked into the cached
+    // values.
+    vector out = base;
+    out_x += csqc_codscope_sway_pitch;
+    out_y += csqc_codscope_sway_yaw;
+    return out;
+};
+
+// ============================================================
+//  sv_gunkick view bias
+//
+//  Pure VF_ANGLES render modification — input_angles is untouched
+//  so the player's mouse direction (the angle the engine sends to
+//  the server with each input command) is unaffected. Only the
+//  CAMERA tilts. The hitscan helper biases the trace direction by
+//  the same kick state, so bullets land where the kicked crosshair
+//  is pointing — not where the input angle is.
+//
+//  When the spring decays back to zero, the camera glides back to
+//  the player's underlying input angle. That's the "fall back to
+//  origin" behaviour from the user's design ask.
+// ============================================================
+vector(vector base) CSQC_ApplyViewKick =
+{
+    if (serverkeyfloat("sv_gunkick", 1) <= 0)
         return base;
     if (!predicted_player || !csqc_prediction_valid)
         return base;
-    if (predicted_player.zoomstage <= 0)
-        return base;
-    if (!Weapon_HasScope(predicted_player.weapon))
-        return base;
-
-    // Movement intensity: at rest ~0.5, walking ~1.3, running ~2.0.
-    vector v = predicted_player.velocity;
-    v_z = 0;
-    float speed = vlen(v);
-    float intensity = 0.5 + bound(0, speed / 300, 1.5);
-
-    // Hold-breath on +button4 — drops sway to 15% of current.
-    if (csqc_live_buttons & PM_BTN_SPRINT)
-        intensity *= 0.15;
 
     vector out = base;
-    out_y += sin(cltime * SNIPERSWAY_YAW_RATE   * 2 * 3.14159265) * SNIPERSWAY_YAW_AMP   * intensity;
-    out_x += sin(cltime * SNIPERSWAY_PITCH_RATE * 2 * 3.14159265) * SNIPERSWAY_PITCH_AMP * intensity;
+    out_x += predicted_player.view_kick_pitch;
+    out_y += predicted_player.view_kick_yaw;
+    return out;
+};
+
+float csqc_damagekick_pitch;
+float csqc_damagekick_roll;
+float csqc_damagekick_last_time;
+
+float(float value, float step) CSQC_ApproachZero =
+{
+    if (value > step)
+        return value - step;
+    if (value < 0 - step)
+        return value + step;
+    return 0;
+};
+
+void(float pitch, float roll) CSQC_DamageViewKick_Add =
+{
+    csqc_damagekick_pitch += pitch;
+    csqc_damagekick_roll  += roll;
+
+    csqc_damagekick_pitch = bound(-16, csqc_damagekick_pitch, 16);
+    csqc_damagekick_roll  = bound(-24, csqc_damagekick_roll, 24);
+};
+
+vector(vector base) CSQC_ApplyDamageViewKick =
+{
+    if (serverkeyfloat("sv_headkick", 1) <= 0)
+    {
+        csqc_damagekick_pitch = 0;
+        csqc_damagekick_roll = 0;
+        csqc_damagekick_last_time = cltime;
+        return base;
+    }
+
+    float dt = cltime - csqc_damagekick_last_time;
+    csqc_damagekick_last_time = cltime;
+
+    if (dt > 0)
+    {
+        float rate = serverkeyfloat("sv_headkick_return_rate", 24);
+        if (rate <= 0)
+            rate = 24;
+        float step = rate * bound(0, dt, 0.1);
+        csqc_damagekick_pitch = CSQC_ApproachZero(csqc_damagekick_pitch, step);
+        csqc_damagekick_roll  = CSQC_ApproachZero(csqc_damagekick_roll, step);
+    }
+
+    vector out = base;
+    out_x += csqc_damagekick_pitch;
+    out_z += csqc_damagekick_roll;
     return out;
 };
 

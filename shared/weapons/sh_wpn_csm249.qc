@@ -1,5 +1,5 @@
 // ============================================================
-//  shared/weapons/sh_wpn_m249.qc  -  M249 LMG
+//  shared/weapons/sh_wpn_csm249.qc  -  CS M249 LMG
 //
 //  Slot  : SLOT_PRIMARY  (impulse 1 / key 1)
 //  Stats : 50-round belt, 150 reserve, full-auto
@@ -35,13 +35,21 @@ const float MAX_MAG_M249              = 50;
 const float MAX_AMMO_M249             = 150;
 
 // --- Balance ---
-const float M249_BASE_SPREAD          = 0.08;
+const float M249_BASE_SPREAD          = 0.01;
 const float M249_MOVE_SPREAD          = 0.12;
 const float M249_FULL_SPREAD_SPEED    = 320;
 const float M249_CLOSE_DAMAGE         = 14;
 const float M249_MIN_DAMAGE           = 7;
 const float M249_DAMAGE_FALLOFF_RANGE = 3072;
 const float M249_DRYFIRE_DELAY        = 0.2;
+const float M249_KICK_PITCH    = 1.5;   // sv_gunkick — LMG, heavy sustained kick.
+const float M249_KICK_VARIANCE = 2.55;
+const float M249_KICK_STRENGTH = 1.5;   // LMG baseline.
+
+// Muzzle offset — see cl_debug_muzzle for live-tune marker.
+const float M249_MUZZLE_FORWARD = 42;
+const float M249_MUZZLE_RIGHT   = 7.95;
+const float M249_MUZZLE_DOWN    = 3.4;
 
 // --- Reload sound frames ---
 const float M249_SND_COVERUP          = 52;
@@ -97,7 +105,8 @@ void(entity player) W_M249PickupCopy =
 void() W_M249Shoot =
 {
     W_PenetratingHitscanShoot(M249_BASE_SPREAD, M249_MOVE_SPREAD, M249_FULL_SPREAD_SPEED,
-        M249_CLOSE_DAMAGE, M249_MIN_DAMAGE, M249_DAMAGE_FALLOFF_RANGE, 48, 0.97);
+        M249_CLOSE_DAMAGE, M249_MIN_DAMAGE, M249_DAMAGE_FALLOFF_RANGE, 48, 0.97,
+        M249_KICK_PITCH, M249_KICK_VARIANCE, M249_KICK_STRENGTH);
 };
 
 void() W_M249Fire =
@@ -192,7 +201,7 @@ void() W_M249Drop =
     self.ammo_m249 = 0;
 
     setmodel(tgt, "models/weapons/wpn_csm249/w_m249.mdl");
-    setsize(tgt, '-16 -16 0', '16 16 32');
+    setsize(tgt, '-16 -16 0', '16 16 48');
     tgt.classname    = "weapon_m249";
     tgt.solid        = SOLID_NOT;
     tgt.movetype     = MOVETYPE_TOSS;
@@ -202,7 +211,6 @@ void() W_M249Drop =
     tgt.weap_drop_func = W_M249Drop;
     tgt.pickupcopy   = W_M249PickupCopy;
     tgt.touch        = weapon_touch;
-    tgt.dropped_spin = 1;
     tgt.think        = weapon_become_solid;
     tgt.nextthink    = time + 0.7;
 };
@@ -210,7 +218,7 @@ void() W_M249Drop =
 void() weapon_m249 =
 {
     setmodel(self, "models/weapons/wpn_csm249/w_m249.mdl");
-    setsize(self, '-16 -16 0', '16 16 32');
+    setsize(self, '-16 -16 0', '16 16 48');
     self.classname     = "weapon_m249";
     self.solid         = SOLID_TRIGGER;
     self.movetype      = MOVETYPE_TOSS;
@@ -220,7 +228,6 @@ void() weapon_m249 =
     self.weap_drop_func = W_M249Drop;
     self.pickupcopy    = W_M249PickupCopy;
     self.touch         = weapon_touch;
-    self.dropped_spin  = 1;
     self.mag_m249      = MAX_MAG_M249;
     self.ammo_m249     = MAX_AMMO_M249;
     W_RegisterMapWeapon(weapon_m249);
@@ -246,7 +253,7 @@ void() CSQC_PredictM249Command =
         if (r == 1)
         {
             CSQC_MarkPendingWeaponAck();
-            if (!pm_suppress_sounds)
+            if (CSQC_BeginFireActionEffects())
             {
                 if (random() < 0.5)
                     sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csm249/fire1.wav", 1, ATTN_NONE);
@@ -254,9 +261,16 @@ void() CSQC_PredictM249Command =
                     sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csm249/fire2.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
                 CSQC_PredictedPenetratingImpact(M249_BASE_SPREAD, M249_MOVE_SPREAD, M249_FULL_SPREAD_SPEED,
-                    M249_CLOSE_DAMAGE, M249_MIN_DAMAGE, M249_DAMAGE_FALLOFF_RANGE, 48, 0.97);
+                    M249_CLOSE_DAMAGE, M249_MIN_DAMAGE, M249_DAMAGE_FALLOFF_RANGE, 48, 0.97,
+                    M249_KICK_PITCH, M249_KICK_VARIANCE, M249_KICK_STRENGTH);
                 CSQC_SpawnCasing("models/weapons/riflecasing.mdl",
                     '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
+                // Rifle/MG muzzle flash — AK47_MUZZLE_* shared default.
+                CSQC_MuzzleFlashAtMuzzle(M249_MUZZLE_FORWARD, M249_MUZZLE_RIGHT,
+                    M249_MUZZLE_DOWN, self.wep_action_id);
+                CSQC_MuzzleSmokeAtMuzzle(M249_MUZZLE_FORWARD, M249_MUZZLE_RIGHT,
+                    M249_MUZZLE_DOWN, self.wep_action_id, 1);
+                CSQC_EndFireActionEffects();
             }
         }
         else if (r == -1)

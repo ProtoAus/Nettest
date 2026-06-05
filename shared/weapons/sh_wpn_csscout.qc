@@ -1,5 +1,5 @@
 // ============================================================
-//  shared/weapons/sh_wpn_scout.qc  -  CS Scout
+//  shared/weapons/sh_wpn_csscout.qc  -  CS Scout
 //
 //  Slot  : SLOT_PRIMARY  (impulse 1 / key 1)
 //  Stats : 10-round magazine, 30 reserve, bolt-action
@@ -36,13 +36,21 @@ const float MAX_MAG_SCOUT             = 10;
 const float MAX_AMMO_SCOUT            = 30;
 
 // --- Balance ---
-const float SCOUT_BASE_SPREAD          = 0.02;
+const float SCOUT_BASE_SPREAD          = 0.01;
 const float SCOUT_MOVE_SPREAD          = 0.08;
 const float SCOUT_FULL_SPREAD_SPEED    = 320;
 const float SCOUT_CLOSE_DAMAGE         = 70;
 const float SCOUT_MIN_DAMAGE           = 50;
 const float SCOUT_DAMAGE_FALLOFF_RANGE = 4096;
 const float SCOUT_DRYFIRE_DELAY        = 0.2;
+const float SCOUT_KICK_PITCH    = 3.0;   // sv_gunkick — bolt sniper.
+const float SCOUT_KICK_VARIANCE = 0.5;
+const float SCOUT_KICK_STRENGTH = 0.8;   // single-shot bolt — heavy kick.
+
+// Muzzle offset — see cl_debug_muzzle for live-tune marker.
+const float SCOUT_MUZZLE_FORWARD = 42;
+const float SCOUT_MUZZLE_RIGHT   = 8.3;
+const float SCOUT_MUZZLE_DOWN    = 4.95;
 
 // --- Pre-computed state durations ---
 const float SCOUT_DRAW_DURATION      = (SCOUT_DRAW_END - SCOUT_DRAW_START) * SCOUT_FRAME_INTERVAL;
@@ -83,6 +91,14 @@ float(float now) SH_ScoutTryReload =
 
 float(float now) SH_ScoutTryAltFire =
 {
+    // sv_codscopes mode reassigns +attack2 from this CS-style stage
+    // cycle to a CoD-style ADS-hold scope (cl_codscope.qc).  Short-
+    // circuit here so zoomstage stays at 0 — the CoD state machine
+    // owns scope visuals and FOV via its own path.  Returns 0 so the
+    // SSQC / CSQC predict callers don't emit a click sfx or stamp
+    // altfire_finished.
+    if (PM_ReadMovevar("sv_codscopes", 0))
+        return 0;
     if (self.weaponstate != WS_IDLE)
         return 0;
     if (now < self.altfire_finished)
@@ -114,10 +130,12 @@ void() W_ScoutShoot =
     // Scoped: no base spread. Unscoped: full base spread.
     if (self.zoomstage > 0)
         W_PenetratingHitscanShoot(0, SCOUT_MOVE_SPREAD, SCOUT_FULL_SPREAD_SPEED,
-            SCOUT_CLOSE_DAMAGE, SCOUT_MIN_DAMAGE, SCOUT_DAMAGE_FALLOFF_RANGE, 80, 0.98);
+            SCOUT_CLOSE_DAMAGE, SCOUT_MIN_DAMAGE, SCOUT_DAMAGE_FALLOFF_RANGE, 80, 0.98,
+            SCOUT_KICK_PITCH, SCOUT_KICK_VARIANCE, SCOUT_KICK_STRENGTH);
     else
         W_PenetratingHitscanShoot(SCOUT_BASE_SPREAD, SCOUT_MOVE_SPREAD, SCOUT_FULL_SPREAD_SPEED,
-            SCOUT_CLOSE_DAMAGE, SCOUT_MIN_DAMAGE, SCOUT_DAMAGE_FALLOFF_RANGE, 80, 0.98);
+            SCOUT_CLOSE_DAMAGE, SCOUT_MIN_DAMAGE, SCOUT_DAMAGE_FALLOFF_RANGE, 80, 0.98,
+            SCOUT_KICK_PITCH, SCOUT_KICK_VARIANCE, SCOUT_KICK_STRENGTH);
 };
 
 void() W_ScoutFire =
@@ -134,7 +152,7 @@ void() W_ScoutFire =
         self.sv_zoomstage = 0;
 
         sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csscout/fire.wav", 1, ATTN_NORM);
-        W_ShellEffect(SHELL_RIFLE_BIG, '8 -6 -4', '6 46 36', '240 720 120');
+        W_ShellEffect(SHELL_RIFLE_BIG, '8 6 -4', '6 46 36', '240 720 120');
     }
     else if (r == -1)
     {
@@ -214,7 +232,7 @@ void() W_ScoutDrop =
     self.ammo_scout = 0;
 
     setmodel(tgt, "models/weapons/wpn_csscout/w_scout.mdl");
-    setsize(tgt, '-16 -16 0', '16 16 32');
+    setsize(tgt, '-16 -16 0', '16 16 48');
     tgt.classname    = "weapon_scout";
     tgt.solid        = SOLID_NOT;
     tgt.movetype     = MOVETYPE_TOSS;
@@ -231,7 +249,7 @@ void() W_ScoutDrop =
 void() weapon_scout =
 {
     setmodel(self, "models/weapons/wpn_csscout/w_scout.mdl");
-    setsize(self, '-16 -16 0', '16 16 32');
+    setsize(self, '-16 -16 0', '16 16 48');
     self.classname     = "weapon_scout";
     self.solid         = SOLID_TRIGGER;
     self.movetype      = MOVETYPE_TOSS;
@@ -287,14 +305,21 @@ void() CSQC_PredictScoutCommand =
         {
             CSQC_MarkPendingWeaponAck();
             csqc_scout_bolt_played = FALSE;
-            if (!pm_suppress_sounds)
+            if (CSQC_BeginFireActionEffects())
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csscout/fire.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
                 CSQC_PredictedPenetratingImpact(self.zoomstage > 0 ? 0 : SCOUT_BASE_SPREAD, SCOUT_MOVE_SPREAD, SCOUT_FULL_SPREAD_SPEED,
-                    SCOUT_CLOSE_DAMAGE, SCOUT_MIN_DAMAGE, SCOUT_DAMAGE_FALLOFF_RANGE, 80, 0.98);
+                    SCOUT_CLOSE_DAMAGE, SCOUT_MIN_DAMAGE, SCOUT_DAMAGE_FALLOFF_RANGE, 80, 0.98,
+                    SCOUT_KICK_PITCH, SCOUT_KICK_VARIANCE, SCOUT_KICK_STRENGTH);
                 CSQC_SpawnCasing("models/weapons/riflecasingbig.mdl",
-                    '8 -6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
+                    '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
+                // Sniper muzzle flash — AK47_MUZZLE_* shared default.
+                CSQC_MuzzleFlashAtMuzzle(SCOUT_MUZZLE_FORWARD, SCOUT_MUZZLE_RIGHT,
+                    SCOUT_MUZZLE_DOWN, self.wep_action_id);
+                CSQC_MuzzleSmokeAtMuzzle(SCOUT_MUZZLE_FORWARD, SCOUT_MUZZLE_RIGHT,
+                    SCOUT_MUZZLE_DOWN, self.wep_action_id, 4);
+                CSQC_EndFireActionEffects();
             }
             self.zoomstage = 0;
         }
@@ -374,6 +399,7 @@ void() CSQC_ScoutEquip =
 	self.csqc_predict_reload = CSQC_PredictScoutReload;
 	self.csqc_display_frame  = CSQC_ScoutDisplayFrame;
 	self.csqc_drop_clear     = CSQC_ScoutDropClear;
+    self.weapon_viewmodel_flip = TRUE;
 };
 
 #endif // CSQC

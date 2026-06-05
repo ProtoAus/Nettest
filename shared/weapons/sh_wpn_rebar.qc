@@ -169,24 +169,24 @@ void() W_RebarDrop =
     tgt.mag_rebar = self.mag_rebar;
     self.mag_rebar = 0;
     setmodel(tgt, "models/weapons/wpn_rebar/w_rebar.mdl");
-    setsize(tgt, '-16 -16 0', '16 16 32');
+    setsize(tgt, '-16 -16 0', '16 16 48');
     tgt.classname = "weapon_rebar"; tgt.solid = SOLID_NOT; tgt.movetype = MOVETYPE_TOSS;
     tgt.weapon = WEP_REBAR; tgt.weapon_slot = SLOT_PRIMARY;
     tgt.weap_draw = W_RebarEquip; tgt.weap_drop_func = W_RebarDrop;
     tgt.pickupcopy = W_RebarPickupCopy; tgt.touch = weapon_touch;
-    tgt.dropped_spin = 1;
+    tgt.dropped_spin = 0;
     tgt.think = weapon_become_solid; tgt.nextthink = time + 0.7;
 };
 
 void() weapon_rebar =
 {
     setmodel(self, "models/weapons/wpn_rebar/w_rebar.mdl");
-    setsize(self, '-16 -16 0', '16 16 32');
+    setsize(self, '-16 -16 0', '16 16 48');
     self.classname = "weapon_rebar"; self.solid = SOLID_TRIGGER; self.movetype = MOVETYPE_TOSS;
     self.weapon = WEP_REBAR; self.weapon_slot = SLOT_PRIMARY;
     self.weap_draw = W_RebarEquip; self.weap_drop_func = W_RebarDrop;
     self.pickupcopy = W_RebarPickupCopy; self.touch = weapon_touch;
-    self.dropped_spin = 1;
+    self.dropped_spin = 0;
     self.mag_rebar = MAX_MAG_REBAR;
     W_RegisterMapWeapon(weapon_rebar);
 };
@@ -219,7 +219,7 @@ void() CSQC_PredictRebarCommand =
                     makevectors(input_angles);
                     vector fire_dir = v_forward;
                     vector fire_org = self.origin + self.view_ofs + fire_dir * 16;
-                    traceline(fire_org, fire_org + fire_dir * 8192, MOVE_NORMAL, self);
+                    CSQC_WeaponTraceLine(fire_org, fire_org + fire_dir * 8192, MOVE_NORMAL, self);
                     if (trace_fraction < 1.0)
                     {
                         vector hit_pos = trace_endpos;

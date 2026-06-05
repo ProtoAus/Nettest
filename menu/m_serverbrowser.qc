@@ -234,6 +234,8 @@ string(float row) sb_gamemode_str =
     if (gm == 0) return "TDM";
     if (gm == 1) return "Elim";
     if (gm == 2) return "Bhop";
+    if (gm == 3) return "FFA";
+    if (gm == 4) return "Paint";
     return raw;
 };
 

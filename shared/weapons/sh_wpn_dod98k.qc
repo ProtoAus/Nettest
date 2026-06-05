@@ -43,13 +43,21 @@ const float MAX_MAG_98K               = 5;
 const float MAX_AMMO_98K              = 25;
 
 // --- Balance ---
-const float K98_BASE_SPREAD           = 0.025;
+const float K98_BASE_SPREAD           = 0.01;
 const float K98_MOVE_SPREAD           = 0.09;
 const float K98_FULL_SPREAD_SPEED     = 320;
 const float K98_CLOSE_DAMAGE          = 80;
 const float K98_MIN_DAMAGE            = 60;
 const float K98_DAMAGE_FALLOFF_RANGE  = 4096;
 const float K98_DRYFIRE_DELAY         = 0.2;
+const float K98_KICK_PITCH    = 3.0;   // sv_gunkick — bolt sniper, big single kick.
+const float K98_KICK_VARIANCE = 0.6;
+const float K98_KICK_STRENGTH = 1.5;   // single-shot bolt — heaviest kick.
+
+// Muzzle offset — see cl_debug_muzzle for live-tune marker.
+const float K98_MUZZLE_FORWARD = 52;
+const float K98_MUZZLE_RIGHT   = 3;
+const float K98_MUZZLE_DOWN    = 2;
 const float K98_STAB_DAMAGE           = 70;
 const float K98_STAB_RANGE            = 88;
 
@@ -106,6 +114,8 @@ float(float now) SH_98KTryReload =
 
 float(float now) SH_98KTryStab =
 {
+    if (Weapon_SprintBlocksFire()) return 0;
+    if (Weapon_LowerBlocksFire()) return 0;
     if (self.weaponstate == WS_RELOAD || self.weaponstate == WS_DRAW || self.weaponstate == WS_SPECIAL)
         return 0;
     if (now < self.attack_finished) return 0;
@@ -129,7 +139,8 @@ void(entity player) W_98KPickupCopy =
 void() W_98KShoot =
 {
     W_PenetratingHitscanShoot(K98_BASE_SPREAD, K98_MOVE_SPREAD, K98_FULL_SPREAD_SPEED,
-        K98_CLOSE_DAMAGE, K98_MIN_DAMAGE, K98_DAMAGE_FALLOFF_RANGE, 80, 0.98);
+        K98_CLOSE_DAMAGE, K98_MIN_DAMAGE, K98_DAMAGE_FALLOFF_RANGE, 80, 0.98,
+        K98_KICK_PITCH, K98_KICK_VARIANCE, K98_KICK_STRENGTH);
 };
 
 void() W_98KStab =
@@ -145,7 +156,14 @@ void() W_98KStab =
     {
         sound(self, CHAN_WEAPON, "sounds/weapons/wpn_dod98k/stab.wav", 1, ATTN_NORM);
         if (W_CanDamageTarget(trace_ent))
-            W_ApplyDamage(self, trace_ent, K98_STAB_DAMAGE);
+        {
+            // Defer player damage to attacker's hitclaim — see
+            // sh_wpn_melee.qc for rationale.
+            float defer_player = (trace_ent.classname == "player")
+                                 && W_ShouldDeferToClaim(self);
+            if (!defer_player)
+                W_ApplyDamage(self, trace_ent, K98_STAB_DAMAGE);
+        }
         else
             W_ImpactEffect(trace_endpos);
     }
@@ -233,7 +251,7 @@ void() W_98KDrop =
     tgt.mag_98k = self.mag_98k; tgt.ammo_98k = self.ammo_98k;
     self.mag_98k = 0; self.ammo_98k = 0;
     setmodel(tgt, "models/weapons/wpn_dod98k/w_98k.mdl");
-    setsize(tgt, '-16 -16 0', '16 16 32');
+    setsize(tgt, '-16 -16 0', '16 16 48');
     tgt.classname = "weapon_dod98k"; tgt.solid = SOLID_NOT; tgt.movetype = MOVETYPE_TOSS;
     tgt.weapon = WEP_DOD98K; tgt.weapon_slot = SLOT_PRIMARY;
     tgt.weap_draw = W_98KEquip; tgt.weap_drop_func = W_98KDrop;
@@ -244,7 +262,7 @@ void() W_98KDrop =
 void() weapon_dod98k =
 {
     setmodel(self, "models/weapons/wpn_dod98k/w_98k.mdl");
-    setsize(self, '-16 -16 0', '16 16 32');
+    setsize(self, '-16 -16 0', '16 16 48');
     self.classname = "weapon_dod98k"; self.solid = SOLID_TRIGGER; self.movetype = MOVETYPE_TOSS;
     self.weapon = WEP_DOD98K; self.weapon_slot = SLOT_PRIMARY;
     self.weap_draw = W_98KEquip; self.weap_drop_func = W_98KDrop;
@@ -295,14 +313,21 @@ void() CSQC_Predict98KCommand =
         {
             CSQC_MarkPendingWeaponAck();
             csqc_98k_fire_snd_stage = 0;
-            if (!pm_suppress_sounds)
+            if (CSQC_BeginFireActionEffects())
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_dod98k/fire.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
                 CSQC_PredictedPenetratingImpact(K98_BASE_SPREAD, K98_MOVE_SPREAD, K98_FULL_SPREAD_SPEED,
-                    K98_CLOSE_DAMAGE, K98_MIN_DAMAGE, K98_DAMAGE_FALLOFF_RANGE, 80, 0.98);
+                    K98_CLOSE_DAMAGE, K98_MIN_DAMAGE, K98_DAMAGE_FALLOFF_RANGE, 80, 0.98,
+                    K98_KICK_PITCH, K98_KICK_VARIANCE, K98_KICK_STRENGTH);
                 CSQC_SpawnCasing("models/weapons/riflecasingbig.mdl",
                     '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
+                // Sniper muzzle flash — AK47_MUZZLE_* shared default.
+                CSQC_MuzzleFlashAtMuzzle(K98_MUZZLE_FORWARD, K98_MUZZLE_RIGHT,
+                    K98_MUZZLE_DOWN, self.wep_action_id);
+                CSQC_MuzzleSmokeAtMuzzle(K98_MUZZLE_FORWARD, K98_MUZZLE_RIGHT,
+                    K98_MUZZLE_DOWN, self.wep_action_id, 4);
+                CSQC_EndFireActionEffects();
             }
         }
         else if (r == -1)

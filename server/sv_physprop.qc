@@ -32,13 +32,6 @@
 //	  physics_ode_autodisable        default 1    — sleep idle bodies
 //	  r_showbboxes 1                              — draw AABBs (tuning aid)
 
-// FTE physics fields not declared in the project's fteextensions.qc.
-.float damp_linear;
-.float damp_angular;
-.float max_angular;
-.float dimension_solid;
-.float dimension_hit;
-
 // Dimension bit dedicated to physics props. Player has dim_solid/dim_hit
 // without this bit — pmove notouches the prop, so the AABB doesn't block
 // player movement. Hitscan paths OR this bit into the shooter's dim_hit
@@ -48,6 +41,7 @@
 const float PHYSPROP_DIM = 2;
 
 void() phys_barrel_use;
+void(entity drop_ent) W_PhysDropWake;
 
 // Hard upper limit on ODE per-substep damping. ODE applies this multiplicatively
 // every ~10 ms substep (~100 substeps/s).
@@ -74,7 +68,10 @@ float(string cvar_name) PhysProp_SafeDamp =
 // the void floor or with an out-of-range coordinate. physics_enable(..FALSE)
 // cleanly detaches the ODE body before remove() so we don't leave a dangling
 // RBE pointer.
-const float PHYSPROP_VOID_Z    = -16384;   // deeper than any plausible map floor
+// -10000 ≈ 5s of free-fall before despawn. Far below any legit map
+// gameplay floor. Mirror in sv_weapons.qc (PHYSDROP_VOID_Z) +
+// cl_tosssmooth.qc void clamp.
+const float PHYSPROP_VOID_Z    = -10000;
 const float PHYSPROP_COORD_CAP = 65536;    // sanity cap for X/Y/Z — anything larger is runaway
 
 void() PhysProp_VoidWatchdog =
@@ -95,6 +92,24 @@ void() PhysProp_VoidWatchdog =
 		remove(self);
 		return;
 	}
+
+	// Runtime stuck-despawn — if the prop's CENTER has been embedded in
+	// BSP for >5 seconds (rare; happens when a moving brush shoves the
+	// barrel into a wall), remove it rather than trying to unstick.
+	// pointcontents-only check (W_PhysDropIsEmbedded uses center, not
+	// bbox) so a barrel resting on its side with a slight floor overlap
+	// doesn't get despawned. 5s is more lenient than the drop's 2s
+	// because barrels are mapper-placed and worth keeping if possible.
+	if (cvar("sv_phys_unstick") && W_PhysDropStuckDuration(self) > 5)
+	{
+		if (cvar("sv_debug_physprops"))
+			dprint(sprintf("[physprop] removing %s at %v (stuck in BSP > 5s)\n",
+				self.classname, self.origin));
+		physics_enable(self, FALSE);
+		remove(self);
+		return;
+	}
+
 	self.nextthink = time + 1;
 };
 
@@ -255,6 +270,8 @@ void(entity owner) phys_can_spawn_infront =
 float(vector shot_dir, float damage) PhysProp_TryPushFromTrace =
 {
 	if (trace_ent == world) return FALSE;
+	if (trace_ent.weapon && trace_ent.weapon_physdrop_sleeping)
+		W_PhysDropWake(trace_ent);
 	if (trace_ent.movetype != MOVETYPE_PHYSICS) return FALSE;
 
 	vector force = shot_dir * (damage * cvar("sv_physprop_hit_force"));
@@ -265,6 +282,63 @@ float(vector shot_dir, float damage) PhysProp_TryPushFromTrace =
 
 	physics_addforce(trace_ent, force, trace_endpos);
 	return TRUE;
+};
+
+// Radius-based explosion push.  Mirror of PhysProp_TryPushFromTrace for
+// the bullet path, but iterates findradius and applies an outward
+// impulse to every nearby phys-drop / phys-prop.  Sleeping weapon drops
+// are woken first (so W_PhysDropWake flips movetype to MOVETYPE_PHYSICS
+// and the impulse takes effect on the same frame).  Force scales with
+// linear distance falloff and an upward bias proportional to radius,
+// so a grenade lifts debris off the ground rather than just shoving
+// it sideways.
+//
+// Called from W_GrenadeExplode / W_RPGExplode / W_HLGrenadeExplode /
+// W_HLSMGGrenadeExplode etc.  `peak_damage` is the explosion's
+// centre-blast damage (the same value used in the radius-damage loop).
+void(vector center, float radius, float peak_damage) PhysProp_TryRadiusPush =
+{
+	if (radius <= 0 || peak_damage <= 0) return;
+
+	float force_scale = cvar("sv_physprop_explosion_force");
+	if (force_scale <= 0) force_scale = 25000;
+
+	entity e = findradius(center, radius);
+	while (e)
+	{
+		// Wake sleeping weapon drops first so the impulse below
+		// actually takes effect (post-wake their movetype is
+		// MOVETYPE_PHYSICS and ODE integrates the force).
+		if (e.weapon && e.weapon_physdrop_sleeping)
+			W_PhysDropWake(e);
+
+		if (e.movetype == MOVETYPE_PHYSICS)
+		{
+			vector to_ent = e.origin - center;
+			float dist = vlen(to_ent);
+			float falloff = 1.0 - (dist / radius);
+			if (falloff > 0)
+			{
+				// Upward bias proportional to radius — flat-ground props
+				// lift instead of skidding.  The bias is added to the
+				// raw vector before normalizing so it scales sensibly
+				// with how far away the prop is.
+				vector dir = to_ent;
+				dir_z += radius * 0.3;
+				dir = normalize(dir);
+
+				vector force = dir * peak_damage * force_scale * falloff;
+
+				if (cvar("sv_debug_physprops"))
+					dprint(sprintf("[physprop] explosion ent=%g force=%v dist=%g falloff=%.2f\n",
+						num_for_edict(e), force, dist, falloff));
+
+				physics_addforce(e, force, e.origin);
+			}
+		}
+
+		e = e.chain;
+	}
 };
 
 // .use handler: fired by SV_UseTarget when the player presses +use aimed at

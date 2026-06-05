@@ -37,13 +37,21 @@ const float MAX_MAG_G3SG1             = 20;
 const float MAX_AMMO_G3SG1            = 60;
 
 // --- Balance ---
-const float G3SG1_BASE_SPREAD          = 0.02;
+const float G3SG1_BASE_SPREAD          = 0.01;
 const float G3SG1_MOVE_SPREAD          = 0.08;
 const float G3SG1_FULL_SPREAD_SPEED    = 320;
 const float G3SG1_CLOSE_DAMAGE         = 60;
 const float G3SG1_MIN_DAMAGE           = 40;
 const float G3SG1_DAMAGE_FALLOFF_RANGE = 4096;
 const float G3SG1_DRYFIRE_DELAY        = 0.2;
+const float G3SG1_KICK_PITCH    = 1.4;   // sv_gunkick — semi-auto sniper.
+const float G3SG1_KICK_VARIANCE = 0.4;
+const float G3SG1_KICK_STRENGTH = 1.0;   // semi-auto — moderate per-shot delay.
+
+// Muzzle offset — see cl_debug_muzzle for live-tune marker.
+const float G3SG1_MUZZLE_FORWARD = 52;
+const float G3SG1_MUZZLE_RIGHT   = 7;
+const float G3SG1_MUZZLE_DOWN    = 4.55;
 
 // --- Pre-computed state durations ---
 const float G3SG1_DRAW_DURATION      = (G3SG1_DRAW_END - G3SG1_DRAW_START) * G3SG1_FRAME_INTERVAL;
@@ -115,10 +123,12 @@ void() W_G3SG1Shoot =
     // Scoped: zero base spread, movement still applies
     if (self.zoomstage > 0)
         W_PenetratingHitscanShoot(0, G3SG1_MOVE_SPREAD, G3SG1_FULL_SPREAD_SPEED,
-            G3SG1_CLOSE_DAMAGE, G3SG1_MIN_DAMAGE, G3SG1_DAMAGE_FALLOFF_RANGE, 96, 0.98);
+            G3SG1_CLOSE_DAMAGE, G3SG1_MIN_DAMAGE, G3SG1_DAMAGE_FALLOFF_RANGE, 96, 0.98,
+            G3SG1_KICK_PITCH, G3SG1_KICK_VARIANCE, G3SG1_KICK_STRENGTH);
     else
         W_PenetratingHitscanShoot(G3SG1_BASE_SPREAD, G3SG1_MOVE_SPREAD, G3SG1_FULL_SPREAD_SPEED,
-            G3SG1_CLOSE_DAMAGE, G3SG1_MIN_DAMAGE, G3SG1_DAMAGE_FALLOFF_RANGE, 96, 0.98);
+            G3SG1_CLOSE_DAMAGE, G3SG1_MIN_DAMAGE, G3SG1_DAMAGE_FALLOFF_RANGE, 96, 0.98,
+            G3SG1_KICK_PITCH, G3SG1_KICK_VARIANCE, G3SG1_KICK_STRENGTH);
 };
 
 void() W_G3SG1Fire =
@@ -203,7 +213,7 @@ void() W_G3SG1Drop =
     self.ammo_g3sg1 = 0;
 
     setmodel(tgt, "models/weapons/wpn_csg3sg1/w_g3sg1.mdl");
-    setsize(tgt, '-16 -16 0', '16 16 32');
+    setsize(tgt, '-16 -16 0', '16 16 48');
     tgt.classname    = "weapon_g3sg1";
     tgt.solid        = SOLID_NOT;
     tgt.movetype     = MOVETYPE_TOSS;
@@ -220,7 +230,7 @@ void() W_G3SG1Drop =
 void() weapon_g3sg1 =
 {
     setmodel(self, "models/weapons/wpn_csg3sg1/w_g3sg1.mdl");
-    setsize(self, '-16 -16 0', '16 16 32');
+    setsize(self, '-16 -16 0', '16 16 48');
     self.classname     = "weapon_g3sg1";
     self.solid         = SOLID_TRIGGER;
     self.movetype      = MOVETYPE_TOSS;
@@ -272,14 +282,21 @@ void() CSQC_PredictG3SG1Command =
         if (r == 1)
         {
             CSQC_MarkPendingWeaponAck();
-            if (!pm_suppress_sounds)
+            if (CSQC_BeginFireActionEffects())
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csg3sg1/fire.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
                 CSQC_PredictedPenetratingImpact(self.zoomstage > 0 ? 0 : G3SG1_BASE_SPREAD, G3SG1_MOVE_SPREAD, G3SG1_FULL_SPREAD_SPEED,
-                    G3SG1_CLOSE_DAMAGE, G3SG1_MIN_DAMAGE, G3SG1_DAMAGE_FALLOFF_RANGE, 96, 0.98);
+                    G3SG1_CLOSE_DAMAGE, G3SG1_MIN_DAMAGE, G3SG1_DAMAGE_FALLOFF_RANGE, 96, 0.98,
+                    G3SG1_KICK_PITCH, G3SG1_KICK_VARIANCE, G3SG1_KICK_STRENGTH);
                 CSQC_SpawnCasing("models/weapons/riflecasing.mdl",
                     '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
+                // Sniper muzzle flash — AK47_MUZZLE_* shared default.
+                CSQC_MuzzleFlashAtMuzzle(G3SG1_MUZZLE_FORWARD, G3SG1_MUZZLE_RIGHT,
+                    G3SG1_MUZZLE_DOWN, self.wep_action_id);
+                CSQC_MuzzleSmokeAtMuzzle(G3SG1_MUZZLE_FORWARD, G3SG1_MUZZLE_RIGHT,
+                    G3SG1_MUZZLE_DOWN, self.wep_action_id, 4);
+                CSQC_EndFireActionEffects();
             }
         }
         else if (r == -1)
@@ -343,6 +360,7 @@ void() CSQC_G3SG1Equip =
 	self.csqc_predict_reload = CSQC_PredictG3SG1Reload;
 	self.csqc_display_frame  = CSQC_G3SG1DisplayFrame;
 	self.csqc_drop_clear     = CSQC_G3SG1DropClear;
+//    self.weapon_viewmodel_flip = TRUE;
 };
 
 #endif // CSQC

@@ -420,7 +420,14 @@ float(float is_mouse = TRUE) _sui_mouse1_down =
 	_holding_click = TRUE;
 	_last_clicked_action_count = 0;
 
-	for (int i = 0; i < _action_elements_index; i++)
+	// Clamp at MAX_ACTION_ELEMENTS — sui_action_element keeps incrementing
+	// _action_elements_index past the cap (for diagnostic counting) but
+	// only writes the first MAX entries into _action_elements[]. Iterating
+	// past the cap reads garbage and crashed the menu VM (out-of-bounds
+	// .pos read with i=256), which then unloaded MenuQC entirely and made
+	// togglemenu fall back to the engine's legacy Quake menu. Same clamp
+	// the mouse1_up handler already uses below (line ~446).
+	for (int i = 0; i < min(MAX_ACTION_ELEMENTS, _action_elements_index); i++)
 	{
 		if (is_2dpoint_in_bbox(_cursor_position, _action_elements[i].pos, _action_elements[i].size))
 		{
@@ -517,7 +524,7 @@ void() _retarget_kb_cursor =
 	// retarget cursor
 	string target = _hover_action_count == 0 ? _sui_default_kb_focus : _hover_actions[0];
 	vector default_pos = _action_elements[0].pos + _action_elements[0].size * 0.5;
-	for (int i = 0; i < _action_elements_index; i++)
+	for (int i = 0; i < min(MAX_ACTION_ELEMENTS, _action_elements_index); i++)
 	{
 		if (_action_elements[i].id == target)
 		{
@@ -550,7 +557,7 @@ void(vector dir) _cursor_kb_move =
 	float best_element_index = -1;
 	vector best_pos = _cursor_position;
 
-	for (int i = 0; i < _action_elements_index; i++)
+	for (int i = 0; i < min(MAX_ACTION_ELEMENTS, _action_elements_index); i++)
 	{
 		if (_action_elements[i].kb_nav_disabled)
 			continue; // scroll bars etc usually

@@ -4,8 +4,133 @@ float settings_sensitivity_cursor;
 string settings_fov_text;
 float settings_fov_cursor;
 
-// Settings menu tab state.  0 = General, 1 = Crosshair.
+// Settings menu tab state.
+//   0 = General, 1 = Crosshair, 2 = Graphics, 3 = Perf & Net, 4 = Voice
 float settings_tab;
+
+// Hover-tooltip latch. Each widget calls settings_tip(id, "description")
+// after rendering itself; sui_is_hovered(id) checks if the cursor is
+// over that widget this frame and, if so, replaces the latch text.
+// Cleared at the start of every tab draw and rendered in the panel
+// footer above the Back button.
+string settings_tip_text;
+
+void(string id, string desc) settings_tip =
+{
+    if (sui_is_hovered(id))
+        settings_tip_text = desc;
+};
+
+// Tip-wrapped slider — same args as cvar_slider plus a description.
+// cvar_slider's internal sui_action_element id is strcat(cvar_s, "sldr"),
+// so the tip latches off that.
+void(vector pos, vector size, vector minmaxsteps, string cvar_s, string label, string fmt, string desc) cvar_slider_tip =
+{
+    cvar_slider(pos, size, minmaxsteps, cvar_s, label, fmt);
+    settings_tip(strcat(cvar_s, "sldr"), desc);
+};
+
+// Tip-wrapped boolean toggle bound to a numeric cvar (>0 == on).
+void(string id, vector pos, vector size, string label, string cvar_s, string desc) settings_toggle_tip =
+{
+    float val = cvar(cvar_s) > 0;
+    if (menu_toggle_button(id, pos, size, label, val))
+        cvar_set(cvar_s, val ? "1" : "0");
+    settings_tip(id, desc);
+};
+
+// localcmd_local-routed variants — for engine cvars flagged
+// CVAR_NOTFROMSERVER (sys_highpriority, sys_clocktype,
+// sys_clockprecision, sys_framepacing, plus the cfg_save_* family).
+// The QC `cvar_set` builtin's PF_cvar_set silently rejects writes
+// to those (engine/common/pr_bgcmd.c:1966) and the standard
+// `localcmd` runs at RESTRICT_INSECURE which trips the same gate
+// at the console-parser layer ("Server tried setting X cvar").
+//
+// localcmd_local is a custom engine builtin (engine/client/pr_menu.c:
+// PF_M_localcmd_local) that submits to Cbuf at RESTRICT_LOCAL — the
+// same trust level as the user typing into the console — so writes
+// to NOTFROMSERVER cvars actually take. Menu-VM only by design;
+// CSQC/SSQC don't get it.
+// Cached at first use; 1 = engine has the patched builtin, 0 = old
+// engine binary (pre-localcmd_local), -1 = unprobed. Bare declaration
+// (no initialiser) so fteqcc treats it as a mutable global rather
+// than folding it to a const. Probed via checkbuiltin() so an engine
+// without the patch falls back to plain localcmd instead of crashing
+// on a `Builtin not implemented` error.
+var float settings_have_lc_local;
+
+void(string cmd_str) settings_dispatch_local =
+{
+    // settings_have_lc_local is 0 on first call (QC zero-init); we
+    // re-probe each call until checkbuiltin returns true so a runtime
+    // engine swap is also handled. Cheap — checkbuiltin is just a
+    // string lookup. Once it sticks at 1 the branch is permanent.
+    if (!settings_have_lc_local)
+    {
+        if (checkbuiltin(localcmd_local))
+            settings_have_lc_local = 1;
+    }
+    if (settings_have_lc_local)
+        localcmd_local(cmd_str);
+    else
+        localcmd(cmd_str);   // best-effort; CVAR_NOTFROMSERVER cvars will reject
+};
+
+void(string id, vector pos, vector size, string label, string cvar_s, string desc) settings_toggle_lc_tip =
+{
+    float val = cvar(cvar_s) > 0;
+    if (menu_toggle_button(id, pos, size, label, val))
+        settings_dispatch_local(strcat(cvar_s, " ", val ? "1" : "0", "\n"));
+    settings_tip(id, desc);
+};
+
+void(vector pos, vector size, vector minmaxsteps, string cvar_s, string label, string fmt, string desc) cvar_slider_lc_tip =
+{
+    // Mirror cvar_slider's body so the write side can route through
+    // settings_dispatch_local. cvar_slider can't be reused because it
+    // hard-codes cvar_set on the write path.
+    float current = cvar(cvar_s);
+    float old = current;
+    sui_push_frame(pos, [size_x, size_y * 0.5 - 4]);
+    sui_text([0, 0], MENU_TEXT_SMALL, label, MENU_TEXT_1, 1, 0);
+    sui_set_align([SUI_ALIGN_END, SUI_ALIGN_START]);
+    sui_text([0, 0], MENU_TEXT_SMALL, sprintf(fmt, current), MENU_TEXT_1, 1, 0);
+    sui_pop_frame();
+    string sldr_id = strcat(cvar_s, "sldr");
+    my_slider(sldr_id, [pos_x, pos_y + size_y * 0.5], [size_x, size_y * 0.5], minmaxsteps, current);
+    if (current != old)
+        settings_dispatch_local(strcat(cvar_s, " ", sprintf(fmt, current), "\n"));
+    settings_tip(sldr_id, desc);
+};
+
+// Tip-wrapped enum cycler — on click, advances to the next value in
+// `options` (space-separated). Works for both string and numeric cvars.
+void(string id, vector pos, vector size, string label, string cvar_s, string options, string desc) settings_enum_tip =
+{
+    string cur = cvar_string(cvar_s);
+    string display = strcat(label, ": ", cur);
+    if (my_button_colored(id, pos, size, display, MENU_BUTTON, MENU_BUTTON_BORDER))
+    {
+        float n = tokenize(options);
+        if (n > 0)
+        {
+            float idx = -1;
+            for (float i = 0; i < n; i++)
+                if (argv(i) == cur) { idx = i; break; }
+            idx = (idx + 1) % n;
+            cvar_set(cvar_s, argv(idx));
+        }
+    }
+    settings_tip(id, desc);
+};
+
+// Section header row inside a tab — small bold-ish label + thin hairline.
+void(vector pos, float width, string label) settings_section =
+{
+    sui_text([pos_x, pos_y], MENU_TEXT_SMALL, label, MENU_TEXT_1, 1, 0);
+    sui_fill([pos_x, pos_y + 11], [width, 1], MENU_BORDER, 0.6, 0);
+};
 
 // Crosshair colour component state — parsed from cl_crosshaircolour on first
 // open per-session, written back whenever a slider moves.
@@ -87,9 +212,12 @@ void() settings_menu =
 	vector size = [430, 320];
 	float pad = 10;
 	float gap = 12;
-	float left_width = 182;
-	float right_x = pad + left_width + gap;
-	float right_width = size_x - right_x - pad;
+	// Two equal columns split down the centre of the panel. Was
+	// asymmetric (left=182, right=216); the new tabs use both
+	// columns for widget content so they need to match.
+	float left_width  = (size_x - pad * 2 - gap) * 0.5;
+	float right_x     = pad + left_width + gap;
+	float right_width = left_width;
 	float xpos;
 	float ypos;
 
@@ -110,8 +238,14 @@ void() settings_menu =
 	ypos = 28;
 
 	// --- Tab bar ---
+	// 5 tabs across the full panel width. Each tab gets ~equal share of
+	// (panel_width - pad*2) minus 4 inter-tab gaps. Tab strip widened
+	// past left_width so longer labels (Perf & Net) fit.
+	settings_tip_text = "";
 	{
-		float tab_w = (left_width - 4) * 0.5;
+		float tab_strip_w = size_x - pad * 2;
+		float tab_gap     = 4;
+		float tab_w       = (tab_strip_w - tab_gap * 4) * 0.2;
 		vector active_col   = MENU_BUTTON_RETURN;
 		vector active_brd   = MENU_BUTTON_RETURN_BORDER;
 		vector inactive_col = MENU_BG_DARK;
@@ -122,10 +256,25 @@ void() settings_menu =
 			settings_tab == 0 ? active_brd : inactive_brd))
 			settings_tab = 0;
 
-		if (my_button_colored("tab_crosshair", [xpos + tab_w + 4, ypos], [tab_w, 20], "Crosshair",
+		if (my_button_colored("tab_crosshair", [xpos + (tab_w + tab_gap), ypos], [tab_w, 20], "Crosshair",
 			settings_tab == 1 ? active_col : inactive_col,
 			settings_tab == 1 ? active_brd : inactive_brd))
 			settings_tab = 1;
+
+		if (my_button_colored("tab_graphics", [xpos + (tab_w + tab_gap) * 2, ypos], [tab_w, 20], "Graphics",
+			settings_tab == 2 ? active_col : inactive_col,
+			settings_tab == 2 ? active_brd : inactive_brd))
+			settings_tab = 2;
+
+		if (my_button_colored("tab_perfnet", [xpos + (tab_w + tab_gap) * 3, ypos], [tab_w, 20], "Perf & Net",
+			settings_tab == 3 ? active_col : inactive_col,
+			settings_tab == 3 ? active_brd : inactive_brd))
+			settings_tab = 3;
+
+		if (my_button_colored("tab_voice", [xpos + (tab_w + tab_gap) * 4, ypos], [tab_w, 20], "Voice",
+			settings_tab == 4 ? active_col : inactive_col,
+			settings_tab == 4 ? active_brd : inactive_brd))
+			settings_tab = 4;
 	}
 	ypos += 26;
 
@@ -176,7 +325,7 @@ void() settings_menu =
 		ypos += 24;
 		my_button("wn_btn", [xpos, ypos], [left_width, 20], "Windowed") ? localcmd("vid_fullscreen 0; vid_width 1024; vid_height 768; vid_restart\n") : 0;
 	}
-	else
+	else if (settings_tab == 1)
 	{
 		// --- Crosshair tab ---
 		cvar_slider([xpos, ypos], [left_width, 28], [1, 32, 32], "cl_crosshairlength", "Length", "%.0f");
@@ -210,29 +359,212 @@ void() settings_menu =
 			cvar_set("cl_crosshairweapongap", settings_cx_weapon_gap ? "1" : "0");
 		ypos += 24;
 	}
+	else if (settings_tab == 2)
+	{
+		// --- Graphics tab ---
+		// Two columns: decals on the left; lighting + renderer on the
+		// right. Widget rows are 18 px tall (vs 28 in General/Crosshair)
+		// to fit ~9 widgets per column inside the 280 px content area.
+		float row_h    = 18;
+		float row_step = 21;
+		float hdr_step = 16;
+		float colL_x   = xpos;
+		float colR_x   = right_x;
+		float colL_w   = left_width;
+		float colR_w   = right_width;
+		float yL = ypos, yR = ypos;
 
-	// --- Right panel: Controls (General) or Preview (Crosshair) ---
-	ypos = 36;
-	xpos = right_x;
+		// --- Left column: Decals & Bullet Holes ---
+		settings_section([colL_x, yL], colL_w, "Decals & Bullet Holes");                                     yL += hdr_step;
+		cvar_slider_tip([colL_x, yL], [colL_w, row_h], [0, 2, 2],   "cl_bulletholes",          "Bullet Holes",     "%.0f", "Master toggle. 0=off, 1=walls only, 2=walls + props.");                              yL += row_step;
+		settings_toggle_tip("bh_renderer", [colL_x, yL], [colL_w, row_h], "Polygon Renderer", "cl_bullethole_renderer", "On=cheap polygon quad. Off=legacy adddecal (BSP-clipped, slower).");                    yL += row_step;
+		cvar_slider_tip([colL_x, yL], [colL_w, row_h], [128, 2048, 15], "cl_bulletholes_max",   "Max Holes",        "%.0f", "Most bullet holes kept on screen. Lower = better fps.");                              yL += row_step;
+		cvar_slider_tip([colL_x, yL], [colL_w, row_h], [0, 3000, 30],   "cl_bullethole_distance","Hole Draw Distance",  "%.0f", "Distance LOD. Holes farther than this are skipped.");                            yL += row_step;
+		cvar_slider_tip([colL_x, yL], [colL_w, row_h], [0, 2, 20],      "cl_bullethole_dedupe_scale","Dedupe Scale","%.2f", "How aggressively new holes overwrite nearby old ones (0=stack, 2=aggressive).");      yL += row_step;
+		cvar_slider_tip([colL_x, yL], [colL_w, row_h], [0, 1, 10],      "cl_decal_opacity",     "Decal Opacity",    "%.1f", "Global alpha multiplier for bullet/blood/paint decals.");                              yL += row_step;
+		cvar_slider_tip([colL_x, yL], [colL_w, row_h], [0, 3, 3],       "cl_impact_quality",    "Impact Quality",   "%.0f", "0=none, 1=spark/chip, 2=full smoke+spark, 3=full + impact lights.");                   yL += row_step;
+		cvar_slider_tip([colL_x, yL], [colL_w, row_h], [0, 8, 8],       "cl_impact_particle_offset","Particle Push","%.0f", "Push impact particles this many units along the surface normal\nso they don't z-fight the wall they spawned on.");      yL += row_step;
+		cvar_slider_tip([colL_x, yL], [colL_w, row_h], [0, 1, 10],      "cl_impact_light_scale","Impact Light Scale","%.1f", "Brightness scale for the per-impact dynamic light flash.");                            yL += row_step;
 
+		// --- Right column: Lighting + Renderer ---
+		settings_section([colR_x, yR], colR_w, "Lighting");                                                  yR += hdr_step;
+		settings_toggle_tip("mz_light", [colR_x, yR], [colR_w, row_h], "Muzzle Flash Light", "cl_muzzleflash_light", "Brief dynamic light at the muzzle on each shot.");                                          yR += row_step;
+		cvar_slider_tip([colR_x, yR], [colR_w, row_h], [0, 1, 10],      "cl_muzzleflash_light_scale","Muzzle Light Scale","%.1f","Brightness scale for the muzzle flash dynamic light.");                          yR += row_step;
+		cvar_slider_tip([colR_x, yR], [colR_w, row_h], [0, 255, 51],    "r_viewmodel_maxlight", "Viewmodel Max Light","%.0f", "Caps how bright the viewmodel can become under map lighting (0–255).");             yR += row_step;
+		yR += 6;
+
+		settings_section([colR_x, yR], colR_w, "Renderer");                                                  yR += hdr_step;
+		cvar_slider_tip([colR_x, yR], [colR_w, row_h], [1, 4, 3],       "vid_conautoscale",     "UI Auto-Scale",    "%.0f", "Console/HUD scale factor (1 = native pixel size, 4 = 4x).");                          yR += row_step;
+		// 0.5..2 range with 6 steps gives positions 0.5, 0.75, 1.0,
+		// 1.25, 1.5, 1.75, 2.0. <1 = downsample (faster), >1 = SSAA.
+		cvar_slider_tip([colR_x, yR], [colR_w, row_h], [0.5, 2.0, 6],   "r_renderscale",        "Render Scale",     "%.2f", "<1 renders below screen res then upscales (faster).\n>1 renders above then downsamples (SSAA, sharper).");  yR += row_step;
+		settings_enum_tip("gl_tex2d", [colR_x, yR], [colR_w, row_h], "2D Filter", "gl_texturemode2d", "n.l l.l nll lll", "Texture filtering for 2D (HUD/menu).\nFirst char = minify, third = magnify. n=nearest (crisp pixels), l=linear (blur).");      yR += row_step;
+		settings_enum_tip("gl_tex3d", [colR_x, yR], [colR_w, row_h], "3D Filter", "gl_texturemode",   "n.l l.l nll lll", "Texture filtering for the 3D world.\nMiddle char = mipmap blend; nll = crisp + smooth distance.");                              yR += row_step;
+	}
+	else if (settings_tab == 3)
+	{
+		// --- Perf & Net tab ---
+		// row_step shrunk from 21→19 vs Graphics tab because Perf & Net
+		// has more rows (8 + 3 + 7 widgets across two cols + 3 section
+		// headers). Phys-Drop section moved to the bottom of the right
+		// column so the left column doesn't run past the Back-button
+		// row at the bottom of the panel.
+		row_h    = 17;
+		row_step = 19;
+		hdr_step = 16;
+		colL_x   = xpos;
+		colR_x   = right_x;
+		colL_w   = left_width;
+		colR_w   = right_width;
+		yL = ypos;
+		yR = ypos;
+
+		// --- Left column: Network & Prediction (9 widgets) ---
+		settings_section([colL_x, yL], colL_w, "Network & Prediction");                                       yL += hdr_step;
+		settings_toggle_tip("ex_on",         [colL_x, yL], [colL_w, row_h], "Extrapolate",         "cl_extrap",          "Predict remote-player motion past the last received snapshot.");                       yL += row_step;
+		settings_toggle_tip("ex_grounded",   [colL_x, yL], [colL_w, row_h], "Extrap Grounded",     "cl_extrap_grounded", "Also extrapolate players that look stationary on ground.");                            yL += row_step;
+		cvar_slider_tip([colL_x, yL], [colL_w, row_h], [0, 20, 20],  "cl_extrap_max",       "Extrap Max",          "%.0f", "Max snapshots to extrapolate before freezing — caps how far we predict.");           yL += row_step;
+		settings_toggle_tip("ex_smooth",     [colL_x, yL], [colL_w, row_h], "Smooth Snaps",        "cl_extrap_smooth",   "Decay position-snap correction visually instead of teleporting.");                     yL += row_step;
+		cvar_slider_tip([colL_x, yL], [colL_w, row_h], [0, 0.2, 40], "cl_extrap_smooth_time","Smooth Time",        "%.3f", "Seconds to decay a snap. Lower = snappier, higher = smoother.");                      yL += row_step;
+		settings_toggle_tip("predict_hits",  [colL_x, yL], [colL_w, row_h], "Predict Hits",        "cl_predict_hits",    "Show hit feedback (hitmarker, blood, decals) instantly on local fire.");               yL += row_step;
+		settings_toggle_tip("predict_breaks",[colL_x, yL], [colL_w, row_h], "Predict Breaks",      "cl_predict_breaks",  "Hide a func_breakable instantly when local damage is lethal.\nServer confirms or rolls back ~1 RTT later.");                          yL += row_step;
+		cvar_slider_tip([colL_x, yL], [colL_w, row_h], [0, 0.1, 20], "cl_interp_time",      "Interp Time",         "%.3f", "Engine snapshot interpolation window. 0 = follow fastest snapshot.");                yL += row_step;
+		settings_toggle_tip("trace_clip",    [colL_x, yL], [colL_w, row_h], "Trace Skip Clip",     "cl_weapontrace_ignore_playerclip", "CSQC weapon traces ignore playerclip brushes (decals on visible wall)."); yL += row_step;
+
+		// --- Right column: Performance (7 widgets) + Phys-Drop (3 widgets) ---
+		// sys_* cvars are CVAR_NOTFROMSERVER — QC's cvar_set silently
+		// rejects them (PF_cvar_set in pr_bgcmd.c hard-checks the
+		// flag). Use the localcmd-routed _lc variants instead so the
+		// console parser actually applies the change.
+		settings_section([colR_x, yR], colR_w, "Performance");                                                yR += hdr_step;
+		settings_toggle_lc_tip("sys_hp",     [colR_x, yR], [colR_w, row_h], "High Process Priority","sys_highpriority",  "Bump OS scheduling priority of the game process.\nReduces frame-time jitter under load; uses more CPU.");                                 yR += row_step;
+		settings_toggle_lc_tip("sys_cprec",  [colR_x, yR], [colR_w, row_h], "Clock Precision",     "sys_clockprecision","Request the Windows scheduler's high-resolution timer.\nLower wait jitter; mild battery / heat increase on laptops.");                yR += row_step;
+		cvar_slider_lc_tip([colR_x, yR], [colR_w, row_h], [0, 3, 3],   "sys_clocktype",      "Clock Type",         "%.0f", "Timer source. 0=auto, 1=timeGetTime (low precision),\n2=QueryPerfCounter, 3=QPC + force-affinity (no drift).");                                yR += row_step;
+		cvar_slider_lc_tip([colR_x, yR], [colR_w, row_h], [0, 3, 3],   "sys_framepacing",    "Frame Pacing",       "%.0f", "0=vanilla Sleep, 1=hi-res waitable timer, 2=+DXGI sync,\n3=+absolute-anchor pacing (best, default).");                                   yR += row_step;
+		settings_toggle_tip("yieldcpu",   [colR_x, yR], [colR_w, row_h], "Yield CPU",           "cl_yieldcpu",       "Sleep between frames. Off = lowest input latency, higher CPU.");                          yR += row_step;
+		cvar_slider_tip([colR_x, yR], [colR_w, row_h], [30, 500, 47],"cl_maxfps",          "Max FPS",            "%.0f", "Render cap when game has focus.");                                                       yR += row_step;
+		cvar_slider_tip([colR_x, yR], [colR_w, row_h], [30, 500, 47],"cl_idlefps",         "Idle FPS",           "%.0f", "Render cap when game window is unfocused.");                                            yR += row_step;
+		yR += 4;
+
+		settings_section([colR_x, yR], colR_w, "Phys-Drop Smoothing");                                        yR += hdr_step;
+		cvar_slider_tip([colR_x, yR], [colR_w, row_h], [0, 0.2, 40], "cl_physdrop_smooth_time","Smooth Time",      "%.3f", "Snap-decay time for ODE-physics dropped weapons (0 = off).");                          yR += row_step;
+		settings_toggle_tip("pd_extrap",     [colR_x, yR], [colR_w, row_h], "PhysDrop Extrap",     "cl_physdrop_extrap",     "Extrapolate phys-drop linear velocity between samples.");                          yR += row_step;
+		settings_toggle_tip("pd_angextrap",  [colR_x, yR], [colR_w, row_h], "PhysDrop Ang Extrap", "cl_physdrop_angextrap",  "Extrapolate phys-drop angular velocity between samples.");                         yR += row_step;
+	}
+	else if (settings_tab == 4)
+	{
+		// --- Voice tab ---
+		// Two columns mirroring Graphics/Perf-Net: Capture on the left
+		// (mic settings, codec, send mode), Playback + HUD on the right.
+		// row_h/row_step/hdr_step + colL_x/colR_x/colL_w/colR_w/yL/yR
+		// are reused from the Graphics tab branch above (QC has function-
+		// scope locals — redeclaring with `float` would trip Q207).
+		row_h    = 17;
+		row_step = 19;
+		hdr_step = 16;
+		colL_x = xpos;
+		colR_x = right_x;
+		colL_w = left_width;
+		colR_w = right_width;
+		yL = ypos; yR = ypos;
+
+		// --- Left column: Capture ---
+		settings_section([colL_x, yL], colL_w, "Capture");                                                       yL += hdr_step;
+		cvar_slider_tip([colL_x, yL], [colL_w, row_h], [0, 2, 2],         "cl_voip_send",        "Send Mode",          "%.0f", "0 = push-to-talk only (hold +voip key).\n1 = voice activation (open mic).\n2 = always send.");        yL += row_step;
+		cvar_slider_tip([colL_x, yL], [colL_w, row_h], [0, 7, 7],         "cl_voip_codec",       "Codec",              "%.0f", "0=Speex11k 1=Raw 2=Opus 3=Speex8k\n4=Speex16k 5=Speex32k 6=PCMA 7=PCMU.\nOpus (2) recommended for best quality/perf.");      yL += row_step;
+		cvar_slider_tip([colL_x, yL], [colL_w, row_h], [6000, 32000, 26], "cl_voip_bitrate",     "Bitrate",            "%.0f", "Codec target bitrate.  24000 (24 kbps) is excellent for Opus.");          yL += row_step;
+		cvar_slider_tip([colL_x, yL], [colL_w, row_h], [0, 10, 40],       "cl_voip_micamp",      "Mic Gain",           "%.1f", "Microphone amplification.  Raise if your mic is too quiet.");              yL += row_step;
+		cvar_slider_tip([colL_x, yL], [colL_w, row_h], [0, 50, 50],       "cl_voip_vad_threshhold","VAD Threshold",    "%.0f", "Voice-activation level when Send Mode = 1.\nHigher = quieter sounds get filtered out.");                  yL += row_step;
+		settings_toggle_tip("voip_test",  [colL_x, yL], [colL_w, row_h], "Mic Test (loopback)", "cl_voip_test",       "Hear your own captured audio locally without networking.\nUse to verify mic + gain are working.");           yL += row_step;
+
+		// --- Right column: Playback + HUD ---
+		settings_section([colR_x, yR], colR_w, "Playback");                                                       yR += hdr_step;
+		cvar_slider_tip([colR_x, yR], [colR_w, row_h], [0, 2, 20],        "cl_voip_play",        "Receive Volume",     "%.2f", "Volume scaler for incoming voice (others' voices).");                       yR += row_step;
+		cvar_slider_tip([colR_x, yR], [colR_w, row_h], [0, 1, 20],        "cl_voip_capturingvol","My Sidetone",        "%.2f", "Game audio scale while YOU are transmitting (so you can hear yourself / others over your own voice).");      yR += row_step;
+		cvar_slider_tip([colR_x, yR], [colR_w, row_h], [0, 1, 20],        "cl_voip_ducking",     "Game Audio Duck",    "%.2f", "Game audio scale while someone is talking to you.\nLower = duck game more so voices stay audible.");        yR += row_step;
+		settings_toggle_tip("voip_nf",  [colR_x, yR], [colR_w, row_h], "Noise Filter",          "cl_voip_noisefilter", "Speex noise cancellation.  Recommended on.");                              yR += row_step;
+		settings_toggle_tip("voip_ag",  [colR_x, yR], [colR_w, row_h], "Auto Gain",             "cl_voip_autogain",    "Auto-normalize voice level.  Off recommended — interferes with VAD.");      yR += row_step;
+		yR += 6;
+
+		settings_section([colR_x, yR], colR_w, "HUD");                                                            yR += hdr_step;
+		settings_toggle_tip("voip_hud", [colR_x, yR], [colR_w, row_h], "Show VoIP HUD",         "hud_voip_show",       "Mod's bottom-left widget: green '+VOIP' indicator while you're talking,\nspeaker list above showing other players who are currently transmitting.");      yR += row_step;
+		settings_toggle_tip("voip_em",  [colR_x, yR], [colR_w, row_h], "Engine Volume Meter",   "cl_voip_showmeter",   "FTE's built-in mic volume meter.  Off by default — replaced by the HUD widget above.");      yR += row_step;
+	}
+
+	// --- Right panel: Controls (General) or Preview (Crosshair).
+	// Graphics + Perf & Net tabs render their own right column inside
+	// the tab branch above (two-column layout) and only need the
+	// shared tooltip footer below.
+	// Right column starts under the tab strip — same y as the left
+	// column does after `ypos += 26` for tab strip clearance. Was 36
+	// (legacy from when there was no tab strip), which made "Controls"
+	// and "Preview" overlap the new tab buttons.
 	if (settings_tab == 0)
 	{
+		ypos = 54;
+		xpos = right_x;
 		sui_text([xpos, ypos], MENU_TEXT_SMALL, "Controls", MENU_TEXT_1, 1, 0);
 		ypos += 16;
-		bind_list("bindlist", [xpos, ypos], [right_width, 230], binds_scroll);
-		ypos += 230 + 8;
+		// Bind list height shrunk so the helper text underneath
+		// (and the Back button) still have clearance under the new
+		// tab strip height.
+		bind_list("bindlist", [xpos, ypos], [right_width, 200], binds_scroll);
+		ypos += 200 + 8;
 		sui_text([xpos, ypos], MENU_TEXT_SMALL, "Click a binding to rebind.", MENU_TEXT_2, 0.85, 0);
 		ypos += 10;
 		sui_text([xpos, ypos], MENU_TEXT_SMALL, "ESC cancels, BACKSPACE clears.", MENU_TEXT_2, 0.85, 0);
 	}
-	else
+	else if (settings_tab == 1)
 	{
+		ypos = 54;
+		xpos = right_x;
 		float preview_size = min(right_width, 180);
 		sui_text([xpos, ypos], MENU_TEXT_SMALL, "Preview", MENU_TEXT_1, 1, 0);
 		ypos += 16;
 		DrawCrosshairPreview([xpos, ypos], [preview_size, preview_size]);
 		ypos += preview_size + 8;
 		sui_text([xpos, ypos], MENU_TEXT_SMALL, "Changes save on Back / ESC.", MENU_TEXT_2, 0.85, 0);
+	}
+
+	// Tooltip footer — single line on the SAME row as the Back button
+	// but offset to its right. Earlier version sat above the button
+	// and clipped through it; the right-of-button placement leaves
+	// the button visually clear and gives the description ~330 px of
+	// width to render in. settings_tip_text was reset to "" at the
+	// top of the tab strip and re-latched by any widget whose id
+	// sui_is_hovered() matched this frame.
+	if (settings_tab == 2 || settings_tab == 3 || settings_tab == 4)
+	{
+		// Tip strip sits to the RIGHT of the Back button (x = 96).
+		// Multi-line tips: split on '\n' and stack two rows; the
+		// 20-px button is just tall enough for two MENU_TEXT_SMALL
+		// (8 px) lines stacked at 10 px spacing. tip_y was -1 px
+		// from the previous version per user feedback.
+		float tip_x = 8 + 80 + 6;          // 6 px gap right of button (was 8 — −2 left)
+		float tip_y = size_y - 28 + 2;     // 2 px tighter to the top (was +4 — −2 up)
+		string display = settings_tip_text;
+		float  alpha   = 0.95;
+		if (display == "")
+		{
+			display = "Hover an option for a description.";
+			alpha   = 0.5;
+		}
+
+		// Split on the first '\n'. Two-line max — engine text widget
+		// doesn't auto-wrap, and we only have ~2 lines of footer
+		// height. Anything beyond '\n' goes on the second row.
+		float nl = strstrofs(display, "\n", 0);
+		if (nl >= 0)
+		{
+			string line1 = substring(display, 0, nl);
+			string line2 = substring(display, nl + 1, -1);
+			sui_text([tip_x, tip_y],     MENU_TEXT_SMALL, line1, MENU_TEXT_2, alpha, 0);
+			sui_text([tip_x, tip_y + 9], MENU_TEXT_SMALL, line2, MENU_TEXT_2, alpha, 0);
+		}
+		else
+		{
+			sui_text([tip_x, tip_y], MENU_TEXT_SMALL, display, MENU_TEXT_2, alpha, 0);
+		}
 	}
 
 	sui_set_align([SUI_ALIGN_START, SUI_ALIGN_END]);

@@ -170,8 +170,11 @@ float(float now) SH_KnifeTickState =
 // what should be idle time.
 float(float now) SH_KnifeTrySlash =
 {
+    if (Weapon_SprintBlocksFire()) return 0;
+    if (Weapon_LowerBlocksFire()) return 0;
 #ifdef CSQC
-    if (cltime < self.csqc_fire_guard)
+    // `now`-based — see sh_weapon_standard.qc SH_StandardTryFire.
+    if (now < self.csqc_fire_guard)
         return 0;
 #endif
     if (self.weaponstate == WS_DRAW)
@@ -184,7 +187,7 @@ float(float now) SH_KnifeTrySlash =
     self.wep_anim_start  = now;
     self.attack_finished = now + KNIFE_SLASH_DELAY;
 #ifdef CSQC
-    self.csqc_fire_guard = cltime + KNIFE_SLASH_DELAY;
+    self.csqc_fire_guard = now + KNIFE_SLASH_DELAY;
 #endif
     return 1;
 };
@@ -192,8 +195,10 @@ float(float now) SH_KnifeTrySlash =
 // Returns: 1 = stab started, 0 = blocked
 float(float now) SH_KnifeTryStab =
 {
+    if (Weapon_SprintBlocksFire()) return 0;
+    if (Weapon_LowerBlocksFire()) return 0;
 #ifdef CSQC
-    if (cltime < self.csqc_fire_guard)
+    if (now < self.csqc_fire_guard)
         return 0;
 #endif
     if (self.weaponstate == WS_DRAW)
@@ -206,7 +211,7 @@ float(float now) SH_KnifeTryStab =
     self.wep_anim_start  = now;
     self.attack_finished = now + KNIFE_STAB_DELAY;
 #ifdef CSQC
-    self.csqc_fire_guard = cltime + KNIFE_STAB_DELAY;
+    self.csqc_fire_guard = now + KNIFE_STAB_DELAY;
 #endif
     return 1;
 };
@@ -234,8 +239,40 @@ void(entity receiver) W_KnifePickupCopy =
 {
 };
 
+void(vector hull_mins, vector hull_maxs) W_KnifeSetupWorldEntity;  // fwd
+
+// Player drop. Mirrors W_M3Drop / W_357Drop: populate the spawned
+// `weapon_drop_target` with model, hull, classname, slot, touch, etc.
+// The previous empty body left every dropped knife model-less and
+// bbox-less, so the engine treated it as zero-volume and the
+// dropped-weapon pipeline (or the void watchdog) culled it within a
+// frame — visible to the user as "the knife just disappears when I
+// drop or throw it." Uses W_KnifeSetupWorldEntity for the GoldSrc
+// hand-pivot → geometric-center shift so the world model lands at the
+// resolved spawn position the way every other dropped weapon does.
 void() W_KnifeDrop =
 {
+    entity tgt = weapon_drop_target;
+
+    // Knife has no ammo; nothing to transfer. Run the same
+    // model+hull setup the map-spawn weapon_knife() uses so the
+    // dropped pickup is identical to one placed by the mapper.
+    entity oldself = self;
+    self = tgt;
+    W_KnifeSetupWorldEntity('-16 -16 0', '16 16 48');
+    self = oldself;
+
+    tgt.classname    = "weapon_knife";
+    tgt.solid        = SOLID_NOT;       // weapon_become_solid flips after grace
+    tgt.movetype     = MOVETYPE_TOSS;
+    tgt.weapon       = WEP_KNIFE;
+    tgt.weapon_slot  = SLOT_MELEE;
+    tgt.weap_draw    = W_KnifeEquip;
+    tgt.weap_drop_func = W_KnifeDrop;
+    tgt.pickupcopy   = W_KnifePickupCopy;
+    tgt.touch        = weapon_touch;
+    tgt.think        = weapon_become_solid;
+    tgt.nextthink    = time + 0.7;
 };
 
 void() W_KnifeEnterIdle =
@@ -331,7 +368,20 @@ float(float attack_range, float damage) W_KnifeTraceAttack =
             sound(self, CHAN_AUTO, "sounds/weapons/wpn_csknife/hit2.wav", 1.0, ATTN_NORM);
 
         dimension_send = saved_dim;
-        W_ApplyDamage(self, trace_ent, damage);
+        // BREAKABLE_INSTANT_CROWBAR: any melee one-shots this brush.
+        // Inflate the dealt damage to a value guaranteed to overflow
+        // any reasonable max_health so the kill path triggers in one
+        // hit regardless of the brush's HP setting.
+        float deal = damage;
+        if (trace_ent.classname == "func_breakable"
+            && (trace_ent.spawnflags & BREAKABLE_INSTANT_CROWBAR))
+            deal = 9999;
+        // Defer player damage to the attacker's hitclaim so the swing
+        // doesn't apply damage twice (server-auth + hitclaim).
+        float defer_player = (trace_ent.classname == "player")
+                             && W_ShouldDeferToClaim(self);
+        if (!defer_player)
+            W_ApplyDamage(self, trace_ent, deal);
         return TRUE;
     }
 
@@ -461,7 +511,7 @@ void() W_KnifeFrame =
 // World entity — spawned from map (classname "weapon_knife")
 void() weapon_knife =
 {
-    W_KnifeSetupWorldEntity('-16 -16 0', '16 16 32');
+    W_KnifeSetupWorldEntity('-16 -16 0', '16 16 48');
     self.classname   = "weapon_knife";
     self.solid       = SOLID_TRIGGER;
     self.movetype    = MOVETYPE_TOSS;
@@ -471,7 +521,6 @@ void() weapon_knife =
     self.weap_drop_func = W_KnifeDrop;
     self.pickupcopy  = W_KnifePickupCopy;
     self.touch       = weapon_touch;
-    self.dropped_spin = 1;
     W_RegisterMapWeapon(weapon_knife);
 };
 
@@ -551,7 +600,7 @@ void() CSQC_PredictKnifeCommand =
                 makevectors(input_angles);
                 stab_src = predicted_player.origin + predicted_player.view_ofs;
                 stab_end = stab_src + (v_forward * KNIFE_STAB_RANGE);
-                traceline(stab_src, stab_end, MOVE_NORMAL | MOVE_HITMODEL, predicted_player);
+                CSQC_WeaponTraceLine(stab_src, stab_end, MOVE_NORMAL | MOVE_HITMODEL, predicted_player);
 
                 if (trace_fraction < 1.0)
                     localsound("sounds/weapons/wpn_csknife/stab.wav");
@@ -702,7 +751,7 @@ float(float elapsed) CSQC_KnifeDisplayFrame =
         makevectors(input_angles);
         src = predicted_player.origin + predicted_player.view_ofs;
         end = src + (v_forward * KNIFE_STAB_RANGE);
-        traceline(src, end, MOVE_NORMAL | MOVE_HITMODEL, predicted_player);
+        CSQC_WeaponTraceLine(src, end, MOVE_NORMAL | MOVE_HITMODEL, predicted_player);
 
         if (trace_fraction < 1.0)
             return KNIFE_SEQ_STAB;
@@ -735,6 +784,7 @@ void() CSQC_KnifeEquip =
 	self.csqc_display_frame  = CSQC_KnifeDisplayFrame;
 	self.csqc_drop_clear     = CSQC_KnifeDropClear;
 	self.weapon_uses_sequences = TRUE;
+//    self.weapon_viewmodel_flip = TRUE;
 };
 
 #endif // CSQC

@@ -1,6 +1,19 @@
 // put custom server-only globals and fields here
 #pragma target fte_5768
 
+// Worldspawn key cache — populated from the world entity's auto-filled
+// .string fields below. Declared here so SV_WeatherStuffPlayer in
+// sv_env_fog.qc (which compiles before sv_main.qc) can read them.
+string sv_worldspawn_fog;
+string sv_worldspawn_rain;
+string sv_worldspawn_snow;
+
+// BSP entity-block keys auto-populated by the engine spawner when the
+// world entity is parsed.  Same pattern env_fog uses for `.float density`.
+.string fog;
+.string rain;
+.string snow;
+
 const float FL_JUMPRELEASED = 4096;
 
 // EF_NODRAW — hides an entity's model from the renderer while keeping
@@ -11,7 +24,8 @@ const float FL_JUMPRELEASED = 4096;
 // sv_ladder.qc — all hide their brush-bbox triggers via this) need
 // it declared somewhere reachable.  Bit value 16 mirrors the
 // authoritative client + extension declarations.
-const float EF_NODRAW = 16;
+const float EF_NODRAW   = 16;
+const float EF_ADDITIVE = 32;
 
 // Hitclaim dedup — written by W_ApplyDamage in sv_weapons.qc and read by
 // SV_HandleHitclaim in sv_player.qc so server-auth hits and client
@@ -19,6 +33,22 @@ const float EF_NODRAW = 16;
 // Declared here (earliest server-side file) so both users see them.
 .entity last_damaged_target;
 .float  last_damaged_time;
+
+// Grappling hook (sv_grappling) per-player state — server-only half.
+// The CSQC-visible half (grapple_rope_active, grapple_anchor) lives in
+// shared/sh_pmove.qc next to the slide state because predicted_player
+// needs to read it during rope rendering.
+.entity grapple_hook;
+// grapple_attached moved to shared/sh_pmove.qc — CSQC needs to read
+// it for the PM_CategorizePosition ground-snap suppress.
+.float  grapple_pull_sound_at;
+.float  grapple_next_loop;
+// Forward decls for sv_grapple.qc — it compiles AFTER sv_weapons.qc
+// and sv_player.qc, both of which need to call these.
+void()             W_GrappleImpulse;
+void()             W_GrapplePullTick;
+void()             W_GrappleHeldTick;
+void(entity player) W_GrappleRelease;
 
 // BSP entity-lump fields that map compilers (e.g. light, worldspawn) stamp
 // onto entities but we don't consume. Declared as no-op stubs so the engine
@@ -50,6 +80,14 @@ float sv_use_is_player_direct;  // TRUE only during SV_PlayerTryUse
 // Damage callbacks (set on any entity that can take damage)
 .void() on_damaged;     // called when health reduced but still > 0
 .void() on_killed;      // called when health reaches 0
+
+// FTE ODE physics fields not declared in the project's fteextensions.qc.
+// Shared by sv_physprop.qc and optional physics-backed weapon drops.
+.float damp_linear;
+.float damp_angular;
+.float max_angular;
+.float dimension_solid;
+.float dimension_hit;
 
 // Map weapon tracking — for round reset
 .float map_weapon;          // TRUE if this weapon was placed in the map (not dropped)
@@ -104,9 +142,74 @@ void(string s) MulticastString =
 	WriteString(MSG_MULTICAST, s);
 };
 
+// Spawnflag 1 — START_OFF: at map load / round restart, the
+// light's switchable style is set to "a" (dark) instead of "m"
+// (full).  Triggers can then turn it on by retoggling.  Only
+// meaningful on lights with a non-zero `style` key — style 0 is
+// the static lightmap pass and isn't toggleable per-entity.
+const float LIGHT_START_OFF = 1;
+
+.float light_state;          // 0 = off, 1 = on (current)
+.float light_default_state;  // re-applied at round restart
+
+// Apply the current on/off state to the lightmap via lightstyle().
+// "m" (109) = full bright (BSP-baked level); "a" (97) = dark.
+// Lights without a switchable style index are no-ops here.
+void() Light_ApplyState =
+{
+	if (self.style <= 0) return;
+	if (self.light_state)
+		lightstyle(self.style, "m");
+	else
+		lightstyle(self.style, "a");
+};
+
+// .use callback — fires when something targets this light.  Each
+// fire flips the on/off state.  Buttons re-fire on auto-return so
+// non-toggle buttons produce a momentary-pulse effect; TOGGLE
+// buttons stay pressed and the light keeps the new state.
+void() Light_Use =
+{
+	if (self.style <= 0) return;
+	self.light_state = self.light_state ? 0 : 1;
+	Light_ApplyState();
+};
+
 void() light =
 {
-	remove(self);
+	// Lights without a targetname AND without a switchable style
+	// have no runtime role — the BSP compiler already baked their
+	// contribution into the lightmap.  Drop them like the legacy
+	// stub did so they don't consume an entity slot.
+	if (self.targetname == "" && self.style <= 0)
+	{
+		remove(self);
+		return;
+	}
+
+	self.light_default_state = (self.spawnflags & LIGHT_START_OFF) ? 0 : 1;
+	self.light_state = self.light_default_state;
+	self.use = Light_Use;
+	Light_ApplyState();
+};
+
+// Walk every `light` entity and re-apply its default on/off state.
+// Called from RoundRestart so a button-press-driven toggle from the
+// previous round doesn't carry over.  Unconditionally re-issues the
+// lightstyle() call even when the state matches — lightstyle's per-
+// style global cache makes that a no-op on the engine side.
+void() Light_RoundReset =
+{
+	entity e = find(world, classname, "light");
+	while (e)
+	{
+		entity oldself = self;
+		self = e;
+		self.light_state = self.light_default_state;
+		Light_ApplyState();
+		self = oldself;
+		e = find(e, classname, "light");
+	}
 };
 
 // Per-player crosshair stat fields — auto-networked to each client via clientstat()
@@ -125,6 +228,12 @@ void() light =
 
 // Round timer — per-player field synced from global each frame
 .float round_timer_remaining;
+
+// Defuse progress (0..CFC4_DEFUSE_TIME) — set per-frame by
+// C4_TickDefuseInteraction in sh_wpn_cfc4.qc on the active defuser
+// only; everyone else stays at 0.  Auto-networked via clientstat()
+// so the HUD bar fills only on the defuser's own client.
+.float defuse_progress_stat;
 
 // Round timer globals
 float round_end_time;     // server time when the current round expires
@@ -145,6 +254,14 @@ float red_team_score;       // rounds won by red team
 .float sv_maptimeleft;
 .float sv_roundnum;
 .float sv_maxrounds;
+
+// Per-player mirror of sv_func_tickrate cvar.  Updated each frame in
+// SV_StartFrame's per-player loop.  Registered via STAT_FUNC_TICKRATE
+// in clientstat so CSQC's PM_CheckRotatingCarry can scale Phase 3
+// slide rates to match the server's per-tick rate.  Per-player only
+// because clientstat works on a per-entity field — the value is the
+// same global cvar copied into each player's slot.
+.float sv_func_tickrate_value;
 
 // Per-player stats for gamemode system
 .float sv_round_phase;

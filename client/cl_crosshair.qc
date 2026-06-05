@@ -1,6 +1,21 @@
 float hud_crosshair_cvars_registered;
 float hud_crosshair_gap_bonus_smoothed;
 
+// Per-frame crosshair cvar cache. Populated by HUD_RefreshCrosshairCache
+// (defined below, after HUD_GetCrosshairColour) once at the top of
+// CSQC_UpdateViewAliveHud so HUD_DrawCrosshair doesn't pay 7 cvar
+// reads + 1 cvar_string + tokenize() per frame. Values change rarely
+// (user opens menu, tweaks a slider). The smoothing/spread math
+// inside HUD_DrawCrosshair still runs every frame because it depends
+// on per-frame stat values.
+string hud_xhair_cache_length_text;
+string hud_xhair_cache_thickness_text;
+string hud_xhair_cache_gap_text;
+float  hud_xhair_cache_length_setting;
+float  hud_xhair_cache_thickness_setting;
+float  hud_xhair_cache_gap_setting;
+vector hud_xhair_cache_colour;
+
 float HUD_CROSSHAIR_DEFAULT_LENGTH = 6;
 float HUD_CROSSHAIR_DEFAULT_THICKNESS = 1;
 float HUD_CROSSHAIR_DEFAULT_GAP = 3;
@@ -51,6 +66,17 @@ vector() HUD_GetCrosshairColour =
     colour_y = bound(0, colour_y, 1);
     colour_z = bound(0, colour_z, 1);
     return colour;
+};
+
+void() HUD_RefreshCrosshairCache =
+{
+    hud_xhair_cache_length_text     = cvar_string("cl_crosshairlength");
+    hud_xhair_cache_thickness_text  = cvar_string("cl_crosshairthickness");
+    hud_xhair_cache_gap_text        = cvar_string("cl_crosshairgap");
+    hud_xhair_cache_length_setting  = cvar("cl_crosshairlength");
+    hud_xhair_cache_thickness_setting = cvar("cl_crosshairthickness");
+    hud_xhair_cache_gap_setting     = cvar("cl_crosshairgap");
+    hud_xhair_cache_colour          = HUD_GetCrosshairColour();
 };
 
 // Returns the predicted player's horizontal speed this render frame.
@@ -198,15 +224,36 @@ void(float zoomstage) HUD_DrawCrosshair =
         return;
     }
 
+    // cl_crosshair 0 hides the entire crosshair.  sv_crosshair 0 (server
+    // gate, default 1) also hides it — legacy/unset servers default to 1
+    // so existing clients keep their crosshair.  Keep the smoothed gap
+    // reset above active so a previous-tick dynamic-spread state doesn't
+    // bleed back in when re-enabled.
+    if (!cvar("cl_crosshair") || serverkeyfloat("sv_crosshair", 1) <= 0)
+    {
+        hud_crosshair_gap_bonus_smoothed = 0;
+        return;
+    }
+
+    // ADS fade — crosshair fades out as the gun rises to the iron-sights
+    // pose (cl_viewfx.qc's ADS envelope rides 0→1 with the same ease as
+    // the pose itself).  Snaps back in when ADS releases or sprint
+    // cancels it.  Skips the entire draw once fully faded so we don't
+    // pay for four no-op drawfills.
+    float xhair_alpha = 1.0 - csqc_viewfx_ads_env;
+    if (xhair_alpha <= 0)
+        return;
+
     HUD_EnsureCrosshairCVars();
 
-    length_text = cvar_string("cl_crosshairlength");
-    thickness_text = cvar_string("cl_crosshairthickness");
-    gap_text = cvar_string("cl_crosshairgap");
-    length_setting = cvar("cl_crosshairlength");
-    thickness_setting = cvar("cl_crosshairthickness");
-    gap_setting = cvar("cl_crosshairgap");
-    colour = HUD_GetCrosshairColour();
+    // Per-frame cvar cache populated once at top of UpdateViewAliveHud.
+    length_text       = hud_xhair_cache_length_text;
+    thickness_text    = hud_xhair_cache_thickness_text;
+    gap_text          = hud_xhair_cache_gap_text;
+    length_setting    = hud_xhair_cache_length_setting;
+    thickness_setting = hud_xhair_cache_thickness_setting;
+    gap_setting       = hud_xhair_cache_gap_setting;
+    colour            = hud_xhair_cache_colour;
 
     if (length_text == "" || length_setting <= 0)
         length = HUD_CROSSHAIR_DEFAULT_LENGTH;
@@ -241,7 +288,7 @@ void(float zoomstage) HUD_DrawCrosshair =
     sz_x = thickness;
     sz_y = length;
     sz_z = 0;
-    drawfill(pos, sz, colour, 1, 0);
+    drawfill(pos, sz, colour, xhair_alpha, 0);
 
     pos_x = cx - (thickness * 0.5);
     pos_y = cy + gap;
@@ -249,7 +296,7 @@ void(float zoomstage) HUD_DrawCrosshair =
     sz_x = thickness;
     sz_y = length;
     sz_z = 0;
-    drawfill(pos, sz, colour, 1, 0);
+    drawfill(pos, sz, colour, xhair_alpha, 0);
 
     pos_x = cx - gap - length;
     pos_y = cy - (thickness * 0.5);
@@ -257,7 +304,7 @@ void(float zoomstage) HUD_DrawCrosshair =
     sz_x = length;
     sz_y = thickness;
     sz_z = 0;
-    drawfill(pos, sz, colour, 1, 0);
+    drawfill(pos, sz, colour, xhair_alpha, 0);
 
     pos_x = cx + gap;
     pos_y = cy - (thickness * 0.5);
@@ -265,5 +312,5 @@ void(float zoomstage) HUD_DrawCrosshair =
     sz_x = length;
     sz_y = thickness;
     sz_z = 0;
-    drawfill(pos, sz, colour, 1, 0);
+    drawfill(pos, sz, colour, xhair_alpha, 0);
 };

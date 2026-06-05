@@ -54,6 +54,15 @@ void(entity trig) push_list_remove =
 //  CSQC replication
 // ---------------------------------------------------------------------------
 
+// Active byte on the wire — CSQC reads this and either adds itself to
+// push_trigger_list (active=1) or removes itself (active=0).  Keeping
+// the entity in the snapshot but flipping a byte is more reliable than
+// trying to drop the entity entirely via SendEntity=NULL, which
+// interacts badly with PVSF_NOREMOVE (the entity hangs around on
+// clients in its last-known state, causing CSQC to keep pushing while
+// the server says off → "clipping into walls" reports).
+.float push_wire_active;
+
 float(entity playerent, float changedflags) trigger_push_SendEntity =
 {
     WriteByte(MSG_ENTITY, CSQC_ENT_PUSH_TRIGGER);
@@ -83,6 +92,8 @@ float(entity playerent, float changedflags) trigger_push_SendEntity =
     // only the AABB pre-filter and disagrees with the server on cuts.
     WriteShort(MSG_ENTITY, self.modelindex);
 
+    WriteByte(MSG_ENTITY, self.push_wire_active ? 1 : 0);
+
     return TRUE;
 };
 
@@ -106,16 +117,97 @@ void() trigger_push_touch =
 //  Spawn
 // ---------------------------------------------------------------------------
 
-/*QUAKED trigger_push (.5 .5 .5) ? PUSH_ONCE PUSH_SILENT PUSH_ADDITIVE PUSH_TUNNEL PUSH_SOURCE
+// Internal activation: links the trigger into the SERVER's
+// push_trigger_list, installs the touch handler, and flips the wire
+// active byte so CSQC adds itself to its OWN push_trigger_list.
+// Called either directly from the spawn function (no START_OFF), or
+// via trigger_push_use after a targeted activation.
+void() trigger_push_activate =
+{
+    self.solid = SOLID_TRIGGER;
+    self.touch = trigger_push_touch;
+
+    // Add to server list ONLY if not already in it — a redundant
+    // activate (USE_ON to an already-on trigger) would otherwise
+    // double-link the entity and break the chain walker.
+    entity scan;
+    float in_list = 0;
+    if (push_trigger_list == self)
+        in_list = 1;
+    else
+    {
+        for (scan = push_trigger_list; scan; scan = scan.push_next)
+        {
+            if (scan == self)
+            {
+                in_list = 1;
+                break;
+            }
+        }
+    }
+    if (!in_list)
+    {
+        self.push_next    = push_trigger_list;
+        push_trigger_list = self;
+    }
+
+    self.push_wire_active = 1;
+    self.SendFlags        = 1;     // dirty so the active=1 byte goes out
+};
+
+// Deactivate: remove from the SERVER's push_trigger_list AND flip the
+// wire byte to 0 so CSQC removes from ITS list too.  Keeps SendEntity
+// installed (the entity stays in the snapshot, just inactive) so a
+// later USE_ON / TOGGLE can bring it back up via the same wire path.
+//
+// Earlier version set self.SendEntity=NULL on deactivate.  That
+// interacted badly with PVSF_NOREMOVE: the engine stopped sending
+// updates but the client's cached entity stuck around in the
+// push_trigger_list, so CSQC kept predicting pushes while the server
+// said off.  Result: the player would partially-push into walls until
+// reconcile snapped them back.  Wire-byte approach is deterministic
+// because the same snapshot that flips the bit also gates the client
+// list operation.
+void() trigger_push_deactivate =
+{
+    push_list_remove(self);
+    self.solid = SOLID_NOT;
+    self.touch = sub_noop;
+
+    self.push_wire_active = 0;
+    self.SendFlags        = 1;     // dirty so the active=0 byte goes out
+};
+
+// Use handler honouring USE_ON / USE_OFF / USE_TOGGLE from the
+// trigger chain (sub_use_type set by Trigger_UseTargets before
+// calling .use()).  Buttons fire OFF/ON/TOGGLE depending on their
+// configured spawnflags — without this we'd toggle on every press,
+// which fights paired enable/disable buttons.
+void() trigger_push_use =
+{
+    float wanted_on;
+    if (sub_use_type == USE_ON)         wanted_on = 1;
+    else if (sub_use_type == USE_OFF)   wanted_on = 0;
+    else                                 wanted_on = !self.push_wire_active;   // toggle
+
+    if (wanted_on)
+        trigger_push_activate();
+    else
+        trigger_push_deactivate();
+};
+
+/*QUAKED trigger_push (.5 .5 .5) ? PUSH_ONCE PUSH_START_OFF PUSH_SILENT PUSH_ADDITIVE PUSH_TUNNEL PUSH_SOURCE
 Pushes players inside its volume in the direction set by angles.
 
 Velocity is applied every physics step (client-predicted).
 
-PUSH_ONCE     – remove after the first player touch.
-PUSH_SILENT   – no wind sound.
-PUSH_ADDITIVE – add to current velocity instead of replacing it.
-PUSH_TUNNEL   – pull toward the trigger centerline while pushing.
-PUSH_SOURCE   – boost along movedir up to speed without overwriting sideways motion.
+PUSH_ONCE      – remove after the first player touch.
+PUSH_START_OFF – do not push until a trigger fires this entity.
+                 First trigger activates and is one-shot.
+PUSH_SILENT    – no wind sound.
+PUSH_ADDITIVE  – add to current velocity instead of replacing it.
+PUSH_TUNNEL    – pull toward the trigger centerline while pushing.
+PUSH_SOURCE    – boost along movedir up to speed without overwriting sideways motion.
 */
 void() trigger_push =
 {
@@ -137,17 +229,31 @@ void() trigger_push =
     // also threw away the BSP geometry — every angled trigger collapsed
     // to its AABB. EF_NODRAW keeps it invisible while preserving the BSP.
     setmodel(self, self.model);
-    self.effects    |= EF_NODRAW;
-    self.movetype    = MOVETYPE_NONE;
-    self.solid       = SOLID_TRIGGER;
-    self.touch       = trigger_push_touch;
+    self.effects |= EF_NODRAW;
+    self.movetype = MOVETYPE_NONE;
 
-    // add to shared list so PM_CheckTriggerPushes finds it
-    self.push_next    = push_trigger_list;
-    push_trigger_list = self;
+    // .use handler installed unconditionally — buttons / relays
+    // can still toggle the trigger off and back on at runtime
+    // regardless of whether it started off.  Without this, a
+    // start-on trigger was uncontrollable for the rest of the map.
+    self.use = trigger_push_use;
 
-    // replicate to CSQC for client-side prediction
-    self.pvsflags  = PVSF_NOREMOVE;
+    // SendEntity installed once and left in place forever — the wire
+    // active byte (push_wire_active) gates client-side push, not the
+    // SendEntity presence.  Avoids the PVSF_NOREMOVE-vs-deactivate
+    // sync problem.
+    self.pvsflags   = PVSF_NOREMOVE;
     self.SendEntity = trigger_push_SendEntity;
-    self.SendFlags  = 1;
+
+    if (self.spawnflags & PUSH_START_OFF)
+    {
+        // Stay dormant until a trigger fires us.  push_wire_active is
+        // already 0 (default), so the first snapshot ships active=0
+        // and the client knows to skip list-add.
+        self.solid    = SOLID_NOT;
+        self.SendFlags = 1;     // ensure the active=0 ships now
+        return;
+    }
+
+    trigger_push_activate();
 };

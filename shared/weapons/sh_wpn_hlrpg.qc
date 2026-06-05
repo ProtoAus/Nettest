@@ -108,12 +108,8 @@ void(entity player) W_RPGPickupCopy =
 // Rocket explosion — radius damage
 void() W_RPGExplode =
 {
-    float dist, damage;
-    float saved_dim;
-    entity e;
-
     // Exclude shooter from explosion effects — they see the client-predicted one
-    saved_dim = dimension_send;
+    float saved_dim = dimension_send;
     if (self.owner)
         dimension_send = dimension_send & ~self.owner.dimension_seen;
 
@@ -121,30 +117,10 @@ void() W_RPGExplode =
 
     dimension_send = saved_dim;
 
-    // Radius damage + push-back
-    e = findradius(self.origin, RPG_EXPLOSION_RADIUS);
-    while (e)
-    {
-        if (W_CanDamageTarget(e))
-        {
-            dist = vlen(e.origin - self.origin);
-            damage = W_LinearDamageFalloff(dist, RPG_EXPLOSION_DAMAGE, RPG_EXPLOSION_MIN_DAMAGE, RPG_EXPLOSION_RADIUS);
-            W_ApplyDamage(self.owner, e, damage);
-        }
-
-        // Push players away from explosion
-        if (e.classname == "player" && e.health > 0)
-        {
-            dist = vlen(e.origin - self.origin);
-            float push_scale = 1 - (dist / RPG_EXPLOSION_RADIUS);
-            push_scale = max(0, push_scale);
-            vector push_dir = normalize(e.origin - self.origin);
-            e.velocity += push_dir * RPG_KNOCKBACK_PUSH * push_scale;
-            e.velocity_z += RPG_KNOCKBACK_UPLIFT * push_scale;
-        }
-
-        e = e.chain;
-    }
+    // Radius damage + player knockback + phys-drop blast — single call.
+    W_RadiusExplode(self.origin, RPG_EXPLOSION_RADIUS,
+                    RPG_EXPLOSION_DAMAGE, RPG_EXPLOSION_MIN_DAMAGE,
+                    RPG_KNOCKBACK_PUSH, RPG_KNOCKBACK_UPLIFT, self.owner);
 
     // Stop fly sound on the same clients that received it — skip shooter,
     // whose CSQC fake rocket will stop its own local fly sound on explode.
@@ -325,7 +301,7 @@ void() W_RPGDrop =
     self.rpg_rocket = world;
 
     setmodel(tgt, RPG_WORLDMODEL);
-    setsize(tgt, '-16 -16 0', '16 16 32');
+    setsize(tgt, '-16 -16 0', '16 16 48');
     tgt.classname    = "weapon_hlrpg";
     tgt.solid        = SOLID_NOT;
     tgt.movetype     = MOVETYPE_TOSS;
@@ -342,7 +318,7 @@ void() W_RPGDrop =
 void() weapon_hlrpg =
 {
     setmodel(self, RPG_WORLDMODEL);
-    setsize(self, '-16 -16 0', '16 16 32');
+    setsize(self, '-16 -16 0', '16 16 48');
     self.classname     = "weapon_hlrpg";
     self.solid         = SOLID_TRIGGER;
     self.movetype      = MOVETYPE_TOSS;

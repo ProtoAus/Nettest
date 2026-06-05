@@ -53,6 +53,26 @@ const float M4A1_SILENCED_MIN_DAMAGE    = 12;
 const float M4A1_DAMAGE_FALLOFF_RANGE   = 3072;
 const float M4A1_DRYFIRE_DELAY          = 0.2;
 
+// sv_gunkick — slightly tamer than the AK; M4 trades raw kick for
+// a tighter base spread.
+const float M4A1_KICK_PITCH    = 1.4;
+const float M4A1_KICK_VARIANCE = 0.4;
+const float M4A1_KICK_STRENGTH = 1.0;   // baseline auto rifle.
+
+// Muzzle offset (cl_muzzleflash.qc CSQC_MuzzleFlashAtMuzzle +
+// cl_muzzlesmoke.qc CSQC_MuzzleSmokeAtMuzzle). Live-tune via
+// cl_debug_muzzle 1 to see the marker.
+const float M4A1_MUZZLE_FORWARD = 42;
+const float M4A1_MUZZLE_RIGHT   = 10;
+const float M4A1_MUZZLE_DOWN    = 6.6;
+// Silenced offset — suppressor extends the muzzle further forward.
+// When m4a1_silenced is on, the flash is suppressed entirely; only
+// smoke seeps out, and from this offset rather than the bare-barrel
+// one above. Same convention as USP.
+const float M4A1_SILENCED_MUZZLE_FORWARD = 54;
+const float M4A1_SILENCED_MUZZLE_RIGHT   = 10;
+const float M4A1_SILENCED_MUZZLE_DOWN    = 6.5;
+
 // --- Pre-computed state durations ---
 const float M4A1_DRAW_DURATION        = (M4A1_DRAW_END - M4A1_DRAW_START) * M4A1_FRAME_INTERVAL;
 const float M4A1_FIRE_DURATION        = (M4A1_FIRE_END - M4A1_FIRE_START) * M4A1_FRAME_INTERVAL;
@@ -159,7 +179,8 @@ void() W_M4A1Shoot =
     }
 
     W_PenetratingHitscanShoot(M4A1_BASE_SPREAD, M4A1_MOVE_SPREAD, M4A1_FULL_SPREAD_SPEED,
-        close_dmg, min_dmg, M4A1_DAMAGE_FALLOFF_RANGE, 48, 0.97);
+        close_dmg, min_dmg, M4A1_DAMAGE_FALLOFF_RANGE, 48, 0.97,
+        M4A1_KICK_PITCH, M4A1_KICK_VARIANCE, M4A1_KICK_STRENGTH);
 };
 
 void() W_M4A1Fire =
@@ -280,7 +301,7 @@ void() W_M4A1Drop =
     self.m4a1_silenced = 0;
 
     setmodel(tgt, "models/weapons/wpn_csm4a1/w_m4a1.mdl");
-    setsize(tgt, '-16 -16 0', '16 16 32');
+    setsize(tgt, '-16 -16 0', '16 16 48');
     tgt.classname    = "weapon_m4a1";
     tgt.solid        = SOLID_NOT;
     tgt.movetype     = MOVETYPE_TOSS;
@@ -290,7 +311,6 @@ void() W_M4A1Drop =
     tgt.weap_drop_func = W_M4A1Drop;
     tgt.pickupcopy   = W_M4A1PickupCopy;
     tgt.touch        = weapon_touch;
-    tgt.dropped_spin = 1;
     tgt.think        = weapon_become_solid;
     tgt.nextthink    = time + 0.7;
 };
@@ -298,7 +318,7 @@ void() W_M4A1Drop =
 void() weapon_m4a1 =
 {
     setmodel(self, "models/weapons/wpn_csm4a1/w_m4a1.mdl");
-    setsize(self, '-16 -16 0', '16 16 32');
+    setsize(self, '-16 -16 0', '16 16 48');
     self.classname     = "weapon_m4a1";
     self.solid         = SOLID_TRIGGER;
     self.movetype      = MOVETYPE_TOSS;
@@ -308,7 +328,6 @@ void() weapon_m4a1 =
     self.weap_drop_func = W_M4A1Drop;
     self.pickupcopy    = W_M4A1PickupCopy;
     self.touch         = weapon_touch;
-    self.dropped_spin  = 1;
     self.mag_m4a1      = MAX_MAG_M4A1;
     self.ammo_m4a1     = MAX_AMMO_M4A1;
     self.m4a1_silenced = TRUE;
@@ -341,7 +360,7 @@ void() CSQC_PredictM4A1Command =
         if (r == 1)
         {
             CSQC_MarkPendingWeaponAck();
-            if (!pm_suppress_sounds)
+            if (CSQC_BeginFireActionEffects())
             {
                 if (self.m4a1_silenced)
                     localsound("sounds/weapons/wpn_csm4a1/sfire1.wav");
@@ -356,9 +375,28 @@ void() CSQC_PredictM4A1Command =
                 CSQC_PredictedPenetratingImpact(M4A1_BASE_SPREAD, M4A1_MOVE_SPREAD, M4A1_FULL_SPREAD_SPEED,
                     self.m4a1_silenced ? M4A1_SILENCED_CLOSE_DAMAGE : M4A1_CLOSE_DAMAGE,
                     self.m4a1_silenced ? M4A1_SILENCED_MIN_DAMAGE   : M4A1_MIN_DAMAGE,
-                    M4A1_DAMAGE_FALLOFF_RANGE, 48, 0.97);
+                    M4A1_DAMAGE_FALLOFF_RANGE, 48, 0.97,
+                    M4A1_KICK_PITCH, M4A1_KICK_VARIANCE, M4A1_KICK_STRENGTH);
                 CSQC_SpawnCasing("models/weapons/riflecasing.mdl",
                     '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
+                // Silenced suppresses the flash and uses an extended
+                // muzzle offset for the smoke (suppressor moves the
+                // visible barrel forward). Same convention as USP.
+                if (self.m4a1_silenced)
+                {
+                    CSQC_MuzzleSmokeAtMuzzle(
+                        M4A1_SILENCED_MUZZLE_FORWARD,
+                        M4A1_SILENCED_MUZZLE_RIGHT,
+                        M4A1_SILENCED_MUZZLE_DOWN, self.wep_action_id, 1);
+                }
+                else
+                {
+                    CSQC_MuzzleFlashAtMuzzle(M4A1_MUZZLE_FORWARD, M4A1_MUZZLE_RIGHT,
+                        M4A1_MUZZLE_DOWN, self.wep_action_id);
+                    CSQC_MuzzleSmokeAtMuzzle(M4A1_MUZZLE_FORWARD, M4A1_MUZZLE_RIGHT,
+                        M4A1_MUZZLE_DOWN, self.wep_action_id, 1);
+                }
+                CSQC_EndFireActionEffects();
             }
         }
         else if (r == -1)
@@ -454,6 +492,7 @@ void() CSQC_M4A1Equip =
 	self.csqc_predict_reload = CSQC_PredictM4A1Reload;
 	self.csqc_display_frame  = CSQC_M4A1DisplayFrame;
 	self.csqc_drop_clear     = CSQC_M4A1DropClear;
+//    self.weapon_viewmodel_flip = TRUE;
 };
 
 #endif // CSQC

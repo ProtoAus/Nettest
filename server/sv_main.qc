@@ -66,7 +66,9 @@ string sv_servercfg_cvars[] =
 	"sv_wateraccelerate",
 	"sv_waterfriction",
 	"sv_toss_tickrate",
+	"sv_roundtoss_tickrate",
 	"pm_ramp_bumpcount",
+	"sv_phys_drops",
 	"sv_physprop_hit_force",
 	"sv_physprop_mass",
 	"sv_physprop_erp",
@@ -113,8 +115,6 @@ string(string line) SV_MapListEntryFromLine =
 string() SV_NextMapFromCycleFile =
 {
 	filestream f = fopen("data/maps.txt", FILE_READ);
-	if (f < 0)
-		f = fopen("maps.txt", FILE_READ);
 	if (f < 0)
 		return "";
 
@@ -461,6 +461,7 @@ string sv_info_last_wepswap_speed_transition;
 string sv_info_last_weaponweight;
 string sv_info_last_backdrop;
 string sv_info_last_toss_tickrate;
+string sv_info_last_phys_drops;
 string sv_info_last_default_primary;
 string sv_info_last_default_secondary;
 string sv_info_last_default_melee;
@@ -475,6 +476,10 @@ string sv_info_last_gamemode;
 // server is the sole source.  Without serverinfo push, the client
 // has no way to know which side owns the marker and double-fires.
 string sv_info_last_trust_clienthits;
+// Mirrors sv_trust_clienthits but for breakable damage.  Pushed so the
+// client knows whether to emit `cmd breakclaim` (and the server knows
+// to defer its own trace damage on those targets).
+string sv_info_last_trust_clientbreak;
 
 // Per-frame cvar cache globals (sv_cached_*) live in shared/sh_customdefs.qc
 // inside #ifdef SSQC, because sh_player_anims.qc references them and
@@ -482,6 +487,7 @@ string sv_info_last_trust_clienthits;
 
 // Phase counter for SV_UpdateMovementServerInfo throttle (every 8 ticks).
 float sv_info_push_phase;
+float sv_phys_mapweapon_sync_done;
 
 void(string key, __inout string last) sv_info_push_if_changed =
 {
@@ -555,6 +561,8 @@ void() SV_UpdateMovementServerInfo =
 	// Read by Toss_NextThinkInterval (sv_weapons.qc) and the CSQC predraw
 	// helper (cl_tosssmooth.qc) for matching dt-cap math.
 	sv_info_push_if_changed("sv_toss_tickrate", sv_info_last_toss_tickrate);
+	// Lets CSQC suppress fake weapon-drop tosses when the server is using ODE.
+	sv_info_push_if_changed("sv_phys_drops",    sv_info_last_phys_drops);
 	// Server browser column: gamemode (TDM / Elim / Bhop / FFA).
 	sv_info_push_if_changed("sv_gamemode",      sv_info_last_gamemode);
 	// Hitmarker ownership: client-side hitmarker prediction reads this
@@ -562,6 +570,10 @@ void() SV_UpdateMovementServerInfo =
 	// server's CSQC_EVENT_HITMARKER (trust=0).  Server's own marker
 	// emit is gated on the same value so the two don't double up.
 	sv_info_push_if_changed("sv_trust_clienthits", sv_info_last_trust_clienthits);
+	// Breakable-damage trust: when ON, client owns the damage source
+	// (sends `cmd breakclaim`) and server defers its own trace damage
+	// on func_breakable targets.  Mirrors sv_trust_clienthits.
+	sv_info_push_if_changed("sv_trust_clientbreak", sv_info_last_trust_clientbreak);
 };
 
 // Post-config fixup: if the persisted data/server.cfg snapshot leaves any
@@ -604,6 +616,23 @@ void() StartFrame =
 	}
 
 	SV_FixupEmptyDefaults();
+
+	// Map weapons spawn before ODE is attached on the first StartFrame.
+	// If sv_phys_drops was already enabled at map load, convert those
+	// initial pickups once after ODE is ready. Later cvar flips intentionally
+	// do not rewrite existing pickup state.
+	if (!sv_phys_mapweapon_sync_done && cvar("sv_ode_loaded") > 0)
+	{
+		sv_phys_mapweapon_sync_done = TRUE;
+		if (cvar("sv_phys_drops") > 0)
+			W_SyncMapWeaponPhysics();
+		// Add brushwork (func_breakable / func_door / func_button) to
+		// ODE's collision world so phys drops can rest on / collide
+		// with them.  Must run AFTER ODE plug_load completes (gated
+		// by sv_ode_loaded above) — calling physics_enable before
+		// ODE is ready is a no-op.
+		BrushSyncODE();
+	}
 
 	// Refresh per-frame cvar cache — single read per tick for constants
 	// that hot-path code (Player_VisualProxy_Sync, SH_PlayerAnim_Update)
@@ -657,6 +686,20 @@ void() StartFrame =
 		{
 			cvar_set("mp_respawn",      "0");
 			cvar_set("mp_disabledoors", "0");
+		}
+		else if (gamemode == GAMEMODE_PAINTGUN)
+		{
+			// Same round flow as elimination — no respawn until round end.
+			cvar_set("mp_respawn",      "0");
+			cvar_set("mp_disabledoors", "0");
+			// Falldamage off so a stray drop doesn't end your round
+			// before anyone tags you.  Paintgun is light-stakes by design.
+			cvar_set("mp_falldamage",   "0");
+			// Strip map weapons — paintgun is paintball + snowball only,
+			// any pickup of a "real" weapon would break the loadout
+			// constraint (and you'd just see slot rejection on touch
+			// anyway since all four slots are pinned by the gamemode).
+			cvar_set("mp_nomapweapons", "1");
 		}
 		else  // TDM
 		{
@@ -762,8 +805,9 @@ void() StartFrame =
 			round_phase = ROUND_PHASE_ROUND_END;
 			round_restart_time = time + cvar("mp_roundrestartdelay");
 		}
-		// Check team elimination (elimination mode only)
-		else if (gamemode == GAMEMODE_ELIMINATION)
+		// Check team elimination — applies to elim and paintgun, both
+		// of which use the "one team left wins the round" win flow.
+		else if (gamemode == GAMEMODE_ELIMINATION || gamemode == GAMEMODE_PAINTGUN)
 		{
 			winner = CheckTeamEliminated();
 			if (winner != 0)
@@ -875,9 +919,9 @@ void() StartFrame =
 					PlayerSpawn();
 					self = saved;
 				}
-				else if (gamemode == GAMEMODE_ELIMINATION)
+				else if (gamemode == GAMEMODE_ELIMINATION || gamemode == GAMEMODE_PAINTGUN)
 				{
-					// Elimination: hide body, enter spectator phase
+					// Elimination / Paintgun: hide body, enter spectator phase
 					e.modelindex = 0;
 					e.death_time = -1;  // prevent re-triggering
 				}

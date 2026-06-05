@@ -23,7 +23,8 @@ const float DBG_MAX_ENTRIES  = 64;
 
 const float DBG_TAB_CLIENT       = 0;
 const float DBG_TAB_CLIENT_DEBUG = 1;
-const float DBG_TAB_COUNT        = 2;
+const float DBG_TAB_VOICE        = 2;
+const float DBG_TAB_COUNT        = 3;
 
 const float DBG_TITLE_H      = 24;
 const float DBG_TAB_STRIP_H  = 20;
@@ -119,7 +120,9 @@ void() Debug_PanelInit =
 {
     if (dbg_panel_initialized) return;
     dbg_panel_initialized = 1;
-    dbg_panel_size = '208 360 0';
+    // Width fits 3 tabs at min 96 px each + 2x2 gap + DBG_PAD*2 inset
+    // (96*3 + 4 + 12 = 304) so the Voice tab button isn't overflowed.
+    dbg_panel_size = '304 360 0';
     dbg_panel_pos  = '64 64 0';
     dbg_panel_current_tab = DBG_TAB_CLIENT;
     // Explicit init — FTEQCC's `var float foo = -1;` initializer at
@@ -154,9 +157,36 @@ void() Debug_PanelInit =
     Debug_AddToggle("cl_debug_game",         DBG_TAB_CLIENT_DEBUG);
     Debug_AddToggle("cl_debug_playermodel",  DBG_TAB_CLIENT_DEBUG);
     Debug_AddToggle("cl_debug_smoothing",    DBG_TAB_CLIENT_DEBUG);
+    Debug_AddToggle("cl_debug_spikes",       DBG_TAB_CLIENT_DEBUG);
+    Debug_AddScalar("cl_debug_spike_ms", 0.1, DBG_TAB_CLIENT_DEBUG);
     Debug_AddToggle("cl_debug_footsteps",    DBG_TAB_CLIENT_DEBUG);
     Debug_AddToggle("cl_debug_extrap",       DBG_TAB_CLIENT_DEBUG);
     Debug_AddToggle("cl_debug_drift",        DBG_TAB_CLIENT_DEBUG);
+
+    // ---------- Voice ----------
+    // Mic + send setup.  cl_voip_send: 0=PTT (hold +voip), 1=VAD (open
+    // mic, fires when above cl_voip_vad_threshhold), 2=always send.
+    // cl_voip_codec: 0=Speex11k 1=Raw 2=Opus 3=Speex8k 4=Speex16k
+    // 5=Speex32k 6=PCMA 7=PCMU.  Opus (2) recommended for best quality
+    // and CPU; bitrate 24000 = excellent quality.
+    Debug_AddScalar("cl_voip_send",          1,    DBG_TAB_VOICE);
+    Debug_AddScalar("cl_voip_codec",         1,    DBG_TAB_VOICE);
+    Debug_AddScalar("cl_voip_bitrate",       1000, DBG_TAB_VOICE);
+    Debug_AddScalar("cl_voip_micamp",        0.5,  DBG_TAB_VOICE);
+    Debug_AddScalar("cl_voip_vad_threshhold",1,    DBG_TAB_VOICE);
+    Debug_AddToggle("cl_voip_test",                DBG_TAB_VOICE);
+    // Playback / ducking.
+    Debug_AddScalar("cl_voip_play",          0.1,  DBG_TAB_VOICE);
+    Debug_AddScalar("cl_voip_capturingvol",  0.1,  DBG_TAB_VOICE);
+    Debug_AddScalar("cl_voip_ducking",       0.1,  DBG_TAB_VOICE);
+    Debug_AddToggle("cl_voip_noisefilter",         DBG_TAB_VOICE);
+    Debug_AddToggle("cl_voip_autogain",            DBG_TAB_VOICE);
+    // HUD.  hud_voip_show gates the mod's bottom-left widget (green
+    // "+VOIP" indicator + speaker list).  cl_voip_showmeter is the
+    // engine's built-in volume meter — off by default since the mod
+    // widget replaces it.
+    Debug_AddToggle("hud_voip_show",               DBG_TAB_VOICE);
+    Debug_AddToggle("cl_voip_showmeter",           DBG_TAB_VOICE);
 };
 
 // =============================================================
@@ -380,8 +410,9 @@ void() Debug_DrawTabStrip =
     if (tab_w < 96) tab_w = 96;
 
     float x = DBG_PAD;
-    Debug_DrawOneTab("Client", DBG_TAB_CLIENT, x, tab_w); x += tab_w + gap;
-    Debug_DrawOneTab("Client Debug", DBG_TAB_CLIENT_DEBUG, x, tab_w);
+    Debug_DrawOneTab("Client",       DBG_TAB_CLIENT,       x, tab_w); x += tab_w + gap;
+    Debug_DrawOneTab("Client Debug", DBG_TAB_CLIENT_DEBUG, x, tab_w); x += tab_w + gap;
+    Debug_DrawOneTab("Voice",        DBG_TAB_VOICE,        x, tab_w);
 
     sui_pop_frame();
 };

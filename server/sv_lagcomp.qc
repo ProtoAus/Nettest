@@ -471,7 +471,10 @@ void() Lagcomp_EndRewind =
 // `self` must be the attacker.
 void(vector src, vector end, float moveflags, entity ignore) Lagcomp_TraceLine =
 {
+    float saved_dim_hit = self.dimension_hit;
+    self.dimension_hit = saved_dim_hit | PHYSDROP_DIM;
     Lagcomp_BeginRewind(self);
     traceline(src, end, moveflags, ignore);
     Lagcomp_EndRewind();
+    self.dimension_hit = saved_dim_hit;
 };

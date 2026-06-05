@@ -19,11 +19,20 @@
 // ============================================================
 
 // --- Layout constants ---
-const float SV_KIND_TOGGLE  = 0;
-const float SV_KIND_SCALAR  = 1;
-const float SV_KIND_ENUM    = 2;
-const float SV_KIND_STRING  = 3;
-const float SV_KIND_ACTION  = 4;
+const float SV_KIND_TOGGLE     = 0;
+const float SV_KIND_SCALAR     = 1;
+const float SV_KIND_ENUM       = 2;
+const float SV_KIND_STRING     = 3;
+const float SV_KIND_ACTION     = 4;
+// Multi-select dropdown — same row layout as SV_KIND_ENUM, but the
+// underlying cvar is a comma-separated list and the dropdown overlay
+// renders checkboxes that toggle bits without closing.  Currently
+// applied only to sv_default_utility (multi-grenade loadout).
+const float SV_KIND_ENUM_MULTI = 5;
+// Section header — renders a non-interactive bold label row in the
+// scroll list.  No cvar binding; sv_entry_cvar holds the literal
+// label text and the dispatcher draws it as a separator.
+const float SV_KIND_HEADER     = 6;
 const float SV_MAX_ENTRIES  = 128;
 
 // Tab IDs — also doubles as ordering for the tab strip below.
@@ -109,19 +118,7 @@ vector sv_enum_button_pos;
 vector sv_enum_button_size;
 var float sv_enum_entry_idx = -1;
 
-// Default-loadout dropdown data. Mirrors menu/m_createserver.qc so the
-// F2 rcon panel can show human-readable weapon names instead of raw ids.
-float  sv_loadout_primary_ids[]    = { 0,  3,    4,    19,   22,    16, 17, 10,  5,             7,     12,                8,          27,    24,    15,           23,      13,    18,     11    };
-string sv_loadout_primary_names[]  = {"None","AK47","M4A1","AWP","G3SG1","M3","MP5","K98","Flak Shotgun","Gauss","Grenade Launcher","Crossbow","Egon","RPG","HL Shotgun","HL SMG","M249","Rebar","Scout"};
-
-float  sv_loadout_secondary_ids[]   = { 0,     28,   1,              21,      9,      26,         6    };
-string sv_loadout_secondary_names[] = {"None","USP","Desert Eagle","Glock",".357","HL Glock","9mm" };
-
-float  sv_loadout_melee_ids[]       = { 0,     20,       2,       14       };
-string sv_loadout_melee_names[]     = {"None","Wrench","Knife","Crowbar" };
-
-float  sv_loadout_utility_ids[]     = { 0,     25       };
-string sv_loadout_utility_names[]   = {"None","Grenade" };
+// Default-loadout dropdown options come from shared/sh_weapon_manifest.qc.
 
 // Tickrate dropdown data. Matches Create Server, but the underlying
 // server cvar is sv_mintic (seconds per tick), so selections are
@@ -196,6 +193,8 @@ void(string label, string cvarname, float kind, float tab,
 {
     Server_AddEntryEx(label, cvarname, kind, tab, scope, accent, no_local_fallback);
 };
+
+void(string text, float tab) Server_AddHeader;  // forward — defined below near multi-enum helpers
 
 string(float idx) Server_GetStringEffective;  // forward
 
@@ -285,8 +284,6 @@ void() Server_LoadCycleMaps =
     sv_cycle_map_selected = 0;
 
     filestream f = fopen("data/maps.txt", FILE_READ);
-    if (f < 0)
-        f = fopen("maps.txt", FILE_READ);
 
     if (f >= 0)
     {
@@ -316,6 +313,21 @@ void() Server_LoadCycleMaps =
     }
 };
 
+// Map a manifest tab bitmask to the panel's first matching SV_TAB_*
+// ordinal.  Single cvar entries can have multiple TAB bits set (so
+// they appear in both the F2 panel and the Create Server menu); for
+// the F2 panel we pick the first F2-tab bit in priority order.
+// Returns -1 if no F2-panel tab bit is set.
+float(float tabs) Server_PanelTabFromMask =
+{
+         if (tabs & CVAR_TAB_RCON)   return SV_TAB_RCON;
+    else if (tabs & CVAR_TAB_MULTI)  return SV_TAB_MULTI;
+    else if (tabs & CVAR_TAB_SERVER) return SV_TAB_SERVER;
+    else if (tabs & CVAR_TAB_DEBUG)  return SV_TAB_DEBUG;
+    else if (tabs & CVAR_TAB_ODE)    return SV_TAB_ODE;
+    return -1;
+};
+
 void() Server_PanelInit =
 {
     if (sv_panel_initialized) return;
@@ -329,111 +341,64 @@ void() Server_PanelInit =
     sv_entry_count = 0;
     sv_enum_entry_idx = -1;
 
-    // ---------- Rcon ----------
+    // The Rcon password row appears TWICE on the panel: first as the
+    // user's local rcon password (gold accent, LOCAL scope, used to
+    // authenticate when the panel is talking to a remote server),
+    // then again as the server's rcon_password cvar (the real value
+    // an admin can change).  The manifest holds one entry per cvar
+    // — the first occurrence is added explicitly here so the row
+    // ordering matches the prior hand-written init.
     Server_AddNamed("Rcon Pw",        "rcon_password",  SV_KIND_STRING, SV_TAB_RCON, SV_SCOPE_LOCAL,  TRUE,  FALSE);
-    Server_AddNamed("hostname",       "hostname",       SV_KIND_STRING, SV_TAB_RCON, SV_SCOPE_SERVER, FALSE, TRUE);
-    Server_AddNamed("maxclients",     "maxclients",     SV_KIND_SCALAR, SV_TAB_RCON, SV_SCOPE_SERVER, FALSE, TRUE);
-    Server_AddNamed("password",       "password",       SV_KIND_STRING, SV_TAB_RCON, SV_SCOPE_SERVER, FALSE, TRUE);
-    Server_AddNamed("rcon_password",  "rcon_password",  SV_KIND_STRING, SV_TAB_RCON, SV_SCOPE_SERVER, FALSE, TRUE);
-    Server_AddNamed("sv_toss_tickrate","sv_toss_tickrate",SV_KIND_SCALAR,SV_TAB_RCON, SV_SCOPE_SERVER, FALSE, TRUE);
-    Server_AddNamed("Tickrate",       "sv_mintic",      SV_KIND_ENUM,   SV_TAB_RCON, SV_SCOPE_SERVER, FALSE, TRUE);
-    Server_AddNamed("sv_gamemode",    "sv_gamemode",    SV_KIND_ENUM,   SV_TAB_RCON, SV_SCOPE_SERVER, FALSE, TRUE);
-    Server_AddNamed("Default Primary",   "sv_default_primary",   SV_KIND_ENUM, SV_TAB_RCON, SV_SCOPE_SERVER, FALSE, TRUE);
-    Server_AddNamed("Default Secondary", "sv_default_secondary", SV_KIND_ENUM, SV_TAB_RCON, SV_SCOPE_SERVER, FALSE, TRUE);
-    Server_AddNamed("Default Melee",     "sv_default_melee",     SV_KIND_ENUM, SV_TAB_RCON, SV_SCOPE_SERVER, FALSE, TRUE);
-    Server_AddNamed("Default Utility",   "sv_default_utility",   SV_KIND_ENUM, SV_TAB_RCON, SV_SCOPE_SERVER, FALSE, TRUE);
-    Server_AddNamed("fraglimit",      "fraglimit",      SV_KIND_SCALAR, SV_TAB_RCON, SV_SCOPE_SERVER, FALSE, TRUE);
-    Server_AddNamed("Map",            "__cycle_map",    SV_KIND_ENUM,   SV_TAB_RCON, SV_SCOPE_LOCAL,  FALSE, FALSE);
-    Server_AddNamed("Change Map",     "__changelevel",  SV_KIND_ACTION, SV_TAB_RCON, SV_SCOPE_LOCAL,  FALSE, FALSE);
-    Server_AddNamed("Save Config",    "sv_saveconfig",  SV_KIND_ACTION, SV_TAB_RCON, SV_SCOPE_SERVER, FALSE, TRUE);
-    Server_AddNamed("Restart Round",  "sv_roundrestart",SV_KIND_ACTION, SV_TAB_RCON, SV_SCOPE_SERVER, FALSE, TRUE);
 
-    // ---------- Multiplayer ----------
-    Server_AddToggle("mp_cheats",            SV_TAB_MULTI);
-    Server_AddToggle("mp_falldamage",        SV_TAB_MULTI);
-    Server_AddScalar("mp_freezetime",        SV_TAB_MULTI);
-    Server_AddToggle("mp_friendlyfire",      SV_TAB_MULTI);
-    Server_AddToggle("mp_deadbodys",         SV_TAB_MULTI);
-    Server_AddScalar("mp_maprestartdelay",   SV_TAB_MULTI);
-    Server_AddScalar("mp_maxrounds",         SV_TAB_MULTI);
-    Server_AddToggle("mp_noblock",           SV_TAB_MULTI);
-    Server_AddToggle("mp_nomapweapons",      SV_TAB_MULTI);
-    Server_AddToggle("mp_respawn",           SV_TAB_MULTI);
-    Server_AddScalar("mp_respawndelay",      SV_TAB_MULTI);
-    Server_AddScalar("mp_roundrestartdelay", SV_TAB_MULTI);
-    Server_AddScalar("mp_roundtime",         SV_TAB_MULTI);
-    Server_AddScalar("mp_timelimit",         SV_TAB_MULTI);
-    Server_AddToggle("mp_weaponweight",      SV_TAB_MULTI);
-    Server_AddToggle("mp_disabledoors",      SV_TAB_MULTI);
+    // Walk the manifest.  Entries with any panel tab bit set are
+    // forwarded to Server_AddEntryEx with kind/scope/accent/
+    // no_local_fallback translated from the CVAR_UI_* / CVAR_FLAG_*
+    // fields.  Section transitions inside the ODE tab emit a header
+    // (sv_physdrop_* lives in section "Drop Physics" so the writer +
+    // panel both naturally separate it from sv_physprop_*).
+    string last_section_in_tab[SV_TAB_COUNT];
+    float i;
+    for (i = 0; i < g_cvar_count; i = i + 1)
+    {
+        float kind_m = g_cvar_ui_kind[i];
+        if (kind_m == CVAR_UI_NONE) continue;
+        if (kind_m == CVAR_UI_HEADER) continue;   // headers are emitted by section-change below
 
-    // ---------- Server ----------
-    Server_AddScalar("sv_gravity",                   SV_TAB_SERVER);
-    Server_AddScalar("sv_maxspeed",                  SV_TAB_SERVER);
-    Server_AddScalar("sv_friction",                  SV_TAB_SERVER);
-    Server_AddScalar("sv_waterfriction",             SV_TAB_SERVER);
-    Server_AddScalar("sv_wateraccelerate",           SV_TAB_SERVER);
-    Server_AddScalar("sv_accelerate",                SV_TAB_SERVER);
-    Server_AddScalar("sv_airaccelerate",             SV_TAB_SERVER);
-    Server_AddScalar("sv_stopspeed",                 SV_TAB_SERVER);
-    Server_AddScalar("sv_shiftspeed",                SV_TAB_SERVER);
-    Server_AddScalar("sv_eye_height",                SV_TAB_SERVER);
-    Server_AddScalar("sv_hull_height",               SV_TAB_SERVER);
-    Server_AddScalar("sv_minpitch",                  SV_TAB_SERVER);
-    Server_AddScalar("sv_maxpitch",                  SV_TAB_SERVER);
-    Server_AddToggle("sv_pure",                      SV_TAB_SERVER);
-    Server_AddToggle("sv_autohop",                   SV_TAB_SERVER);
-    Server_AddToggle("sv_stamina",                   SV_TAB_SERVER);
-    Server_AddToggle("sv_snipersway",                SV_TAB_SERVER);
-    Server_AddToggle("sv_lagcomp",                   SV_TAB_SERVER);
-    Server_AddScalar("sv_lagcomp_maxrewind",         SV_TAB_SERVER);
-    // sv_trust_clienthits is 0/1/2 — scalar.
-    Server_AddScalar("sv_trust_clienthits",          SV_TAB_SERVER);
-    Server_AddScalar("sv_hitbox_expand",             SV_TAB_SERVER);
-    Server_AddScalar("sv_anim_qu_per_sec",           SV_TAB_SERVER);
-    Server_AddScalar("sv_anim_qu_per_sec_crouch",    SV_TAB_SERVER);
-    Server_AddToggle("sv_command_continuation",      SV_TAB_SERVER);
-    Server_AddScalar("sv_pose_keepalive_ticks",      SV_TAB_SERVER);
-    Server_AddScalar("sv_wepswap_speed_transition",  SV_TAB_SERVER);
-    Server_AddScalar("sv_player_basebone",           SV_TAB_SERVER);
-    Server_AddToggle("sv_backdrop",                  SV_TAB_SERVER);
-    Server_AddToggle("sv_ode_loaded",                SV_TAB_SERVER);
-    // sv_antilag is 0/1/2/3 — scalar.
-    Server_AddScalar("sv_antilag",                   SV_TAB_SERVER);
-    Server_AddToggle("sv_bigcoords",                 SV_TAB_SERVER);
-    Server_AddToggle("sv_nqplayerphysics",           SV_TAB_SERVER);
-    Server_AddScalar("pm_ramp_bumpcount",            SV_TAB_SERVER);
-    Server_AddNamed("Write AllCommand",              "sv_writecvars",  SV_KIND_ACTION, SV_TAB_SERVER, SV_SCOPE_SERVER, FALSE, TRUE);
+        float tabs = g_cvar_ui_tabs[i];
+        float tab  = Server_PanelTabFromMask(tabs);
+        if (tab < 0) continue;
 
-    // ---------- Server debug ----------
-    Server_AddToggle("sv_debug_clienthits",   SV_TAB_DEBUG);
-    Server_AddToggle("sv_debug_hitclaim",     SV_TAB_DEBUG);
-    Server_AddToggle("sv_debug_lagcomp",      SV_TAB_DEBUG);
-    Server_AddToggle("sv_debug_camera",       SV_TAB_DEBUG);
-    // sv_debug_hitboxes accepts 0/1/2 — scalar.
-    Server_AddScalar("sv_debug_hitboxes",     SV_TAB_DEBUG);
-    Server_AddToggle("sv_debug_blendfracs",   SV_TAB_DEBUG);
-    Server_AddToggle("sv_debug_noblock",      SV_TAB_DEBUG);
-    Server_AddToggle("sv_debug_continuation", SV_TAB_DEBUG);
-    Server_AddToggle("sv_debug_ent_types",    SV_TAB_DEBUG);
-    Server_AddToggle("sv_debug_pickups",      SV_TAB_DEBUG);
-    Server_AddToggle("sv_debug_footsteps",    SV_TAB_DEBUG);
-    Server_AddToggle("sv_debug_physprops",    SV_TAB_DEBUG);
-    Server_AddToggle("sv_debug_spawns",       SV_TAB_DEBUG);
-    Server_AddToggle("sv_debug_weapons",      SV_TAB_DEBUG);
-    Server_AddToggle("sv_debug_wepswap",      SV_TAB_DEBUG);
+        // Emit a header row when we cross into a new section within
+        // the same panel tab (only currently used for "Drop Physics"
+        // in the ODE tab, but the mechanism is general so future
+        // sub-sections light up automatically).
+        if (last_section_in_tab[tab] != "" &&
+            last_section_in_tab[tab] != g_cvar_section[i])
+        {
+            Server_AddHeader(g_cvar_section[i], tab);
+        }
+        last_section_in_tab[tab] = g_cvar_section[i];
 
-    // ---------- ODE physics ----------
-    Server_AddToggle("physics_ode_autodisable",       SV_TAB_ODE);
-    Server_AddScalar("physics_ode_iterationsperframe",SV_TAB_ODE);
-    Server_AddToggle("physics_ode_worldquickstep",    SV_TAB_ODE);
-    Server_AddScalar("sv_physprop_hit_force",         SV_TAB_ODE);
-    Server_AddScalar("sv_physprop_use_force",         SV_TAB_ODE);
-    Server_AddScalar("sv_physprop_use_velmult",       SV_TAB_ODE);
-    Server_AddScalar("sv_physprop_mass",              SV_TAB_ODE);
-    Server_AddScalar("sv_physprop_erp",               SV_TAB_ODE);
-    Server_AddScalar("sv_physprop_damp_lin",          SV_TAB_ODE);
-    Server_AddScalar("sv_physprop_damp_ang",          SV_TAB_ODE);
-    Server_AddScalar("sv_physprop_friction",          SV_TAB_ODE);
+        float flags = g_cvar_ui_flags[i];
+        float scope             = (flags & CVAR_FLAG_SCOPE_LOCAL)        ? SV_SCOPE_LOCAL : SV_SCOPE_SERVER;
+        float accent            = (flags & CVAR_FLAG_ACCENT_GOLD)        ? TRUE  : FALSE;
+        float no_local_fallback = (flags & CVAR_FLAG_NO_LOCAL_FALLBACK)  ? TRUE  : FALSE;
+
+        // Manifest CVAR_UI_TOGGLE..HEADER are off-by-one from the
+        // panel's SV_KIND_* (SV_KIND_TOGGLE=0).  Subtract 1 to map.
+        float kind_p = kind_m - 1;
+
+        string label = (g_cvar_ui_label[i] != "") ? g_cvar_ui_label[i] : g_cvar_name[i];
+
+        Server_AddEntryEx(label, g_cvar_name[i], kind_p, tab,
+                          scope, accent, no_local_fallback);
+    }
+
+    // Pseudo-cvar rows (not real cvars, so not in the manifest).
+    // Both live in the RCON tab and target the local engine, not the
+    // remote server's cvar table.
+    Server_AddNamed("Map",        "__cycle_map",   SV_KIND_ENUM,   SV_TAB_RCON, SV_SCOPE_LOCAL, FALSE, FALSE);
+    Server_AddNamed("Change Map", "__changelevel", SV_KIND_ACTION, SV_TAB_RCON, SV_SCOPE_LOCAL, FALSE, FALSE);
 };
 
 // =============================================================
@@ -703,7 +668,12 @@ string(float idx) Server_GetStringEffective =
 
 float(float gm) Server_GamemodeIndex =
 {
-    return bound(GAMEMODE_TDM, floor(gm + 0.5), GAMEMODE_FFA);
+    // Clamp to the highest gamemode constant so newly-added modes
+    // (e.g. Paintgun) don't get truncated to FFA — that was the
+    // source of the F2 panel showing "Free For All" while the
+    // server was actually running Paintgun.  Update this bound
+    // whenever a new GAMEMODE_* is added.
+    return bound(GAMEMODE_TDM, floor(gm + 0.5), GAMEMODE_DEFUSE);
 };
 
 string(float gm) Server_GamemodeLabel =
@@ -715,6 +685,10 @@ string(float gm) Server_GamemodeLabel =
         return "Bhop";
     if (gm == GAMEMODE_FFA)
         return "Free For All";
+    if (gm == GAMEMODE_PAINTGUN)
+        return "Paintball";
+    if (gm == GAMEMODE_DEFUSE)
+        return "Defuse";
     return "Team Deathmatch";
 };
 
@@ -750,120 +724,125 @@ float(float tickrate) Server_TickrateFindIndex =
     return 0;
 };
 
-float(float idx) Server_EntryLoadoutKind =
+// Lookup the enum source for an entry: the manifest's g_cvar_ui_enum
+// for real cvars, plus hardcoded CVAR_ENUM_MAP_CYCLE for the pseudo-
+// cvar `__cycle_map` (which isn't in the manifest because it doesn't
+// correspond to a real cvar).
+float(float idx) Server_EntryEnumSource =
 {
     if (idx < 0 || idx >= sv_entry_count)
-        return -1;
-    string cn = sv_entry_cvar[idx];
-    if (cn == "sv_default_primary")   return 0;
-    if (cn == "sv_default_secondary") return 1;
-    if (cn == "sv_default_melee")     return 2;
-    if (cn == "sv_default_utility")   return 3;
+        return CVAR_ENUM_NONE;
+    if (sv_entry_cvar[idx] == "__cycle_map")
+        return CVAR_ENUM_MAP_CYCLE;
+    float mi = CVar_FindIndex(sv_entry_cvar[idx]);
+    if (mi < 0) return CVAR_ENUM_NONE;
+    return g_cvar_ui_enum[mi];
+};
+
+// Loadout slot index used by Server_LoadoutOption* helpers below.
+// Derived from the manifest's enum source so adding a new loadout
+// slot is one line in the manifest + one branch in the helpers.
+float(float idx) Server_EntryLoadoutKind =
+{
+    float src = Server_EntryEnumSource(idx);
+    if (src == CVAR_ENUM_LOADOUT_PRIMARY)   return 0;
+    if (src == CVAR_ENUM_LOADOUT_SECONDARY) return 1;
+    if (src == CVAR_ENUM_LOADOUT_MELEE)     return 2;
+    if (src == CVAR_ENUM_LOADOUT_UTILITY)   return 3;
     return -1;
 };
 
 float(float loadout_kind) Server_LoadoutOptionCount =
 {
-    if (loadout_kind == 0) return sv_loadout_primary_ids.length;
-    if (loadout_kind == 1) return sv_loadout_secondary_ids.length;
-    if (loadout_kind == 2) return sv_loadout_melee_ids.length;
-    if (loadout_kind == 3) return sv_loadout_utility_ids.length;
+    if (loadout_kind == 0) return WeaponManifest_LoadoutCount(WMF_SLOT_PRIMARY);
+    if (loadout_kind == 1) return WeaponManifest_LoadoutCount(WMF_SLOT_SECONDARY);
+    if (loadout_kind == 2) return WeaponManifest_LoadoutCount(WMF_SLOT_MELEE);
+    if (loadout_kind == 3) return WeaponManifest_LoadoutCount(WMF_SLOT_UTILITY);
     return 0;
 };
 
 float(float loadout_kind, float option_index) Server_LoadoutOptionId =
 {
-    if (loadout_kind == 0) return sv_loadout_primary_ids[option_index];
-    if (loadout_kind == 1) return sv_loadout_secondary_ids[option_index];
-    if (loadout_kind == 2) return sv_loadout_melee_ids[option_index];
-    if (loadout_kind == 3) return sv_loadout_utility_ids[option_index];
+    if (loadout_kind == 0) return WeaponManifest_LoadoutWeapon(WMF_SLOT_PRIMARY, option_index);
+    if (loadout_kind == 1) return WeaponManifest_LoadoutWeapon(WMF_SLOT_SECONDARY, option_index);
+    if (loadout_kind == 2) return WeaponManifest_LoadoutWeapon(WMF_SLOT_MELEE, option_index);
+    if (loadout_kind == 3) return WeaponManifest_LoadoutWeapon(WMF_SLOT_UTILITY, option_index);
     return 0;
 };
 
 string(float loadout_kind, float option_index) Server_LoadoutOptionLabel =
 {
-    if (loadout_kind == 0) return sv_loadout_primary_names[option_index];
-    if (loadout_kind == 1) return sv_loadout_secondary_names[option_index];
-    if (loadout_kind == 2) return sv_loadout_melee_names[option_index];
-    if (loadout_kind == 3) return sv_loadout_utility_names[option_index];
+    if (loadout_kind == 0) return WeaponManifest_LoadoutLabel(WMF_SLOT_PRIMARY, option_index);
+    if (loadout_kind == 1) return WeaponManifest_LoadoutLabel(WMF_SLOT_SECONDARY, option_index);
+    if (loadout_kind == 2) return WeaponManifest_LoadoutLabel(WMF_SLOT_MELEE, option_index);
+    if (loadout_kind == 3) return WeaponManifest_LoadoutLabel(WMF_SLOT_UTILITY, option_index);
     return "";
 };
 
 float(float loadout_kind, float weapon_id) Server_LoadoutFindIndex =
 {
-    float i;
-    float count = Server_LoadoutOptionCount(loadout_kind);
-    for (i = 0; i < count; i = i + 1)
-        if (Server_LoadoutOptionId(loadout_kind, i) == weapon_id)
-            return i;
+    if (loadout_kind == 0) return WeaponManifest_LoadoutFindIndex(WMF_SLOT_PRIMARY, weapon_id);
+    if (loadout_kind == 1) return WeaponManifest_LoadoutFindIndex(WMF_SLOT_SECONDARY, weapon_id);
+    if (loadout_kind == 2) return WeaponManifest_LoadoutFindIndex(WMF_SLOT_MELEE, weapon_id);
+    if (loadout_kind == 3) return WeaponManifest_LoadoutFindIndex(WMF_SLOT_UTILITY, weapon_id);
     return 0;
 };
 
+// Enum-source-keyed dispatch.  All four helpers below switch on the
+// CVAR_ENUM_* id that the manifest associated with the cvar (or the
+// hardcoded value Server_EntryEnumSource returns for pseudo-cvars).
+// Adding a new enum source = adding a constant in sh_cvar_table.qc
+// + one branch in each helper.
 float(float idx) Server_EntryOptionCount =
 {
-    if (idx < 0 || idx >= sv_entry_count)
-        return 0;
+    if (idx < 0 || idx >= sv_entry_count) return 0;
+    float src = Server_EntryEnumSource(idx);
+    if (src == CVAR_ENUM_MAP_CYCLE) return sv_cycle_maps_loaded ? buf_getsize(sv_cycle_maps) : 0;
+    if (src == CVAR_ENUM_TICKRATE)  return sv_tickrate_values.length;
+    if (src == CVAR_ENUM_GAMEMODE)  return 6;
     float loadout_kind = Server_EntryLoadoutKind(idx);
-    if (sv_entry_cvar[idx] == "__cycle_map")
-        return sv_cycle_maps_loaded ? buf_getsize(sv_cycle_maps) : 0;
-    if (sv_entry_cvar[idx] == "sv_mintic")
-        return sv_tickrate_values.length;
-    if (sv_entry_cvar[idx] == "sv_gamemode")
-        return 4;
-    if (loadout_kind >= 0)
-        return Server_LoadoutOptionCount(loadout_kind);
+    if (loadout_kind >= 0)          return Server_LoadoutOptionCount(loadout_kind);
     return 0;
 };
 
 float(float idx, float option_index) Server_EntryOptionValue =
 {
-    if (idx < 0 || idx >= sv_entry_count)
-        return 0;
+    if (idx < 0 || idx >= sv_entry_count) return 0;
+    float src = Server_EntryEnumSource(idx);
+    if (src == CVAR_ENUM_MAP_CYCLE) return option_index;
+    if (src == CVAR_ENUM_TICKRATE)  return sv_tickrate_values[option_index];
+    if (src == CVAR_ENUM_GAMEMODE)  return option_index;
     float loadout_kind = Server_EntryLoadoutKind(idx);
-    if (sv_entry_cvar[idx] == "__cycle_map")
-        return option_index;
-    if (sv_entry_cvar[idx] == "sv_mintic")
-        return sv_tickrate_values[option_index];
-    if (sv_entry_cvar[idx] == "sv_gamemode")
-        return option_index;
-    if (loadout_kind >= 0)
-        return Server_LoadoutOptionId(loadout_kind, option_index);
+    if (loadout_kind >= 0)          return Server_LoadoutOptionId(loadout_kind, option_index);
     return 0;
 };
 
 string(float idx, float option_index) Server_EntryOptionLabel =
 {
-    if (idx < 0 || idx >= sv_entry_count)
-        return "";
+    if (idx < 0 || idx >= sv_entry_count) return "";
+    float src = Server_EntryEnumSource(idx);
+    if (src == CVAR_ENUM_MAP_CYCLE) return bufstr_get(sv_cycle_maps, option_index);
+    if (src == CVAR_ENUM_TICKRATE)  return sv_tickrate_labels[option_index];
+    if (src == CVAR_ENUM_GAMEMODE)  return Server_GamemodeLabel(option_index);
     float loadout_kind = Server_EntryLoadoutKind(idx);
-    if (sv_entry_cvar[idx] == "__cycle_map")
-        return bufstr_get(sv_cycle_maps, option_index);
-    if (sv_entry_cvar[idx] == "sv_mintic")
-        return sv_tickrate_labels[option_index];
-    if (sv_entry_cvar[idx] == "sv_gamemode")
-        return Server_GamemodeLabel(option_index);
-    if (loadout_kind >= 0)
-        return Server_LoadoutOptionLabel(loadout_kind, option_index);
+    if (loadout_kind >= 0)          return Server_LoadoutOptionLabel(loadout_kind, option_index);
     return "";
 };
 
 float(float idx) Server_EntryCurrentEnumValue =
 {
-    if (idx < 0 || idx >= sv_entry_count)
-        return 0;
-    float loadout_kind = Server_EntryLoadoutKind(idx);
-    if (sv_entry_cvar[idx] == "__cycle_map")
+    if (idx < 0 || idx >= sv_entry_count) return 0;
+    float src = Server_EntryEnumSource(idx);
+    if (src == CVAR_ENUM_MAP_CYCLE)
     {
         float count = sv_cycle_maps_loaded ? buf_getsize(sv_cycle_maps) : 0;
-        if (count <= 0)
-            return 0;
+        if (count <= 0) return 0;
         sv_cycle_map_selected = bound(0, sv_cycle_map_selected, count - 1);
         return sv_cycle_map_selected;
     }
-    if (sv_entry_cvar[idx] == "sv_mintic")
-        return Server_TickrateValueFromMintic(Server_GetEffective(idx));
-    if (sv_entry_cvar[idx] == "sv_gamemode")
-        return Server_GamemodeIndex(Server_GetEffective(idx));
+    if (src == CVAR_ENUM_TICKRATE) return Server_TickrateValueFromMintic(Server_GetEffective(idx));
+    if (src == CVAR_ENUM_GAMEMODE) return Server_GamemodeIndex(Server_GetEffective(idx));
+    float loadout_kind = Server_EntryLoadoutKind(idx);
     if (loadout_kind >= 0)
         return Weapon_IdFromStringOrDefault(Server_GetStringEffective(idx), WEP_NONE);
     return 0;
@@ -871,25 +850,122 @@ float(float idx) Server_EntryCurrentEnumValue =
 
 string(float idx) Server_EntryCurrentEnumLabel =
 {
-    if (idx < 0 || idx >= sv_entry_count)
-        return "";
-    float loadout_kind = Server_EntryLoadoutKind(idx);
+    if (idx < 0 || idx >= sv_entry_count) return "";
+    float src = Server_EntryEnumSource(idx);
     float current_value = Server_EntryCurrentEnumValue(idx);
-    if (sv_entry_cvar[idx] == "__cycle_map")
+    if (src == CVAR_ENUM_MAP_CYCLE)
     {
         float count = sv_cycle_maps_loaded ? buf_getsize(sv_cycle_maps) : 0;
-        if (count <= 0)
-            return "(none)";
+        if (count <= 0) return "(none)";
         return bufstr_get(sv_cycle_maps, current_value);
     }
-    if (sv_entry_cvar[idx] == "sv_mintic")
-        return sv_tickrate_labels[Server_TickrateFindIndex(current_value)];
-    if (sv_entry_cvar[idx] == "sv_gamemode")
-        return Server_GamemodeLabel(current_value);
+    if (src == CVAR_ENUM_TICKRATE) return sv_tickrate_labels[Server_TickrateFindIndex(current_value)];
+    if (src == CVAR_ENUM_GAMEMODE) return Server_GamemodeLabel(current_value);
+    float loadout_kind = Server_EntryLoadoutKind(idx);
     if (loadout_kind >= 0)
         return Server_LoadoutOptionLabel(loadout_kind,
             Server_LoadoutFindIndex(loadout_kind, current_value));
     return "";
+};
+
+// -------- Multi-select enum (SV_KIND_ENUM_MULTI) --------
+// Read the cvar value, parse as comma-separated weapon-id list, and
+// return a bitmask of option indices (bit i set = option i checked).
+float(float idx) Server_EntryEnumMultiMask =
+{
+    if (idx < 0 || idx >= sv_entry_count)
+        return 0;
+    float loadout_kind = Server_EntryLoadoutKind(idx);
+    if (loadout_kind < 0)
+        return 0;
+
+    string list = Server_GetStringEffective(idx);
+    if (list == "")
+        return 0;
+
+    float n = tokenizebyseparator(list, ",");
+    float mask = 0;
+    float i;
+    for (i = 0; i < n; i++)
+    {
+        float wep_id = Weapon_IdFromStringOrDefault(argv(i), WEP_NONE);
+        float opt    = Server_LoadoutFindIndex(loadout_kind, wep_id);
+        float opt_count = Server_LoadoutOptionCount(loadout_kind);
+        if (opt < 0 || opt >= opt_count)
+            continue;
+        mask = mask | pow(2, opt);
+    }
+    return mask;
+};
+
+// Build a comma-separated weapon-id list from a bitmask of option
+// indices and write it back to the entry's cvar.  Empty mask becomes
+// "0" (PlayerSpawn falls back to WEP_NONE).
+void(float idx, float mask) Server_EntryEnumMultiSetMask =
+{
+    if (idx < 0 || idx >= sv_entry_count)
+        return;
+    float loadout_kind = Server_EntryLoadoutKind(idx);
+    if (loadout_kind < 0)
+        return;
+
+    float opt_count = Server_LoadoutOptionCount(loadout_kind);
+    string out = "";
+    float n_set = 0;
+    float i;
+    for (i = 0; i < opt_count; i++)
+    {
+        if (!(mask & pow(2, i)))
+            continue;
+        float wep_id = Server_LoadoutOptionId(loadout_kind, i);
+        if (n_set == 0)
+            out = ftos(wep_id);
+        else
+            out = strcat(out, ",", ftos(wep_id));
+        n_set++;
+    }
+    Server_SetEntryString(idx, n_set ? out : "0");
+};
+
+// Summary label for the closed-dropdown button.  "(none)" / one or
+// two names joined / "N selected" for three+.
+string(float idx) Server_EntryEnumMultiSummary =
+{
+    if (idx < 0 || idx >= sv_entry_count)
+        return "(none)";
+    float loadout_kind = Server_EntryLoadoutKind(idx);
+    if (loadout_kind < 0)
+        return "(none)";
+
+    float mask = Server_EntryEnumMultiMask(idx);
+    float opt_count = Server_LoadoutOptionCount(loadout_kind);
+    float i, n_set = 0;
+    string out = "";
+    for (i = 0; i < opt_count; i++)
+    {
+        if (!(mask & pow(2, i)))
+            continue;
+        if (n_set == 0)
+            out = Server_LoadoutOptionLabel(loadout_kind, i);
+        else if (n_set < 2)
+            out = strcat(out, ", ", Server_LoadoutOptionLabel(loadout_kind, i));
+        n_set++;
+    }
+    if (n_set == 0)
+        return "(none)";
+    if (n_set > 2)
+        return sprintf("%g selected", n_set);
+    return out;
+};
+
+// -------- Section header (SV_KIND_HEADER) --------
+// Adds a non-interactive separator row that displays `text` as a bold
+// label.  Stored in sv_entry_cvar so the row dispatcher can read it
+// without adding a new parallel array.
+void(string text, float tab) Server_AddHeader =
+{
+    Server_AddEntryEx(text, text, SV_KIND_HEADER, tab,
+        SV_SCOPE_LOCAL, FALSE, FALSE);
 };
 
 // =============================================================
@@ -1083,7 +1159,10 @@ void() Server_DrawEnumOverlay =
         return;
 
     float entry_idx = sv_enum_entry_idx;
-    float current_value = Server_EntryCurrentEnumValue(entry_idx);
+    float kind = sv_entry_kind[entry_idx];
+    float is_multi = (kind == SV_KIND_ENUM_MULTI);
+    float current_value = is_multi ? 0 : Server_EntryCurrentEnumValue(entry_idx);
+    float multi_mask = is_multi ? Server_EntryEnumMultiMask(entry_idx) : 0;
     float option_count = Server_EntryOptionCount(entry_idx);
     float item_h = 20;
     float list_h = item_h * option_count + 4;
@@ -1099,13 +1178,33 @@ void() Server_DrawEnumOverlay =
     for (float option_index = 0; option_index < option_count; option_index = option_index + 1)
     {
         float option_value = Server_EntryOptionValue(entry_idx, option_index);
-        vector col  = option_value == current_value ? SV_BTN_ACTIVE : SV_BTN_OFF;
-        vector bord = option_value == current_value ? SV_BTN_ACTIVE_BORD : SV_BTN_OFF_BORD;
+        float bit = is_multi ? pow(2, option_index) : 0;
+        float checked = is_multi ? ((multi_mask & bit) ? 1 : 0)
+                                 : (option_value == current_value);
+        vector col  = checked ? SV_BTN_ACTIVE      : SV_BTN_OFF;
+        vector bord = checked ? SV_BTN_ACTIVE_BORD : SV_BTN_OFF_BORD;
+        string label = is_multi
+            ? strcat(checked ? "[x] " : "[ ] ", Server_EntryOptionLabel(entry_idx, option_index))
+            : Server_EntryOptionLabel(entry_idx, option_index);
+
         if (!Debug_Button(sprintf("sv_enum_item_%g_%g", entry_idx, option_index),
             [2, 2 + option_index * item_h],
             [sv_enum_button_size_x - 4, item_h - 2],
-            Server_EntryOptionLabel(entry_idx, option_index), col, bord))
+            label, col, bord))
             continue;
+
+        if (is_multi)
+        {
+            // Toggle just this bit; keep dropdown open so the user can
+            // pick more options.
+            float new_mask = checked ? (multi_mask - bit) : (multi_mask + bit);
+            Server_EntryEnumMultiSetMask(entry_idx, new_mask);
+            multi_mask = new_mask;
+            // Don't return — let other rows respond to clicks on the
+            // same frame (Debug_Button only reports the row that was
+            // actually clicked, so the rest of the loop is no-ops).
+            continue;
+        }
 
         Server_SetEntryValue(entry_idx, option_value);
         sv_enum_open = 0;
@@ -1207,7 +1306,7 @@ void() Server_DrawBody =
                 Server_FireEntryAction(i);
             }
         }
-        else if (kind == SV_KIND_ENUM)
+        else if (kind == SV_KIND_ENUM || kind == SV_KIND_ENUM_MULTI)
         {
             float enum_input_w = floor(row_w * 0.5);
             float enum_lbl_w   = row_w - enum_input_w;
@@ -1227,10 +1326,14 @@ void() Server_DrawBody =
                 sv_enum_button_size = [enum_input_w, SV_ROW_H - 2];
             }
 
+            string btn_label = (kind == SV_KIND_ENUM_MULTI)
+                ? Server_EntryEnumMultiSummary(i)
+                : Server_EntryCurrentEnumLabel(i);
+
             if (Debug_Button(id_btn,
                 [SV_PAD + enum_lbl_w, row_y + 1],
                 [enum_input_w, SV_ROW_H - 2],
-                strcat(Server_EntryCurrentEnumLabel(i), this_open ? " -" : " v"),
+                strcat(btn_label, this_open ? " -" : " v"),
                 btn_col, btn_bord))
             {
                 if (option_count <= 0)
@@ -1257,6 +1360,15 @@ void() Server_DrawBody =
                     sv_enum_button_size = [enum_input_w, SV_ROW_H - 2];
                 }
             }
+        }
+        else if (kind == SV_KIND_HEADER)
+        {
+            // Bold separator row.  Slightly taller-feeling via a subtle
+            // background tint so the eye picks out the section break in
+            // a long scroll list.
+            sui_fill([SV_PAD, row_y + 1], [row_w, SV_ROW_H - 2], '0.10 0.12 0.14', 0.85, 0);
+            sui_text([SV_PAD + 6, row_y + 6], SV_FONT,
+                     sv_entry_label[i], SV_GOLD_TEXT, 1, 0);
         }
         else // SV_KIND_SCALAR or SV_KIND_STRING
         {

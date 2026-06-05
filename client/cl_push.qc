@@ -48,11 +48,16 @@ void(entity trig) push_list_remove_csqc =
 	}
 };
 
-// Read a trigger_push entity update from the server and add to the list
+// Read a trigger_push entity update from the server and reconcile
+// CSQC list membership with the server's active state.  The trailing
+// active byte (0/1) lets the server toggle a trigger on and off
+// without removing the entity from the snapshot — keeps client and
+// server in lockstep through enable/disable cycles.
 void() CSQC_PushTrigger_Update =
 {
 	vector org, emins, emaxs;
 	float  mi;
+	float  active;
 
 	org   = readvector();
 	emins = readvector();
@@ -61,6 +66,7 @@ void() CSQC_PushTrigger_Update =
 	self.speed      = readfloat();
 	self.spawnflags = readfloat();
 	mi              = readshort();
+	active          = readbyte();
 
 	setorigin(self, org);
 	// Bind the BSP submodel BEFORE setsize so PM_BoxInTriggerBrush's
@@ -71,33 +77,35 @@ void() CSQC_PushTrigger_Update =
 		setmodelindex(self, mi);
 	setsize(self, emins, emaxs);
 
-	// Only add if not already in the list.  Walk the whole list to
-	// be sure — the old check (self.push_next == world) was fooled
-	// when push_next had been stomped back to world while self was
-	// still reachable from the head, creating a cycle on add.
-	if (push_trigger_list != self)
+	// Walk the list once to determine current membership.
+	entity scan;
+	float  i = 0;
+	float  in_list = (push_trigger_list == self);
+	if (!in_list)
 	{
-		entity scan;
-		float  i = 0;
-		float  already_present = 0;
 		for (scan = push_trigger_list; scan; scan = scan.push_next)
 		{
 			if (scan == self)
 			{
-				already_present = 1;
+				in_list = 1;
 				break;
 			}
 			i = i + 1;
 			if (i > 4096)
 			{
-				dprint("CSQC_PushTrigger_Update: cycle detected during add-scan\n");
+				dprint("CSQC_PushTrigger_Update: cycle detected during scan\n");
 				break;
 			}
 		}
-		if (!already_present)
-		{
-			self.push_next    = push_trigger_list;
-			push_trigger_list = self;
-		}
+	}
+
+	if (active && !in_list)
+	{
+		self.push_next    = push_trigger_list;
+		push_trigger_list = self;
+	}
+	else if (!active && in_list)
+	{
+		push_list_remove_csqc(self);
 	}
 };

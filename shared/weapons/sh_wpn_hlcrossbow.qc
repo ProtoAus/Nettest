@@ -335,7 +335,7 @@ void() W_CrossbowDrop =
     tgt.mag_crossbow = self.mag_crossbow; tgt.ammo_crossbow = self.ammo_crossbow;
     self.mag_crossbow = 0; self.ammo_crossbow = 0;
     setmodel(tgt, "models/weapons/wpn_hlcrossbow/w_crossbow.mdl");
-    setsize(tgt, '-16 -16 0', '16 16 32');
+    setsize(tgt, '-16 -16 0', '16 16 48');
     tgt.classname = "weapon_crossbow"; tgt.solid = SOLID_NOT; tgt.movetype = MOVETYPE_TOSS;
     tgt.weapon = WEP_CROSSBOW; tgt.weapon_slot = SLOT_PRIMARY;
     tgt.weap_draw = W_CrossbowEquip; tgt.weap_drop_func = W_CrossbowDrop;
@@ -346,7 +346,7 @@ void() W_CrossbowDrop =
 void() weapon_crossbow =
 {
     setmodel(self, "models/weapons/wpn_hlcrossbow/w_crossbow.mdl");
-    setsize(self, '-16 -16 0', '16 16 32');
+    setsize(self, '-16 -16 0', '16 16 48');
     self.classname = "weapon_crossbow"; self.solid = SOLID_TRIGGER; self.movetype = MOVETYPE_TOSS;
     self.weapon = WEP_CROSSBOW; self.weapon_slot = SLOT_PRIMARY;
     self.weap_draw = W_CrossbowEquip; self.weap_drop_func = W_CrossbowDrop;
@@ -414,7 +414,7 @@ void() CSQC_PredictCrossbowCommand =
                 if (self.zoomstage > 0)
                 {
                     // Scoped: instant hitscan trace + stuck rebar
-                    traceline(fire_org, fire_org + fire_dir * 8192, MOVE_NORMAL, self);
+                    CSQC_WeaponTraceLine(fire_org, fire_org + fire_dir * 8192, MOVE_NORMAL, self);
                     if (trace_fraction < 1.0)
                     {
                         vector hit_pos = trace_endpos;
@@ -453,7 +453,7 @@ void() CSQC_PredictCrossbowCommand =
                     bolt.solid = SOLID_NOT;
                     bolt.drawmask = MASK_ENGINE;
 
-                    traceline(fire_org, fire_org + fire_dir * 8192, MOVE_NORMAL, self);
+                    CSQC_WeaponTraceLine(fire_org, fire_org + fire_dir * 8192, MOVE_NORMAL, self);
                     if (trace_fraction < 1.0)
                     {
                         hit_dist = vlen(trace_endpos - fire_org);

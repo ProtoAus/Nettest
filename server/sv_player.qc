@@ -337,6 +337,16 @@ void() PlayerBeginTeamSelection =
     self.slot_utility         = WEP_NONE;
     self.slot_utility_equip   = __NULL__;
     self.slot_utility_drop    = __NULL__;
+    W_SlotAmmo_ClearSlots(self);
+    self.ammo_hlgrenade       = 0;
+    self.ammo_snowball        = 0;
+    self.ammo_cshegrenade     = 0;
+    self.ammo_csflashbang     = 0;
+    self.ammo_cssmokegrenade  = 0;
+    self.mag_paintball        = 0;
+    self.ammo_paintball       = 0;
+    self.snowball_has_slingshot = FALSE;
+    self.snowball_use_slingshot = FALSE;
     self.team_menu_request_serial = 0;
     self.velocity = '0 0 0';
     self.fixangle = TRUE;
@@ -354,6 +364,86 @@ void() PlayerBeginTeamSelection =
 
 void() PlayerSpawn;
 .entity player_visual_proxy;  // forward declaration (defined below)
+
+void(vector org, void() spawn_func) SV_DebugSpawnWeapon =
+{
+    entity saved_self = self;
+
+    self = spawn();
+    setorigin(self, org);
+    spawn_func();
+
+    // Debug spawns trip the sv_debug_weapon_spawning early-return inside
+    // W_RegisterMapWeapon, which means the slot-ammo seed lines (the
+    // W_SlotAmmo_SaveLegacy + W_SlotAmmo_CopyPlayerToDrop pair that map
+    // weapons rely on) never run.  Without those, weapon_drop_mag/ammo
+    // stay zero on the entity, and weapon_touch's slot-ammo path
+    // overwrites the legacy mag_*/ammo_* fields back to zero on pickup
+    // — debug weapons came up empty.  Run the seed manually here so the
+    // ammo the weapon_*() spawn function set on legacy fields makes it
+    // into the drop fields the slot-ammo pipeline reads.
+    W_SlotAmmo_SaveLegacy(self, self.weapon);
+    W_SlotAmmo_CopyPlayerToDrop(self, self, self.weapon);
+
+    if (W_PhysDropAllowed(self.weapon))
+    {
+        // Same mesh-aware floor snap that map weapons get in
+        // W_RegisterMapWeapon — without it, debug weapons spawn at the
+        // requested grid origin (typically a few units above the floor),
+        // ODE detects mesh-below-bbox penetration on activation and
+        // ejects them upward, producing the same bounce cascade
+        // map weapons used to suffer from at round restart.
+        if (!W_PhysDropGroundSnap())
+            self.velocity = '0 0 -200';   // void fallback — let TOSS find ground
+        self.owner = world;
+        W_PhysDropStart(self, 0);
+    }
+
+    self = saved_self;
+};
+
+vector(vector base, float row, float col) SV_DebugWeaponOrigin =
+{
+    return base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48);
+};
+
+void(vector org, float weapon_id) SV_DebugSpawnWeaponId =
+{
+	     if (weapon_id == WEP_AK47)           SV_DebugSpawnWeapon(org, weapon_ak47);
+	else if (weapon_id == WEP_HDAK47)         SV_DebugSpawnWeapon(org, weapon_hdak47);
+	else if (weapon_id == WEP_M4A1)           SV_DebugSpawnWeapon(org, weapon_m4a1);
+	else if (weapon_id == WEP_CSAWP)          SV_DebugSpawnWeapon(org, weapon_csawp);
+	else if (weapon_id == WEP_G3SG1)          SV_DebugSpawnWeapon(org, weapon_g3sg1);
+	else if (weapon_id == WEP_CSM3)           SV_DebugSpawnWeapon(org, weapon_csm3);
+	else if (weapon_id == WEP_CSMP5)          SV_DebugSpawnWeapon(org, weapon_csmp5);
+	else if (weapon_id == WEP_PAINTBALL)      SV_DebugSpawnWeapon(org, weapon_paintball);
+	else if (weapon_id == WEP_DOD98K)         SV_DebugSpawnWeapon(org, weapon_dod98k);
+	else if (weapon_id == WEP_FLAKSHOTGUN)    SV_DebugSpawnWeapon(org, weapon_flakshotgun);
+	else if (weapon_id == WEP_GAUSS)          SV_DebugSpawnWeapon(org, weapon_gauss);
+	else if (weapon_id == WEP_GRENADELAUNCHER) SV_DebugSpawnWeapon(org, weapon_grenadelauncher);
+	else if (weapon_id == WEP_CROSSBOW)       SV_DebugSpawnWeapon(org, weapon_crossbow);
+	else if (weapon_id == WEP_HLEGON)         SV_DebugSpawnWeapon(org, weapon_hlegon);
+	else if (weapon_id == WEP_HLRPG)          SV_DebugSpawnWeapon(org, weapon_hlrpg);
+	else if (weapon_id == WEP_HLSHOTGUN)      SV_DebugSpawnWeapon(org, weapon_hlshotgun);
+	else if (weapon_id == WEP_HLSMG)          SV_DebugSpawnWeapon(org, weapon_hlsmg);
+	else if (weapon_id == WEP_M249)           SV_DebugSpawnWeapon(org, weapon_m249);
+	else if (weapon_id == WEP_REBAR)          SV_DebugSpawnWeapon(org, weapon_rebar);
+	else if (weapon_id == WEP_SCOUT)          SV_DebugSpawnWeapon(org, weapon_scout);
+	else if (weapon_id == WEP_DEAGLE)         SV_DebugSpawnWeapon(org, weapon_deagle);
+	else if (weapon_id == WEP_GLOCK)          SV_DebugSpawnWeapon(org, weapon_glock);
+	else if (weapon_id == WEP_357)            SV_DebugSpawnWeapon(org, weapon_357);
+	else if (weapon_id == WEP_HLGLOCK)        SV_DebugSpawnWeapon(org, weapon_hlglock);
+	else if (weapon_id == WEP_PISTOL)         SV_DebugSpawnWeapon(org, weapon_pistol);
+	else if (weapon_id == WEP_WRENCH)         SV_DebugSpawnWeapon(org, weapon_wrench);
+	else if (weapon_id == WEP_KNIFE)          SV_DebugSpawnWeapon(org, weapon_knife);
+	else if (weapon_id == WEP_HLCROWBAR)      SV_DebugSpawnWeapon(org, weapon_hlcrowbar);
+	else if (weapon_id == WEP_HLGRENADE)      SV_DebugSpawnWeapon(org, weapon_hlgrenade);
+	else if (weapon_id == WEP_SNOWBALL)       SV_DebugSpawnWeapon(org, weapon_snowball);
+	else if (weapon_id == WEP_SLINGSHOT)      SV_DebugSpawnWeapon(org, weapon_slingshot);
+	else if (weapon_id == WEP_CSHEGRENADE)    SV_DebugSpawnWeapon(org, weapon_cshegrenade);
+	else if (weapon_id == WEP_CSFLASHBANG)    SV_DebugSpawnWeapon(org, weapon_csflashbang);
+	else if (weapon_id == WEP_CSSMOKEGRENADE) SV_DebugSpawnWeapon(org, weapon_cssmokegrenade);
+};
 
 // Apply the correct player model based on team + model_index.
 void() PlayerApplyModel =
@@ -426,6 +516,32 @@ void(float new_team, float model_idx) PlayerJoinTeam =
     PlayerApplyTeamColours();
     PlayerRefreshScoreboardInfo(self);
 
+    // Auto-restart trigger when the player count goes from 1 to 2 —
+    // checked BEFORE the elim/paintgun deferred-spawn return below so
+    // a new joiner who lands in the dead/spec pending state still
+    // fires the restart.  Walk player_chain_head and count teamed
+    // players (TEAM_BLUE + TEAM_RED).  If we're now the second teamed
+    // player and the round was already running (round_phase != NONE),
+    // queue a restart via the standard sv_roundrestart admin trigger.
+    // Works in all gamemodes — score / round timer reset on the
+    // restart path.
+    if (round_phase != ROUND_PHASE_NONE)
+    {
+        float teamed_count = 0;
+        entity scan = player_chain_head;
+        while (scan)
+        {
+            if (scan.player_team == TEAM_BLUE || scan.player_team == TEAM_RED)
+                teamed_count = teamed_count + 1;
+            scan = scan.player_chain_next;
+        }
+        if (teamed_count == 2)
+        {
+            cvar_set("sv_roundrestart", "1");
+            bprint(PRINT_HIGH, "Second player joined — restarting round.\n");
+        }
+    }
+
     // Elimination mid-round join: stay invisible/non-colliding until the
     // next RoundRestart. RoundRestart's teamed-player loop in sv_main.qc
     // already clears is_dead/pending_round_join and calls PlayerSpawn,
@@ -434,7 +550,8 @@ void(float new_team, float model_idx) PlayerJoinTeam =
     // Spec-leavers also bypass this branch — they should fully spawn
     // even mid-round (they were already a non-participant).
     if (!was_spec
-        && cvar("sv_gamemode") == GAMEMODE_ELIMINATION
+        && (cvar("sv_gamemode") == GAMEMODE_ELIMINATION
+            || cvar("sv_gamemode") == GAMEMODE_PAINTGUN)
         && (round_phase == ROUND_PHASE_ACTIVE
             || round_phase == ROUND_PHASE_ROUND_END))
     {
@@ -462,7 +579,11 @@ void(float new_team, float model_idx) PlayerJoinTeam =
 
     PlayerSpawn();
 
-    // Start the first round when the first player joins a team
+    // Start the first round when the first player joins a team.
+    // (The 2-player auto-restart trigger lives above the deferred-spawn
+    // branch so it fires for both fully-spawned and pending-spawn
+    // joiners — see the count-and-set-sv_roundrestart block earlier in
+    // this function.)
     if (round_phase == ROUND_PHASE_NONE)
     {
         round_active = TRUE;
@@ -1282,6 +1403,8 @@ float(entity playerent, float changedflags) PM_PredictionProxy_SendEntity =
 		WriteFloat(MSG_ENTITY, max(0, self.attack_finished - time));
 		WriteFloat(MSG_ENTITY, (self.wep_anim_start > 0) ? max(0, time - self.wep_anim_start) : 0);
 		WriteByte(MSG_ENTITY, self.zoomstage);
+		WriteByte(MSG_ENTITY, self.snowball_has_slingshot ? 1 : 0);
+		WriteByte(MSG_ENTITY, self.snowball_use_slingshot ? 1 : 0);
 		// Speed-factor blend state — preserves in-flight transition
 		// across reconcile so client replay and server pmove stay
 		// synchronized through ping-window weapon switches.
@@ -1291,81 +1414,26 @@ float(entity playerent, float changedflags) PM_PredictionProxy_SendEntity =
 
 	if (changedflags & PM_SF_AMMO)
 	{
-		// 6-byte bitmask first, then only the fields whose bit is set.
-		// Matches PM_SyncPredictionProxy's diff order exactly — bit N of
-		// mbK corresponds to the Nth field in byte K's block below.
+		// Compact slot-ammo bitmask. Primary/secondary ammo is canonical;
+		// utilities remain separate because utility inventory is multi-carry.
 		float m0 = self.pm_ammo_mb0;
 		float m1 = self.pm_ammo_mb1;
-		float m2 = self.pm_ammo_mb2;
-		float m3 = self.pm_ammo_mb3;
-		float m4 = self.pm_ammo_mb4;
-		float m5 = self.pm_ammo_mb5;
 
 		WriteByte(MSG_ENTITY, m0);
 		WriteByte(MSG_ENTITY, m1);
-		WriteByte(MSG_ENTITY, m2);
-		WriteByte(MSG_ENTITY, m3);
-		WriteByte(MSG_ENTITY, m4);
-		WriteByte(MSG_ENTITY, m5);
 
-		// byte 0
-		if (m0 &   1) WriteByte(MSG_ENTITY, self.mag_deagle);
-		if (m0 &   2) WriteByte(MSG_ENTITY, self.ammo_deagle);
-		if (m0 &   4) WriteByte(MSG_ENTITY, self.mag_ak47);
-		if (m0 &   8) WriteByte(MSG_ENTITY, self.ammo_ak47);
-		if (m0 &  16) WriteByte(MSG_ENTITY, self.mag_m4a1);
-		if (m0 &  32) WriteByte(MSG_ENTITY, self.ammo_m4a1);
-		if (m0 &  64) WriteByte(MSG_ENTITY, self.m4a1_silenced);
-		if (m0 & 128) WriteByte(MSG_ENTITY, self.mag_flakshotgun);
+		if (m0 &   1) WriteByte(MSG_ENTITY, self.slot_primary_mag);
+		if (m0 &   2) WriteByte(MSG_ENTITY, self.slot_primary_ammo);
+		if (m0 &   4) WriteByte(MSG_ENTITY, self.slot_primary_aux);
+		if (m0 &   8) WriteByte(MSG_ENTITY, self.slot_secondary_mag);
+		if (m0 &  16) WriteByte(MSG_ENTITY, self.slot_secondary_ammo);
+		if (m0 &  32) WriteByte(MSG_ENTITY, self.slot_secondary_aux);
+		if (m0 &  64) WriteByte(MSG_ENTITY, self.ammo_hlgrenade);
+		if (m0 & 128) WriteByte(MSG_ENTITY, self.ammo_snowball);
 
-		// byte 1
-		if (m1 &   1) WriteByte(MSG_ENTITY, self.mag_pistol);
-		if (m1 &   2) WriteByte(MSG_ENTITY, self.ammo_pistol);
-		if (m1 &   4) WriteByte(MSG_ENTITY, self.mag_scout);
-		if (m1 &   8) WriteByte(MSG_ENTITY, self.ammo_scout);
-		if (m1 &  16) WriteByte(MSG_ENTITY, self.mag_357);
-		if (m1 &  32) WriteByte(MSG_ENTITY, self.ammo_357);
-		if (m1 &  64) WriteByte(MSG_ENTITY, self.mag_m249);
-		if (m1 & 128) WriteByte(MSG_ENTITY, self.ammo_m249);
-
-		// byte 2
-		if (m2 &   1) WriteByte(MSG_ENTITY, self.mag_awp);
-		if (m2 &   2) WriteByte(MSG_ENTITY, self.ammo_awp);
-		if (m2 &   4) WriteByte(MSG_ENTITY, self.mag_98k);
-		if (m2 &   8) WriteByte(MSG_ENTITY, self.ammo_98k);
-		if (m2 &  16) WriteByte(MSG_ENTITY, self.mag_shotgun);
-		if (m2 &  32) WriteByte(MSG_ENTITY, self.ammo_shotgun);
-		if (m2 &  64) WriteByte(MSG_ENTITY, self.mag_m3);
-		if (m2 & 128) WriteByte(MSG_ENTITY, self.ammo_m3);
-
-		// byte 3
-		if (m3 &   1) WriteByte(MSG_ENTITY, self.mag_mp5);
-		if (m3 &   2) WriteByte(MSG_ENTITY, self.ammo_mp5);
-		if (m3 &   4) WriteByte(MSG_ENTITY, self.mag_crossbow);
-		if (m3 &   8) WriteByte(MSG_ENTITY, self.ammo_crossbow);
-		if (m3 &  16) WriteByte(MSG_ENTITY, self.mag_grenadelauncher);
-		if (m3 &  32) WriteByte(MSG_ENTITY, self.mag_rebar);
-		if (m3 &  64) WriteByte(MSG_ENTITY, self.ammo_gauss);
-		if (m3 & 128) WriteByte(MSG_ENTITY, self.mag_glock);
-
-		// byte 4
-		if (m4 &   1) WriteByte(MSG_ENTITY, self.ammo_glock);
-		if (m4 &   2) WriteByte(MSG_ENTITY, self.mag_g3sg1);
-		if (m4 &   4) WriteByte(MSG_ENTITY, self.ammo_g3sg1);
-		if (m4 &   8) WriteByte(MSG_ENTITY, self.mag_hlsmg);
-		if (m4 &  16) WriteByte(MSG_ENTITY, self.ammo_hlsmg);
-		if (m4 &  32) WriteByte(MSG_ENTITY, self.ammo_hlsmg_grenades);
-		if (m4 &  64) WriteByte(MSG_ENTITY, self.mag_hlrpg);
-		if (m4 & 128) WriteByte(MSG_ENTITY, self.ammo_hlrpg);
-
-		// byte 5 (bit 7 unused — 47 fields total)
-		if (m5 &   1) WriteByte(MSG_ENTITY, self.ammo_hlgrenade);
-		if (m5 &   2) WriteByte(MSG_ENTITY, self.mag_hlglock);
-		if (m5 &   4) WriteByte(MSG_ENTITY, self.ammo_hlglock);
-		if (m5 &   8) WriteByte(MSG_ENTITY, self.ammo_hlegon);
-		if (m5 &  16) WriteByte(MSG_ENTITY, self.mag_csusp);
-		if (m5 &  32) WriteByte(MSG_ENTITY, self.ammo_csusp);
-		if (m5 &  64) WriteByte(MSG_ENTITY, self.csusp_silenced);
+		if (m1 &   1) WriteByte(MSG_ENTITY, self.ammo_cshegrenade);
+		if (m1 &   2) WriteByte(MSG_ENTITY, self.ammo_csflashbang);
+		if (m1 &   4) WriteByte(MSG_ENTITY, self.ammo_cssmokegrenade);
 
 		// Consume the mask now that we've written all pending fields —
 		// PM_SyncPredictionProxy accumulates bits with |= across multiple
@@ -1378,6 +1446,7 @@ float(entity playerent, float changedflags) PM_PredictionProxy_SendEntity =
 		self.pm_ammo_mb3 = 0;
 		self.pm_ammo_mb4 = 0;
 		self.pm_ammo_mb5 = 0;
+		self.pm_ammo_mb6 = 0;
 	}
 
 	return TRUE;
@@ -1408,53 +1477,30 @@ float(entity playerent, float changedflags) dropped_weapon_SendEntity =
 	WriteCoord(MSG_ENTITY, self.velocity_x);
 	WriteCoord(MSG_ENTITY, self.velocity_y);
 	WriteCoord(MSG_ENTITY, self.velocity_z);
+	// Angular velocity lets CSQC visually tumble ODE drops between server
+	// samples instead of only snapping to the latest authoritative angles.
+	WriteCoord(MSG_ENTITY, self.avelocity_x);
+	WriteCoord(MSG_ENTITY, self.avelocity_y);
+	WriteCoord(MSG_ENTITY, self.avelocity_z);
 	WriteString(MSG_ENTITY, self.model);
 
-	float mag = 0, ammo = 0, silencer = 0;
-	float wep = self.weapon;
-	     if (wep == WEP_AK47)            { mag = self.mag_ak47;            ammo = self.ammo_ak47;            }
-	else if (wep == WEP_M4A1)            { mag = self.mag_m4a1;            ammo = self.ammo_m4a1;            silencer = self.m4a1_silenced; }
-	else if (wep == WEP_CSAWP)           { mag = self.mag_awp;             ammo = self.ammo_awp;             }
-	else if (wep == WEP_G3SG1)           { mag = self.mag_g3sg1;           ammo = self.ammo_g3sg1;           }
-	else if (wep == WEP_CSM3)            { mag = self.mag_m3;              ammo = self.ammo_m3;              }
-	else if (wep == WEP_CSMP5)           { mag = self.mag_mp5;             ammo = self.ammo_mp5;             }
-	else if (wep == WEP_DOD98K)          { mag = self.mag_98k;             ammo = self.ammo_98k;             }
-	else if (wep == WEP_FLAKSHOTGUN)     { mag = self.mag_flakshotgun;                                       }
-	else if (wep == WEP_GAUSS)           {                                 ammo = self.ammo_gauss;           }
-	else if (wep == WEP_GRENADELAUNCHER) { mag = self.mag_grenadelauncher;                                   }
-	else if (wep == WEP_CROSSBOW)        { mag = self.mag_crossbow;        ammo = self.ammo_crossbow;        }
-	else if (wep == WEP_HLEGON)          {                                 ammo = self.ammo_hlegon;          }
-	else if (wep == WEP_HLRPG)           { mag = self.mag_hlrpg;           ammo = self.ammo_hlrpg;           }
-	else if (wep == WEP_HLSHOTGUN)       { mag = self.mag_shotgun;         ammo = self.ammo_shotgun;         }
-	else if (wep == WEP_HLSMG)           { mag = self.mag_hlsmg;           ammo = self.ammo_hlsmg;           }
-	else if (wep == WEP_M249)            { mag = self.mag_m249;            ammo = self.ammo_m249;            }
-	else if (wep == WEP_REBAR)           { mag = self.mag_rebar;                                             }
-	else if (wep == WEP_SCOUT)           { mag = self.mag_scout;           ammo = self.ammo_scout;           }
-	else if (wep == WEP_CSUSP)           { mag = self.mag_csusp;           ammo = self.ammo_csusp;           silencer = self.csusp_silenced; }
-	else if (wep == WEP_DEAGLE)          { mag = self.mag_deagle;          ammo = self.ammo_deagle;          }
-	else if (wep == WEP_GLOCK)           { mag = self.mag_glock;           ammo = self.ammo_glock;           }
-	else if (wep == WEP_357)             { mag = self.mag_357;             ammo = self.ammo_357;             }
-	else if (wep == WEP_HLGLOCK)         { mag = self.mag_hlglock;         ammo = self.ammo_hlglock;         }
-	else if (wep == WEP_PISTOL)          { mag = self.mag_pistol;          ammo = self.ammo_pistol;          }
-	else if (wep == WEP_HLGRENADE)       {                                 ammo = self.ammo_hlgrenade;       }
-	// Melee (WRENCH/KNIFE/HLCROWBAR) — no ammo, leave both zero.
-
-	WriteByte(MSG_ENTITY, mag);
-	WriteByte(MSG_ENTITY, ammo);
-	WriteByte(MSG_ENTITY, silencer ? 1 : 0);
+	WriteByte(MSG_ENTITY, self.weapon_drop_mag);
+	WriteByte(MSG_ENTITY, self.weapon_drop_ammo);
+	WriteByte(MSG_ENTITY, self.weapon_drop_aux);
 
 	// Classic-Quake spin opt-in (per-weapon flag on the dropped entity).
 	// CSQC derives rotation locally from cltime for spinning weapons.
 	WriteByte(MSG_ENTITY, self.dropped_spin ? 1 : 0);
 
-	// Settled angles from weapon_settle_think's floor-normal trace.  CSQC
-	// ignores these when dropped_spin is set (spin derives yaw locally),
-	// but for the common non-spin case they let the networked entity
-	// inherit the same pitch/roll the fake drop settled to — otherwise
-	// the real ent pops in at 0 0 0 and visually jumps off the slope.
+	// Server angles. CSQC ignores these when dropped_spin is set, uses them
+	// directly for physics drops, and keeps non-physics non-spin drops upright.
 	WriteCoord(MSG_ENTITY, self.angles_x);
 	WriteCoord(MSG_ENTITY, self.angles_y);
 	WriteCoord(MSG_ENTITY, self.angles_z);
+
+	// Physics drops are server-authoritative ODE bodies. CSQC uses this to
+	// disable toss extrapolation/fake angular prediction for those entities.
+	WriteByte(MSG_ENTITY, (self.movetype == MOVETYPE_PHYSICS || self.weapon_physdrop_sleeping) ? 1 : 0);
 	return TRUE;
 };
 
@@ -1506,79 +1552,27 @@ void(entity player) PM_SyncPredictionProxy =
 	    proxy.attack_finished != player.attack_finished ||
 	    proxy.wep_anim_start  != player.wep_anim_start ||
 	    proxy.zoomstage       != player.zoomstage ||
+	    proxy.snowball_has_slingshot != player.snowball_has_slingshot ||
+	    proxy.snowball_use_slingshot != player.snowball_use_slingshot ||
 	    proxy.pm_weapon_blend_progress != player.pm_weapon_blend_progress ||
 	    proxy.pm_weapon_prev_factor    != player.pm_weapon_prev_factor)
 		bits |= PM_SF_WEAPON_STATE;
 
-	// Ammo per-field diff — builds a 47-bit mask (packed into 6 bytes
-	// on proxy.pm_ammo_mb0..mb5) so SendEntity can write only the
-	// fields that actually changed, plus the 6-byte mask itself.
-	// Worst case (all fields changed): 6 + 47 = 53 B vs old 48 B flat
-	// (+5 B).  Common case (one field changed): 6 + 1 = 7 B (−41 B).
-	//
-	// IMPORTANT: the order below MUST stay in lock-step with the write
-	// order in PM_PredictionProxy_SendEntity (PM_SF_AMMO section) and
-	// the client read order in cl_player.qc's prediction-proxy parser.
-	float mb0 = 0, mb1 = 0, mb2 = 0, mb3 = 0, mb4 = 0, mb5 = 0;
+	// Ammo diff for canonical slot ammo + multi-carry utility counts.
+	float mb0 = 0, mb1 = 0, mb2 = 0, mb3 = 0, mb4 = 0, mb5 = 0, mb6 = 0;
 
-	// byte 0 (bits 0-7)
-	if (proxy.mag_deagle          != player.mag_deagle)          mb0 |= 1;
-	if (proxy.ammo_deagle         != player.ammo_deagle)         mb0 |= 2;
-	if (proxy.mag_ak47            != player.mag_ak47)            mb0 |= 4;
-	if (proxy.ammo_ak47           != player.ammo_ak47)           mb0 |= 8;
-	if (proxy.mag_m4a1            != player.mag_m4a1)            mb0 |= 16;
-	if (proxy.ammo_m4a1           != player.ammo_m4a1)           mb0 |= 32;
-	if (proxy.m4a1_silenced       != player.m4a1_silenced)       mb0 |= 64;
-	if (proxy.mag_flakshotgun     != player.mag_flakshotgun)     mb0 |= 128;
+	if (proxy.slot_primary_mag     != player.slot_primary_mag)     mb0 |= 1;
+	if (proxy.slot_primary_ammo    != player.slot_primary_ammo)    mb0 |= 2;
+	if (proxy.slot_primary_aux     != player.slot_primary_aux)     mb0 |= 4;
+	if (proxy.slot_secondary_mag   != player.slot_secondary_mag)   mb0 |= 8;
+	if (proxy.slot_secondary_ammo  != player.slot_secondary_ammo)  mb0 |= 16;
+	if (proxy.slot_secondary_aux   != player.slot_secondary_aux)   mb0 |= 32;
+	if (proxy.ammo_hlgrenade       != player.ammo_hlgrenade)       mb0 |= 64;
+	if (proxy.ammo_snowball        != player.ammo_snowball)        mb0 |= 128;
 
-	// byte 1 (bits 8-15)
-	if (proxy.mag_pistol          != player.mag_pistol)          mb1 |= 1;
-	if (proxy.ammo_pistol         != player.ammo_pistol)         mb1 |= 2;
-	if (proxy.mag_scout           != player.mag_scout)           mb1 |= 4;
-	if (proxy.ammo_scout          != player.ammo_scout)          mb1 |= 8;
-	if (proxy.mag_357             != player.mag_357)             mb1 |= 16;
-	if (proxy.ammo_357            != player.ammo_357)            mb1 |= 32;
-	if (proxy.mag_m249            != player.mag_m249)            mb1 |= 64;
-	if (proxy.ammo_m249           != player.ammo_m249)           mb1 |= 128;
-
-	// byte 2 (bits 16-23)
-	if (proxy.mag_awp             != player.mag_awp)             mb2 |= 1;
-	if (proxy.ammo_awp            != player.ammo_awp)            mb2 |= 2;
-	if (proxy.mag_98k             != player.mag_98k)             mb2 |= 4;
-	if (proxy.ammo_98k            != player.ammo_98k)            mb2 |= 8;
-	if (proxy.mag_shotgun         != player.mag_shotgun)         mb2 |= 16;
-	if (proxy.ammo_shotgun        != player.ammo_shotgun)        mb2 |= 32;
-	if (proxy.mag_m3              != player.mag_m3)              mb2 |= 64;
-	if (proxy.ammo_m3             != player.ammo_m3)             mb2 |= 128;
-
-	// byte 3 (bits 24-31)
-	if (proxy.mag_mp5             != player.mag_mp5)             mb3 |= 1;
-	if (proxy.ammo_mp5            != player.ammo_mp5)            mb3 |= 2;
-	if (proxy.mag_crossbow        != player.mag_crossbow)        mb3 |= 4;
-	if (proxy.ammo_crossbow       != player.ammo_crossbow)       mb3 |= 8;
-	if (proxy.mag_grenadelauncher != player.mag_grenadelauncher) mb3 |= 16;
-	if (proxy.mag_rebar           != player.mag_rebar)           mb3 |= 32;
-	if (proxy.ammo_gauss          != player.ammo_gauss)          mb3 |= 64;
-	if (proxy.mag_glock           != player.mag_glock)           mb3 |= 128;
-
-	// byte 4 (bits 32-39)
-	if (proxy.ammo_glock          != player.ammo_glock)          mb4 |= 1;
-	if (proxy.mag_g3sg1           != player.mag_g3sg1)           mb4 |= 2;
-	if (proxy.ammo_g3sg1          != player.ammo_g3sg1)          mb4 |= 4;
-	if (proxy.mag_hlsmg           != player.mag_hlsmg)           mb4 |= 8;
-	if (proxy.ammo_hlsmg          != player.ammo_hlsmg)          mb4 |= 16;
-	if (proxy.ammo_hlsmg_grenades != player.ammo_hlsmg_grenades) mb4 |= 32;
-	if (proxy.mag_hlrpg           != player.mag_hlrpg)           mb4 |= 64;
-	if (proxy.ammo_hlrpg          != player.ammo_hlrpg)          mb4 |= 128;
-
-	// byte 5 (bits 40-46 — bit 7 unused, 47 total fields)
-	if (proxy.ammo_hlgrenade      != player.ammo_hlgrenade)      mb5 |= 1;
-	if (proxy.mag_hlglock         != player.mag_hlglock)         mb5 |= 2;
-	if (proxy.ammo_hlglock        != player.ammo_hlglock)        mb5 |= 4;
-	if (proxy.ammo_hlegon         != player.ammo_hlegon)         mb5 |= 8;
-	if (proxy.mag_csusp           != player.mag_csusp)           mb5 |= 16;
-	if (proxy.ammo_csusp          != player.ammo_csusp)          mb5 |= 32;
-	if (proxy.csusp_silenced      != player.csusp_silenced)      mb5 |= 64;
+	if (proxy.ammo_cshegrenade     != player.ammo_cshegrenade)     mb1 |= 1;
+	if (proxy.ammo_csflashbang     != player.ammo_csflashbang)     mb1 |= 2;
+	if (proxy.ammo_cssmokegrenade  != player.ammo_cssmokegrenade)  mb1 |= 4;
 
 	// OR (accumulate), don't overwrite.  PlayerSpawn can call
 	// PM_SyncPredictionProxy twice in one tick (once via
@@ -1593,9 +1587,11 @@ void(entity player) PM_SyncPredictionProxy =
 	proxy.pm_ammo_mb3 |= mb3;
 	proxy.pm_ammo_mb4 |= mb4;
 	proxy.pm_ammo_mb5 |= mb5;
+	proxy.pm_ammo_mb6 |= mb6;
 
 	if (proxy.pm_ammo_mb0 || proxy.pm_ammo_mb1 || proxy.pm_ammo_mb2
-	 || proxy.pm_ammo_mb3 || proxy.pm_ammo_mb4 || proxy.pm_ammo_mb5)
+	 || proxy.pm_ammo_mb3 || proxy.pm_ammo_mb4 || proxy.pm_ammo_mb5
+	 || proxy.pm_ammo_mb6)
 		bits |= PM_SF_AMMO;
 
 	// Copy player → proxy cache (so next call compares against this snapshot).
@@ -1629,6 +1625,8 @@ void(entity player) PM_SyncPredictionProxy =
 	proxy.attack_finished = player.attack_finished;
 	proxy.wep_anim_start  = player.wep_anim_start;
 	proxy.zoomstage       = player.zoomstage;
+	proxy.snowball_has_slingshot = player.snowball_has_slingshot;
+	proxy.snowball_use_slingshot = player.snowball_use_slingshot;
 	proxy.pm_weapon_blend_progress = player.pm_weapon_blend_progress;
 	proxy.pm_weapon_prev_factor    = player.pm_weapon_prev_factor;
 
@@ -1673,12 +1671,22 @@ void(entity player) PM_SyncPredictionProxy =
 	proxy.mag_hlrpg       = player.mag_hlrpg;
 	proxy.ammo_hlrpg      = player.ammo_hlrpg;
 	proxy.ammo_hlgrenade  = player.ammo_hlgrenade;
+	proxy.ammo_snowball   = player.ammo_snowball;
 	proxy.mag_hlglock     = player.mag_hlglock;
 	proxy.ammo_hlglock    = player.ammo_hlglock;
 	proxy.ammo_hlegon     = player.ammo_hlegon;
-	proxy.mag_csusp       = player.mag_csusp;
-	proxy.ammo_csusp      = player.ammo_csusp;
-	proxy.csusp_silenced  = player.csusp_silenced;
+	proxy.mag_paintball   = player.mag_paintball;
+	proxy.ammo_paintball  = player.ammo_paintball;
+	proxy.ammo_cshegrenade = player.ammo_cshegrenade;
+	proxy.ammo_csflashbang = player.ammo_csflashbang;
+	proxy.ammo_cssmokegrenade = player.ammo_cssmokegrenade;
+
+	proxy.slot_primary_mag    = player.slot_primary_mag;
+	proxy.slot_primary_ammo   = player.slot_primary_ammo;
+	proxy.slot_primary_aux    = player.slot_primary_aux;
+	proxy.slot_secondary_mag  = player.slot_secondary_mag;
+	proxy.slot_secondary_ammo = player.slot_secondary_ammo;
+	proxy.slot_secondary_aux  = player.slot_secondary_aux;
 
 	proxy.SendFlags = proxy.SendFlags | bits;
 };
@@ -1707,18 +1715,18 @@ void(entity player) PM_EnsurePredictionProxy =
 
 	// Force a full snapshot on first creation so the client definitely
 	// gets every section even if a player's field happens to match zero.
-	// For PM_SF_AMMO: also set every bit in the 6-byte mask so the
-	// per-field-gated SendEntity writes all 47 ammo values on baseline.
-	// Byte 5 only uses bits 0-6 (47 fields total); keep bit 7 clear.
+	// For PM_SF_AMMO: also set every used bit in the compact slot-ammo
+	// mask so SendEntity writes all ammo values on baseline.
 	if (was_new)
 	{
 		proxy.SendFlags = proxy.SendFlags | PM_SF_MOVEMENT | PM_SF_WEAPON_STATE | PM_SF_AMMO;
 		proxy.pm_ammo_mb0 = 255;
-		proxy.pm_ammo_mb1 = 255;
-		proxy.pm_ammo_mb2 = 255;
-		proxy.pm_ammo_mb3 = 255;
-		proxy.pm_ammo_mb4 = 255;
-		proxy.pm_ammo_mb5 = 127;
+		proxy.pm_ammo_mb1 = 7;
+		proxy.pm_ammo_mb2 = 0;
+		proxy.pm_ammo_mb3 = 0;
+		proxy.pm_ammo_mb4 = 0;
+		proxy.pm_ammo_mb5 = 0;
+		proxy.pm_ammo_mb6 = 0;
 	}
 };
 
@@ -1752,13 +1760,20 @@ void() W_GiveStartingAmmo =
 	self.mag_m249 = 0;             self.ammo_m249 = 0;
 	self.mag_rebar = 0;
 	self.mag_scout = 0;            self.ammo_scout = 0;
-	self.mag_csusp = 0;            self.ammo_csusp = 0;
+	self.mag_paintball = 0;        self.ammo_paintball = 0;
 	self.mag_deagle = 0;           self.ammo_deagle = 0;
 	self.mag_glock = 0;            self.ammo_glock = 0;
 	self.mag_357 = 0;              self.ammo_357 = 0;
 	self.mag_hlglock = 0;          self.ammo_hlglock = 0;
 	self.mag_pistol = 0;           self.ammo_pistol = 0;
 	self.ammo_hlgrenade = 0;
+	self.ammo_snowball = 0;
+	self.ammo_cshegrenade = 0;
+	self.ammo_csflashbang = 0;
+	self.ammo_cssmokegrenade = 0;
+	self.snowball_has_slingshot = FALSE;
+	self.snowball_use_slingshot = FALSE;
+	W_SlotAmmo_ClearSlots(self);
 
 	// Primary slot
 	self.slot_primary_equip = __NULL__;
@@ -1768,6 +1783,12 @@ void() W_GiveStartingAmmo =
 	case WEP_AK47:
 		self.slot_primary_equip = W_AK47Equip;
 		self.slot_primary_drop  = W_AK47Drop;
+		self.mag_ak47 = MAX_MAG_AK47;   self.ammo_ak47 = MAX_AMMO_AK47;
+		break;
+	case WEP_HDAK47:
+		// HD variant — shares mag_ak47 / ammo_ak47 with WEP_AK47.
+		self.slot_primary_equip = W_HDAK47Equip;
+		self.slot_primary_drop  = W_HDAK47Drop;
 		self.mag_ak47 = MAX_MAG_AK47;   self.ammo_ak47 = MAX_AMMO_AK47;
 		break;
 	case WEP_M4A1:
@@ -1856,22 +1877,23 @@ void() W_GiveStartingAmmo =
 		self.slot_primary_drop  = W_ScoutDrop;
 		self.mag_scout = MAX_MAG_SCOUT;         self.ammo_scout = MAX_AMMO_SCOUT;
 		break;
+	case WEP_PAINTBALL:
+		self.slot_primary_equip = W_PaintballEquip;
+		self.slot_primary_drop  = W_PaintballDrop;
+		self.mag_paintball = MAX_MAG_PAINTBALL; self.ammo_paintball = MAX_AMMO_PAINTBALL;
+		break;
 	default:
 		self.slot_primary = WEP_NONE;
 		break;
 	}
+	if (self.slot_primary != WEP_NONE)
+		W_SlotAmmo_SaveLegacy(self, self.slot_primary);
 
 	// Secondary slot
 	self.slot_secondary_equip = __NULL__;
 	self.slot_secondary_drop  = __NULL__;
 	switch (self.slot_secondary)
 	{
-	case WEP_CSUSP:
-		self.slot_secondary_equip = W_CSUSPEquip;
-		self.slot_secondary_drop  = W_CSUSPDrop;
-		self.mag_csusp = MAX_MAG_CSUSP;   self.ammo_csusp = MAX_AMMO_CSUSP;
-		break;
-	case WEP_DEAGLE:
 		self.slot_secondary_equip = W_DeagleEquip;
 		self.slot_secondary_drop  = W_DeagleDrop;
 		self.mag_deagle = MAX_MAG_DEAGLE; self.ammo_deagle = MAX_AMMO_DEAGLE;
@@ -1900,6 +1922,8 @@ void() W_GiveStartingAmmo =
 		self.slot_secondary = WEP_NONE;
 		break;
 	}
+	if (self.slot_secondary != WEP_NONE)
+		W_SlotAmmo_SaveLegacy(self, self.slot_secondary);
 
 	// Melee slot
 	self.slot_melee_equip = __NULL__;
@@ -1933,9 +1957,73 @@ void() W_GiveStartingAmmo =
 		self.slot_utility_drop  = W_HLGrenadeDrop;
 		self.ammo_hlgrenade = MAX_AMMO_HLGRENADE;
 		break;
+	case WEP_SNOWBALL:
+		self.slot_utility_equip = W_SnowballEquip;
+		self.slot_utility_drop  = W_SnowballDrop;
+		self.ammo_snowball = MAX_AMMO_SNOWBALL;
+		break;
+	case WEP_CSHEGRENADE:
+		self.slot_utility_equip = W_CSHEGrenadeEquip;
+		self.slot_utility_drop  = W_CSHEGrenadeDrop;
+		self.ammo_cshegrenade = MAX_AMMO_CSHEGRENADE;
+		break;
+	case WEP_CSFLASHBANG:
+		self.slot_utility_equip = W_CSFlashbangEquip;
+		self.slot_utility_drop  = W_CSFlashbangDrop;
+		self.ammo_csflashbang = MAX_AMMO_CSFLASHBANG;
+		break;
+	case WEP_CSSMOKEGRENADE:
+		self.slot_utility_equip = W_CSSmokeGrenadeEquip;
+		self.slot_utility_drop  = W_CSSmokeGrenadeDrop;
+		self.ammo_cssmokegrenade = MAX_AMMO_CSSMOKEGRENADE;
+		break;
+	case WEP_SLINGSHOT:
+		// Slingshot is a snowball upgrade — selecting it as the
+		// loadout's "primary utility" implies snowballs to throw with
+		// it, otherwise the player spawns holding a slingshot they
+		// can't use.  Equip snowball as the active utility, fill
+		// snowball ammo, and pre-arm the slingshot toggle.
+		self.snowball_has_slingshot = TRUE;
+		self.snowball_use_slingshot = TRUE;
+		self.slot_utility = WEP_SNOWBALL;
+		self.slot_utility_equip = W_SnowballEquip;
+		self.slot_utility_drop  = W_SnowballDrop;
+		self.ammo_snowball = MAX_AMMO_SNOWBALL;
+		break;
 	default:
 		self.slot_utility = WEP_NONE;
 		break;
+	}
+
+	// Multi-utility post-pass: sv_default_utility is a comma-separated
+	// weapon-id list (e.g. "33,34" for HE+Flash).  The switch above
+	// already gave ammo for the FIRST entry (the active slot_utility);
+	// here we give ammo for any additional utility ids so the player
+	// spawns carrying every selected grenade.  Any unknown / duplicate
+	// / non-utility id is skipped; the inventory model already supports
+	// holding multiple utilities (W_UtilityNextCarried iterates them).
+	{
+		string util_list = cvar_string("sv_default_utility");
+		float util_n = Weapon_TokenizeIdList(util_list);
+		float util_i;
+		for (util_i = 0; util_i < util_n; util_i++)
+		{
+			float util_wep = Weapon_IdFromStringOrDefault(argv(util_i), WEP_NONE);
+			if (util_wep == WEP_NONE || util_wep == self.slot_utility)
+				continue;
+			if      (util_wep == WEP_HLGRENADE)       self.ammo_hlgrenade      = MAX_AMMO_HLGRENADE;
+			else if (util_wep == WEP_SNOWBALL)        self.ammo_snowball       = MAX_AMMO_SNOWBALL;
+			else if (util_wep == WEP_CSHEGRENADE)     self.ammo_cshegrenade    = MAX_AMMO_CSHEGRENADE;
+			else if (util_wep == WEP_CSFLASHBANG)     self.ammo_csflashbang    = MAX_AMMO_CSFLASHBANG;
+			else if (util_wep == WEP_CSSMOKEGRENADE)  self.ammo_cssmokegrenade = MAX_AMMO_CSSMOKEGRENADE;
+			else if (util_wep == WEP_SLINGSHOT)
+			{
+				self.snowball_has_slingshot = TRUE;
+				self.snowball_use_slingshot = TRUE;
+				if (self.ammo_snowball <= 0)
+					self.ammo_snowball = MAX_AMMO_SNOWBALL;
+			}
+		}
 	}
 };
 
@@ -2055,12 +2143,30 @@ void() PlayerSpawn =
 	{
 		W_GiveStartingAmmo();
 	}
+	else if (cvar("sv_gamemode") == GAMEMODE_PAINTGUN)
+	{
+		// Paintgun gamemode: paintball-only loadout, no secondary /
+		// melee / utility.  Players still spawn with snowballs because
+		// snowball-tag also counts as a kill in this mode (the user
+		// asked for the same lethality as the paintball), so a thrown
+		// snowball is also a valid kill option.
+		self.slot_primary   = WEP_PAINTBALL;
+		self.slot_secondary = WEP_NONE;
+		self.slot_melee     = WEP_NONE;
+		self.slot_utility   = WEP_SNOWBALL;
+		W_GiveStartingAmmo();
+	}
 	else
 	{
 		self.slot_primary   = Weapon_IdFromStringOrDefault(cvar_string("sv_default_primary"),   WEP_NONE);
 		self.slot_secondary = Weapon_IdFromStringOrDefault(cvar_string("sv_default_secondary"), WEP_NONE);
 		self.slot_melee     = Weapon_IdFromStringOrDefault(cvar_string("sv_default_melee"),     WEP_NONE);
-		self.slot_utility   = Weapon_IdFromStringOrDefault(cvar_string("sv_default_utility"),   WEP_NONE);
+		// Utility loadout is a comma-separated weapon-id list ("33,34" =
+		// HE+Flash) so a single round-start can grant multiple grenades.
+		// The active utility (slot_utility) is the first valid id; any
+		// extras get their starting ammo in W_GiveStartingAmmo's post-
+		// pass and are reachable via the utility-cycle key.
+		self.slot_utility   = Weapon_FirstIdFromList(cvar_string("sv_default_utility"), WEP_NONE);
 		W_GiveStartingAmmo();
 	}
 	self.survived_round = 0;  // consume the flag so it doesn't leak to future spawns
@@ -2098,52 +2204,17 @@ void() PlayerSpawn =
 		makevectors(self.angles);
 		sv_debug_weapon_spawning = TRUE;
 
-		// Spawn weapons in a grid: 6 columns wide, 48 units apart
-		// Row spacing = 64 forward, Column spacing = 48 right
-		float col, row;
+		// Spawn manifest-listed debug weapons in a grid.
+		float col, row, i, wep;
 		vector base = saved_self.origin;
 
-		// Row 1
-		col = 0; row = 0;
-		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_ak47();        col++;
-		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_m4a1();         col++;
-		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_csawp();        col++;
-		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_scout();        col++;
-		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_g3sg1();        col++;
-		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_m249();
-
-		// Row 2
-		col = 0; row = 1;
-		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_csmp5();        col++;
-		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_dod98k();       col++;
-		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_crossbow();     col++;
-		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_grenadelauncher(); col++;
-		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_rebar();        col++;
-		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_gauss();
-
-		// Row 3: shotguns + flak + HL new primaries
-		col = 0; row = 2;
-		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_hlshotgun();    col++;
-		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_csm3();         col++;
-		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_flakshotgun();  col++;
-		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_hlsmg();        col++;
-		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_hlrpg();        col++;
-		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_hlegon();
-
-		// Row 4: grenade
-		col = 0; row = 3;
-		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_hlgrenade();
-
-		// Row 5: secondaries + melee
-		col = 0; row = 4;
-		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_pistol();       col++;
-		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_deagle();       col++;
-		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_357();          col++;
-		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_glock();        col++;
-		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_csusp();        col++;
-		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_hlglock();      col++;
-		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_hlcrowbar();    col++;
-		self = spawn(); setorigin(self, base + v_forward * (64 + row * 64) + v_right * ((col - 2.5) * 48)); weapon_wrench();
+		for (i = 0; i < WeaponManifest_DebugCount(); i = i + 1)
+		{
+			wep = WeaponManifest_DebugWeapon(i);
+			row = floor(i / 7);
+			col = i - row * 7;
+			SV_DebugSpawnWeaponId(SV_DebugWeaponOrigin(base, row, col), wep);
+		}
 
 		self = saved_self;
 		sv_debug_weapon_spawning = FALSE;
@@ -2328,11 +2399,24 @@ float(string command_string) SV_HandleHitclaim =
 	}
 	float damage = body_damage * W_HitgroupDamageMultiplier(hitgroup);
 
+	// Paintgun gamemode: every player-targeted hitclaim is a tag kill,
+	// matching the server-side direct-damage path in sh_wpn_paintball /
+	// sh_wpn_snowball.  Without this override the server's hitclaim
+	// receiver would apply only the falloff body damage (~4-7) the
+	// client computed, since W_ShouldDeferToClaim defers paintball
+	// player damage to the client claim — and the client doesn't know
+	// the gamemode-tagged-kill rule.  Bypass the soft-trust cap below
+	// because 1000 is the gamemode's intended damage, not a manufactured
+	// claim.
+	float paintgun_kill = (cvar("sv_gamemode") == GAMEMODE_PAINTGUN);
+	if (paintgun_kill)
+		damage = 1000;
+
 	// Soft-trust sanity: cap BODY damage, enforce friendly-fire, PVS
 	// check. Headshot multiplier is applied AFTER the cap so a legit
 	// ~50-body headshot can still land 200 final, but a manufactured
 	// body=999 claim gets clipped before the multiplier.
-	if (mode == 1)
+	if (mode == 1 && !paintgun_kill)
 	{
 		if (body_damage > 200) damage = 200 * W_HitgroupDamageMultiplier(hitgroup);
 
@@ -2385,6 +2469,84 @@ float(string command_string) SV_HandleHitclaim =
 	return applied;
 };
 
+// Client-trusted breakable damage handler.  Mirror of SV_HandleHitclaim
+// for func_breakable targets — when sv_trust_clientbreak is on, the
+// client emits `cmd breakclaim <entnum> <damage>` per damaging shot
+// (CSQC_SendBreakClaim in sh_weapon_logic.qc) and we apply that damage
+// here.  Server's own hitscan path defers via W_ShouldDeferBreakToClaim
+// so the same shot doesn't double up.  Wire format:
+//   cmd breakclaim <target_entnum> <damage>
+// Validates: trust mode on, attacker is a live player, target is a
+// damageable func_breakable.  Damage is sanity-capped at 500 per claim.
+float(string command_string) SV_HandleBreakclaim =
+{
+	float dbg = cvar("sv_debug_hitclaim");
+
+	if (cvar("sv_trust_clientbreak") < 1) {
+		if (dbg) print("[breakclaim] reject: sv_trust_clientbreak < 1\n");
+		return 0;
+	}
+
+	if (!self || self.classname != "player") {
+		if (dbg) print("[breakclaim] reject: self is not a player\n");
+		return 0;
+	}
+	if (self.is_dead) {
+		if (dbg) print(sprintf("[breakclaim] reject: %s is dead\n", self.netname));
+		return 0;
+	}
+
+	float target_entnum = stof(argv(1));
+	float body_damage   = stof(argv(2));
+
+	if (target_entnum <= 0) {
+		if (dbg) print(sprintf("[breakclaim] reject: target_entnum %g <= 0\n", target_entnum));
+		return 0;
+	}
+	if (body_damage <= 0) {
+		if (dbg) print(sprintf("[breakclaim] reject: body_damage %g <= 0\n", body_damage));
+		return 0;
+	}
+
+	entity target = edict_num(target_entnum);
+	if (!target || target == world) {
+		if (dbg) print(sprintf("[breakclaim] reject: edict_num(%g) returned world/null\n", target_entnum));
+		return 0;
+	}
+	if (target.classname != "func_breakable") {
+		if (dbg) print(sprintf("[breakclaim] reject: ent %g classname='%s' (not func_breakable)\n", target_entnum, target.classname));
+		return 0;
+	}
+	if (target.takedamage != DAMAGE_YES) {
+		if (dbg) print(sprintf("[breakclaim] reject: ent %g not damageable\n", target_entnum));
+		return 0;
+	}
+	if (target.health <= 0) {
+		if (dbg) print(sprintf("[breakclaim] reject: ent %g already broken\n", target_entnum));
+		return 0;
+	}
+
+	// Sanity cap — bound the damage a single claim can apply so a
+	// crafted client can't one-shot a high-HP brush.  500 covers any
+	// legitimate single-shot damage in this mod (max base damage * any
+	// reasonable falloff multiplier).
+	float damage = body_damage;
+	if (damage > 500) damage = 500;
+
+	// Re-entrancy guard: W_ApplyDamage's breakable-defer gate would
+	// otherwise reject this very call (see sv_weapons.qc).  Set the
+	// flag so the gate skips, restore after.
+	sv_in_breakclaim_apply = TRUE;
+	float applied = W_ApplyDamage(self, target, damage);
+	sv_in_breakclaim_apply = FALSE;
+
+	if (dbg)
+		print(sprintf("[breakclaim] %s -> #%g dmg=%.0f applied=%.0f\n",
+			self.netname, target_entnum, damage, applied));
+
+	return applied;
+};
+
 void(string command_string) SV_ParseClientCommand =
 {
 	tokenize(command_string);
@@ -2393,6 +2555,12 @@ void(string command_string) SV_ParseClientCommand =
 	if (cmd == "hitclaim")
 	{
 		SV_HandleHitclaim(command_string);
+		return;
+	}
+
+	if (cmd == "breakclaim")
+	{
+		SV_HandleBreakclaim(command_string);
 		return;
 	}
 

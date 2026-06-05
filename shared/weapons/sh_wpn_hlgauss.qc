@@ -1,5 +1,5 @@
 // ============================================================
-//  shared/weapons/sh_wpn_gauss.qc  -  HL Gauss Gun
+//  shared/weapons/sh_wpn_hlgauss.qc  -  HL Gauss Gun
 //
 //  Slot  : SLOT_PRIMARY  (impulse 1 / key 1)
 //  Stats : ammo_gauss (no magazine, direct ammo pool)
@@ -90,8 +90,11 @@ float(float now) SH_GaussTickState =
 
 float(float now) SH_GaussTryPrimaryFire =
 {
+    if (Weapon_SprintBlocksFire()) return 0;
+    if (Weapon_LowerBlocksFire()) return 0;
 #ifdef CSQC
-    if (cltime < self.csqc_fire_guard) return 0;
+    // `now`-based — see sh_weapon_standard.qc SH_StandardTryFire.
+    if (now < self.csqc_fire_guard) return 0;
 #endif
     if (self.weaponstate == WS_DRAW || self.weaponstate == WS_SPECIAL || self.weaponstate == WS_RELOAD) return 0;
     if (now < self.attack_finished) return 0;
@@ -100,7 +103,7 @@ float(float now) SH_GaussTryPrimaryFire =
     {
         self.attack_finished = now + GAUSS_DRYFIRE_DELAY;
 #ifdef CSQC
-        self.csqc_fire_guard = cltime + GAUSS_DRYFIRE_DELAY;
+        self.csqc_fire_guard = now + GAUSS_DRYFIRE_DELAY;
 #endif
         return -1;
     }
@@ -111,13 +114,15 @@ float(float now) SH_GaussTryPrimaryFire =
     self.wep_anim_start   = now;
     self.attack_finished  = now + GAUSS_PRIMARY_DELAY;
 #ifdef CSQC
-    self.csqc_fire_guard  = cltime + GAUSS_PRIMARY_DELAY;
+    self.csqc_fire_guard  = now + GAUSS_PRIMARY_DELAY;
 #endif
     return 1;
 };
 
 float(float now) SH_GaussTryAltFire =
 {
+    if (Weapon_SprintBlocksFire()) return 0;
+    if (Weapon_LowerBlocksFire()) return 0;
     if (self.weaponstate == WS_DRAW || self.weaponstate == WS_SPECIAL || self.weaponstate == WS_RELOAD) return 0;
     if (now < self.attack_finished) return 0;
 
@@ -189,7 +194,7 @@ void(float damage, float is_primary) W_GaussBeamFire =
     W_WeaponTraceLine(src, end);
 
     beam_end = (trace_fraction < 1.0) ? trace_endpos : end;
-    te_beam(self, src, beam_end);
+    HLBeam_Multicast(HL_BEAM_GAUSS, self, src + v_right * 8 + v_up * -12, beam_end);
 
     if (trace_fraction < 1.0)
     {
@@ -205,29 +210,13 @@ void(float damage, float is_primary) W_GaussBeamFire =
         {
             te_explosion(trace_endpos);
 
-            // Radius damage + knockback
-            entity e = findradius(trace_endpos, GAUSS_CHARGE_BLAST_RADIUS);
-            while (e)
-            {
-                float bdist = vlen(e.origin - trace_endpos);
-
-                if (W_CanDamageTarget(e))
-                {
-                    float blast_dmg = W_LinearDamageFalloff(bdist, damage * 0.5, damage * 0.1, GAUSS_CHARGE_BLAST_RADIUS);
-                    W_ApplyDamage(self, e, blast_dmg);
-                }
-
-                if (e.classname == "player" && e.health > 0)
-                {
-                    float push_scale = 1 - (bdist / GAUSS_CHARGE_BLAST_RADIUS);
-                    push_scale = max(0, push_scale);
-                    vector push_dir = normalize(e.origin - trace_endpos);
-                    e.velocity += push_dir * GAUSS_CHARGE_BLAST_PUSH * push_scale;
-                    e.velocity_z += GAUSS_CHARGE_BLAST_UPLIFT * push_scale;
-                }
-
-                e = e.chain;
-            }
+            // Radius damage + player knockback + phys-drop blast — single call.
+            // Gauss charged-blast scales with the beam's damage (50% at
+            // centre, 10% at edge), so peak/min are derived params.
+            W_RadiusExplode(trace_endpos, GAUSS_CHARGE_BLAST_RADIUS,
+                            damage * 0.5, damage * 0.1,
+                            GAUSS_CHARGE_BLAST_PUSH, GAUSS_CHARGE_BLAST_UPLIFT,
+                            self);
         }
     }
 };
@@ -377,7 +366,7 @@ void() W_GaussDrop =
     tgt.ammo_gauss = self.ammo_gauss;
     self.ammo_gauss = 0;
     setmodel(tgt, "models/weapons/wpn_hlgauss/w_gauss.mdl");
-    setsize(tgt, '-16 -16 0', '16 16 32');
+    setsize(tgt, '-16 -16 0', '16 16 48');
     tgt.classname = "weapon_gauss"; tgt.solid = SOLID_NOT; tgt.movetype = MOVETYPE_TOSS;
     tgt.weapon = WEP_GAUSS; tgt.weapon_slot = SLOT_PRIMARY;
     tgt.weap_draw = W_GaussEquip; tgt.weap_drop_func = W_GaussDrop;
@@ -388,7 +377,7 @@ void() W_GaussDrop =
 void() weapon_gauss =
 {
     setmodel(self, "models/weapons/wpn_hlgauss/w_gauss.mdl");
-    setsize(self, '-16 -16 0', '16 16 32');
+    setsize(self, '-16 -16 0', '16 16 48');
     self.classname = "weapon_gauss"; self.solid = SOLID_TRIGGER; self.movetype = MOVETYPE_TOSS;
     self.weapon = WEP_GAUSS; self.weapon_slot = SLOT_PRIMARY;
     self.weap_draw = W_GaussEquip; self.weap_drop_func = W_GaussDrop;
@@ -425,7 +414,10 @@ void() CSQC_PredictGaussCommand =
                 {
                     makevectors(input_angles);
                     vector gsrc = self.origin + self.view_ofs;
-                    traceline(gsrc, gsrc + v_forward * 8192, MOVE_NORMAL, self);
+                    vector gend = gsrc + v_forward * 8192;
+                    CSQC_WeaponTraceLine(gsrc, gend, MOVE_NORMAL, self);
+                    HLBeam_Draw(HL_BEAM_GAUSS, self, gsrc + v_right * 8 + v_up * -12,
+                                (trace_fraction < 1.0) ? trace_endpos : gend);
                     if (trace_fraction < 1.0)
                     {
                         CSQC_BulletImpact(trace_endpos, trace_plane_normal, GAUSS_PRIMARY_DAMAGE);
@@ -489,13 +481,16 @@ void() CSQC_PredictGaussCommand =
                 // Gauss is perfectly accurate — direct trace, no spread system
                 {
                     makevectors(input_angles);
-                    gsrc = self.origin + self.view_ofs;
-                    traceline(gsrc, gsrc + v_forward * 8192, MOVE_NORMAL, self);
+                    vector alt_gsrc = self.origin + self.view_ofs;
+                    vector alt_gend = alt_gsrc + v_forward * 8192;
+                    CSQC_WeaponTraceLine(alt_gsrc, alt_gend, MOVE_NORMAL, self);
+                    HLBeam_Draw(HL_BEAM_GAUSS, self, alt_gsrc + v_right * 8 + v_up * -12,
+                                (trace_fraction < 1.0) ? trace_endpos : alt_gend);
                     if (trace_fraction < 1.0)
                     {
                         CSQC_BulletImpact(trace_endpos, trace_plane_normal, damage);
                         if (cvar("cl_debug_impacts"))
-                            CSQC_AddDebugImpact(trace_endpos, gsrc, '0 1 0', 0, 0);
+                            CSQC_AddDebugImpact(trace_endpos, alt_gsrc, '0 1 0', 0, 0);
                     }
                 }
             }

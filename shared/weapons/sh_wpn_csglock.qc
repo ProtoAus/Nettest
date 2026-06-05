@@ -49,6 +49,14 @@ const float GLOCK_CLOSE_DAMAGE         = 18;
 const float GLOCK_MIN_DAMAGE           = 10;
 const float GLOCK_DAMAGE_FALLOFF_RANGE = 2048;
 const float GLOCK_DRYFIRE_DELAY        = 0.2;
+const float GLOCK_KICK_PITCH    = 0.55;   // sv_gunkick — light pistol.
+const float GLOCK_KICK_VARIANCE = 2.25;
+const float GLOCK_KICK_STRENGTH = 1.5;    // small light pistol.
+
+// Muzzle offset — see cl_debug_muzzle for live-tune marker.
+const float GLOCK_MUZZLE_FORWARD = 38;
+const float GLOCK_MUZZLE_RIGHT   = 13.3;
+const float GLOCK_MUZZLE_DOWN    = 9;
 
 const float GLOCK_BURST_SPREAD         = 0.03;   // base spread during burst
 const float GLOCK_BURST_DAMAGE         = 14;     // less damage per bullet in burst
@@ -109,6 +117,8 @@ float(float now) SH_GlockTryReload =
 // Start a 3-round burst. Returns 1 if burst started, -1 dry, 0 blocked.
 float(float now) SH_GlockTryBurst =
 {
+    if (Weapon_SprintBlocksFire()) return 0;
+    if (Weapon_LowerBlocksFire()) return 0;
     if (self.weaponstate == WS_RELOAD || self.weaponstate == WS_DRAW || self.weaponstate == WS_SPECIAL)
         return 0;
     if (now < self.attack_finished)
@@ -149,13 +159,15 @@ void(entity player) W_GlockPickupCopy =
 void() W_GlockShoot =
 {
     W_PenetratingHitscanShoot(GLOCK_BASE_SPREAD, GLOCK_MOVE_SPREAD, GLOCK_FULL_SPREAD_SPEED,
-        GLOCK_CLOSE_DAMAGE, GLOCK_MIN_DAMAGE, GLOCK_DAMAGE_FALLOFF_RANGE, 8, 0.94);
+        GLOCK_CLOSE_DAMAGE, GLOCK_MIN_DAMAGE, GLOCK_DAMAGE_FALLOFF_RANGE, 8, 0.94,
+        GLOCK_KICK_PITCH, GLOCK_KICK_VARIANCE, GLOCK_KICK_STRENGTH);
 };
 
 void() W_GlockBurstShoot =
 {
     W_PenetratingHitscanShoot(GLOCK_BURST_SPREAD, GLOCK_MOVE_SPREAD, GLOCK_FULL_SPREAD_SPEED,
-        GLOCK_BURST_DAMAGE, GLOCK_MIN_DAMAGE, GLOCK_DAMAGE_FALLOFF_RANGE, 8, 0.94);
+        GLOCK_BURST_DAMAGE, GLOCK_MIN_DAMAGE, GLOCK_DAMAGE_FALLOFF_RANGE, 8, 0.94,
+        GLOCK_KICK_PITCH, GLOCK_KICK_VARIANCE, GLOCK_KICK_STRENGTH);
 };
 
 void() W_GlockFire =
@@ -266,7 +278,7 @@ void() W_GlockDrop =
     self.ammo_glock = 0;
 
     setmodel(tgt, "models/weapons/wpn_csglock/w_glock.mdl");
-    setsize(tgt, '-12 -12 0', '12 12 24');
+    setsize(tgt, '-12 -12 0', '12 12 40');
     tgt.classname    = "weapon_glock";
     tgt.solid        = SOLID_NOT;
     tgt.movetype     = MOVETYPE_TOSS;
@@ -283,7 +295,7 @@ void() W_GlockDrop =
 void() weapon_glock =
 {
     setmodel(self, "models/weapons/wpn_csglock/w_glock.mdl");
-    setsize(self, '-12 -12 0', '12 12 24');
+    setsize(self, '-12 -12 0', '12 12 40');
     self.classname     = "weapon_glock";
     self.solid         = SOLID_TRIGGER;
     self.movetype      = MOVETYPE_TOSS;
@@ -323,14 +335,21 @@ void() CSQC_PredictGlockCommand =
         if (r == 1)
         {
             CSQC_MarkPendingWeaponAck();
-            if (!pm_suppress_sounds)
+            if (CSQC_BeginFireActionEffects())
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csglock/fire.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
                 CSQC_PredictedPenetratingImpact(GLOCK_BASE_SPREAD, GLOCK_MOVE_SPREAD, GLOCK_FULL_SPREAD_SPEED,
-                    GLOCK_CLOSE_DAMAGE, GLOCK_MIN_DAMAGE, GLOCK_DAMAGE_FALLOFF_RANGE, 8, 0.94);
+                    GLOCK_CLOSE_DAMAGE, GLOCK_MIN_DAMAGE, GLOCK_DAMAGE_FALLOFF_RANGE, 8, 0.94,
+                    GLOCK_KICK_PITCH, GLOCK_KICK_VARIANCE, GLOCK_KICK_STRENGTH);
                 CSQC_SpawnCasing("models/weapons/9mmcasing.mdl",
                     '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
+                // Pistol muzzle flash — DEAGLE_MUZZLE_* shared default.
+                CSQC_MuzzleFlashAtMuzzle(GLOCK_MUZZLE_FORWARD, GLOCK_MUZZLE_RIGHT,
+                    GLOCK_MUZZLE_DOWN, self.wep_action_id);
+                CSQC_MuzzleSmokeAtMuzzle(GLOCK_MUZZLE_FORWARD, GLOCK_MUZZLE_RIGHT,
+                    GLOCK_MUZZLE_DOWN, self.wep_action_id, 1);
+                CSQC_EndFireActionEffects();
             }
         }
         else if (r == -1)
@@ -348,14 +367,21 @@ void() CSQC_PredictGlockCommand =
         if (r == 1)
         {
             CSQC_MarkPendingWeaponAck();
-            if (!pm_suppress_sounds)
+            if (CSQC_BeginFireActionEffects())
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csglock/fireburst.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
                 CSQC_PredictedPenetratingImpact(GLOCK_BURST_SPREAD, GLOCK_MOVE_SPREAD, GLOCK_FULL_SPREAD_SPEED,
-                    GLOCK_BURST_DAMAGE, GLOCK_MIN_DAMAGE, GLOCK_DAMAGE_FALLOFF_RANGE, 8, 0.94);
+                    GLOCK_BURST_DAMAGE, GLOCK_MIN_DAMAGE, GLOCK_DAMAGE_FALLOFF_RANGE, 8, 0.94,
+                    GLOCK_KICK_PITCH, GLOCK_KICK_VARIANCE, GLOCK_KICK_STRENGTH);
                 CSQC_SpawnCasing("models/weapons/9mmcasing.mdl",
                     '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
+                // Pistol muzzle flash — DEAGLE_MUZZLE_* shared default.
+                CSQC_MuzzleFlashAtMuzzle(GLOCK_MUZZLE_FORWARD, GLOCK_MUZZLE_RIGHT,
+                    GLOCK_MUZZLE_DOWN, self.wep_action_id);
+                CSQC_MuzzleSmokeAtMuzzle(GLOCK_MUZZLE_FORWARD, GLOCK_MUZZLE_RIGHT,
+                    GLOCK_MUZZLE_DOWN, self.wep_action_id, 1);
+                CSQC_EndFireActionEffects();
             }
         }
         else if (r == -1)
@@ -374,14 +400,21 @@ void() CSQC_PredictGlockCommand =
             self.mag_glock -= 1;
             self.wep_action_id += 1;
             self.fire_spread_pending += FIRE_SPREAD_PENALTY_PER_SHOT;
-            if (!pm_suppress_sounds)
+            if (CSQC_BeginFireActionEffects())
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csglock/fireburst.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
                 CSQC_PredictedPenetratingImpact(GLOCK_BURST_SPREAD, GLOCK_MOVE_SPREAD, GLOCK_FULL_SPREAD_SPEED,
-                    GLOCK_BURST_DAMAGE, GLOCK_MIN_DAMAGE, GLOCK_DAMAGE_FALLOFF_RANGE, 8, 0.94);
+                    GLOCK_BURST_DAMAGE, GLOCK_MIN_DAMAGE, GLOCK_DAMAGE_FALLOFF_RANGE, 8, 0.94,
+                    GLOCK_KICK_PITCH, GLOCK_KICK_VARIANCE, GLOCK_KICK_STRENGTH);
                 CSQC_SpawnCasing("models/weapons/9mmcasing.mdl",
                     '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
+                // Pistol muzzle flash — DEAGLE_MUZZLE_* shared default.
+                CSQC_MuzzleFlashAtMuzzle(GLOCK_MUZZLE_FORWARD, GLOCK_MUZZLE_RIGHT,
+                    GLOCK_MUZZLE_DOWN, self.wep_action_id);
+                CSQC_MuzzleSmokeAtMuzzle(GLOCK_MUZZLE_FORWARD, GLOCK_MUZZLE_RIGHT,
+                    GLOCK_MUZZLE_DOWN, self.wep_action_id, 1);
+                CSQC_EndFireActionEffects();
             }
         }
         self.glock_burst_count -= 1;
@@ -449,6 +482,7 @@ void() CSQC_GlockEquip =
 	self.csqc_predict_reload = CSQC_PredictGlockReload;
 	self.csqc_display_frame  = CSQC_GlockDisplayFrame;
 	self.csqc_drop_clear     = CSQC_GlockDropClear;
+//    self.weapon_viewmodel_flip = TRUE;
 };
 
 #endif // CSQC

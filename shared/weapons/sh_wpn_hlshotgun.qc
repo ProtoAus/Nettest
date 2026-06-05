@@ -51,6 +51,17 @@ const float HLSG_PELLET_CLOSE_DAMAGE  = 13;
 const float HLSG_PELLET_MIN_DAMAGE    = 4;
 const float HLSG_PELLET_FALLOFF_RANGE = 1024;
 const float HLSG_DRYFIRE_DELAY        = 0.2;
+// sv_gunkick — pump shotgun, big single-shot kick. Double-barrel
+// alt-fire amplifies via DBL_KICK_STRENGTH for the harder kick.
+const float HLSG_KICK_PITCH        = 2.5;
+const float HLSG_KICK_VARIANCE     = 0.6;
+const float HLSG_KICK_STRENGTH     = 1.5;
+const float HLSG_DBL_KICK_STRENGTH = 2.5;   // both barrels — punishing kick.
+
+// Muzzle offset — see cl_debug_muzzle for live-tune marker.
+const float HLSG_MUZZLE_FORWARD = 42;
+const float HLSG_MUZZLE_RIGHT   = 8.2;
+const float HLSG_MUZZLE_DOWN    = 9.8;
 
 const string HLSG_VIEWMODEL    = "models/weapons/wpn_hlshotgun/v_shotgun.mdl";
 const string HLSG_WORLDMODEL   = "models/weapons/wpn_hlshotgun/w_shotgun.mdl";
@@ -99,8 +110,11 @@ float(float now) SH_ShotgunTickState =
 
 float(float now) SH_ShotgunTryFire =
 {
+    if (Weapon_SprintBlocksFire()) return 0;
+    if (Weapon_LowerBlocksFire()) return 0;
 #ifdef CSQC
-    if (cltime < self.csqc_fire_guard) return 0;
+    // `now`-based — see sh_weapon_standard.qc SH_StandardTryFire.
+    if (now < self.csqc_fire_guard) return 0;
 #endif
     if (self.weaponstate != WS_IDLE) return 0;
     if (now < self.attack_finished) return 0;
@@ -109,7 +123,7 @@ float(float now) SH_ShotgunTryFire =
     {
         self.attack_finished = now + HLSG_DRYFIRE_DELAY;
 #ifdef CSQC
-        self.csqc_fire_guard = cltime + HLSG_DRYFIRE_DELAY;
+        self.csqc_fire_guard = now + HLSG_DRYFIRE_DELAY;
 #endif
         return -1;
     }
@@ -120,15 +134,17 @@ float(float now) SH_ShotgunTryFire =
     self.wep_anim_start   = now;
     self.attack_finished  = now + HLSG_FIRE_DELAY;
 #ifdef CSQC
-    self.csqc_fire_guard  = cltime + HLSG_FIRE_DELAY;
+    self.csqc_fire_guard  = now + HLSG_FIRE_DELAY;
 #endif
     return 1;
 };
 
 float(float now) SH_ShotgunTryDoubleFire =
 {
+    if (Weapon_SprintBlocksFire()) return 0;
+    if (Weapon_LowerBlocksFire()) return 0;
 #ifdef CSQC
-    if (cltime < self.csqc_fire_guard) return 0;
+    if (now < self.csqc_fire_guard) return 0;
 #endif
     if (self.weaponstate != WS_IDLE) return 0;
     if (now < self.attack_finished) return 0;
@@ -137,7 +153,7 @@ float(float now) SH_ShotgunTryDoubleFire =
     {
         self.attack_finished = now + HLSG_DRYFIRE_DELAY;
 #ifdef CSQC
-        self.csqc_fire_guard = cltime + HLSG_DRYFIRE_DELAY;
+        self.csqc_fire_guard = now + HLSG_DRYFIRE_DELAY;
 #endif
         return -1;
     }
@@ -148,7 +164,7 @@ float(float now) SH_ShotgunTryDoubleFire =
     self.wep_anim_start   = now;
     self.attack_finished  = now + HLSG_DBLFIRE_DELAY;
 #ifdef CSQC
-    self.csqc_fire_guard  = cltime + HLSG_DBLFIRE_DELAY;
+    self.csqc_fire_guard  = now + HLSG_DBLFIRE_DELAY;
 #endif
     return 1;
 };
@@ -173,12 +189,22 @@ float(float now) SH_ShotgunTryReload =
 void(entity player) W_ShotgunPickupCopy =
 { player.mag_shotgun = self.mag_shotgun; player.ammo_shotgun = self.ammo_shotgun; };
 
-void(float pellets, float spread_val) W_ShotgunFirePellets =
+void(float pellets, float spread_val, optional float kick_strength) W_ShotgunFirePellets =
 {
     vector src, dir, end;
     float sx, sy, i, dist, damage;
 
+    // sv_gunkick — one impulse per trigger pull. Caller passes a
+    // strength multiplier (single-barrel uses HLSG_KICK_STRENGTH,
+    // double-barrel HLSG_DBL_KICK_STRENGTH).
+    SH_ApplyViewKick(HLSG_KICK_PITCH, HLSG_KICK_VARIANCE, kick_strength);
+
+    vector saved_v_angle = self.v_angle;
+    self.v_angle_x += self.view_kick_pitch;
+    self.v_angle_y += self.view_kick_yaw;
     makevectors(self.v_angle);
+    self.v_angle = saved_v_angle;
+
     src = self.origin + self.view_ofs;
 
     for (i = 0; i < pellets; i++)
@@ -216,7 +242,7 @@ void() W_ShotgunFire =
     {
         self.weaponframe = HLSG_FIRE_START;
         self.wep_nextframe = time + HLSG_FRAME_INTERVAL;
-        W_ShotgunFirePellets(HLSG_PELLETS, HLSG_SPREAD);
+        W_ShotgunFirePellets(HLSG_PELLETS, HLSG_SPREAD, HLSG_KICK_STRENGTH);
         sound(self, CHAN_WEAPON, "sounds/weapons/wpn_hlshotgun/fire1.wav", 1, ATTN_NORM);
     }
     else if (r == -1)
@@ -230,7 +256,7 @@ void() W_ShotgunAltFire =
     {
         self.weaponframe = HLSG_DBLFIRE_START;
         self.wep_nextframe = time + HLSG_FRAME_INTERVAL;
-        W_ShotgunFirePellets(HLSG_DBL_PELLETS, HLSG_DBL_SPREAD);
+        W_ShotgunFirePellets(HLSG_DBL_PELLETS, HLSG_DBL_SPREAD, HLSG_DBL_KICK_STRENGTH);
         sound(self, CHAN_WEAPON, "sounds/weapons/wpn_hlshotgun/fire2.wav", 1, ATTN_NORM);
     }
     else if (r == -1)
@@ -372,7 +398,7 @@ void() W_ShotgunDrop =
     tgt.mag_shotgun = self.mag_shotgun; tgt.ammo_shotgun = self.ammo_shotgun;
     self.mag_shotgun = 0; self.ammo_shotgun = 0;
     setmodel(tgt, "models/weapons/wpn_hlshotgun/w_shotgun.mdl");
-    setsize(tgt, '-16 -16 0', '16 16 32');
+    setsize(tgt, '-16 -16 0', '16 16 48');
     tgt.classname = "weapon_hlshotgun"; tgt.solid = SOLID_NOT; tgt.movetype = MOVETYPE_TOSS;
     tgt.weapon = WEP_HLSHOTGUN; tgt.weapon_slot = SLOT_PRIMARY;
     tgt.weap_draw = W_ShotgunEquip; tgt.weap_drop_func = W_ShotgunDrop;
@@ -383,7 +409,7 @@ void() W_ShotgunDrop =
 void() weapon_hlshotgun =
 {
     setmodel(self, "models/weapons/wpn_hlshotgun/w_shotgun.mdl");
-    setsize(self, '-16 -16 0', '16 16 32');
+    setsize(self, '-16 -16 0', '16 16 48');
     self.classname = "weapon_hlshotgun"; self.solid = SOLID_TRIGGER; self.movetype = MOVETYPE_TOSS;
     self.weapon = WEP_HLSHOTGUN; self.weapon_slot = SLOT_PRIMARY;
     self.weap_draw = W_ShotgunEquip; self.weap_drop_func = W_ShotgunDrop;
@@ -424,12 +450,19 @@ void() CSQC_PredictShotgunCommand =
             CSQC_MarkPendingWeaponAck();
             csqc_hlsg_pump_played = FALSE;
             csqc_hlsg_casing_spawned = FALSE;
-            if (!pm_suppress_sounds)
+            if (CSQC_BeginFireActionEffects())
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_hlshotgun/fire2.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
                 CSQC_PredictedShotgunImpact(HLSG_DBL_PELLETS, HLSG_DBL_SPREAD,
-                    HLSG_PELLET_CLOSE_DAMAGE, HLSG_PELLET_MIN_DAMAGE, HLSG_PELLET_FALLOFF_RANGE);
+                    HLSG_PELLET_CLOSE_DAMAGE, HLSG_PELLET_MIN_DAMAGE, HLSG_PELLET_FALLOFF_RANGE,
+                    HLSG_KICK_PITCH, HLSG_KICK_VARIANCE, HLSG_DBL_KICK_STRENGTH);
+                // Shotgun muzzle flash — AK47_MUZZLE_* shared default.
+                CSQC_MuzzleFlashAtMuzzle(HLSG_MUZZLE_FORWARD, HLSG_MUZZLE_RIGHT,
+                    HLSG_MUZZLE_DOWN, self.wep_action_id);
+                CSQC_MuzzleSmokeAtMuzzle(HLSG_MUZZLE_FORWARD, HLSG_MUZZLE_RIGHT,
+                    HLSG_MUZZLE_DOWN, self.wep_action_id, HLSG_DBL_PELLETS);
+                CSQC_EndFireActionEffects();
             }
         }
     }
@@ -442,12 +475,19 @@ void() CSQC_PredictShotgunCommand =
             CSQC_MarkPendingWeaponAck();
             csqc_hlsg_pump_played = FALSE;
             csqc_hlsg_casing_spawned = FALSE;
-            if (!pm_suppress_sounds)
+            if (CSQC_BeginFireActionEffects())
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_hlshotgun/fire1.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
                 CSQC_PredictedShotgunImpact(HLSG_PELLETS, HLSG_SPREAD,
-                    HLSG_PELLET_CLOSE_DAMAGE, HLSG_PELLET_MIN_DAMAGE, HLSG_PELLET_FALLOFF_RANGE);
+                    HLSG_PELLET_CLOSE_DAMAGE, HLSG_PELLET_MIN_DAMAGE, HLSG_PELLET_FALLOFF_RANGE,
+                    HLSG_KICK_PITCH, HLSG_KICK_VARIANCE, HLSG_KICK_STRENGTH);
+                // Shotgun muzzle flash — AK47_MUZZLE_* shared default.
+                CSQC_MuzzleFlashAtMuzzle(HLSG_MUZZLE_FORWARD, HLSG_MUZZLE_RIGHT,
+                    HLSG_MUZZLE_DOWN, self.wep_action_id);
+                CSQC_MuzzleSmokeAtMuzzle(HLSG_MUZZLE_FORWARD, HLSG_MUZZLE_RIGHT,
+                    HLSG_MUZZLE_DOWN, self.wep_action_id, HLSG_PELLETS);
+                CSQC_EndFireActionEffects();
             }
         }
         else if (r == -1)

@@ -718,6 +718,7 @@ const float RF_ADDITIVE = 8;	/* Shaders from this entity will temporarily be hac
 const float RF_USEAXIS = 16;	/* The entity will be oriented according to the current v_forward+v_right+v_up vector values instead of the entity's .angles field. */
 const float RF_NOSHADOW = 32;	/* This entity will not cast shadows. Often useful on view models. */
 const float RF_FRAMETIMESARESTARTTIMES = 64;	/* Specifies that the frame1time, frame2time field are timestamps (denoting the start of the animation) rather than time into the animation. */
+const float RF_XFLIP = 128;	/* Mirror this entity horizontally. Intended for left-handed viewmodels: the renderer flips projection X and inverts cull winding so backface culling stays correct. (Custom FTE engine extension — registered in pr_cmds.c as CSQCRF_XFLIP.) */
 const float IE_KEYDOWN = 0;	/* Specifies that a key was pressed. Second argument is the scan code. Third argument is the unicode (printable) char value. Fourth argument denotes which keyboard(or mouse, if its a mouse 'scan' key) the event came from. Note that some systems may completely separate scan codes and unicode values, with a 0 value for the unspecified argument. */
 const float IE_KEYUP = 1;	/* Specifies that a key was released. Arguments are the same as IE_KEYDOWN. On some systems, this may be fired instantly after IE_KEYDOWN was fired. */
 const float IE_MOUSEDELTA = 2;	/* Specifies that a mouse was moved (touch screens and tablets typically give IE_MOUSEABS events instead, use _windowed_mouse 0 to test code to cope with either). Second argument is the X displacement, third argument is the Y displacement. Fourth argument is which mouse or touch event triggered the event. */
@@ -1397,11 +1398,11 @@ void(vector org, vector texcoords, vector rgb, float alpha) R_PolygonVertex = #3
 		Specifies a polygon vertex with its various properties. */
 
 void() R_EndPolygon = #308; /*
-		Ends the current polygon. At least 3 verticies must have been specified. You do not need to call beginpolygon if you wish to draw another polygon with the same shader. */
+	Ends the current polygon. At least 3 verticies must have been specified. You do not need to call beginpolygon if you wish to draw another polygon with the same shader. */
 
 #define getviewprop getproperty
 __variant(float property) getproperty = #309; /*
-		Retrieve a currently-set (typically view) property, allowing you to read the current viewport or other things. Due to cheat protection, certain values may be unretrievable. */
+	Retrieve a currently-set (typically view) property, allowing you to read the current viewport or other things. Due to cheat protection, certain values may be unretrievable. */
 
 vector (vector v) unproject = #310; /*
 		Transform a 2d screen-space point (with depth) into a 3d world-space point, according the various origin+angle+fov etc settings set via setproperty. */
@@ -1916,6 +1917,9 @@ float(float v, optional float base) log = #532; /* Part of ??MVDSV_BUILTINS
 
 float(entity e, float channel, string newsample, float volume, float attenuation, float pitchpct, float flags, float timeoffset) soundupdate = #0:soundupdate; /*
 		Changes the properties of the current sound being played on the given entity channel. newsample may be empty, and will be ignored in this case. timeoffset is relative to the current position (subtract the result of getsoundtime for absolute positions). Negative volume can be used to stop the sound. Return value is a fractional value based upon the number of audio devices that could be updated - test against TRUE rather than non-zero. */
+
+void(entity e, float channel) stopsound = #0:stopsound; /*
+		Stops the sound currently playing on the given entity+channel. Empty-string sound() is a silent no-op in the engine (sfx==NULL guard), so use this for explicit stops. Required on non-CHAN_AUTO channels — CHAN_AUTO allocates fresh channels per call and cannot be targeted. */
 
 float(entity e, float channel) getsoundtime = #533; /*
 		Returns the current playback time of the sample on the given entity's channel. Beware CHAN_AUTO (in csqc, channels are not limited by network protocol). */

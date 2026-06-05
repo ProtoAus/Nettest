@@ -86,6 +86,8 @@ float(float now) SH_CrowbarTickState =
 
 float(float now) SH_CrowbarTryFire =
 {
+    if (Weapon_SprintBlocksFire()) return 0;
+    if (Weapon_LowerBlocksFire()) return 0;
     if (self.weaponstate == WS_DRAW)
         return 0;
     if (now < self.attack_finished)
@@ -135,7 +137,19 @@ void() W_CrowbarSwing =
             sound(self, CHAN_WEAPON, "sounds/weapons/wpn_hlcrowbar/hitwall2.wav", 1, ATTN_NORM);
 
         if (W_CanDamageTarget(trace_ent))
-            W_ApplyDamage(self, trace_ent, CROWBAR_DAMAGE);
+        {
+            // BREAKABLE_INSTANT_CROWBAR — see sh_wpn_csknife.qc.
+            float deal = CROWBAR_DAMAGE;
+            if (trace_ent.classname == "func_breakable"
+                && (trace_ent.spawnflags & BREAKABLE_INSTANT_CROWBAR))
+                deal = 9999;
+            // Defer player damage to attacker's client hitclaim so
+            // damage isn't applied twice (server-auth + hitclaim).
+            float defer_player = (trace_ent.classname == "player")
+                                 && W_ShouldDeferToClaim(self);
+            if (!defer_player)
+                W_ApplyDamage(self, trace_ent, deal);
+        }
         else
         {
             PhysProp_TryPushFromTrace(v_forward, CROWBAR_DAMAGE);
@@ -230,7 +244,7 @@ void() W_CrowbarDrop =
 {
     entity tgt = weapon_drop_target;
     setmodel(tgt, "models/weapons/wpn_hlcrowbar/w_crowbar.mdl");
-    setsize(tgt, '-16 -16 0', '16 16 32');
+    setsize(tgt, '-16 -16 0', '16 16 48');
     tgt.classname = "weapon_hlcrowbar"; tgt.solid = SOLID_NOT; tgt.movetype = MOVETYPE_TOSS;
     tgt.weapon = WEP_HLCROWBAR; tgt.weapon_slot = SLOT_MELEE;
     tgt.weap_draw = W_CrowbarEquip; tgt.weap_drop_func = W_CrowbarDrop;
@@ -241,7 +255,7 @@ void() W_CrowbarDrop =
 void() weapon_hlcrowbar =
 {
     setmodel(self, "models/weapons/wpn_hlcrowbar/w_crowbar.mdl");
-    setsize(self, '-16 -16 0', '16 16 32');
+    setsize(self, '-16 -16 0', '16 16 48');
     self.classname = "weapon_hlcrowbar"; self.solid = SOLID_TRIGGER; self.movetype = MOVETYPE_TOSS;
     self.weapon = WEP_HLCROWBAR; self.weapon_slot = SLOT_MELEE;
     self.weap_draw = W_CrowbarEquip; self.weap_drop_func = W_CrowbarDrop;

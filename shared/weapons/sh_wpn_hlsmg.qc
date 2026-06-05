@@ -44,13 +44,21 @@ const float MAX_AMMO_HLSMG               = 250;
 const float MAX_AMMO_HLSMG_GRENADES      = 2;
 
 // --- Balance ---
-const float HLSMG_BASE_SPREAD            = 0.05;
+const float HLSMG_BASE_SPREAD            = 0.01;
 const float HLSMG_MOVE_SPREAD            = 0.08;
 const float HLSMG_FULL_SPREAD_SPEED      = 320;
 const float HLSMG_CLOSE_DAMAGE           = 10;
 const float HLSMG_MIN_DAMAGE             = 5;
 const float HLSMG_DAMAGE_FALLOFF_RANGE   = 2048;
 const float HLSMG_DRYFIRE_DELAY          = 0.2;
+const float HLSMG_KICK_PITCH    = 0.7;   // sv_gunkick — SMG, light per-shot kick that builds.
+const float HLSMG_KICK_VARIANCE = 0.3;
+const float HLSMG_KICK_STRENGTH = 1.5;  // SMG.
+
+// Muzzle offset — see cl_debug_muzzle for live-tune marker.
+const float HLSMG_MUZZLE_FORWARD = 42;
+const float HLSMG_MUZZLE_RIGHT   = 4.5;
+const float HLSMG_MUZZLE_DOWN    = 6.5;
 
 // --- Grenade balance ---
 const float HLSMG_GRENADE_SPEED          = 1000;
@@ -128,6 +136,8 @@ float(float now) SH_HLSMGTryFire =
 
 float(float now) SH_HLSMGTryGrenade =
 {
+    if (Weapon_SprintBlocksFire()) return 0;
+    if (Weapon_LowerBlocksFire()) return 0;
     if (self.weaponstate != WS_IDLE) return 0;
     if (now < self.attack_finished) return 0;
 
@@ -169,18 +179,15 @@ void(entity player) W_HLSMGPickupCopy =
 void() W_HLSMGShoot =
 {
     W_PenetratingHitscanShoot(HLSMG_BASE_SPREAD, HLSMG_MOVE_SPREAD, HLSMG_FULL_SPREAD_SPEED,
-        HLSMG_CLOSE_DAMAGE, HLSMG_MIN_DAMAGE, HLSMG_DAMAGE_FALLOFF_RANGE, 24, 0.95);
+        HLSMG_CLOSE_DAMAGE, HLSMG_MIN_DAMAGE, HLSMG_DAMAGE_FALLOFF_RANGE, 24, 0.95,
+        HLSMG_KICK_PITCH, HLSMG_KICK_VARIANCE, HLSMG_KICK_STRENGTH);
 };
 
 // Grenade explosion — radius damage
 void() W_HLSMGGrenadeExplode =
 {
-    float dist, damage;
-    float saved_dim;
-    entity e;
-
     // Exclude shooter from explosion effects — they see the client-predicted one
-    saved_dim = dimension_send;
+    float saved_dim = dimension_send;
     if (self.owner)
         dimension_send = dimension_send & ~self.owner.dimension_seen;
 
@@ -188,29 +195,10 @@ void() W_HLSMGGrenadeExplode =
 
     dimension_send = saved_dim;
 
-    // Radius damage + push-back
-    e = findradius(self.origin, HLSMG_GRENADE_RADIUS);
-    while (e)
-    {
-        if (W_CanDamageTarget(e))
-        {
-            dist = vlen(e.origin - self.origin);
-            damage = W_LinearDamageFalloff(dist, HLSMG_GRENADE_DAMAGE, HLSMG_GRENADE_MIN_DAMAGE, HLSMG_GRENADE_RADIUS);
-            W_ApplyDamage(self.owner, e, damage);
-        }
-
-        // Push players away from explosion
-        if (e.classname == "player" && e.health > 0)
-        {
-            dist = vlen(e.origin - self.origin);
-            float push_scale = 1 - (dist / HLSMG_GRENADE_RADIUS);
-            vector push_dir = normalize(e.origin - self.origin);
-            e.velocity += push_dir * 800 * push_scale;
-            e.velocity_z += 350 * push_scale;
-        }
-
-        e = e.chain;
-    }
+    // Radius damage + player knockback + phys-drop blast — single call.
+    W_RadiusExplode(self.origin, HLSMG_GRENADE_RADIUS,
+                    HLSMG_GRENADE_DAMAGE, HLSMG_GRENADE_MIN_DAMAGE,
+                    800, 350, self.owner);
 
     remove(self);
 };
@@ -353,7 +341,7 @@ void() W_HLSMGDrop =
     self.ammo_hlsmg_grenades = 0;
 
     setmodel(tgt, "models/weapons/wpn_hlsmg/w_smg.mdl");
-    setsize(tgt, '-16 -16 0', '16 16 32');
+    setsize(tgt, '-16 -16 0', '16 16 48');
     tgt.classname    = "weapon_hlsmg";
     tgt.solid        = SOLID_NOT;
     tgt.movetype     = MOVETYPE_TOSS;
@@ -370,7 +358,7 @@ void() W_HLSMGDrop =
 void() weapon_hlsmg =
 {
     setmodel(self, "models/weapons/wpn_hlsmg/w_smg.mdl");
-    setsize(self, '-16 -16 0', '16 16 32');
+    setsize(self, '-16 -16 0', '16 16 48');
     self.classname     = "weapon_hlsmg";
     self.solid         = SOLID_TRIGGER;
     self.movetype      = MOVETYPE_TOSS;
@@ -465,7 +453,7 @@ void() CSQC_PredictHLSMGCommand =
         if (r == 1)
         {
             CSQC_MarkPendingWeaponAck();
-            if (!pm_suppress_sounds)
+            if (CSQC_BeginFireActionEffects())
             {
                 float snd = random();
                 if (snd < 0.333)
@@ -476,9 +464,16 @@ void() CSQC_PredictHLSMGCommand =
                     sound(self, CHAN_WEAPON, "sounds/weapons/wpn_hlsmg/fire3.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
                 CSQC_PredictedPenetratingImpact(HLSMG_BASE_SPREAD, HLSMG_MOVE_SPREAD, HLSMG_FULL_SPREAD_SPEED,
-                    HLSMG_CLOSE_DAMAGE, HLSMG_MIN_DAMAGE, HLSMG_DAMAGE_FALLOFF_RANGE, 24, 0.95);
+                    HLSMG_CLOSE_DAMAGE, HLSMG_MIN_DAMAGE, HLSMG_DAMAGE_FALLOFF_RANGE, 24, 0.95,
+                    HLSMG_KICK_PITCH, HLSMG_KICK_VARIANCE, HLSMG_KICK_STRENGTH);
                 CSQC_SpawnCasing("models/weapons/9mmcasing.mdl",
                     '8 4 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
+                // SMG muzzle flash — AK47_MUZZLE_* shared default.
+                CSQC_MuzzleFlashAtMuzzle(HLSMG_MUZZLE_FORWARD, HLSMG_MUZZLE_RIGHT,
+                    HLSMG_MUZZLE_DOWN, self.wep_action_id);
+                CSQC_MuzzleSmokeAtMuzzle(HLSMG_MUZZLE_FORWARD, HLSMG_MUZZLE_RIGHT,
+                    HLSMG_MUZZLE_DOWN, self.wep_action_id, 1);
+                CSQC_EndFireActionEffects();
             }
         }
         else if (r == -1)

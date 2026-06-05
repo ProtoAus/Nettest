@@ -22,23 +22,54 @@ const vector TEAMTINT_BLUE    = '0.6 0.75 1';
 const vector TEAMTINT_RED     = '1 0.65 0.65';
 const vector TEAMTINT_NEUTRAL = '1 1 1';
 
+// Compute the brightness clamp scalar for a given world position.
+// Returns 1.0 when the local lightmap sample is below the cap; a
+// smaller multiplier when above so the rendered model's perceived
+// brightness is bounded. Hue is preserved (the scalar applies to all
+// three channels equally — won't shift team-tint colours).
+//
+// `cap_byte` is in the same 0–255 byte range r_viewmodel_maxlight
+// uses, matching getlight()'s native output. cap_byte <= 0 disables
+// the cap entirely. Used by the team-tint pass and the dropped-
+// weapon predraw to enforce r_playermodels_maxlight /
+// r_physdrops_maxlight respectively without an engine patch.
+float(vector pos, float cap_byte) CSQC_MaxlightScale =
+{
+    if (cap_byte <= 0)
+        return 1.0;
+    vector light = getlight(pos);
+    float maxch = light_x;
+    if (light_y > maxch) maxch = light_y;
+    if (light_z > maxch) maxch = light_z;
+    if (maxch <= cap_byte)
+        return 1.0;
+    return cap_byte / maxch;
+};
+
 void() CSQC_ApplyTeamTints =
 {
     float enabled = cvar("cl_teamcolours") > 0;
+    float cap = cvar("r_playermodels_maxlight");
     entity vis;
     float slot;
     string t;
     float team_id;
     vector tint;
+    float scale;
 
     vis = findchain(classname, "player_visual_proxy");
     while (vis)
     {
         slot = vis.vis_owner_entnum - 1;
 
+        // Brightness cap is sampled at the visible body's render
+        // origin so a player crossing a bright tile dims uniformly.
+        // Scalar = 1 when below the cap (cheap, the common case).
+        scale = CSQC_MaxlightScale(vis.origin, cap);
+
         if (!enabled || slot < 0 || slot >= maxclients)
         {
-            vis.colormod = TEAMTINT_NEUTRAL;
+            vis.colormod = TEAMTINT_NEUTRAL * scale;
             vis = vis.chain;
             continue;
         }
@@ -53,7 +84,9 @@ void() CSQC_ApplyTeamTints =
         else
             tint = TEAMTINT_NEUTRAL;
 
-        vis.colormod = tint;
+        // Stack the brightness clamp on top of the team tint — same
+        // hue, capped intensity.
+        vis.colormod = tint * scale;
         vis = vis.chain;
     }
 };

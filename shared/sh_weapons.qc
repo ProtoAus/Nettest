@@ -6,6 +6,37 @@
 //  own file: shared/weapons/sh_wpn_*.qc
 // ============================================================
 
+// Forward decl — implemented in sh_pmove.qc.  SSQC's progs.src
+// includes every weapon file before sh_pmove (because sh_pmove uses
+// per-weapon ammo fields), so the fire-block helper has to be
+// declared here, in a header included earlier than any weapon file.
+// Body uses pm_movetype + PM_MOVETYPE_NOCLIP which live in sh_pmove
+// — those don't escape the function body so a plain forward decl is
+// enough.
+float() Weapon_SprintBlocksFire;
+// Lower-pose fire gate — same compile-order story.  Body references
+// grapple_rope_active (shared field, declared in sh_customdefs.qc
+// which compiles before this header) and pm_on_ladder_cached
+// (declared right next to pm_ladder_detach_time in sh_customdefs.qc).
+float() Weapon_LowerBlocksFire;
+// Same compile-order story for the ADS gate — sh_weapon_logic.qc
+// compiles before sh_pmove.qc on SSQC, so the helper's body
+// references (pm_movetype, PM_MOVETYPE_NOCLIP, PM_BTN_SPRINT,
+// PM_ReadMovevar) need to be visible to the SSQC compiler.  The
+// helper itself is forward-declared so SH_GetSpreadScale (defined
+// further down sh_weapon_logic.qc) can call it.
+.float pm_movetype;
+float  PM_MOVETYPE_NOCLIP = 5;
+float  PM_BTN_SPRINT      = 8;
+float(string name, float fallback) PM_ReadMovevar;
+float() Weapon_IsADSActive;
+// Grapple shared field is declared in sh_pmove.qc which compiles
+// AFTER sh_weapon_logic.qc on SSQC (sv_progs.src), so the forward-
+// decl here lets Weapon_IsADSActive's grapple-cancel branch see the
+// field.  The .vector grapple_anchor that sits next to it isn't
+// needed here — only the rope-active gate.
+.float grapple_rope_active;
+
 // --- Weapon IDs ---
 const float WEP_NONE   = 0;
 const float WEP_DEAGLE = 1;
@@ -35,7 +66,47 @@ const float WEP_HLRPG            = 24;
 const float WEP_HLGRENADE        = 25;
 const float WEP_HLGLOCK          = 26;
 const float WEP_HLEGON           = 27;
-const float WEP_CSUSP            = 28;
+// HD AK47 — sequence-driven GoldSrc viewmodel variant of WEP_AK47.
+// Shares the same ammo pool (mag_ak47 / ammo_ak47) and balance numbers,
+// only differs in v/w/p models + animation system.
+const float WEP_HDAK47           = 29;
+const float WEP_SNOWBALL         = 30;
+const float WEP_SLINGSHOT        = 31;  // pickup-only snowball upgrade
+const float WEP_PAINTBALL        = 32;
+const float WEP_CSHEGRENADE      = 33;
+const float WEP_CSFLASHBANG      = 34;
+const float WEP_CSSMOKEGRENADE   = 35;
+const float WEP_BUTTERFLY        = 36;
+const float WEP_CFAUG            = 37;
+const float WEP_CFFAMAS          = 38;
+const float WEP_CFMAC10          = 39;
+const float WEP_CFC4             = 40;
+// Fists-only "weapon" — sequence-driven viewmodel only (no p_/w_model);
+// random punch picks on +attack, random kick picks on +altattack,
+// block_low on special.  Can't be dropped (no world model).
+const float WEP_MELEE            = 41;
+// Katana sword — sequence-driven, full p_/w_/v_ model set, droppable.
+// Random slash on +attack (slash1/2/3), no-op block on +altattack.
+const float WEP_KATANA           = 42;
+// CF-series new weapons (Beretta M9, Colt Anaconda, Barrett, PSG1, Dual
+// Desert Deagle).  Each gets its own ammo pool — no sharing across
+// look-alike pairs (e.g. WEP_CFDEAGLE is independent from WEP_DEAGLE).
+const float WEP_CFFIVESEVEN      = 43;   // Beretta M9 (pistol, secondary)
+const float WEP_CFDEAGLE         = 44;   // Colt Anaconda (revolver, secondary)
+const float WEP_CFAWP            = 45;   // Barrett M82 (bolt-action sniper, primary, CoD-scope)
+const float WEP_CFG3SG1          = 46;   // PSG1 (semi-auto sniper, primary, CoD-scope, no scope-out on fire)
+const float WEP_CFELITE          = 47;   // Dual Desert Deagle (dual-wield pistol, secondary)
+const float WEP_CFXM1014         = 48;   // SPAS-12 (pump shotgun, primary)
+const float WEP_CFSCOUTM700      = 49;   // Remington M700 (bolt-action sniper, primary, CoD-scope)
+const float WEP_CFM3             = 50;   // Winchester (pump shotgun, primary)
+const float WEP_CFGALIL          = 51;   // FN SCAR (full-auto rifle, primary)
+const float WEP_CFGLOCK          = 52;   // C96 Mauser (semi-auto pistol, secondary)
+const float WEP_CFSG550          = 53;   // SVD Dragunov (semi-auto sniper, primary, CoD-scope, no scope-out on fire)
+// CrossFire SMG/rifle additions — sequence-driven GoldSrc viewmodels,
+// full-auto, penetrating hitscan.  Each has its own ammo pool.
+const float WEP_CFMP5            = 54;   // CF MP5 (full-auto 9mm SMG, primary)
+const float WEP_CFVECTOR         = 55;   // CF Vector (full-auto .45 SMG, primary)
+const float WEP_CFTYPE89         = 56;   // CF Type 89 (full-auto 5.56 rifle, primary)
 
 // --- Slot IDs ---
 const float SLOT_NONE      = 0;
@@ -44,16 +115,83 @@ const float SLOT_SECONDARY = 2;
 const float SLOT_MELEE     = 3;
 const float SLOT_UTILITY   = 4;
 
+// Physics weapon drops live outside FTE's default dimension mask (255).
+// dimension_solid = PHYSDROP_DIM (only) means player movement (which has
+// dimension_hit = dimension_default) doesn't collide with their ODE bodies.
+// dimension_hit = dimension_default | PHYSDROP_DIM means the drop CAN
+// collide with regular brushwork (world, func_breakable, func_door,
+// func_button …) and with other phys drops.  Server weapon traces
+// temporarily OR PHYSDROP_DIM into self.dimension_hit when they need
+// to shoot the drops themselves.
+const float PHYSDROP_DIM = 256;
+
+// Grace window before a player can pick their own toss back up. This is
+// separate from fake-drop handoff: CSQC swaps to the real server entity as
+// soon as that entity arrives, but pickup prediction stays locked until here.
+const float WEAPON_DROP_PICKUP_DELAY = 0.5;
+
+// Pickup zone — a fixed cube anchored at the dropped weapon's origin used
+// to test "is the player close enough to pick this up?". Decoupled from
+// the entity's setsize hull because ODE phys-drops have a setsize that
+// can be much larger than the visible weapon (its trimesh hull) AND
+// rotates with the body. Anchoring a fixed cube keeps pickup feel
+// consistent across weapon types and lets client + server agree on the
+// same authoritative reach. Both sides use these numbers — keep edits
+// in sync naturally by keeping them here.
+const float WEAPON_PICKUP_HALF_W    = 18;
+const float WEAPON_PICKUP_HEIGHT_DN = 12;
+const float WEAPON_PICKUP_HEIGHT_UP = 28;
+// Slack pad on the pickup zone — keeps a player whose bbox grazes the
+// authoritative cube from bouncing pickup-eligible state on/off when
+// snapshot jitter wobbles their position by a unit or two. Same value
+// on both sides so client predict and server +use agree on whether
+// you're "in the zone".
+const float WEAPON_PICKUP_PAD       = 4;
+
+float(float wep) Weapon_PhysDropEligible =
+{
+    if (wep == WEP_NONE)
+        return FALSE;
+    return TRUE;
+};
+
 // --- Weapon impulses ---
 const float WEAPON_IMPULSE_PRIMARY   = 1;
 const float WEAPON_IMPULSE_SECONDARY = 2;
 const float WEAPON_IMPULSE_MELEE     = 3;
-const float WEAPON_IMPULSE_DROP      = 5;
+// (impulse 4 = utility cycle — handled inline in the dispatcher)
+// C4 select on impulse 5, mirroring the inventory-slot pattern of
+// 1=primary / 2=secondary / 3=melee / 4=utility / 5=C4.  Drop got
+// shifted to impulse 8 to keep this slot ordering clean — bind via
+// `bind g "impulse 8"` (the default).
+const float WEAPON_IMPULSE_C4        = 5;
 const float WEAPON_IMPULSE_RELOAD    = 6;
 const float WEAPON_IMPULSE_SPECIAL   = 7;
+const float WEAPON_IMPULSE_DROP      = 8;
+// Grappling hook — sv_grappling-gated.
+//
+//   `impulse 9`   — legacy toggle: press to fire, press again to release.
+//                   Bind via `bind <key> "impulse 9"`.
+//
+//   `impulse 91`  — press-and-hold RELEASE half: paired with the
+//                   +grapple / -grapple aliases registered in
+//                   CSQC_Init.  `+grapple` fires impulse 9 on key
+//                   press, `-grapple` fires impulse 91 on key release.
+//                   Bind via `bind <key> "+grapple"`.
+//
+// The impulse-pair approach is used (rather than a held button bit)
+// because the user-command button mask is byte-limited on the
+// protocol in use here — bit 256 (+button9) wouldn't traverse the
+// wire reliably.  Impulses are scalar and protocol-agnostic.
+const float WEAPON_IMPULSE_GRAPPLE        = 9;
+const float WEAPON_IMPULSE_GRAPPLE_RELEASE = 91;
 const float WEAPON_IMPULSE_NEXT      = 12;
 const float WEAPON_IMPULSE_PREV      = 13;
 const float WEAPON_IMPULSE_LASTINV   = 14;
+// Client-only flashlight toggle. Handled entirely on CSQC — toggles
+// a local-render dlight + plays the click sound. Not networked, so
+// other players don't see the cone in this version.
+const float WEAPON_IMPULSE_FLASHLIGHT = 50;
 
 // --- Weapon slot groups (broader category used by some weapons) ---
 const float WSG_MELEE = 3;
@@ -84,10 +222,29 @@ const float CSQC_EVENT_WEAPON_PICKUP_SOUND = 15;  // pickup confirm sound routed
 const float CSQC_EVENT_BREAKABLE_IMPACT_SOUND = 16;  // breakable material thump routed to PVS clients except the attacker (who predicted it locally in CSQC_BulletImpact)
 const float CSQC_EVENT_BREAKABLE_BREAK_SOUND = 17;   // breakable destruction sound routed to PVS clients except the attacker (who predicted it via replicated brush_health)
 const float CSQC_EVENT_FOOTSTEP_SOUND = 18;          // player footstep, routed to PVS clients except the stepper (whose CSQC pmove plays it via localsound as the predicted step fires)
-const float CSQC_EVENT_DEATH_DROP = 19;              // visual fake-drop scatter for the dying local player; server-authoritative origin/velocity so the fake matches the server's rng scatter until weapon_become_solid wires the real SendEntity at +0.7s
+const float CSQC_EVENT_DEATH_DROP = 19;              // visual fake-drop scatter for non-physics death drops; ODE drops use the real SendEntity immediately
 const float CSQC_EVENT_GRENADE_EXPLODE = 20;         // grenade detonation FX — sprite + particles + light + boom sound. Server multicasts to PVS EXCEPT shooter (who handles all FX locally via CSQC_FakeHLGrenadeExplode). Carries a sample-variant byte for the boom; the dimension_send mask on the multicast does the filtering (sound() builtin doesn't honor dimension_send, so we route the audio via this event).
 const float CSQC_EVENT_DAMAGE_REPORT   = 21;         // death-screen damage report (sent only to the dying player) — given/taken lists with each opponent's name + current HP. cl_playerdamage gates display.
 const float CSQC_EVENT_GRENADE_BOUNCE  = 22;         // grenade surface bounce sound. Server multicasts to PVS EXCEPT shooter (who plays it locally via CSQC_FakeHLGrenadeBounce). Carries the sample-variant byte. Same rationale as CSQC_EVENT_GRENADE_EXPLODE — sound() doesn't honor dimension_send, multicast does.
+const float CSQC_EVENT_HL_BEAM         = 23;         // HL Gauss/Egon beam segment. Shooter predicts locally; server event is attacker-excluded for remote viewers.
+const float CSQC_EVENT_SNOWSPLAT       = 24;         // snowball impact sound/decal. Wall decals are attacker-excluded because the shooter predicts them locally.
+const float CSQC_EVENT_PAINTSPLAT      = 25;         // paintball hit decal. Shooter predicts locally; server event is attacker-excluded for remote viewers.
+const float CSQC_EVENT_CSGRENADE_EXPLODE = 26;       // CS grenade detonation FX. Payload carries type so HE/flash/smoke can share the multicast.
+const float CSQC_EVENT_CSGRENADE_BOUNCE  = 27;       // CS grenade bounce sound. Shooter predicts locally, remote clients receive this.
+const float CSQC_EVENT_C4_EXPLODE        = 28;       // C4 detonation FX — sprite gfx/fexplo.spr at 4x scale + boom sound.
+const float CSQC_EVENT_DOOR_VIEWROT      = 29;       // private rotating-door yaw delta sent to a single carried player so their CSQC adds it to input_angles.
+const float CSQC_EVENT_TRIGGER_HURT_HIT  = 30;       // (reserved, future use; kept here for the byte ordering reference)
+const float CSQC_EVENT_BUTTON_SPARK      = 31;       // SPARKS-flagged func_button — server multicasts to PVS, CSQC fires "fx_spark.main" via pointparticles. te_spark didn't render in this engine config; pointparticles with the loaded particle config does.
+const float CSQC_EVENT_ENV_EXPLOSION     = 32;       // env_explosion (HL point entity) — fireball sprite + smoke emitter + scorch decal + sparks + sound, masked by spawnflag bits NoDamage/NoFireball/NoSmoke/NoDecal/NoSparks.  Sound always plays per HL spec.
+const float CSQC_EVENT_CLEANMODELS       = 33;       // server-console "cleanmodels" trigger — wipes shells/mags client-side (corpses are removed server-side and replicate naturally via SendEntity).
+const float CSQC_EVENT_CLEANDECALS       = 34;       // server-console "cleandecals" trigger — wipes bullet holes, scorch decals, muzzle smoke, and CS smoke-grenade puffs client-side.
+const float CSQC_EVENT_SPRAY             = 35;       // player spray decal spawn (impulse 19). Payload: spray_id short, owner entnum byte, pos 3×coord, normal 3×coord, name string. Multicast PVS.
+const float CSQC_EVENT_SPRAY_REMOVE      = 36;       // FIFO eviction of a player's oldest spray when sv_spraymax is hit. Payload: spray_id short. Multicast ALL so any client that allocated the slot can free it.
+const float CSQC_EVENT_PLAYER_FLINCH     = 37;       // visual flinch reaction when a player takes damage.  Payload: 1 byte victim slot, 1 byte hitgroup (HITGROUP_HEAD/GENERIC).  Server multicasts on every non-fatal player hit; the attacker also predicts locally via CSQC_SendHitclaim so they see flinch instantly without waiting for the server round-trip.
+const float CSQC_EVENT_ENV_FADE          = 38;       // env_fade HUD overlay. Payload: rgb bytes, alpha byte, duration float, hold float, flags byte.
+const float CSQC_EVENT_ENV_MESSAGE       = 39;       // env_message title text. Payload: message/title key string; client resolves titles.txt.
+const float CSQC_EVENT_DAMAGE_VIEWKICK   = 40;       // private victim camera punch. Payload: signed short pitch*100, signed short roll*100.
+const float CSQC_EVENT_RADIO_CALL        = 41;       // radio quick-chat playback. Payload: resolved voice-line path string. CSQC plays beep1 → voice → beep2 in sequence using soundlength() to time each stage.
 
 // --- Kill-feed causes (byte payload of CSQC_EVENT_KILLFEED) ---
 const float KILL_CAUSE_WEAPON       = 0;
@@ -106,6 +263,13 @@ const float PROJ_TYPE_HLGRENADE     = 0;   // hand grenade (gravity 0.5)
 const float PROJ_TYPE_GRENADE       = 1;   // GL grenade   (gravity 1.0)
 const float PROJ_TYPE_RPG_ROCKET    = 2;   // RPG rocket   (gravity 0.0)
 const float PROJ_TYPE_CROSSBOW_BOLT = 3;   // crossbow     (gravity 0.0)
+const float PROJ_TYPE_SNOWBALL      = 4;   // snowball     (gravity 0.65)
+const float PROJ_TYPE_CSHEGRENADE   = 5;   // CS HE        (gravity 0.55)
+const float PROJ_TYPE_CSFLASHBANG   = 6;   // CS flashbang (gravity 0.55)
+const float PROJ_TYPE_CSSMOKEGRENADE = 7;  // CS smoke     (gravity 0.55)
+const float PROJ_TYPE_PAINTBALL     = 8;   // paintball — sv_paintball_projectile mode. Reuses
+                                           // w_snowball.mdl shrunk via .scale, tinted via
+                                           // .colormod (3 extra wire bytes when ptype==8).
 
 // Type → world model path. Matches the SSQC spawn site of each
 // projectile. Used by the CSQC parser to setmodel the local entity
@@ -116,6 +280,11 @@ string(float t) Projectile_TypeModel =
     if (t == PROJ_TYPE_GRENADE)       return "models/weapons/wpn_grenadelauncher/grenade.mdl";
     if (t == PROJ_TYPE_RPG_ROCKET)    return "models/weapons/wpn_hlrpg/rpgrocket.mdl";
     if (t == PROJ_TYPE_CROSSBOW_BOLT) return "models/weapons/wpn_hlcrossbow/bolt.mdl";
+    if (t == PROJ_TYPE_SNOWBALL)      return "models/weapons/wpn_snowball/w_snowball.mdl";
+    if (t == PROJ_TYPE_CSHEGRENADE)   return "models/weapons/wpn_cshegrenade/w_hegrenade.mdl";
+    if (t == PROJ_TYPE_CSFLASHBANG)   return "models/weapons/wpn_csflashbang/w_flashbang.mdl";
+    if (t == PROJ_TYPE_CSSMOKEGRENADE) return "models/weapons/wpn_cssmokegrenade/w_smokegrenade.mdl";
+    if (t == PROJ_TYPE_PAINTBALL)     return "models/weapons/wpn_snowball/w_snowball.mdl";
     return "";
 };
 
@@ -129,6 +298,11 @@ float(float t) Projectile_TypeGravity =
     if (t == PROJ_TYPE_GRENADE)       return 1.0;
     if (t == PROJ_TYPE_RPG_ROCKET)    return 0;
     if (t == PROJ_TYPE_CROSSBOW_BOLT) return 0;
+    if (t == PROJ_TYPE_SNOWBALL)      return 0.65;
+    if (t == PROJ_TYPE_CSHEGRENADE)   return 0.55;
+    if (t == PROJ_TYPE_CSFLASHBANG)   return 0.55;
+    if (t == PROJ_TYPE_CSSMOKEGRENADE) return 0.55;
+    if (t == PROJ_TYPE_PAINTBALL)     return 0.45;   // PAINTBALL_PROJ_GRAVITY (sh_wpn_paintball.qc)
     return 0;
 };
 
@@ -141,17 +315,7 @@ float(float t) Projectile_TypeGravity =
 // the stale-crosshair-after-switch stutter at high ping.
 float(float wep_id) Weapon_HasCrosshair =
 {
-    if (wep_id == WEP_NONE)      return 0;
-    if (wep_id == WEP_KNIFE)     return 0;
-    if (wep_id == WEP_WRENCH)    return 0;
-    if (wep_id == WEP_HLCROWBAR) return 0;
-    if (wep_id == WEP_HLGRENADE) return 0;
-    // Snipers — use scope, no crosshair.
-    if (wep_id == WEP_CSAWP)     return 0;
-    if (wep_id == WEP_SCOUT)     return 0;
-    if (wep_id == WEP_G3SG1)     return 0;
-    if (wep_id == WEP_CROSSBOW)  return 0;
-    return 1;
+    return WeaponManifest_HasCrosshair(wep_id);
 };
 
 // Can this weapon enter a scoped (zoomstage > 0) state via its alt-fire?
@@ -161,11 +325,20 @@ float(float wep_id) Weapon_HasCrosshair =
 // we treat zoomstage as 0 for HUD gating, regardless of the stat.
 float(float wep_id) Weapon_HasScope =
 {
-    if (wep_id == WEP_CSAWP)    return 1;
-    if (wep_id == WEP_SCOUT)    return 1;
-    if (wep_id == WEP_G3SG1)    return 1;
-    if (wep_id == WEP_CROSSBOW) return 1;
-    return 0;
+    // sv_codscopes mode reassigns +attack2 on scout / awp from the
+    // CS-style stage-cycle to a CoD-style ADS-hold scope (state
+    // machine in client/cl_codscope.qc).  Hiding the scope-capable
+    // flag for those two weapons under codscopes mode automatically
+    // suppresses the legacy zoom path: CSQC_UpdateViewAliveSensitivity
+    // (cl_main.qc), HUD_DrawScope gate (cl_hud.qc), CSQC_ApplySniperSway
+    // (cl_cameras.qc), and the predicted-shot zero-spread branch all
+    // gate on Weapon_HasScope — when this returns 0 for scout/awp the
+    // legacy stack treats them as unscoped weapons and the CoD
+    // overlay / FOV / fog story owns the entire feel for them.
+    if ((wep_id == WEP_SCOUT || wep_id == WEP_CSAWP)
+        && PM_ReadMovevar("sv_codscopes", 0))
+        return 0;
+    return WeaponManifest_HasScope(wep_id);
 };
 
 // Canonicalize a weapon token so console-friendly aliases like
@@ -173,12 +346,7 @@ float(float wep_id) Weapon_HasScope =
 // simple comparable key.
 string(string raw) Weapon_NameKey =
 {
-    raw = strtolower(raw);
-    raw = strreplace(" ", "", raw);
-    raw = strreplace("_", "", raw);
-    raw = strreplace("-", "", raw);
-    raw = strreplace(".", "", raw);
-    return raw;
+    return WeaponManifest_NameKey(raw);
 };
 
 // Accept either a numeric weapon id or a short weapon alias. Unknown
@@ -186,85 +354,48 @@ string(string raw) Weapon_NameKey =
 // cvar behavior remains intact.
 float(string raw, float fallback) Weapon_IdFromStringOrDefault =
 {
-    string key = Weapon_NameKey(raw);
-    float numeric;
-    string numeric_key;
+    return WeaponManifest_IdFromStringOrDefault(raw, fallback);
+};
 
-    if (key == "")
+// Walk a comma-separated weapon-id list (e.g. "33,34" or "hegrenade,flashbang")
+// and return the first valid weapon id, or `fallback` if the list is empty
+// or contains only unknown tokens.  Whitespace inside tokens is allowed.
+// Single-id strings ("33") still parse since tokenizebyseparator returns
+// one token in that case.
+float(string list, float fallback) Weapon_FirstIdFromList =
+{
+    if (list == "")
         return fallback;
-
-    numeric = stof(raw);
-    numeric_key = Weapon_NameKey(sprintf("%g", numeric));
-    if (key == numeric_key && numeric == floor(numeric)
-        && numeric >= WEP_NONE && numeric <= WEP_CSUSP)
-        return numeric;
-
-    if (key == "none" || key == "wepnone") return WEP_NONE;
-    if (key == "deagle" || key == "deserteagle" || key == "wepdeagle") return WEP_DEAGLE;
-    if (key == "knife" || key == "wepknife") return WEP_KNIFE;
-    if (key == "ak47" || key == "wepak47") return WEP_AK47;
-    if (key == "m4a1" || key == "wepm4a1") return WEP_M4A1;
-    if (key == "flakshotgun" || key == "wepflakshotgun") return WEP_FLAKSHOTGUN;
-    if (key == "9mm" || key == "pistol" || key == "weppistol") return WEP_PISTOL;
-    if (key == "gauss" || key == "wepgauss") return WEP_GAUSS;
-    if (key == "crossbow" || key == "wepcrossbow") return WEP_CROSSBOW;
-    if (key == "357" || key == "wep357") return WEP_357;
-    if (key == "k98" || key == "dod98k" || key == "wepdod98k") return WEP_DOD98K;
-    if (key == "scout" || key == "wepscout") return WEP_SCOUT;
-    if (key == "gl" || key == "grenadelauncher" || key == "wepgrenadelauncher") return WEP_GRENADELAUNCHER;
-    if (key == "m249" || key == "wepm249") return WEP_M249;
-    if (key == "crowbar" || key == "hlcrowbar" || key == "wephlcrowbar") return WEP_HLCROWBAR;
-    if (key == "hlshotgun" || key == "wephlshotgun") return WEP_HLSHOTGUN;
-    if (key == "m3" || key == "csm3" || key == "wepcsm3") return WEP_CSM3;
-    if (key == "mp5" || key == "csmp5" || key == "wepcsmp5") return WEP_CSMP5;
-    if (key == "rebar" || key == "weprebar") return WEP_REBAR;
-    if (key == "awp" || key == "csawp" || key == "wepcsawp") return WEP_CSAWP;
-    if (key == "wrench" || key == "wepwrench") return WEP_WRENCH;
-    if (key == "glock" || key == "wepglock") return WEP_GLOCK;
-    if (key == "g3sg1" || key == "wepg3sg1") return WEP_G3SG1;
-    if (key == "hlsmg" || key == "wephlsmg") return WEP_HLSMG;
-    if (key == "rpg" || key == "hlrpg" || key == "wephlrpg") return WEP_HLRPG;
-    if (key == "grenade" || key == "hlgrenade" || key == "wephlgrenade") return WEP_HLGRENADE;
-    if (key == "hlglock" || key == "wephlglock") return WEP_HLGLOCK;
-    if (key == "egon" || key == "hlegon" || key == "wephlegon") return WEP_HLEGON;
-    if (key == "usp" || key == "csusp" || key == "wepcsusp") return WEP_CSUSP;
-
+    float n = tokenizebyseparator(list, ",");
+    float i;
+    for (i = 0; i < n; i++)
+    {
+        float id = Weapon_IdFromStringOrDefault(argv(i), WEP_NONE);
+        if (id != WEP_NONE)
+            return id;
+    }
     return fallback;
+};
+
+// Iterate a comma-separated weapon-id list, calling `action(id)` once per
+// valid weapon id (skipping unknowns).  Order preserved.  Caller passes a
+// statically-known function pointer so QC's call indirection is one less
+// hop than walking + dispatching by id at the call site.
+//
+// Usage: tokenize the cvar once, walk the tokens, give ammo per id.  See
+// W_GiveStartingAmmo's utility post-pass.
+float(string list) Weapon_TokenizeIdList =
+{
+    if (list == "")
+        return 0;
+    return tokenizebyseparator(list, ",");
 };
 
 // Short display name for a weapon ID — used by the kill feed and (potentially)
 // future UI.  Matches the labels in menu/m_createserver.qc loadout arrays.
 string(float wep_id) Weapon_DisplayName =
 {
-    if (wep_id == WEP_AK47)            return "AK47";
-    if (wep_id == WEP_M4A1)            return "M4A1";
-    if (wep_id == WEP_CSAWP)           return "AWP";
-    if (wep_id == WEP_G3SG1)           return "G3SG1";
-    if (wep_id == WEP_CSM3)            return "M3";
-    if (wep_id == WEP_CSMP5)           return "MP5";
-    if (wep_id == WEP_DOD98K)          return "K98";
-    if (wep_id == WEP_FLAKSHOTGUN)     return "Flak Shotgun";
-    if (wep_id == WEP_GAUSS)           return "Gauss";
-    if (wep_id == WEP_GRENADELAUNCHER) return "Grenade Launcher";
-    if (wep_id == WEP_CROSSBOW)        return "Crossbow";
-    if (wep_id == WEP_HLEGON)          return "Egon";
-    if (wep_id == WEP_HLRPG)           return "RPG";
-    if (wep_id == WEP_HLSHOTGUN)       return "HL Shotgun";
-    if (wep_id == WEP_HLSMG)           return "HL SMG";
-    if (wep_id == WEP_M249)            return "M249";
-    if (wep_id == WEP_REBAR)           return "Rebar";
-    if (wep_id == WEP_SCOUT)           return "Scout";
-    if (wep_id == WEP_CSUSP)           return "USP";
-    if (wep_id == WEP_DEAGLE)          return "Desert Eagle";
-    if (wep_id == WEP_GLOCK)           return "Glock";
-    if (wep_id == WEP_357)             return ".357";
-    if (wep_id == WEP_HLGLOCK)         return "HL Glock";
-    if (wep_id == WEP_PISTOL)          return "9mm";
-    if (wep_id == WEP_WRENCH)          return "Wrench";
-    if (wep_id == WEP_KNIFE)           return "Knife";
-    if (wep_id == WEP_HLCROWBAR)       return "Crowbar";
-    if (wep_id == WEP_HLGRENADE)       return "Grenade";
-    return "?";
+    return WeaponManifest_DisplayName(wep_id);
 };
 
 // Per-weapon walk/run-speed multiplier applied to mv_maxspeed and
@@ -274,49 +405,7 @@ string(float wep_id) Weapon_DisplayName =
 // Predicted automatically — both SSQC and CSQC read self.weapon.
 float(float wep_id) Weapon_SpeedFactor =
 {
-    // melee — no weight penalty
-    if (wep_id == WEP_KNIFE)           return 1.0;
-    if (wep_id == WEP_WRENCH)          return 1.0;
-    if (wep_id == WEP_HLCROWBAR)       return 1.0;
-    if (wep_id == WEP_HLGRENADE)       return 1.0;
-    if (wep_id == WEP_REBAR)           return 1.0;
-
-    // light pistols
-    if (wep_id == WEP_PISTOL)          return 0.985;
-    if (wep_id == WEP_HLGLOCK)         return 0.985;
-    if (wep_id == WEP_GLOCK)           return 0.985;
-    if (wep_id == WEP_CSUSP)           return 0.985;
-
-    // heavy pistols / crossbow
-    if (wep_id == WEP_DEAGLE)          return 0.97;
-    if (wep_id == WEP_357)             return 0.97;
-    if (wep_id == WEP_CROSSBOW)        return 0.97;
-
-    // SMGs
-    if (wep_id == WEP_CSMP5)           return 0.96;
-    if (wep_id == WEP_HLSMG)           return 0.96;
-
-    // assault rifles / shotguns / mid-weight long arms
-    if (wep_id == WEP_AK47)            return 0.945;
-    if (wep_id == WEP_M4A1)            return 0.945;
-    if (wep_id == WEP_CSM3)            return 0.945;
-    if (wep_id == WEP_HLSHOTGUN)       return 0.945;
-    if (wep_id == WEP_FLAKSHOTGUN)     return 0.945;
-    if (wep_id == WEP_SCOUT)           return 0.945;
-    if (wep_id == WEP_DOD98K)          return 0.945;
-    if (wep_id == WEP_GAUSS)           return 0.945;
-    if (wep_id == WEP_HLEGON)          return 0.945;
-    if (wep_id == WEP_GRENADELAUNCHER) return 0.945;
-    if (wep_id == WEP_HLRPG)           return 0.945;
-
-    // heavy — ~250 qu/s at default sv_maxspeed 270
-    if (wep_id == WEP_G3SG1)           return 0.926;
-
-    // extra-heavy — ~240 qu/s at default sv_maxspeed 270
-    if (wep_id == WEP_CSAWP)           return 0.889;
-    if (wep_id == WEP_M249)            return 0.889;
-
-    return 1.0;  // empty hands / unknown
+    return WeaponManifest_SpeedFactor(wep_id);
 };
 
 // Definition moved below — Weapon_SpeedFactor_Smooth references .weapon
@@ -325,14 +414,15 @@ float(float wep_id) Weapon_SpeedFactor =
 
 // --- Bullet impact material codes (sent in CSQC_EVENT_IMPACT) ---
 // Used by CSQC to pick the right particle effect per surface.
-// Anything > IMPACT_MAT_DEFAULT is "no decal" (player body or breakable
-// brush — both move/destroy and bullet holes would orphan).
+// Some materials allow decals on static BSP, while METAL_NODECAL is reserved
+// for physics bodies that should spark but never receive a bullet hole.
 const float IMPACT_MAT_DEFAULT      = 0;   // static wall/concrete (orange dust + decal)
 const float IMPACT_MAT_FLESH        = 1;   // routine flesh hit (cloud only, no sparks)
 const float IMPACT_MAT_METAL        = 2;   // BREAKABLE_METAL/MACHINE/CIRCUIT (sparks)
 const float IMPACT_MAT_GLASS        = 3;   // BREAKABLE_GLASS (clear shards)
 const float IMPACT_MAT_WOOD         = 4;   // BREAKABLE_WOOD (brown debris)
 const float IMPACT_MAT_FLESH_LETHAL = 5;   // killing blow OR headshot (cloud + spark splash)
+const float IMPACT_MAT_METAL_NODECAL = 6;  // physics metal hit (sparks, no decal)
 
 // --- Shell/mag type IDs (sent in multicast events) ---
 const float SHELL_9MM       = 0;
@@ -349,6 +439,8 @@ const float MAG_RIFLE       = 8;
 const float BRUSH_TYPE_STATIC = 0;
 const float BRUSH_TYPE_DOOR   = 1;
 const float BRUSH_TYPE_BUTTON = 2;
+const float BRUSH_TYPE_CONVEYOR = 4;   // ships movedir + speed in brushsync wire
+const float BRUSH_TYPE_TRAIN    = 5;   // func_train / func_tracktrain — CSQC predicts platform carry + geometry push via PM_CheckMovingPushers train branch
 
 // --- Door/button state (shared between server and client) ---
 const float MOVER_STATE_BOTTOM = 0;
@@ -366,6 +458,28 @@ const float PLAYER_ATTACKANIM_MELEE = 2;
 .float slot_melee;
 .float slot_utility;
 
+// Canonical ammo state for single-weapon inventory slots.  Legacy
+// per-weapon mag/ammo fields are still used as active-weapon working
+// registers by the existing weapon implementations; sh_weapon_slotammo.qc
+// mirrors them to/from these slot fields.
+.float slot_primary_mag;
+.float slot_primary_ammo;
+.float slot_primary_aux;
+.float slot_secondary_mag;
+.float slot_secondary_ammo;
+.float slot_secondary_aux;
+
+// Utility inventory fields live here because sv_weapons.qc manages the
+// utility slot before the individual utility weapon files are compiled.
+.float ammo_hlgrenade;
+.float ammo_snowball;
+.float ammo_cshegrenade;
+.float ammo_csflashbang;
+.float ammo_cssmokegrenade;
+.float ammo_cfc4;
+.float snowball_has_slingshot;
+.float snowball_use_slingshot;
+
 .void() slot_primary_equip;
 .void() slot_secondary_equip;
 .void() slot_melee_equip;
@@ -381,6 +495,18 @@ const float PLAYER_ATTACKANIM_MELEE = 2;
 .float previous_weapon;
 .float weaponstate;
 .float wep_action_id;    // increments whenever a new weapon action starts
+
+// Server-side replay-protection ring for SV_HandleProjhitClaim.
+// Stores the last 32 action_ids consumed by a successful projhit so
+// the same shot can't claim twice.  We no longer require the live
+// projectile entity to exist when the claim arrives — server-side
+// physics often consumes the projectile (fuse, world touch) before
+// the client's hit claim lands, which caused the "shot doesn't
+// register" bug.  Window-based validation against wep_action_id
+// proves the player actually fired that shot recently; this ring
+// prevents replays.
+.float proj_consumed_ids[32];
+.float proj_consumed_ring_idx;
 .float wep_nextframe;    // server-side: absolute server time of next frame tick
 .float wep_anim_start;   // absolute time when the current animation began
 
@@ -470,6 +596,16 @@ float() Weapon_SpeedFactor_Smooth =
 .string weapon_worldmodel;             // world model path
 .string weapon_deploy_sound;           // deploy sound (empty string = none)
 .float  weapon_uses_sequences;         // TRUE for GoldSrc-format MDLs (sequence-driven, not frame-driven)
+.float  weapon_viewmodel_flip;         // TRUE to mirror the viewmodel horizontally (left-handed source models). Engine-side: RF_XFLIP flips projection X and inverts cull winding.
+// Muzzle tag — set in the CSQC equip function for weapons whose
+// viewmodel has a usable muzzleflash bone (e.g. HL studio MDLs with a
+// $attachment).  Empty `weapon_muzzle_bone` = no tag → the sway pivot
+// code in cl_viewfx.qc falls back to translation parallax.  Offset is
+// in HL studio coords (+X forward, +Y left, +Z up) just like the
+// existing muzzle-flash plumbing, so the same constants used for the
+// flash also describe the pivot point.
+.string weapon_muzzle_bone;
+.vector weapon_muzzle_offset;
 
 // --- World weapon entity fields ---
 .float weapon_slot;           // SLOT_* this pickup belongs to
@@ -483,6 +619,13 @@ float() Weapon_SpeedFactor_Smooth =
 .void() equip;                // equip function pointer (alternative to weap_draw)
 .void() drop;                 // drop function pointer
 .void() spawnitem;            // world spawn function for this weapon type
+
+// Generic dropped-ammo payload.  SendEntity and CSQC pickup prediction read
+// this directly; individual weapon drop funcs still populate their legacy
+// fields for compatibility.
+.float weapon_drop_mag;
+.float weapon_drop_ammo;
+.float weapon_drop_aux;
 
 // --- Player animation family constants ---
 const float PANIM_NONE     = 0;
@@ -499,71 +642,13 @@ const float PANIM_AK47     = 9;
 // Maps weapon ID to animation family for player model sequences.
 float(float wep) W_GetPlayerAnimFamily =
 {
-    switch (wep)
-    {
-    case WEP_CSUSP:
-    case WEP_DEAGLE:
-    case WEP_PISTOL:
-    case WEP_357:
-    case WEP_HLGLOCK:
-        return PANIM_ONEHAND;
-    case WEP_AK47:
-        return PANIM_AK47;
-    case WEP_M4A1:
-    case WEP_SCOUT:
-    case WEP_DOD98K:
-    case WEP_CROSSBOW:
-    case WEP_GAUSS:
-    case WEP_REBAR:
-    case WEP_HLSMG:
-    case WEP_HLRPG:
-    case WEP_HLEGON:
-        return PANIM_CARBINE;
-    case WEP_G3SG1:
-    case WEP_CSAWP:
-        return PANIM_RIFLE;
-    case WEP_CSMP5:
-        return PANIM_MP5;
-    case WEP_CSM3:
-    case WEP_HLSHOTGUN:
-    case WEP_FLAKSHOTGUN:
-        return PANIM_SHOTGUN;
-    case WEP_M249:
-        return PANIM_PARA;
-    case WEP_KNIFE:
-    case WEP_WRENCH:
-    case WEP_HLCROWBAR:
-        return PANIM_KNIFE;
-    case WEP_GRENADELAUNCHER:
-    case WEP_HLGRENADE:
-        return PANIM_GRENADE;
-    case WEP_GLOCK:
-        return PANIM_ONEHAND;
-    default:
-        return PANIM_ONEHAND;
-    }
+    return WeaponManifest_PlayerAnimFamily(wep);
 };
 
 // Maps weapon ID to the p_*.mdl path for third-person weapon attachment.
 string(float wep) W_GetPModelPath =
 {
-    switch (wep)
-    {
-    case WEP_AK47:   return "models/weapons/wpn_csak47/p_ak47.mdl";
-    case WEP_CSAWP:  return "models/weapons/wpn_csawp/p_awp.mdl";
-    case WEP_DEAGLE: return "models/weapons/wpn_csdeagle/p_deagle.mdl";
-    case WEP_G3SG1:  return "models/weapons/wpn_csg3sg1/p_g3sg1.mdl";
-    case WEP_GLOCK:  return "models/weapons/wpn_csglock/p_glock.mdl";
-    case WEP_KNIFE:  return "models/weapons/wpn_csknife/p_knife.mdl";
-    case WEP_CSM3:   return "models/weapons/wpn_csm3/p_m3.mdl";
-    case WEP_M4A1:   return "models/weapons/wpn_csm4a1/p_m4a1.mdl";
-    case WEP_M249:   return "models/weapons/wpn_csm249/p_m249.mdl";
-    case WEP_CSMP5:  return "models/weapons/wpn_csmp5/p_mp5.mdl";
-    case WEP_SCOUT:  return "models/weapons/wpn_csscout/p_scout.mdl";
-    case WEP_DOD98K: return "models/weapons/wpn_dod98k/p_k98.mdl";
-    case WEP_CSUSP:  return "models/weapons/wpn_csusp/p_usp.mdl";
-    default:         return "";
-    }
+    return WeaponManifest_PModelPath(wep);
 };
 
 // Linear damage falloff from close_dmg at point-blank to min_dmg at `range`.
@@ -577,3 +662,62 @@ float(float dist, float close_dmg, float min_dmg, float range) W_LinearDamageFal
     t = bound(0, dist / range, 1);
     return close_dmg + (min_dmg - close_dmg) * t;
 };
+
+// --- sv_hitbox_expand bookends ---
+//
+// Inflate every alive (CSQC: remote) player's bbox by sv_hitbox_expand
+// for the duration of a hit trace, then restore.  Used by both the
+// CSQC predicted trace and the SSQC authoritative trace so they agree
+// on which limbs are reachable after lag rewind.  CSQC walks the
+// player_visual_proxy chain; SSQC walks the live player chain (impl
+// in server/sv_weapons.qc, declared here so callers compiled earlier
+// in sv_progs.src — sh_weapon_logic.qc, sh_weapon_standard.qc — see
+// the symbol without a per-file forward decl).
+#ifdef SSQC
+void() W_PlayersExpandHitboxes;
+void() W_PlayersRestoreHitboxes;
+#endif
+
+#ifdef CSQC
+void() W_PlayersExpandHitboxes =
+{
+    float expand = serverkeyfloat("sv_hitbox_expand");
+    if (expand <= 0) expand = cvar("sv_hitbox_expand");
+    if (expand <= 0) return;
+
+    entity p = findchain(classname, "player_visual_proxy");
+    while (p)
+    {
+        if (!p.vis_is_dead && p.solid == SOLID_BBOX)
+        {
+            vector mn = p.mins;
+            vector mx = p.maxs;
+            mn_x -= expand; mn_y -= expand; mn_z -= expand;
+            mx_x += expand; mx_y += expand; mx_z += expand;
+            setsize(p, mn, mx);
+        }
+        p = p.chain;
+    }
+};
+
+void() W_PlayersRestoreHitboxes =
+{
+    float expand = serverkeyfloat("sv_hitbox_expand");
+    if (expand <= 0) expand = cvar("sv_hitbox_expand");
+    if (expand <= 0) return;
+
+    entity p = findchain(classname, "player_visual_proxy");
+    while (p)
+    {
+        if (!p.vis_is_dead && p.solid == SOLID_BBOX)
+        {
+            vector mn = p.mins;
+            vector mx = p.maxs;
+            mn_x += expand; mn_y += expand; mn_z += expand;
+            mx_x -= expand; mx_y -= expand; mx_z -= expand;
+            setsize(p, mn, mx);
+        }
+        p = p.chain;
+    }
+};
+#endif

@@ -44,6 +44,12 @@ float create_server_nomapweapons;
 // no sanity checks) is power-user — not exposed in the menu, set via
 // console / data/server.cfg if needed.
 float create_server_trust_clienthits;
+// Voice / VoIP server-side toggles.  voip_record cycles through
+// 0=off / 1=record-all / 2=spectators-only (matches engine sv_voip_record
+// values).  voip_echo is debug-only.
+float create_server_voip;
+float create_server_voip_record;     // 0..2
+float create_server_voip_echo;
 float create_server_seeded;
 float create_server_tab;    // 0 = server, 1 = game, 2 = movement
 float create_server_tickrate_index;
@@ -84,26 +90,19 @@ float  create_server_odequick;
 float  create_server_odeautodisable;
 
 // --- Default-loadout dropdown state ---
-// Parallel (id, display-name) arrays drive the four "Default Weapons"
-// dropdowns on the Game tab.  The cvar stores the WEP_* integer directly;
-// the index into these arrays is just UI state.  WEP_* values correspond to
-// the constants in shared/sh_weapons.qc — keep this list in sync.
-float  cs_loadout_primary_ids[]    = { 0,  3,    4,    19,   22,    16, 17, 10,  5,             7,     12,                8,          27,    24,    15,           23,      13,    18,     11    };
-string cs_loadout_primary_names[]  = {"None","AK47","M4A1","AWP","G3SG1","M3","MP5","K98","Flak Shotgun","Gauss","Grenade Launcher","Crossbow","Egon","RPG","HL Shotgun","HL SMG","M249","Rebar","Scout"};
-
-float  cs_loadout_secondary_ids[]   = { 0,     28,   1,              21,      9,      26,         6    };
-string cs_loadout_secondary_names[] = {"None","USP","Desert Eagle","Glock",".357","HL Glock","9mm" };
-
-float  cs_loadout_melee_ids[]       = { 0,     20,       2,       14       };
-string cs_loadout_melee_names[]     = {"None","Wrench","Knife","Crowbar" };
-
-float  cs_loadout_utility_ids[]     = { 0,     25       };
-string cs_loadout_utility_names[]   = {"None","Grenade" };
+// Default-loadout dropdown options are built from shared/sh_weapon_manifest.qc.
 
 float cs_default_primary_idx;     float  cs_default_primary_open;     vector cs_default_primary_scroll;
 float cs_default_secondary_idx;   float  cs_default_secondary_open;   vector cs_default_secondary_scroll;
 float cs_default_melee_idx;       float  cs_default_melee_open;       vector cs_default_melee_scroll;
 float cs_default_utility_idx;     float  cs_default_utility_open;     vector cs_default_utility_scroll;
+// Multi-select bitmask of cs_default_utility_options indices.  Bit i
+// means option i is checked.  sv_default_utility serialises as a
+// comma-separated weapon-id list so the player can spawn with multiple
+// grenades simultaneously.  cs_default_utility_idx stays as the
+// "first checked" index (used by code paths that still treat it as a
+// single selection — they get the active utility).
+float cs_default_utility_mask;
 
 // Latched draw positions for the four dropdowns — set each frame when the
 // buttons are drawn on the Server tab; read at end-of-frame to draw the
@@ -120,65 +119,16 @@ strbuf cs_default_melee_options;
 strbuf cs_default_utility_options;
 float  cs_default_options_loaded;
 
-// MenuQC doesn't compile against shared/sh_weapons.qc, so the Create
-// Server screen keeps a small local parser for seeding its dropdowns
-// from named sv_default_* values such as "ak47" or "desert eagle".
+// Create Server reads weapon names and loadout options from the shared
+// metadata-only manifest.
 string(string raw) create_server_weapon_name_key =
 {
-    raw = strtolower(raw);
-    raw = strreplace(" ", "", raw);
-    raw = strreplace("_", "", raw);
-    raw = strreplace("-", "", raw);
-    raw = strreplace(".", "", raw);
-    return raw;
+    return WeaponManifest_NameKey(raw);
 };
 
 float(string raw, float fallback) create_server_weapon_id_from_string_or_default =
 {
-    string key = create_server_weapon_name_key(raw);
-    float numeric;
-    string numeric_key;
-
-    if (key == "")
-        return fallback;
-
-    numeric = stof(raw);
-    numeric_key = create_server_weapon_name_key(sprintf("%g", numeric));
-    if (key == numeric_key && numeric == floor(numeric)
-        && numeric >= 0 && numeric <= 28)
-        return numeric;
-
-    if (key == "none" || key == "wepnone") return 0;
-    if (key == "deagle" || key == "deserteagle" || key == "wepdeagle") return 1;
-    if (key == "knife" || key == "wepknife") return 2;
-    if (key == "ak47" || key == "wepak47") return 3;
-    if (key == "m4a1" || key == "wepm4a1") return 4;
-    if (key == "flakshotgun" || key == "wepflakshotgun") return 5;
-    if (key == "9mm" || key == "pistol" || key == "weppistol") return 6;
-    if (key == "gauss" || key == "wepgauss") return 7;
-    if (key == "crossbow" || key == "wepcrossbow") return 8;
-    if (key == "357" || key == "wep357") return 9;
-    if (key == "k98" || key == "dod98k" || key == "wepdod98k") return 10;
-    if (key == "scout" || key == "wepscout") return 11;
-    if (key == "gl" || key == "grenadelauncher" || key == "wepgrenadelauncher") return 12;
-    if (key == "m249" || key == "wepm249") return 13;
-    if (key == "crowbar" || key == "hlcrowbar" || key == "wephlcrowbar") return 14;
-    if (key == "hlshotgun" || key == "wephlshotgun") return 15;
-    if (key == "m3" || key == "csm3" || key == "wepcsm3") return 16;
-    if (key == "mp5" || key == "csmp5" || key == "wepcsmp5") return 17;
-    if (key == "rebar" || key == "weprebar") return 18;
-    if (key == "awp" || key == "csawp" || key == "wepcsawp") return 19;
-    if (key == "wrench" || key == "wepwrench") return 20;
-    if (key == "glock" || key == "wepglock") return 21;
-    if (key == "g3sg1" || key == "wepg3sg1") return 22;
-    if (key == "hlsmg" || key == "wephlsmg") return 23;
-    if (key == "rpg" || key == "hlrpg" || key == "wephlrpg") return 24;
-    if (key == "grenade" || key == "hlgrenade" || key == "wephlgrenade") return 25;
-    if (key == "hlglock" || key == "wephlglock") return 26;
-    if (key == "egon" || key == "hlegon" || key == "wephlegon") return 27;
-    if (key == "usp" || key == "csusp" || key == "wepcsusp") return 28;
-
-    return fallback;
+    return WeaponManifest_IdFromStringOrDefault(raw, fallback);
 };
 
 void() create_server_load_gamemode_options =
@@ -191,6 +141,8 @@ void() create_server_load_gamemode_options =
 	bufstr_add(create_server_gamemode_options, "Elimination", FALSE);
 	bufstr_add(create_server_gamemode_options, "Bhop", FALSE);
 	bufstr_add(create_server_gamemode_options, "Free For All", FALSE);
+	bufstr_add(create_server_gamemode_options, "Paintball", FALSE);
+	bufstr_add(create_server_gamemode_options, "Defuse", FALSE);
 	create_server_gamemode_options_loaded = TRUE;
 };
 
@@ -202,22 +154,79 @@ void() create_server_load_loadout_options =
         return;
 
     cs_default_primary_options = buf_create();
-    for (i = 0; i < cs_loadout_primary_names.length; i++)
-        bufstr_add(cs_default_primary_options, cs_loadout_primary_names[i], FALSE);
+    for (i = 0; i < WeaponManifest_LoadoutCount(WMF_SLOT_PRIMARY); i++)
+        bufstr_add(cs_default_primary_options, WeaponManifest_LoadoutLabel(WMF_SLOT_PRIMARY, i), FALSE);
 
     cs_default_secondary_options = buf_create();
-    for (i = 0; i < cs_loadout_secondary_names.length; i++)
-        bufstr_add(cs_default_secondary_options, cs_loadout_secondary_names[i], FALSE);
+    for (i = 0; i < WeaponManifest_LoadoutCount(WMF_SLOT_SECONDARY); i++)
+        bufstr_add(cs_default_secondary_options, WeaponManifest_LoadoutLabel(WMF_SLOT_SECONDARY, i), FALSE);
 
     cs_default_melee_options = buf_create();
-    for (i = 0; i < cs_loadout_melee_names.length; i++)
-        bufstr_add(cs_default_melee_options, cs_loadout_melee_names[i], FALSE);
+    for (i = 0; i < WeaponManifest_LoadoutCount(WMF_SLOT_MELEE); i++)
+        bufstr_add(cs_default_melee_options, WeaponManifest_LoadoutLabel(WMF_SLOT_MELEE, i), FALSE);
 
     cs_default_utility_options = buf_create();
-    for (i = 0; i < cs_loadout_utility_names.length; i++)
-        bufstr_add(cs_default_utility_options, cs_loadout_utility_names[i], FALSE);
+    for (i = 0; i < WeaponManifest_LoadoutCount(WMF_SLOT_UTILITY); i++)
+        bufstr_add(cs_default_utility_options, WeaponManifest_LoadoutLabel(WMF_SLOT_UTILITY, i), FALSE);
 
     cs_default_options_loaded = TRUE;
+};
+
+// Convert sv_default_utility (comma-separated weapon ids) → bitmask of
+// indices into cs_default_utility_options.  Unknown / non-utility ids
+// are silently ignored.  Single-int strings ("33") still parse since
+// tokenizebyseparator returns one token in that case.
+float(string list) create_server_utility_mask_from_cvar =
+{
+    float mask = 0;
+    if (list == "")
+        return 0;
+    float n = tokenizebyseparator(list, ",");
+    float i;
+    for (i = 0; i < n; i++)
+    {
+        float id  = create_server_weapon_id_from_string_or_default(argv(i), 0);
+        float idx = WeaponManifest_LoadoutFindIndex(WMF_SLOT_UTILITY, id);
+        if (idx < 0 || idx >= WeaponManifest_LoadoutCount(WMF_SLOT_UTILITY))
+            continue;
+        mask = mask | pow(2, idx);
+    }
+    return mask;
+};
+
+// Convert mask → comma-separated id list for cvar_set.  Empty mask
+// serialises as "0" so PlayerSpawn falls back to WEP_NONE.
+string(float mask) create_server_utility_mask_to_cvar =
+{
+    string out = "";
+    float count = WeaponManifest_LoadoutCount(WMF_SLOT_UTILITY);
+    float i, n_set = 0;
+    for (i = 0; i < count; i++)
+    {
+        if (!(mask & pow(2, i)))
+            continue;
+        float id = WeaponManifest_LoadoutWeapon(WMF_SLOT_UTILITY, i);
+        if (n_set == 0)
+            out = ftos(id);
+        else
+            out = strcat(out, ",", ftos(id));
+        n_set++;
+    }
+    if (n_set == 0)
+        return "0";
+    return out;
+};
+
+// Return the option-index of the lowest set bit in the mask, or 0 if
+// the mask is empty.  Used to keep cs_default_utility_idx in sync as
+// the "active utility" (matches what the runtime spawns into slot_utility).
+float(float mask) create_server_utility_first_idx =
+{
+    float i;
+    for (i = 0; i < 24; i++)
+        if (mask & pow(2, i))
+            return i;
+    return 0;
 };
 
 void() Menu_FixupEmptyDefaults;  // forward — defined in m_menu.qc
@@ -299,6 +308,9 @@ void() create_server_seed_fields =
 	}
 
 	create_server_pure = cvar("sv_pure") > 0;
+	create_server_voip        = cvar("sv_voip") > 0;
+	create_server_voip_record = bound(0, cvar("sv_voip_record"), 2);
+	create_server_voip_echo   = cvar("sv_voip_echo") > 0;
 	create_server_friendlyfire = cvar("mp_friendlyfire") > 0;
 	create_server_autohop = cvar("sv_autohop") > 0;
 	create_server_falldamage = cvar("mp_falldamage") > 0;
@@ -316,32 +328,25 @@ void() create_server_seed_fields =
 	create_server_trust_clienthits = cvar("sv_trust_clienthits") > 0;
 
 	// Seed default-loadout dropdown indices from the sv_default_* cvars.
-	// Each cvar stores a WEP_* integer; find its index in the matching
-	// cs_loadout_*_ids array.  Falls back to index 0 ("None") if not found.
+	// Each cvar stores a WEP_* integer; find its manifest loadout index.
 	create_server_load_loadout_options();
 	{
 		float want;
-		float i;
 
 		want = create_server_weapon_id_from_string_or_default(cvar_string("sv_default_primary"), 0);
-		cs_default_primary_idx = 0;
-		for (i = 0; i < cs_loadout_primary_ids.length; i++)
-			if (cs_loadout_primary_ids[i] == want) { cs_default_primary_idx = i; break; }
+		cs_default_primary_idx = WeaponManifest_LoadoutFindIndex(WMF_SLOT_PRIMARY, want);
 
 		want = create_server_weapon_id_from_string_or_default(cvar_string("sv_default_secondary"), 0);
-		cs_default_secondary_idx = 0;
-		for (i = 0; i < cs_loadout_secondary_ids.length; i++)
-			if (cs_loadout_secondary_ids[i] == want) { cs_default_secondary_idx = i; break; }
+		cs_default_secondary_idx = WeaponManifest_LoadoutFindIndex(WMF_SLOT_SECONDARY, want);
 
 		want = create_server_weapon_id_from_string_or_default(cvar_string("sv_default_melee"), 0);
-		cs_default_melee_idx = 0;
-		for (i = 0; i < cs_loadout_melee_ids.length; i++)
-			if (cs_loadout_melee_ids[i] == want) { cs_default_melee_idx = i; break; }
+		cs_default_melee_idx = WeaponManifest_LoadoutFindIndex(WMF_SLOT_MELEE, want);
 
-		want = create_server_weapon_id_from_string_or_default(cvar_string("sv_default_utility"), 0);
-		cs_default_utility_idx = 0;
-		for (i = 0; i < cs_loadout_utility_ids.length; i++)
-			if (cs_loadout_utility_ids[i] == want) { cs_default_utility_idx = i; break; }
+		// Utility is multi-select; seed both the bitmask and the legacy
+		// single-index (kept in sync as "first checked" so any code that
+		// still reads cs_default_utility_idx stays correct).
+		cs_default_utility_mask = create_server_utility_mask_from_cvar(cvar_string("sv_default_utility"));
+		cs_default_utility_idx  = create_server_utility_first_idx(cs_default_utility_mask);
 	}
 
 	// Physics tab seeding
@@ -452,6 +457,108 @@ float(string id, vector pos, vector size, strbuf options, __inout float selected
 	sui_pop_frame();
 
 	return changed;
+};
+
+// ---- Multi-select dropdown ----
+// `selection_mask` is a float bitmask of option indices (bit i set =
+// option i is checked).  Float can exactly represent integers up to
+// 2^24, more than enough for the small option lists this is used with
+// (utility loadout has ≤ 8 entries).  Click on the button toggles the
+// list open/closed; click on a list item toggles that option's bit
+// without closing the list.
+//
+// Caller-side cvar serialisation: convert the mask to / from a comma-
+// separated weapon-id list using create_server_utility_mask_to_cvar /
+// create_server_utility_mask_from_cvar (defined below).
+
+string(strbuf options, float mask) menu_multidropdown_summary =
+{
+    float count = buf_getsize(options);
+    float i, n_set = 0;
+    string out = "";
+    for (i = 0; i < count; i++)
+    {
+        if (!(mask & pow(2, i)))
+            continue;
+        if (n_set == 0)
+            out = bufstr_get(options, i);
+        else if (n_set < 2)
+            out = strcat(out, ", ", bufstr_get(options, i));
+        n_set++;
+    }
+    if (n_set == 0)
+        return "(none)";
+    if (n_set > 2)
+        return sprintf("%g selected", n_set);
+    return out;
+};
+
+float(string id, vector pos, vector size, strbuf options, __inout float selection_mask, __inout float is_open) menu_multidropdown_button =
+{
+    float count = buf_getsize(options);
+    string button_text = menu_multidropdown_summary(options, selection_mask);
+    vector button_color = MENU_BUTTON;
+    vector border_color = MENU_BUTTON_BORDER;
+
+    if (count <= 0)
+    {
+        is_open = FALSE;
+        button_color = MENU_BG_DARK;
+        border_color = MENU_BORDER;
+        button_text = "(no options)";
+    }
+    else
+    {
+        button_text = strcat(button_text, is_open ? " -" : " v");
+    }
+
+    if (my_button_colored(strcat(id, "_btn"), pos, [size_x, 20], button_text, button_color, border_color) && count > 0)
+    {
+        is_open = !is_open;
+        return TRUE;
+    }
+    return FALSE;
+};
+
+float(string id, vector pos, vector size, strbuf options, __inout float selection_mask, __inout float is_open, __inout vector scrollofs) menu_multidropdown_list =
+{
+    float changed = FALSE;
+    float count = buf_getsize(options);
+    float list_height = 0;
+    vector listitem_pos = '0 0 0';
+
+    if (!is_open || count <= 0)
+        return FALSE;
+
+    list_height = min(size_y - 24, max(24, count * 20 + 4));
+
+    sui_push_frame([pos_x, pos_y + 24], [size_x, list_height]);
+    sui_fill([0, 0], [size_x, list_height], MENU_BG_DARK, 0.96, 0);
+    sui_border_box([0, 0], [size_x, list_height], 2, MENU_BORDER, 1.0, 0);
+
+    sui_list_view_begin(strcat(id, "_list"), [1, 1], [size_x - 2, list_height - 2], [size_x - 8, 20], count, scrollofs, [0, 6]);
+    for (float index = sui_list_item(listitem_pos); index > -1; index = sui_list_item(listitem_pos))
+    {
+        float bit = pow(2, index);
+        float checked = (selection_mask & bit) ? 1 : 0;
+        string item = strcat(checked ? "[x] " : "[ ] ", bufstr_get(options, index));
+        vector item_color  = checked ? MENU_BUTTON_RETURN        : MENU_BUTTON;
+        vector item_border = checked ? MENU_BUTTON_RETURN_BORDER : MENU_BUTTON_BORDER;
+
+        if (!my_button_colored(strcat(id, "_item", ftos(index)), listitem_pos, [size_x - 8, 20], item, item_color, item_border))
+            continue;
+
+        // Toggle this bit; keep list open so user can pick more items.
+        if (checked)
+            selection_mask = selection_mask - bit;
+        else
+            selection_mask = selection_mask + bit;
+        changed = TRUE;
+    }
+    sui_list_view_end();
+    sui_pop_frame();
+
+    return changed;
 };
 
 float(string id, vector pos, vector size, strbuf options, __inout float selected_index, __inout float is_open, __inout vector scrollofs, float keep_open) menu_dropdown =
@@ -617,6 +724,9 @@ void() create_server_launch =
 	cvar_set("rcon_password", create_server_rcon_password_text);
 	cvar_set("sv_rcon_password_shadow", create_server_rcon_password_text);
 	cvar_set("sv_pure", create_server_pure ? "1" : "0");
+	cvar_set("sv_voip", create_server_voip ? "1" : "0");
+	cvar_set("sv_voip_record", ftos(create_server_voip_record));
+	cvar_set("sv_voip_echo", create_server_voip_echo ? "1" : "0");
 	cvar_set("sv_mintic", tic_val);
 	cvar_set("sv_maxtic", tic_val);
 	cvar_set("fraglimit", create_server_fraglimit_text);
@@ -635,16 +745,58 @@ void() create_server_launch =
 	cvar_set("sv_trust_clienthits", create_server_trust_clienthits ? "1" : "0");
 	cvar_set("sv_gamemode", ftos(create_server_gamemode));
 
+	// Apply gamemode-default toggles so the saved server.cfg reflects
+	// what this gamemode wants out of the box. SSQC's StartFrame also
+	// re-asserts these on each map load (gamemode-changed branch in
+	// sv_main.qc) — applying them here too means the very first
+	// server.cfg write after Create Server is already correct, instead
+	// of carrying over stale `mp_respawn 0` from a previous Elimination
+	// session. Mirrors sv_main.qc's per-gamemode block exactly.
+	// IDs match the dropdown order seeded in create_server_gamemode_options
+	// init (TDM=0, ELIMINATION=1, BHOP=2, FFA=3, PAINTGUN=4); shared/
+	// sh_customdefs.qc isn't included in m_progs.src so the GAMEMODE_*
+	// constants aren't visible — keep the IDs in sync if you rename them.
+	if (create_server_gamemode == 2)         // BHOP
+	{
+		cvar_set("mp_falldamage",   "0");
+		cvar_set("mp_noblock",      "1");
+		cvar_set("mp_respawn",      "1");
+		cvar_set("mp_disabledoors", "1");
+	}
+	else if (create_server_gamemode == 3)    // FFA
+	{
+		cvar_set("mp_respawn",      "1");
+		cvar_set("mp_disabledoors", "0");
+	}
+	else if (create_server_gamemode == 1)    // ELIMINATION
+	{
+		cvar_set("mp_respawn",      "0");
+		cvar_set("mp_disabledoors", "0");
+	}
+	else if (create_server_gamemode == 4)    // PAINTGUN
+	{
+		cvar_set("mp_respawn",      "0");
+		cvar_set("mp_disabledoors", "0");
+		cvar_set("mp_falldamage",   "0");
+		cvar_set("mp_nomapweapons", "1");
+	}
+	else                                      // TDM (0) — fallback
+	{
+		cvar_set("mp_respawn",      "1");
+		cvar_set("mp_disabledoors", "0");
+	}
+
 	// Default-loadout WEP_* IDs.  Index is clamped because the dropdown
 	// arrays might change between sessions (e.g. a weapon was removed).
-	cs_default_primary_idx   = bound(0, cs_default_primary_idx,   cs_loadout_primary_ids.length   - 1);
-	cs_default_secondary_idx = bound(0, cs_default_secondary_idx, cs_loadout_secondary_ids.length - 1);
-	cs_default_melee_idx     = bound(0, cs_default_melee_idx,     cs_loadout_melee_ids.length     - 1);
-	cs_default_utility_idx   = bound(0, cs_default_utility_idx,   cs_loadout_utility_ids.length   - 1);
-	cvar_set("sv_default_primary",   ftos(cs_loadout_primary_ids[cs_default_primary_idx]));
-	cvar_set("sv_default_secondary", ftos(cs_loadout_secondary_ids[cs_default_secondary_idx]));
-	cvar_set("sv_default_melee",     ftos(cs_loadout_melee_ids[cs_default_melee_idx]));
-	cvar_set("sv_default_utility",   ftos(cs_loadout_utility_ids[cs_default_utility_idx]));
+	cs_default_primary_idx   = bound(0, cs_default_primary_idx,   WeaponManifest_LoadoutCount(WMF_SLOT_PRIMARY)   - 1);
+	cs_default_secondary_idx = bound(0, cs_default_secondary_idx, WeaponManifest_LoadoutCount(WMF_SLOT_SECONDARY) - 1);
+	cs_default_melee_idx     = bound(0, cs_default_melee_idx,     WeaponManifest_LoadoutCount(WMF_SLOT_MELEE)     - 1);
+	cs_default_utility_idx   = create_server_utility_first_idx(cs_default_utility_mask);
+	cvar_set("sv_default_primary",   ftos(WeaponManifest_LoadoutWeapon(WMF_SLOT_PRIMARY, cs_default_primary_idx)));
+	cvar_set("sv_default_secondary", ftos(WeaponManifest_LoadoutWeapon(WMF_SLOT_SECONDARY, cs_default_secondary_idx)));
+	cvar_set("sv_default_melee",     ftos(WeaponManifest_LoadoutWeapon(WMF_SLOT_MELEE, cs_default_melee_idx)));
+	// Utility serialises as a comma-separated id list (multi-select).
+	cvar_set("sv_default_utility",   create_server_utility_mask_to_cvar(cs_default_utility_mask));
 
 	cvar_set("mp_freezetime", create_server_freezetime_text);
 	cvar_set("mp_roundrestartdelay", create_server_restartdelay_text);
@@ -851,6 +1003,34 @@ void() create_server_menu =
 					create_server_tickrate_index = 0;
 			}
 		}
+		ypos += 24;
+
+		// --- Voice / VoIP server toggles ---
+		// Master receive switch.  When 0, the server drops every voice
+		// packet — no in-game voice chat for anyone connected.
+		menu_toggle_button("create_voip", [xpos, ypos], [property_width, 20], "Voice Chat", create_server_voip);
+		ypos += 24;
+
+		// MVD voice recording — cycler since the engine accepts 0/1/2.
+		// 0 = off, 1 = record everyone, 2 = record spectators only.
+		{
+			string voip_rec_label;
+			if      (create_server_voip_record == 1) voip_rec_label = "Voice Record: All";
+			else if (create_server_voip_record == 2) voip_rec_label = "Voice Record: Spec";
+			else                                     voip_rec_label = "Voice Record: Off";
+			if (my_button("create_voip_rec", [xpos, ypos], [property_width, 20], voip_rec_label))
+			{
+				create_server_voip_record += 1;
+				if (create_server_voip_record > 2)
+					create_server_voip_record = 0;
+			}
+		}
+		ypos += 24;
+
+		// Debug echo — server bounces voice packets back to the sender
+		// for testing.  Off in production.
+		menu_toggle_button("create_voip_echo", [xpos, ypos], [property_width, 20], "Voice Echo (debug)", create_server_voip_echo);
+		ypos += 24;
 	}
 	else if (create_server_tab == 1)
 	{
@@ -950,8 +1130,8 @@ void() create_server_menu =
 				cs_default_secondary_open = FALSE;
 				cs_default_utility_open = FALSE;
 			}
-			if (menu_dropdown_button("create_def_util", cs_default_utility_pos, cs_default_utility_size,
-				cs_default_utility_options, cs_default_utility_idx, cs_default_utility_open, FALSE))
+			if (menu_multidropdown_button("create_def_util", cs_default_utility_pos, cs_default_utility_size,
+				cs_default_utility_options, cs_default_utility_mask, cs_default_utility_open))
 			{
 				create_server_gamemode_open = FALSE;
 				cs_default_primary_open = FALSE;
@@ -1093,8 +1273,8 @@ void() create_server_menu =
 			cs_default_secondary_options, cs_default_secondary_idx, cs_default_secondary_open, cs_default_secondary_scroll);
 		menu_dropdown_list("create_def_mel", cs_default_melee_pos, cs_default_melee_size,
 			cs_default_melee_options, cs_default_melee_idx, cs_default_melee_open, cs_default_melee_scroll);
-		menu_dropdown_list("create_def_util", cs_default_utility_pos, cs_default_utility_size,
-			cs_default_utility_options, cs_default_utility_idx, cs_default_utility_open, cs_default_utility_scroll);
+		menu_multidropdown_list("create_def_util", cs_default_utility_pos, cs_default_utility_size,
+			cs_default_utility_options, cs_default_utility_mask, cs_default_utility_open, cs_default_utility_scroll);
 	}
 
 	sui_set_default_kb_focus("create_name");

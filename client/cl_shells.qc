@@ -178,6 +178,11 @@ void(string mdl, vector origin_offset, vector base_velocity, vector velocity_jit
     accessory.shell_delay = time + 0.05;
     accessory.shell_deadline = time + 10;
     accessory.drawmask = MASK_ENGINE;
+    // Shells / mags don't need lightmap participation — under sustained
+    // fire a muzzleflash dlight + dozens of ejected casings nearby
+    // multiplies the per-mesh dlight loop cost (gl_alias.c:1515-1559)
+    // for zero visual gain.  EF_FULLBRIGHT early-outs that loop entirely.
+    accessory.effects |= EF_FULLBRIGHT;
     setsize(accessory, '0 0 0', '0 0 0');
 
     accessory_origin = self.origin + self.view_ofs
@@ -209,6 +214,7 @@ void(string mdl, vector origin_offset, vector base_velocity, vector velocity_jit
 
 void(string mdl, vector ofs, vector vel, vector vel_jitter, vector avel, vector avel_jitter) CSQC_SpawnCasing =
 {
+    if (!cvar("cl_ejectcasing")) return;
     // Global shell adjustments: push forward, raise, adjust ejection velocity
     ofs_x += 4;
     ofs_z += 1;
@@ -219,6 +225,7 @@ void(string mdl, vector ofs, vector vel, vector vel_jitter, vector avel, vector 
 
 void(string mdl, vector ofs, vector vel, vector vel_jitter, vector avel, vector avel_jitter) CSQC_SpawnMag =
 {
+    if (!cvar("cl_ejectmag")) return;
     // Lower mag drop origin on player
     ofs_z -= 4;
     CSQC_SpawnAccessory(mdl, ofs, vel, vel_jitter, avel, avel_jitter, MOVETYPE_TOSS, 20, 0);
@@ -239,6 +246,8 @@ void(string mdl, vector org, vector vel, vector avel, float move_type, float lif
     accessory.shell_delay = time + 0.05;
     accessory.shell_deadline = time + 10;
     accessory.drawmask = MASK_ENGINE;
+    // See CSQC_SpawnAccessory — skip dlight mesh-relight for ejecta.
+    accessory.effects |= EF_FULLBRIGHT;
     setsize(accessory, '0 0 0', '0 0 0');
 
     setorigin(accessory, org);
@@ -252,11 +261,13 @@ void(string mdl, vector org, vector vel, vector avel, float move_type, float lif
 
 void(string mdl, vector org, vector vel, vector avel) CSQC_SpawnRemoteCasing =
 {
+    if (!cvar("cl_ejectcasing")) return;
     CSQC_SpawnRemoteAccessory(mdl, org, vel, avel, MOVETYPE_BOUNCE, 20, 2);
 };
 
 void(string mdl, vector org, vector vel, vector avel) CSQC_SpawnRemoteMag =
 {
+    if (!cvar("cl_ejectmag")) return;
     CSQC_SpawnRemoteAccessory(mdl, org, vel, avel, MOVETYPE_TOSS, 20, 0);
 };
 

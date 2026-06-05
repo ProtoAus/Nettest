@@ -365,6 +365,14 @@ float(vector) vectoyaw = #10;
 vector(vector) vectoangles = #11;
 float() random = #12;
 void(string,...) localcmd = #13;
+// Engine extension (engine/client/pr_menu.c:PF_M_localcmd_local) —
+// menu-only, runs at RESTRICT_LOCAL so writes to CVAR_NOTFROMSERVER
+// cvars (sys_*, cfg_save_*) succeed instead of triggering the
+// "Server tried setting X cvar" gate. Optional builtin: an older
+// engine binary won't have it; we feature-detect via checkbuiltin()
+// at use sites and fall back to plain `localcmd` (which silently
+// fails for those cvars — the menu just won't apply them).
+void(string,...) localcmd_local = #0:localcmd_local;
 float(string name) cvar = #14;
 void(string name, string value) cvar_set = #15;
 void(string text) dprint = #16;

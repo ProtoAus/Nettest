@@ -73,12 +73,8 @@ void(entity player) W_GLPickupCopy =
 // Grenade explosion — radius damage
 void() W_GrenadeExplode =
 {
-    float dist, damage;
-    float saved_dim;
-    entity e;
-
     // Exclude shooter from explosion effects — they see the client-predicted one
-    saved_dim = dimension_send;
+    float saved_dim = dimension_send;
     if (self.owner)
         dimension_send = dimension_send & ~self.owner.dimension_seen;
 
@@ -86,29 +82,10 @@ void() W_GrenadeExplode =
 
     dimension_send = saved_dim;
 
-    // Radius damage + push-back
-    e = findradius(self.origin, GL_EXPLOSION_RADIUS);
-    while (e)
-    {
-        if (W_CanDamageTarget(e))
-        {
-            dist = vlen(e.origin - self.origin);
-            damage = W_LinearDamageFalloff(dist, GL_EXPLOSION_DAMAGE, GL_EXPLOSION_MIN_DAMAGE, GL_EXPLOSION_RADIUS);
-            W_ApplyDamage(self.owner, e, damage);
-        }
-
-        // Push players away from explosion
-        if (e.classname == "player" && e.health > 0)
-        {
-            dist = vlen(e.origin - self.origin);
-            float push_scale = 1 - (dist / GL_EXPLOSION_RADIUS);
-            vector push_dir = normalize(e.origin - self.origin);
-            e.velocity += push_dir * 800 * push_scale;
-            e.velocity_z += 350 * push_scale;
-        }
-
-        e = e.chain;
-    }
+    // Radius damage + player knockback + phys-drop blast — single call.
+    W_RadiusExplode(self.origin, GL_EXPLOSION_RADIUS,
+                    GL_EXPLOSION_DAMAGE, GL_EXPLOSION_MIN_DAMAGE,
+                    800, 350, self.owner);
 
     remove(self);
 };
@@ -211,24 +188,24 @@ void() W_GLDrop =
     tgt.mag_grenadelauncher = self.mag_grenadelauncher;
     self.mag_grenadelauncher = 0;
     setmodel(tgt, "models/weapons/wpn_grenadelauncher/w_grenlauncher.mdl");
-    setsize(tgt, '-16 -16 0', '16 16 32');
+    setsize(tgt, '-16 -16 0', '16 16 48');
     tgt.classname = "weapon_grenadelauncher"; tgt.solid = SOLID_NOT; tgt.movetype = MOVETYPE_TOSS;
     tgt.weapon = WEP_GRENADELAUNCHER; tgt.weapon_slot = SLOT_PRIMARY;
     tgt.weap_draw = W_GLEquip; tgt.weap_drop_func = W_GLDrop;
     tgt.pickupcopy = W_GLPickupCopy; tgt.touch = weapon_touch;
-    tgt.dropped_spin = 1;
+    tgt.dropped_spin = 0;
     tgt.think = weapon_become_solid; tgt.nextthink = time + 0.7;
 };
 
 void() weapon_grenadelauncher =
 {
     setmodel(self, "models/weapons/wpn_grenadelauncher/w_grenlauncher.mdl");
-    setsize(self, '-16 -16 0', '16 16 32');
+    setsize(self, '-16 -16 0', '16 16 48');
     self.classname = "weapon_grenadelauncher"; self.solid = SOLID_TRIGGER; self.movetype = MOVETYPE_TOSS;
     self.weapon = WEP_GRENADELAUNCHER; self.weapon_slot = SLOT_PRIMARY;
     self.weap_draw = W_GLEquip; self.weap_drop_func = W_GLDrop;
     self.pickupcopy = W_GLPickupCopy; self.touch = weapon_touch;
-    self.dropped_spin = 1;
+    self.dropped_spin = 0;
     self.mag_grenadelauncher = MAX_MAG_GRENADELAUNCHER;
     W_RegisterMapWeapon(weapon_grenadelauncher);
 };

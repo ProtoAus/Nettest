@@ -35,13 +35,26 @@ const float MAX_MAG_DEAGLE           = 7;
 const float MAX_AMMO_DEAGLE          = 35;
 
 // --- Balance ---
-const float DEAGLE_BASE_SPREAD          = 0.008;
+const float DEAGLE_BASE_SPREAD          = 0.01;
 const float DEAGLE_MOVE_SPREAD          = 0.06;
 const float DEAGLE_FULL_SPREAD_SPEED    = 320;
-const float DEAGLE_CLOSE_DAMAGE         = 27;
+const float DEAGLE_CLOSE_DAMAGE         = 35;
 const float DEAGLE_MIN_DAMAGE           = 18;
 const float DEAGLE_DAMAGE_FALLOFF_RANGE = 4096;
 const float DEAGLE_DRYFIRE_DELAY        = 0.2;
+const float DEAGLE_KICK_PITCH    = 1.6;   // sv_gunkick — heavy pistol, big single kick.
+const float DEAGLE_KICK_VARIANCE = 0.5;
+const float DEAGLE_KICK_STRENGTH = 1.4;   // single-shot pistol — long delay.
+
+// Camera-local muzzle offset for the two-frame sprite muzzle flash
+// (cl_muzzleflash.qc CSQC_MuzzleFlashAtMuzzle). Pistol barrel sits
+// closer to the camera than a rifle — shorter FORWARD value.
+//   FORWARD  qu in front of the camera origin
+//   RIGHT    qu to the right (cl_lefthand mirrors)
+//   DOWN     qu below the camera origin
+const float DEAGLE_MUZZLE_FORWARD = 38;
+const float DEAGLE_MUZZLE_RIGHT   = 10.3;
+const float DEAGLE_MUZZLE_DOWN    = 5;
 
 // --- Pre-computed state durations ---
 const float DEAGLE_DRAW_DURATION      = (DEAGLE_DRAW_END - DEAGLE_DRAW_START) * DEAGLE_FRAME_INTERVAL;
@@ -69,7 +82,8 @@ float(float now) SH_DeagleTickState =
 // Returns: 1 = fired, -1 = dry fire, 0 = blocked
 float(float now) SH_DeagleTryFire =
 {
-    return SH_StandardTryFire(now, mag_deagle, DEAGLE_FIRE_DELAY, DEAGLE_DRYFIRE_DELAY);
+    // Semi-auto: must release +attack between shots (matches CS 1.6 Deagle).
+    return SH_StandardTryFireSemiAuto(now, mag_deagle, DEAGLE_FIRE_DELAY, DEAGLE_DRYFIRE_DELAY);
 };
 
 // Returns: 1 = reload started, 0 = blocked
@@ -94,7 +108,8 @@ void(entity player) W_DeaglePickupCopy =
 void() W_DeagleShoot =
 {
     W_PenetratingHitscanShoot(DEAGLE_BASE_SPREAD, DEAGLE_MOVE_SPREAD, DEAGLE_FULL_SPREAD_SPEED,
-        DEAGLE_CLOSE_DAMAGE, DEAGLE_MIN_DAMAGE, DEAGLE_DAMAGE_FALLOFF_RANGE, 32, 0.96);
+        DEAGLE_CLOSE_DAMAGE, DEAGLE_MIN_DAMAGE, DEAGLE_DAMAGE_FALLOFF_RANGE, 32, 0.96,
+        DEAGLE_KICK_PITCH, DEAGLE_KICK_VARIANCE, DEAGLE_KICK_STRENGTH);
 };
 
 // Fire — called by W_WeaponFrame when button0 pressed (self = player)
@@ -114,7 +129,7 @@ void() W_DeagleFire =
         else
             sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csdeagle/fire2.wav", 1, ATTN_NORM);
 
-        W_ShellEffect(SHELL_9MM, '8 -6 -4', '6 46 36', '240 720 120');
+        W_ShellEffect(SHELL_9MM, '8 6 -4', '6 46 36', '240 720 120');
     }
     else if (r == -1)
     {
@@ -187,7 +202,7 @@ void() W_DeagleDrop =
     self.ammo_deagle = 0;
 
     setmodel(tgt, "models/weapons/wpn_csdeagle/w_deagle.mdl");
-    setsize(tgt, '-12 -12 0', '12 12 24');
+    setsize(tgt, '-12 -12 0', '12 12 40');
     tgt.classname    = "weapon_deagle";
     tgt.solid        = SOLID_NOT;
     tgt.movetype     = MOVETYPE_TOSS;
@@ -205,7 +220,7 @@ void() W_DeagleDrop =
 void() weapon_deagle =
 {
     setmodel(self, "models/weapons/wpn_csdeagle/w_deagle.mdl");
-    setsize(self, '-12 -12 0', '12 12 24');
+    setsize(self, '-12 -12 0', '12 12 40');
     self.classname     = "weapon_deagle";
     self.solid         = SOLID_TRIGGER;
     self.movetype      = MOVETYPE_TOSS;
@@ -242,7 +257,7 @@ void() CSQC_PredictDeagleCommand =
         if (r == 1)
         {
             CSQC_MarkPendingWeaponAck();
-            if (!pm_suppress_sounds)
+            if (CSQC_BeginFireActionEffects())
             {
                 if (random() < 0.5)
                     localsound("sounds/weapons/wpn_csdeagle/fire1.wav");
@@ -250,9 +265,19 @@ void() CSQC_PredictDeagleCommand =
                     localsound("sounds/weapons/wpn_csdeagle/fire2.wav");
                 CSQC_RecordPredictedWeaponSound();
                 CSQC_PredictedPenetratingImpact(DEAGLE_BASE_SPREAD, DEAGLE_MOVE_SPREAD, DEAGLE_FULL_SPREAD_SPEED,
-                    DEAGLE_CLOSE_DAMAGE, DEAGLE_MIN_DAMAGE, DEAGLE_DAMAGE_FALLOFF_RANGE, 32, 0.96);
+                    DEAGLE_CLOSE_DAMAGE, DEAGLE_MIN_DAMAGE, DEAGLE_DAMAGE_FALLOFF_RANGE, 32, 0.96,
+                    DEAGLE_KICK_PITCH, DEAGLE_KICK_VARIANCE, DEAGLE_KICK_STRENGTH);
                 CSQC_SpawnCasing("models/weapons/9mmcasing.mdl",
-                    '8 -6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
+                    '8 6 -4', '6 46 36', '8 14 14', '240 720 120', '120 240 180');
+                // Animated frame-walk muzzle flash — deagle test.
+                // Tune position via DEAGLE_MUZZLE_* above, framerate
+                // via cl_muzzleflash_anim_fps (default 30).  Other
+                // weapons still use the 4-variant static path.
+                CSQC_MuzzleFlashAtMuzzleAnimated(DEAGLE_MUZZLE_FORWARD, DEAGLE_MUZZLE_RIGHT,
+                    DEAGLE_MUZZLE_DOWN, self.wep_action_id);
+                CSQC_MuzzleSmokeAtMuzzle(DEAGLE_MUZZLE_FORWARD, DEAGLE_MUZZLE_RIGHT,
+                    DEAGLE_MUZZLE_DOWN, self.wep_action_id, 1);
+                CSQC_EndFireActionEffects();
             }
         }
         else if (r == -1)
@@ -316,6 +341,7 @@ void() CSQC_DeagleEquip =
 	self.csqc_predict_reload = CSQC_PredictDeagleReload;
 	self.csqc_display_frame  = CSQC_DeagleDisplayFrame;
 	self.csqc_drop_clear     = CSQC_DeagleDropClear;
+    self.weapon_viewmodel_flip = TRUE;
 };
 
 #endif // CSQC

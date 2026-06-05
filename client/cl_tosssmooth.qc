@@ -51,6 +51,9 @@ float toss_frame_cache_cltime;
 float toss_frame_cache_dt_cap;
 float toss_frame_cache_gravity;
 float toss_frame_cache_smooth_time;
+float toss_frame_cache_phys_smooth_time;
+float toss_frame_cache_phys_extrap;
+float toss_frame_cache_phys_angextrap;
 
 void() CSQC_TossFrameCacheRefresh =
 {
@@ -69,6 +72,33 @@ void() CSQC_TossFrameCacheRefresh =
     toss_frame_cache_smooth_time = cvar("cl_toss_smooth_time");
     if (toss_frame_cache_smooth_time < 0.001)
         toss_frame_cache_smooth_time = 0.001;
+
+    toss_frame_cache_phys_smooth_time = cvar("cl_physdrop_smooth_time");
+    if (toss_frame_cache_phys_smooth_time < 0.001)
+        toss_frame_cache_phys_smooth_time = toss_frame_cache_smooth_time;
+
+    toss_frame_cache_phys_extrap = bound(0, cvar("cl_physdrop_extrap"), 1);
+    toss_frame_cache_phys_angextrap = cvar("cl_physdrop_angextrap");
+};
+
+float() CSQC_PhysDropExtrapScale =
+{
+    CSQC_TossFrameCacheRefresh();
+    return toss_frame_cache_phys_extrap;
+};
+
+float() CSQC_PhysDropAngularExtrap =
+{
+    CSQC_TossFrameCacheRefresh();
+    return (toss_frame_cache_phys_angextrap > 0);
+};
+
+float(entity ent) CSQC_TossSmoothTime =
+{
+    CSQC_TossFrameCacheRefresh();
+    if (ent.dropped_weapon_physdrop)
+        return toss_frame_cache_phys_smooth_time;
+    return toss_frame_cache_smooth_time;
 };
 
 // Reset the smoothing state. Use on first appearance, post-teleport,
@@ -113,6 +143,19 @@ vector(entity ent) Toss_PredictedNow =
     // snapshot — the "weapons fall and jump back up" bug. The 1 qu/s
     // velocity floor also screens float noise on near-stopped items.
     ext_z -= 0.5 * toss_frame_cache_gravity * ent.toss_gravity * dt * dt;
+
+    // Void short-circuit — if the extrapolation has fallen below the
+    // server's void-Z threshold (PHYSDROP_VOID_Z = -10000 in
+    // sv_weapons.qc / sv_physprop.qc), the server WILL remove the
+    // entity at its next watchdog tick. During that gap we'd keep
+    // predicting it falling forever, visually pulling the prop
+    // infinitely below the map. Clamp to the last server origin and
+    // stop predicting so the prop just sits there until the network
+    // removeentity arrives and CSQC_Ent_Remove cleans it up. Magic
+    // number kept in sync with both server files.
+    if (ext_z < -10000)
+        return ent.toss_last_origin;
+
     return ext;
 };
 
@@ -149,6 +192,16 @@ CSQC_TossSampleApply =
         // renders the new origin cleanly.
         ent.extrap_error_offset = '0 0 0';
         ent.extrap_error_cltime = 0;
+        // Snap origin now: the predraw fast-path (settled, no smoothing,
+        // no spin) skips CSQC_TossPredraw entirely and renders at
+        // self.origin.  For isnew entities that arrive already-settled
+        // (e.g. ODE phys-drops sent for the first time after they've
+        // come to rest — first-sample err > MAXJUMP forces this branch),
+        // self.origin is still the (0,0,0) default and the entity
+        // renders at world origin forever.  The slow-path is unaffected
+        // — its first action is also to setorigin via Toss_PredictedNow,
+        // so writing here just brings the fast-path to parity.
+        setorigin(ent, new_origin);
     }
 
     // Anchor the new authoritative sample. Predraw will extrapolate
@@ -175,9 +228,9 @@ void(entity ent) CSQC_TossPredraw =
     {
         // Item-specific smoothing time — separate from the player extrap
         // so admins can tune one without affecting the other.
-        CSQC_TossFrameCacheRefresh();
+        float smooth_time = CSQC_TossSmoothTime(ent);
         float age = cltime - ent.extrap_error_cltime;
-        float decay = 1.0 - (age / toss_frame_cache_smooth_time);
+        float decay = 1.0 - (age / smooth_time);
         if (decay > 0)
             ext = ext + ent.extrap_error_offset * decay;
         else

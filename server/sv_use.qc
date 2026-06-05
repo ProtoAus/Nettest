@@ -23,6 +23,21 @@ float(entity use_target) SV_UseTarget =
         return FALSE;
     if (!use_target.use)
         return FALSE;
+
+    // sv_debug_use: print what we hit + its target chain so a mapper
+    // can diagnose dead buttons (no target, locked master, etc.).
+    if (cvar("sv_debug_use"))
+    {
+        print(sprintf("[+use] %s -> classname=\"%s\" target=\"%s\" targetname=\"%s\" master=\"%s\" killtarget=\"%s\" delay=%g\n",
+                      self.netname,
+                      use_target.classname,
+                      use_target.target,
+                      use_target.targetname,
+                      use_target.master,
+                      use_target.killtarget,
+                      use_target.delay));
+    }
+
     oldself      = self;
     oldactivator = activator;
     activator    = self;
@@ -34,13 +49,14 @@ float(entity use_target) SV_UseTarget =
 };
 
 // Returns TRUE if `e` is a settled, pickable weapon (map or dropped).
-// Dropped weapons are SOLID_NOT for ~0.7s after the toss so they can't
-// be re-grabbed mid-throw — gate on solid != SOLID_NOT to honour that.
+// Dropped weapons remain pickup-gated after the toss so they cannot be
+// re-grabbed mid-throw. Gate on both solid and weapon_solid_time.
 float(entity e) SV_IsPickableWeapon =
 {
     if (!e || e == world) return FALSE;
     if (e.touch != weapon_touch) return FALSE;
     if (e.solid == SOLID_NOT) return FALSE;
+    if (e.weapon_solid_time > time) return FALSE;
     return TRUE;
 };
 
@@ -61,6 +77,56 @@ float(entity weap) SV_TryWeaponPickup =
     return TRUE;
 };
 
+// +use weapon swap: if the player already has a weapon in the pickup's
+// slot, drop the held one and equip the new one in a single +use.
+// Without this the duplicate-slot reject inside weapon_touch made
+// +use no-op on a same-slot pickup, forcing the player to bind drop +
+// pickup separately.  Utility is multi-carry and falls through to the
+// normal pickup (weapon_touch handles utility duplicates per-weapon).
+float(entity weap) SV_TryWeaponSwap =
+{
+    if (!SV_IsPickableWeapon(weap)) return FALSE;
+
+    float pickup_slot = weap.weapon_slot;
+    if (pickup_slot == SLOT_UTILITY)
+        return SV_TryWeaponPickup(weap);
+
+    float held_in_slot = WEP_NONE;
+    if      (pickup_slot == SLOT_PRIMARY)   held_in_slot = self.slot_primary;
+    else if (pickup_slot == SLOT_SECONDARY) held_in_slot = self.slot_secondary;
+    else if (pickup_slot == SLOT_MELEE)     held_in_slot = self.slot_melee;
+
+    // Fists are intrinsic — treat them as an empty melee slot for
+    // pickup purposes.  Without this collapse the swap path below
+    // tries to W_DropCurrentWeapon the fists, which is a no-op
+    // (slot_melee_drop is NULL), leaving slot_melee = WEP_MELEE so
+    // the subsequent SV_TryWeaponPickup re-rejects.  Net visible
+    // effect was "weapon flickers on ground but never enters
+    // inventory", the user's exact bug report.
+    if (pickup_slot == SLOT_MELEE && held_in_slot == WEP_MELEE)
+        held_in_slot = WEP_NONE;
+
+    if (held_in_slot == WEP_NONE)
+        return SV_TryWeaponPickup(weap);   // empty slot — normal pickup
+
+    if (held_in_slot == weap.weapon)
+        return SV_TryWeaponPickup(weap);   // identical weapon — let weapon_touch reject
+
+    // Switch to the slot's currently-held weapon if we're not already
+    // wielding it (W_DropCurrentWeapon drops `self.weapon`, so we must
+    // be holding the one we want to drop).  W_DropCurrentWeapon then
+    // calls W_SelectStrongest which equips whatever's left, and the
+    // SV_TryWeaponPickup that follows runs weapon_touch's standard
+    // auto-equip rules — primary auto-equips, secondary auto-equips
+    // when no primary exists, etc., so the player ends up holding the
+    // newly picked weapon as expected.
+    if (self.weapon != held_in_slot)
+        W_SelectWeapon(held_in_slot);
+
+    W_DropCurrentWeapon();
+    return SV_TryWeaponPickup(weap);
+};
+
 // Trace forward from the player's eye; try the hit entity first, then fall
 // back to a cone search so slightly off-center aims still register. Dispatches
 // to use targets (buttons/doors) OR weapon pickups, whichever is in front.
@@ -77,20 +143,65 @@ void() SV_PlayerTryUse =
 
     sv_use_is_player_direct = TRUE;
 
-    tracebox(use_start, '-8 -8 -8', '8 8 8', use_end, MOVE_NORMAL, self);
-    if (SV_UseTarget(trace_ent))
+    // sv_use_through_walls 1: same forward tracebox as the default
+    // path, but iteratively skip past any non-usable solid entity
+    // the trace hits (func_wall, func_illusionary, func_door
+    // surfaces with no .use, decorative breakables) so the trace
+    // continues to the next thing.  World BSP geometry still blocks
+    // (worldspawn is not a func_* — it's the level's base brushwork).
+    // This replaces the previous "skip trace, cone-search radius"
+    // behaviour, which picked nearby-but-not-aimed-at entities and
+    // felt arbitrary.  Off path keeps the existing single-trace
+    // semantic so default play is unchanged.
+    if (cvar("sv_use_through_walls"))
     {
-        sv_use_is_player_direct = FALSE;
-        return;
+        vector cur_start = use_start;
+        entity ignore    = self;
+        float  steps     = 0;
+        while (steps < 16)
+        {
+            steps = steps + 1;
+            traceline(cur_start, use_end, MOVE_NORMAL, ignore);
+            if (trace_fraction >= 1.0)
+                break;                   // trace ran clean to use_end
+            if (!trace_ent || trace_ent == world)
+                break;                   // hit world — wall blocks
+            if (trace_ent.use && SV_UseTarget(trace_ent))
+            {
+                sv_use_is_player_direct = FALSE;
+                return;
+            }
+            if (SV_TryWeaponSwap(trace_ent))
+            {
+                sv_use_is_player_direct = FALSE;
+                return;
+            }
+            // Hit a non-usable solid entity (func_wall / decorative).
+            // Step the trace start past it and ignore it on the next
+            // iteration so we don't re-hit the same surface.
+            ignore    = trace_ent;
+            cur_start = trace_endpos + v_forward * 1;
+        }
     }
-    // Direct hit on a weapon — tracebox MOVE_NORMAL skips SOLID_TRIGGER
-    // weapons so this rarely fires, but covers the case where a weapon
-    // sits on a clip-brush or other SOLID_BBOX surface that bumps it
-    // into the trace's collision set.
-    if (SV_TryWeaponPickup(trace_ent))
+    else
     {
-        sv_use_is_player_direct = FALSE;
-        return;
+        traceline(use_start, use_end, MOVE_NORMAL, self);
+        if (SV_UseTarget(trace_ent))
+        {
+            sv_use_is_player_direct = FALSE;
+            return;
+        }
+        // Direct hit on a weapon — tracebox MOVE_NORMAL skips SOLID_TRIGGER
+        // weapons so this rarely fires, but covers the case where a weapon
+        // sits on a clip-brush or other SOLID_BBOX surface that bumps it
+        // into the trace's collision set.  Use the swap path so +use on a
+        // weapon you already have in that slot drops yours and picks up
+        // the targeted one.
+        if (SV_TryWeaponSwap(trace_ent))
+        {
+            sv_use_is_player_direct = FALSE;
+            return;
+        }
     }
 
     // Radius fallback: pick the entity within the cone that is most aligned
@@ -119,7 +230,7 @@ void() SV_PlayerTryUse =
     }
 
     if (best_is_weapon)
-        SV_TryWeaponPickup(best);
+        SV_TryWeaponSwap(best);
     else
         SV_UseTarget(best);
 

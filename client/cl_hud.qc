@@ -72,6 +72,70 @@ void() HUD_TriggerHitmarker =
     csqc_hitmarker_time = cltime;
 };
 
+// Defuse progress bar — visible only on the active defuser's client.
+// STAT_DEFUSE_PROGRESS is set per-client via the .float field
+// defuse_progress_stat (sv_main.qc clientstat declaration).
+//
+// Layout: 250×8 outer box with a 1 px dark-blue border, a 1 px gap
+// from border to fill (so the screen behind shows through), and the
+// fill itself is a 246×4 horizontal dark-blue gradient that reveals
+// from left to right as progress climbs.  No background — the gap
+// acts as the see-through transparency.
+void() HUD_DrawDefuseBar =
+{
+    float progress = getstatf(STAT_DEFUSE_PROGRESS);
+    if (progress <= 0)
+        return;
+
+    float outer_w = 250;
+    float outer_h = 8;
+    float outer_x = (g_width - outer_w) * 0.5;
+    float outer_y = g_height * 0.78;
+
+    vector border_col = '0.06 0.10 0.35';   // dark blue, opaque
+
+    // 1 px border — four strips so the centre stays transparent
+    // (no full-rect drawfill, otherwise we'd cover the see-through).
+    drawfill([outer_x, outer_y],
+             [outer_w, 1], border_col, 1.0, 0);                                  // top
+    drawfill([outer_x, outer_y + outer_h - 1],
+             [outer_w, 1], border_col, 1.0, 0);                                  // bottom
+    drawfill([outer_x, outer_y],
+             [1, outer_h], border_col, 1.0, 0);                                  // left
+    drawfill([outer_x + outer_w - 1, outer_y],
+             [1, outer_h], border_col, 1.0, 0);                                  // right
+
+    // Inner fill region — border (1) + gap (1) on every side.
+    float bar_x = outer_x + 2;
+    float bar_y = outer_y + 2;
+    float bar_w = outer_w - 4;   // 246 px
+    float bar_h = outer_h - 4;   //   4 px
+    float fill_w = bar_w * (progress / CFC4_DEFUSE_TIME);
+    if (fill_w > bar_w) fill_w = bar_w;
+
+    // Horizontal dark-blue gradient — 16 vertical strips, each with
+    // an interpolated colour stop.  Drawn only up to fill_w so each
+    // newly-revealed pixel has its own gradient shade as the defuse
+    // climbs left-to-right.
+    vector grad_lo = '0.08 0.18 0.50';   // darker on the left
+    vector grad_hi = '0.25 0.55 0.95';   // lighter on the right
+    float strips = 16;
+    float strip_w_full = bar_w / strips;
+    float i;
+    for (i = 0; i < strips; i = i + 1)
+    {
+        float strip_x = i * strip_w_full;
+        if (strip_x >= fill_w)
+            break;
+        float strip_w = strip_w_full;
+        if (strip_x + strip_w > fill_w)
+            strip_w = fill_w - strip_x;
+        float t = i / strips;
+        vector strip_col = grad_lo + (grad_hi - grad_lo) * t;
+        drawfill([bar_x + strip_x, bar_y], [strip_w, bar_h], strip_col, 1.0, 0);
+    }
+};
+
 void() HUD_DrawHitmarker =
 {
     float age, alpha;
@@ -324,38 +388,7 @@ void() HUD_DrawScope =
 
 string(float wep_id) HUD_WeaponName =
 {
-    switch (wep_id)
-    {
-    case WEP_DEAGLE:      return "DEAGLE";
-    case WEP_KNIFE:       return "KNIFE";
-    case WEP_AK47:        return "AK47";
-    case WEP_M4A1:        return "M4A1";
-    case WEP_FLAKSHOTGUN: return "SHOTGUN";
-    case WEP_PISTOL:      return "PISTOL";
-    case WEP_SCOUT:       return "SCOUT";
-    case WEP_357:         return ".357";
-    case WEP_WRENCH:      return "WRENCH";
-    case WEP_M249:        return "M249";
-    case WEP_GAUSS:       return "GAUSS";
-    case WEP_CROSSBOW:    return "CROSSBOW";
-    case WEP_DOD98K:      return "98K";
-    case WEP_GRENADELAUNCHER: return "GL";
-    case WEP_HLCROWBAR:   return "CROWBAR";
-    case WEP_HLSHOTGUN:   return "SHOTGUN";
-    case WEP_CSM3:        return "M3";
-    case WEP_CSMP5:       return "MP5";
-    case WEP_REBAR:       return "REBAR";
-    case WEP_CSAWP:       return "AWP";
-    case WEP_GLOCK:       return "GLOCK";
-    case WEP_G3SG1:       return "G3SG1";
-    case WEP_HLSMG:       return "SMG";
-    case WEP_HLRPG:       return "RPG";
-    case WEP_HLGRENADE:   return "GRENADE";
-    case WEP_HLGLOCK:     return "HL GLOCK";
-    case WEP_HLEGON:      return "EGON";
-    case WEP_CSUSP:       return "USP-45";
-    default:              return "";
-    }
+    return WeaponManifest_HudName(wep_id);
 };
 
 float HUD_SLOT_WIDTH   = 100;
@@ -372,6 +405,12 @@ float  hud_slot_cache_primary;
 float  hud_slot_cache_secondary;
 float  hud_slot_cache_melee;
 float  hud_slot_cache_utility;
+float  hud_slot_cache_hlgrenade_ammo;
+float  hud_slot_cache_snowball_ammo;
+float  hud_slot_cache_cshegrenade_ammo;
+float  hud_slot_cache_csflashbang_ammo;
+float  hud_slot_cache_cssmokegrenade_ammo;
+float  hud_slot_cache_slingshot;
 string hud_slot_cache_text1;
 string hud_slot_cache_text2;
 string hud_slot_cache_text3;
@@ -401,6 +440,26 @@ string(float slot_num, float weapon_id) HUD_BuildWeaponSlotText =
     string name;
 
     name = HUD_WeaponName(weapon_id);
+
+    // Slot 4 (utility): show the currently-selected utility's display
+    // name (e.g. "FLASH", "HE") rather than a generic "UTILITY" label.
+    // The dropdown rows beneath the slot list any other utilities the
+    // player carries, so the slot label itself only needs to show
+    // what's active.  Fall back to a name derived from carried ammo
+    // if slot_utility hasn't latched yet (rare — happens between a
+    // pickup tick and W_UtilityRefreshSlotBinding).
+    if (slot_num == 4)
+    {
+        if (weapon_id != WEP_NONE)
+            name = HUD_WeaponName(weapon_id);
+        else if (predicted_player.ammo_hlgrenade > 0)        name = HUD_WeaponName(WEP_HLGRENADE);
+        else if (predicted_player.ammo_snowball > 0)         name = HUD_WeaponName(WEP_SNOWBALL);
+        else if (predicted_player.ammo_cshegrenade > 0)      name = HUD_WeaponName(WEP_CSHEGRENADE);
+        else if (predicted_player.ammo_csflashbang > 0)      name = HUD_WeaponName(WEP_CSFLASHBANG);
+        else if (predicted_player.ammo_cssmokegrenade > 0)   name = HUD_WeaponName(WEP_CSSMOKEGRENADE);
+        else
+            name = "";
+    }
     if (name == "")
         return "";
 
@@ -416,6 +475,12 @@ void() HUD_UpdateWeaponSlotCache =
         && hud_slot_cache_secondary == predicted_player.slot_secondary
         && hud_slot_cache_melee == predicted_player.slot_melee
         && hud_slot_cache_utility == predicted_player.slot_utility
+        && hud_slot_cache_hlgrenade_ammo == predicted_player.ammo_hlgrenade
+        && hud_slot_cache_snowball_ammo == predicted_player.ammo_snowball
+        && hud_slot_cache_cshegrenade_ammo == predicted_player.ammo_cshegrenade
+        && hud_slot_cache_csflashbang_ammo == predicted_player.ammo_csflashbang
+        && hud_slot_cache_cssmokegrenade_ammo == predicted_player.ammo_cssmokegrenade
+        && hud_slot_cache_slingshot == predicted_player.snowball_has_slingshot
         && hud_slot_cache_active == predicted_player.weapon)
         return;
 
@@ -425,6 +490,12 @@ void() HUD_UpdateWeaponSlotCache =
     hud_slot_cache_secondary = predicted_player.slot_secondary;
     hud_slot_cache_melee = predicted_player.slot_melee;
     hud_slot_cache_utility = predicted_player.slot_utility;
+    hud_slot_cache_hlgrenade_ammo = predicted_player.ammo_hlgrenade;
+    hud_slot_cache_snowball_ammo = predicted_player.ammo_snowball;
+    hud_slot_cache_cshegrenade_ammo = predicted_player.ammo_cshegrenade;
+    hud_slot_cache_csflashbang_ammo = predicted_player.ammo_csflashbang;
+    hud_slot_cache_cssmokegrenade_ammo = predicted_player.ammo_cssmokegrenade;
+    hud_slot_cache_slingshot = predicted_player.snowball_has_slingshot;
     hud_slot_cache_active = predicted_player.weapon;
 
     hud_slot_cache_text1 = HUD_BuildWeaponSlotText(1, hud_slot_cache_primary);
@@ -480,10 +551,21 @@ string(float weapon_id, float format_id, float value_a, float value_b) HUD_Cache
 
 string() HUD_GetAmmoString =
 {
+    float wep = predicted_player.weapon;
+    if (W_SlotAmmo_UsesSlot(wep))
+    {
+        float fmt = W_SlotAmmo_HudFormat(predicted_player, wep);
+        float a = W_SlotAmmo_HudPrimaryValue(predicted_player, wep);
+        float b = slotammo_ammo;
+        return HUD_CacheAmmoString(wep, fmt, a, b);
+    }
+
     if (predicted_player.weapon == WEP_DEAGLE)
         return HUD_CacheAmmoString(WEP_DEAGLE, 1, predicted_player.mag_deagle, predicted_player.ammo_deagle);
     else if (predicted_player.weapon == WEP_AK47)
         return HUD_CacheAmmoString(WEP_AK47, 1, predicted_player.mag_ak47, predicted_player.ammo_ak47);
+    else if (predicted_player.weapon == WEP_HDAK47)
+        return HUD_CacheAmmoString(WEP_HDAK47, 1, predicted_player.mag_ak47, predicted_player.ammo_ak47);
     else if (predicted_player.weapon == WEP_M4A1)
         return HUD_CacheAmmoString(WEP_M4A1, 1, predicted_player.mag_m4a1, predicted_player.ammo_m4a1);
     else if (predicted_player.weapon == WEP_FLAKSHOTGUN)
@@ -524,24 +606,68 @@ string() HUD_GetAmmoString =
         return HUD_CacheAmmoString(WEP_HLRPG, 1, predicted_player.mag_hlrpg, predicted_player.ammo_hlrpg);
     else if (predicted_player.weapon == WEP_HLGRENADE)
         return HUD_CacheAmmoString(WEP_HLGRENADE, 2, predicted_player.ammo_hlgrenade, 0);
+    else if (predicted_player.weapon == WEP_SNOWBALL)
+        return HUD_CacheAmmoString(WEP_SNOWBALL, 2, predicted_player.ammo_snowball, 0);
+    else if (predicted_player.weapon == WEP_CSHEGRENADE)
+        return HUD_CacheAmmoString(WEP_CSHEGRENADE, 2, predicted_player.ammo_cshegrenade, 0);
+    else if (predicted_player.weapon == WEP_CSFLASHBANG)
+        return HUD_CacheAmmoString(WEP_CSFLASHBANG, 2, predicted_player.ammo_csflashbang, 0);
+    else if (predicted_player.weapon == WEP_CSSMOKEGRENADE)
+        return HUD_CacheAmmoString(WEP_CSSMOKEGRENADE, 2, predicted_player.ammo_cssmokegrenade, 0);
+    else if (predicted_player.weapon == WEP_PAINTBALL)
+        return HUD_CacheAmmoString(WEP_PAINTBALL, 1, predicted_player.mag_paintball, predicted_player.ammo_paintball);
     else if (predicted_player.weapon == WEP_HLGLOCK)
         return HUD_CacheAmmoString(WEP_HLGLOCK, 1, predicted_player.mag_hlglock, predicted_player.ammo_hlglock);
     else if (predicted_player.weapon == WEP_HLEGON)
         return HUD_CacheAmmoString(WEP_HLEGON, 2, predicted_player.ammo_hlegon, 0);
-    else if (predicted_player.weapon == WEP_CSUSP)
-        return HUD_CacheAmmoString(WEP_CSUSP, 1, predicted_player.mag_csusp, predicted_player.ammo_csusp);
+    else if (predicted_player.weapon == WEP_CFAUG)
+        return HUD_CacheAmmoString(WEP_CFAUG, 1, predicted_player.mag_cfaug, predicted_player.ammo_cfaug);
+    else if (predicted_player.weapon == WEP_CFFAMAS)
+        return HUD_CacheAmmoString(WEP_CFFAMAS, 1, predicted_player.mag_cffamas, predicted_player.ammo_cffamas);
+    else if (predicted_player.weapon == WEP_CFMAC10)
+        return HUD_CacheAmmoString(WEP_CFMAC10, 1, predicted_player.mag_cfmac10, predicted_player.ammo_cfmac10);
+    else if (predicted_player.weapon == WEP_CFMP5)
+        return HUD_CacheAmmoString(WEP_CFMP5, 1, predicted_player.mag_cfmp5, predicted_player.ammo_cfmp5);
+    else if (predicted_player.weapon == WEP_CFVECTOR)
+        return HUD_CacheAmmoString(WEP_CFVECTOR, 1, predicted_player.mag_cfvector, predicted_player.ammo_cfvector);
+    else if (predicted_player.weapon == WEP_CFTYPE89)
+        return HUD_CacheAmmoString(WEP_CFTYPE89, 1, predicted_player.mag_cftype89, predicted_player.ammo_cftype89);
+    else if (predicted_player.weapon == WEP_CFFIVESEVEN)
+        return HUD_CacheAmmoString(WEP_CFFIVESEVEN, 1, predicted_player.mag_cffiveseven, predicted_player.ammo_cffiveseven);
+    else if (predicted_player.weapon == WEP_CFDEAGLE)
+        return HUD_CacheAmmoString(WEP_CFDEAGLE, 1, predicted_player.mag_cfdeagle, predicted_player.ammo_cfdeagle);
+    else if (predicted_player.weapon == WEP_CFAWP)
+        return HUD_CacheAmmoString(WEP_CFAWP, 1, predicted_player.mag_cfawp, predicted_player.ammo_cfawp);
+    else if (predicted_player.weapon == WEP_CFG3SG1)
+        return HUD_CacheAmmoString(WEP_CFG3SG1, 1, predicted_player.mag_cfg3sg1, predicted_player.ammo_cfg3sg1);
+    else if (predicted_player.weapon == WEP_CFELITE)
+        return HUD_CacheAmmoString(WEP_CFELITE, 1, predicted_player.mag_cfelite, predicted_player.ammo_cfelite);
+    else if (predicted_player.weapon == WEP_CFXM1014)
+        return HUD_CacheAmmoString(WEP_CFXM1014, 1, predicted_player.mag_cfxm1014, predicted_player.ammo_cfxm1014);
+    else if (predicted_player.weapon == WEP_CFSCOUTM700)
+        return HUD_CacheAmmoString(WEP_CFSCOUTM700, 1, predicted_player.mag_cfscoutm700, predicted_player.ammo_cfscoutm700);
+    else if (predicted_player.weapon == WEP_CFM3)
+        return HUD_CacheAmmoString(WEP_CFM3, 1, predicted_player.mag_cfm3, predicted_player.ammo_cfm3);
+    else if (predicted_player.weapon == WEP_CFGALIL)
+        return HUD_CacheAmmoString(WEP_CFGALIL, 1, predicted_player.mag_cfgalil, predicted_player.ammo_cfgalil);
+    else if (predicted_player.weapon == WEP_CFGLOCK)
+        return HUD_CacheAmmoString(WEP_CFGLOCK, 1, predicted_player.mag_cfglock, predicted_player.ammo_cfglock);
+    else if (predicted_player.weapon == WEP_CFSG550)
+        return HUD_CacheAmmoString(WEP_CFSG550, 1, predicted_player.mag_cfsg550, predicted_player.ammo_cfsg550);
 
     return "";
 };
 
 string() HUD_GetHLSMGGrenadeString =
 {
+    W_SlotAmmo_GetForWeapon(predicted_player, WEP_HLSMG);
+    float grenades = slotammo_aux;
     if (!hud_hlsmg_gren_cache_valid
-        || hud_hlsmg_gren_cache_value != predicted_player.ammo_hlsmg_grenades)
+        || hud_hlsmg_gren_cache_value != grenades)
     {
         hud_hlsmg_gren_cache_valid = TRUE;
-        hud_hlsmg_gren_cache_value = predicted_player.ammo_hlsmg_grenades;
-        hud_hlsmg_gren_cache_text = sprintf("Grenade Launcher: %g", predicted_player.ammo_hlsmg_grenades);
+        hud_hlsmg_gren_cache_value = grenades;
+        hud_hlsmg_gren_cache_text = sprintf("Grenade Launcher: %g", grenades);
         hud_hlsmg_gren_cache_width = stringwidth(hud_hlsmg_gren_cache_text, 1, [16, 16]);
     }
 
@@ -579,7 +705,11 @@ void(string slot_text, float is_active, vector pos) HUD_DrawWeaponSlot =
 
     text_size = [HUD_SLOT_FONT, HUD_SLOT_FONT];
     text_pos_x = pos_x + HUD_SLOT_PADDING;
-    text_pos_y = pos_y + (HUD_SLOT_HEIGHT - HUD_SLOT_FONT) * 0.5;
+    // The font's glyph metrics extend below the geometric mid-line;
+    // the math-only midpoint lands ~1 px high.  Bump the baseline by
+    // 1 px so the label sits centred to the eye instead of crammed
+    // against the slot's top edge.
+    text_pos_y = pos_y + (HUD_SLOT_HEIGHT - HUD_SLOT_FONT) * 0.5 + 1;
     text_pos_z = 0;
 
     // Drop shadow
@@ -588,11 +718,123 @@ void(string slot_text, float is_active, vector pos) HUD_DrawWeaponSlot =
     drawstring(text_pos, slot_text, text_size, text_color, text_alpha, 0);
 };
 
+// Compact dropdown row — half-height of the main slot, native 8 px
+// bitmap font, no shadow.  Active row gets a subtle highlight so the
+// player can see which utility is currently selected without the row
+// rearranging the list.
+float HUD_DROP_HEIGHT = 12;
+float HUD_DROP_FONT   = 8;
+
+void(string label, float is_active, vector pos) HUD_DrawUtilityDropRow =
+{
+    vector bg_color  = is_active ? '0.18 0.30 0.42' : '0.07 0.09 0.11';
+    float  bg_alpha  = is_active ? 0.75 : 0.45;
+    vector tx_color  = is_active ? '1 1 1'          : '0.7 0.75 0.85';
+    float  tx_alpha  = is_active ? 1.0  : 0.7;
+
+    drawfill(pos, [HUD_SLOT_WIDTH, HUD_DROP_HEIGHT], bg_color, bg_alpha, 0);
+
+    if (is_active)
+        drawfill([pos_x + HUD_SLOT_WIDTH - 2, pos_y], [2, HUD_DROP_HEIGHT], '0.4 0.7 1', 1.0, 0);
+
+    vector text_size = [HUD_DROP_FONT, HUD_DROP_FONT];
+    vector text_pos;
+    text_pos_x = pos_x + HUD_SLOT_PADDING + 4;
+    text_pos_y = pos_y + (HUD_DROP_HEIGHT - HUD_DROP_FONT) * 0.5 + 1;
+    text_pos_z = 0;
+
+    drawstring(text_pos, label, text_size, tx_color, tx_alpha, 0);
+};
+
+// Render the full carried-utility list below slot 4 in fixed canonical
+// order (HE → Snowball → CSHE → Flash → Smoke).  The active utility
+// gets the highlighted row instead of being hidden, so cycling the
+// utility key (impulse 4) or scroll wheel doesn't reshuffle the
+// visible rows — only the highlight moves.  Order matches
+// W_UtilityCycleCarried so the next-key target maps to the next row
+// down.  Returns the number of rows drawn (informational).
+// Throttled-recompute cache for the utility dropdown. The carried[]
+// + names[] + total values rebuild at cl_hud_fps Hz (default 30) OR
+// immediately whenever any of the 5 ammo fields changes — the
+// ammo_sum check forces an instant rebuild on pickup / use so the
+// dropdown stays responsive without paying the full eval cost on
+// idle frames. `active` (currently-equipped utility) reads per frame
+// because it's a single cheap field lookup and drives the
+// per-row highlight.
+float  hud_util_cache_last_recompute;
+float  hud_util_cache_total;
+float  hud_util_cache_carried[5];
+string hud_util_cache_names[5];
+float  hud_util_cache_ammo_sum;
+
+float(vector first_pos) HUD_DrawUtilityDropdown =
+{
+    float row = 0;
+    float active = predicted_player.slot_utility;
+    vector pos = first_pos;
+
+    float cands[5] = { WEP_HLGRENADE, WEP_SNOWBALL, WEP_CSHEGRENADE,
+                       WEP_CSFLASHBANG, WEP_CSSMOKEGRENADE };
+
+    // Detect any ammo change since the last rebuild — pickup / use /
+    // drop instantly invalidates the cache regardless of throttle.
+    // Sum is a good-enough fingerprint: any ammo field changing by ±1
+    // shifts the sum by ±1, never colliding within one tick.
+    float ammo_sum = predicted_player.ammo_hlgrenade
+                   + predicted_player.ammo_snowball
+                   + predicted_player.ammo_cshegrenade
+                   + predicted_player.ammo_csflashbang
+                   + predicted_player.ammo_cssmokegrenade;
+
+    float hud_fps = cvar("cl_hud_fps");
+    if (hud_fps <= 0) hud_fps = 30;
+    float interval = 1.0 / hud_fps;
+
+    if (ammo_sum != hud_util_cache_ammo_sum
+        || cltime - hud_util_cache_last_recompute >= interval)
+    {
+        hud_util_cache_last_recompute = cltime;
+        hud_util_cache_ammo_sum = ammo_sum;
+
+        hud_util_cache_carried[0] = predicted_player.ammo_hlgrenade > 0;
+        hud_util_cache_carried[1] = predicted_player.ammo_snowball > 0;
+        hud_util_cache_carried[2] = predicted_player.ammo_cshegrenade > 0;
+        hud_util_cache_carried[3] = predicted_player.ammo_csflashbang > 0;
+        hud_util_cache_carried[4] = predicted_player.ammo_cssmokegrenade > 0;
+
+        hud_util_cache_total = 0;
+        for (float ci = 0; ci < 5; ci++)
+        {
+            if (hud_util_cache_carried[ci])
+            {
+                hud_util_cache_names[ci] = HUD_WeaponName(cands[ci]);
+                hud_util_cache_total = hud_util_cache_total + 1;
+            }
+        }
+    }
+
+    // Don't draw a single-row dropdown — slot 4 already shows the only
+    // carried utility, the dropdown adds nothing.
+    if (hud_util_cache_total <= 1)
+        return 0;
+
+    for (float i = 0; i < 5; i++)
+    {
+        if (!hud_util_cache_carried[i])
+            continue;
+
+        HUD_DrawUtilityDropRow(hud_util_cache_names[i], cands[i] == active, pos);
+        pos_y = pos_y + HUD_DROP_HEIGHT + 1;
+        row++;
+    }
+
+    return row;
+};
+
 void() HUD_DrawWeaponSlots =
 {
     float  active;
     float  slot_x, slot_y;
-    string active_text = "";
 
     active = predicted_player.weapon;
     HUD_UpdateWeaponSlotCache();
@@ -600,39 +842,10 @@ void() HUD_DrawWeaponSlots =
     slot_x = g_width - HUD_SLOT_WIDTH - 12;
     slot_y = g_height * 0.5 - ((HUD_SLOT_HEIGHT * 4 + HUD_SLOT_GAP * 3) * 0.5);
 
-    if (cltime > hud_slot_full_until)
-    {
-        // Auto-hide branch: keep the active row at its OWN slot's Y so
-        // the panel feels stationary — only the active row remains
-        // visible, the others vanish in place. Previously this branch
-        // re-centered the row vertically, which made the active label
-        // jump to the middle of the screen whenever auto-hide kicked in.
-        float active_y = slot_y;
-        if (active == predicted_player.slot_primary)
-        {
-            active_text = hud_slot_cache_text1;
-            active_y = slot_y;
-        }
-        else if (active == predicted_player.slot_secondary)
-        {
-            active_text = hud_slot_cache_text2;
-            active_y = slot_y + (HUD_SLOT_HEIGHT + HUD_SLOT_GAP);
-        }
-        else if (active == predicted_player.slot_melee)
-        {
-            active_text = hud_slot_cache_text3;
-            active_y = slot_y + (HUD_SLOT_HEIGHT + HUD_SLOT_GAP) * 2;
-        }
-        else if (active == predicted_player.slot_utility)
-        {
-            active_text = hud_slot_cache_text4;
-            active_y = slot_y + (HUD_SLOT_HEIGHT + HUD_SLOT_GAP) * 3;
-        }
-
-        if (active_text != "")
-            HUD_DrawWeaponSlot(active_text, TRUE, [slot_x, active_y]);
-        return;
-    }
+    // No more auto-hide — non-active slots stay visible at reduced
+    // opacity so the player keeps a constant view of their loadout.
+    // HUD_DrawWeaponSlot already dims inactive entries via bg_alpha
+    // 0.6 / text_alpha 0.8.
 
     if (hud_slot_cache_text1 != "")
         HUD_DrawWeaponSlot(hud_slot_cache_text1, active == predicted_player.slot_primary, [slot_x, slot_y]);
@@ -645,6 +858,23 @@ void() HUD_DrawWeaponSlots =
 
     if (hud_slot_cache_text4 != "")
         HUD_DrawWeaponSlot(hud_slot_cache_text4, active == predicted_player.slot_utility, [slot_x, slot_y + (HUD_SLOT_HEIGHT + HUD_SLOT_GAP) * 3]);
+
+    // Slot 5 — C4 (impulse 5).  Visible whenever the player carries a
+    // charge, even if not currently holding it.  Lives outside the
+    // utility cycle so it gets its own dedicated slot.  Label format
+    // matches the other slots ("N NAME") via HUD_BuildWeaponSlotText.
+    float c4_y = slot_y + (HUD_SLOT_HEIGHT + HUD_SLOT_GAP) * 4;
+    if (predicted_player.ammo_cfc4 > 0)
+    {
+        string c4_text = sprintf("5 %s", HUD_WeaponName(WEP_CFC4));
+        HUD_DrawWeaponSlot(c4_text, active == WEP_CFC4, [slot_x, c4_y]);
+        c4_y = c4_y + HUD_SLOT_HEIGHT + HUD_SLOT_GAP;
+    }
+
+    // Carried-utility "dropdown" — appears beneath the last slot
+    // (utility, or C4 if present) whenever the player carries any
+    // utility besides the active one.
+    HUD_DrawUtilityDropdown([slot_x, c4_y]);
 };
 
 void() HUD_DrawRoundTimer =
@@ -762,26 +992,21 @@ void() CSQC_DrawWeaponHUD =
     string hp_str;
     float  x, y;
     float  prev_font;
+    float  prev_font_early;
 
-    // Always draw round messages and timer, even when dead/spectating
-    float prev_font_early = drawfont;
-    drawfont = hud_font;
-    HUD_DrawCenterMessage();
-    HUD_DrawRoundTimer();
-    drawfont = prev_font_early;
-
-    if (!predicted_player || !csqc_prediction_valid)
-        return;
-
-    // Team-select cameras: the local ent exists with health=100 and a default
-    // loadout, but the player hasn't joined yet.  Hide health / weapon slots /
-    // crosshair until they're on a team.  (Round messages and timer above
-    // already drew, which is intentional — they're useful during team pick.)
-    if (getstati(STAT_PLAYERTEAM) <= TEAM_NONE)
-        return;
-
+    // ---- SCOPE OVERLAY FIRST (alive players only) ----
+    // The scope (letterbox + scope.png + fade) must draw BEFORE any
+    // text or status overlays so the round timer / center message /
+    // stamina bar can composite on top.  Without this, the scope's
+    // black bars would cover the round timer (user reported bug:
+    // "Can you ensure the bar overlays on top of scope, same with
+    // the round time").
+    float scope_ok = predicted_player && csqc_prediction_valid
+                  && getstati(STAT_PLAYERTEAM) > TEAM_NONE;
+    float predicted_zoomstage = 0;
+    if (scope_ok)
     {
-        float predicted_zoomstage = predicted_player.zoomstage;
+        predicted_zoomstage = predicted_player.zoomstage;
         // Swap to a non-scope weapon while scoped and the server's
         // zoomstage reset lags on high ping — clear it locally based on
         // the predicted weapon so the scope overlay disappears instantly.
@@ -790,6 +1015,36 @@ void() CSQC_DrawWeaponHUD =
 
         if (predicted_zoomstage > 0)
             HUD_DrawScope();
+        // CoD scope draws on top of the CS-style stack — the two are
+        // mutually exclusive (Weapon_HasScope returns 0 for scout/awp
+        // under sv_codscopes so the legacy HUD_DrawScope can't fire
+        // for them), but ordering this AFTER it keeps the fade fill
+        // above any other HUD overlay drawn earlier.  The drawer
+        // self-gates on phase != OFF.
+        CSQC_CodScope_DrawOverlay();
+    }
+
+    // ---- Round timer + center message + stamina bar — ON TOP of scope ----
+    // Drawn for everyone including dead / spectating; the scope above
+    // is alive-gated so spectators get the same layout minus the scope.
+    prev_font_early = drawfont;
+    drawfont = hud_font;
+    HUD_DrawCenterMessage();
+    HUD_DrawRoundTimer();
+    HUD_DrawCodStaminaBar();
+    drawfont = prev_font_early;
+
+    if (!predicted_player || !csqc_prediction_valid)
+        return;
+    if (getstati(STAT_PLAYERTEAM) <= TEAM_NONE)
+        return;
+
+    {
+        // Pass an effective zoomstage that reflects the CoD scope too
+        // so the crosshair-suppress branch in cl_crosshair.qc treats
+        // a CoD-scoped player the same as a CS-scoped one.
+        if (CSQC_CodScope_IsScoped() && predicted_zoomstage == 0)
+            predicted_zoomstage = 2;
         HUD_DrawCrosshair(predicted_zoomstage);
     }
 
@@ -889,6 +1144,21 @@ float net_graph_ema_snap_interval;
 float net_graph_last_snap_cltime;
 float net_graph_last_snap_serverprevtime;
 
+// Throttled-recompute cache for HUD_DrawNetGraph. Lines[] and widths[]
+// are rebuilt at cl_netgraph_fps Hz (default 10) and reused on every
+// other frame; the per-frame draw loop just re-blits the cached
+// strings. Cuts the per-frame ~6 cvar reads + 6 sprintf builds + 6
+// stringwidth calls down to ~2 reads + zero formatting work in
+// steady state.
+float  ng_cache_last_recompute;
+string ng_cache_lines[6];
+float  ng_cache_widths[6];
+float  ng_cache_panel_w;
+float  ng_cache_extrap_master;
+float  ng_cache_smooth_enabled;
+float  ng_cache_smooth_time;
+float  ng_cache_sv_tick;
+
 void() HUD_DrawNetGraph =
 {
     if (!cvar("net_graph"))
@@ -898,6 +1168,8 @@ void() HUD_DrawNetGraph =
     drawfont = hud_font_mono;
 
     // --- Sample fps (clframetime) with light EMA smoothing ---
+    // Runs every frame so the EMA is fresh; the EMA value itself is
+    // displayed via the throttled string-rebuild below.
     if (clframetime > 0)
     {
         float inst_fps = 1.0 / clframetime;
@@ -908,6 +1180,7 @@ void() HUD_DrawNetGraph =
     }
 
     // --- Detect new snapshot via serverprevtime, record spacing ---
+    // Also runs every frame so we don't miss a snapshot tick.
     if (serverprevtime != net_graph_last_snap_serverprevtime)
     {
         if (net_graph_last_snap_cltime > 0)
@@ -922,85 +1195,86 @@ void() HUD_DrawNetGraph =
         net_graph_last_snap_serverprevtime = serverprevtime;
     }
 
-    // --- Read config + live state ---
-    float sv_tick = serverkeyfloat("sv_mintic");
-    if (sv_tick <= 0) sv_tick = 0.015;
-    float srv_hz = 1.0 / sv_tick;
+    // --- Throttled recompute (cl_netgraph_fps, default 10) ---
+    // Cvar reads + sprintf + stringwidth scan run at most this often;
+    // every other frame just re-blits the cached strings + widths.
+    // Lines display data that's already smoothed (fps EMA, snap-interval
+    // EMA), so 10 Hz refresh is visually identical to per-frame.
+    float ng_fps = cvar("cl_netgraph_fps");
+    if (ng_fps <= 0) ng_fps = 10;
+    if (cltime - ng_cache_last_recompute >= 1.0 / ng_fps)
+    {
+        ng_cache_last_recompute = cltime;
 
-    float cl_send = cvar("cl_netfps");
+        ng_cache_sv_tick = serverkeyfloat("sv_mintic");
+        if (ng_cache_sv_tick <= 0) ng_cache_sv_tick = 0.015;
+        float srv_hz = 1.0 / ng_cache_sv_tick;
 
-    float extrap_master;
-    if (cvar_string("cl_extrap") == "")
-        extrap_master = 1;
-    else
-        extrap_master = cvar("cl_extrap");
-    float extrap_grounded = cvar("cl_extrap_grounded");
+        float cl_send = cvar("cl_netfps");
 
-    float snap_dt_now = cltime - net_graph_last_snap_cltime;  // time since latest snap
-    float snap_hz = (net_graph_ema_snap_interval > 0) ? (1.0 / net_graph_ema_snap_interval) : 0;
+        if (cvar_string("cl_extrap") == "")
+            ng_cache_extrap_master = 1;
+        else
+            ng_cache_extrap_master = cvar("cl_extrap");
+        float extrap_grounded = cvar("cl_extrap_grounded");
 
-    // Smoothing (entity error compensation) state — visible so the three
-    // smoothness layers (interp / extrap / smooth) are all in one panel.
-    float smooth_enabled = 1;
-    if (cvar_string("cl_extrap_smooth") != "" && !cvar("cl_extrap_smooth"))
-        smooth_enabled = 0;
-    float smooth_time;
-    if (cvar_string("cl_extrap_smooth_time") == "")
-        smooth_time = 0.031;
-    else
-        smooth_time = cvar("cl_extrap_smooth_time");
+        float snap_dt_recompute = cltime - net_graph_last_snap_cltime;
+        float snap_hz = (net_graph_ema_snap_interval > 0) ? (1.0 / net_graph_ema_snap_interval) : 0;
 
-    // --- Build lines ---
-    string line_fps    = sprintf("fps   %4.0f", net_graph_ema_fps);
-    string line_srv    = sprintf("srv   %4.0f Hz  (%.4fs)", srv_hz, sv_tick);
-    string line_snd    = sprintf("snd   %4.0f Hz", cl_send);
-    string line_snap   = sprintf("snap  %4.0f Hz  dt %.3fs", snap_hz, snap_dt_now);
-    string line_extr   = sprintf("extrap %s%s", extrap_master ? "ON " : "OFF",
-                                 extrap_grounded ? "(grounded)" : "");
-    string line_smooth = sprintf("smooth %s %.3fs",
-                                 (smooth_enabled && smooth_time > 0) ? "ON " : "OFF",
-                                 smooth_time);
+        ng_cache_smooth_enabled = 1;
+        if (cvar_string("cl_extrap_smooth") != "" && !cvar("cl_extrap_smooth"))
+            ng_cache_smooth_enabled = 0;
+        if (cvar_string("cl_extrap_smooth_time") == "")
+            ng_cache_smooth_time = 0.031;
+        else
+            ng_cache_smooth_time = cvar("cl_extrap_smooth_time");
 
-    // --- Layout: bottom-right, stacked upward ---
+        ng_cache_lines[0] = sprintf("fps   %4.0f", net_graph_ema_fps);
+        ng_cache_lines[1] = sprintf("srv   %4.0f Hz  (%.4fs)", srv_hz, ng_cache_sv_tick);
+        ng_cache_lines[2] = sprintf("snd   %4.0f Hz", cl_send);
+        ng_cache_lines[3] = sprintf("snap  %4.0f Hz  dt %.3fs", snap_hz, snap_dt_recompute);
+        ng_cache_lines[4] = sprintf("extrap %s%s",
+                                    ng_cache_extrap_master ? "ON " : "OFF",
+                                    extrap_grounded ? "(grounded)" : "");
+        ng_cache_lines[5] = sprintf("smooth %s %.3fs",
+                                    (ng_cache_smooth_enabled && ng_cache_smooth_time > 0) ? "ON " : "OFF",
+                                    ng_cache_smooth_time);
+
+        vector text_size_local = [12, 12];
+        ng_cache_panel_w = 0;
+        for (float ci = 0; ci < 6; ci++)
+        {
+            ng_cache_widths[ci] = stringwidth(ng_cache_lines[ci], 0, text_size_local);
+            if (ng_cache_widths[ci] > ng_cache_panel_w)
+                ng_cache_panel_w = ng_cache_widths[ci];
+        }
+    }
+
+    // --- Per-frame layout + draw using cached strings/widths ---
     vector text_size = [12, 12];
     float pad = 8;
     float line_h = text_size_y + 2;
     float right_x = g_width - pad;
     float bottom_y = g_height - pad;
-
-    string lines[6];
-    lines[0] = line_fps;
-    lines[1] = line_srv;
-    lines[2] = line_snd;
-    lines[3] = line_snap;
-    lines[4] = line_extr;
-    lines[5] = line_smooth;
-
-    // Background panel
-    float panel_w = 0;
-    float i;
-    for (i = 0; i < 6; i++)
-    {
-        float w = stringwidth(lines[i], 0, text_size);
-        if (w > panel_w) panel_w = w;
-    }
     float panel_h = line_h * 6 + 4;
-    vector panel_pos = [right_x - panel_w - 6, bottom_y - panel_h];
-    drawfill(panel_pos, [panel_w + 8, panel_h], '0 0 0', 0.55, 0);
+    vector panel_pos = [right_x - ng_cache_panel_w - 6, bottom_y - panel_h];
+    drawfill(panel_pos, [ng_cache_panel_w + 8, panel_h], '0 0 0', 0.55, 0);
 
-    // Lines stacked from bottom to top (smooth at bottom, fps at top)
-    for (i = 0; i < 6; i++)
+    // snap_dt_now is fresh per frame so the snap-dt colour reacts
+    // immediately to lag spikes even if the cached string is up to
+    // 100 ms stale (it'll catch up on the next throttled rebuild).
+    float snap_dt_now = cltime - net_graph_last_snap_cltime;
+
+    for (float i = 0; i < 6; i++)
     {
-        float w = stringwidth(lines[i], 0, text_size);
-        vector p = [right_x - w - 2, bottom_y - line_h * (6 - i) + 2];
+        vector p = [right_x - ng_cache_widths[i] - 2, bottom_y - line_h * (6 - i) + 2];
         vector col;
         col = '1 1 1';
-        // Highlight the big ones
-        if (i == 3) col = (snap_dt_now > sv_tick * 2) ? '1 0.5 0.3' : '0.7 1 0.7';  // snap dt
-        if (i == 4) col = extrap_master ? '0.7 1 0.7' : '1 0.7 0.7';
-        if (i == 5) col = (smooth_enabled && smooth_time > 0) ? '0.7 1 0.7' : '0.8 0.8 0.8';
-        drawstring(p + [1, 1], lines[i], text_size, '0 0 0', 0.7, 0);
-        drawstring(p, lines[i], text_size, col, 0.95, 0);
+        if (i == 3) col = (snap_dt_now > ng_cache_sv_tick * 2) ? '1 0.5 0.3' : '0.7 1 0.7';
+        if (i == 4) col = ng_cache_extrap_master ? '0.7 1 0.7' : '1 0.7 0.7';
+        if (i == 5) col = (ng_cache_smooth_enabled && ng_cache_smooth_time > 0) ? '0.7 1 0.7' : '0.8 0.8 0.8';
+        drawstring(p + [1, 1], ng_cache_lines[i], text_size, '0 0 0', 0.7, 0);
+        drawstring(p, ng_cache_lines[i], text_size, col, 0.95, 0);
     }
 
     drawfont = prev_font;

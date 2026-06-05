@@ -35,3 +35,8 @@ ode
 .vscode
 /.vscode
 data
+qcc.cfg
+triggers.cpp
+halflife-cs.fgd
+fteqw.lnk
+scintilla.cfg

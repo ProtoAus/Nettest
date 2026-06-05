@@ -711,6 +711,9 @@ float(float x, float y) CSQC_DrawDebugGame =
     string gm_label;
     if      (gm == GAMEMODE_ELIMINATION) gm_label = "Elimination";
     else if (gm == GAMEMODE_BHOP)        gm_label = "Bhop";
+    else if (gm == GAMEMODE_FFA)         gm_label = "Free For All";
+    else if (gm == GAMEMODE_PAINTGUN)    gm_label = "Paintball";
+    else if (gm == GAMEMODE_DEFUSE)      gm_label = "Defuse";
     else                                 gm_label = "TDM";
     y = dbg_line(x, y, "Gamemode", gm_label, DBG_VALUE_COL);
 
@@ -1231,6 +1234,90 @@ void() CSQC_DrawDebugHitboxExpand =
         dbg_hitbox_line(c3, c7, col, alpha);
 
         vis = vis.chain;
+    }
+};
+
+// ============================================================
+//  cl_debug_physdrop_bbox — phys-drop bbox wireframes
+//
+//  0 = off, 1 = ODE tight box (rotated with .angles, green),
+//  2 = trace-inflated AABB (axis-aligned, orange), 3 = both.
+//  ODE-tight reconstructs from sv_physdrop_bbox_{x,y,z} (the same
+//  cvars the server feeds W_PhysDropEnable's setsize) — CSQC's
+//  self.mins/.maxs is the pickup-touch AABB, NOT the ODE collision
+//  shape, so reading those directly would render a misleading box.
+//  Trace-inflated reads sv_physdrop_trace_bbox_{x,y,z} (CVAR_SIDE_BOTH
+//  so cvar() works clientside without serverinfo).
+// ============================================================
+
+void() CSQC_DrawDebugPhysDropBboxes =
+{
+    float mode = cvar("cl_debug_physdrop_bbox");
+    if (mode <= 0) return;
+
+    float bx = cvar("sv_physdrop_bbox_x");
+    float by = cvar("sv_physdrop_bbox_y");
+    float bz = cvar("sv_physdrop_bbox_z");
+    float tx = cvar("sv_physdrop_trace_bbox_x");
+    float ty = cvar("sv_physdrop_trace_bbox_y");
+    float tz = cvar("sv_physdrop_trace_bbox_z");
+
+    entity w = findchain(classname, "csqc_dropped_weapon");
+    while (w)
+    {
+        if (w.modelindex && w.dropped_weapon_physdrop)
+        {
+            vector o = w.origin;
+
+            if ((mode == 1 || mode == 3) && bx > 0 && by > 0 && bz > 0)
+            {
+                // ODE-tight half-extents from the server-side cvars,
+                // rotated by the drop's current .angles so the visual
+                // matches the physics body orientation.
+                makevectors(w.angles);
+                vector mn = [-bx, -by, -bz];
+                vector mx = [ bx,  by,  bz];
+                vector gcol = '0 1 0';
+                float galpha = 0.8;
+                vector g0 = o + v_forward*mn_x + v_right*mn_y + v_up*mn_z;
+                vector g1 = o + v_forward*mx_x + v_right*mn_y + v_up*mn_z;
+                vector g2 = o + v_forward*mx_x + v_right*mx_y + v_up*mn_z;
+                vector g3 = o + v_forward*mn_x + v_right*mx_y + v_up*mn_z;
+                vector g4 = o + v_forward*mn_x + v_right*mn_y + v_up*mx_z;
+                vector g5 = o + v_forward*mx_x + v_right*mn_y + v_up*mx_z;
+                vector g6 = o + v_forward*mx_x + v_right*mx_y + v_up*mx_z;
+                vector g7 = o + v_forward*mn_x + v_right*mx_y + v_up*mx_z;
+                dbg_hitbox_line(g0,g1,gcol,galpha); dbg_hitbox_line(g1,g2,gcol,galpha);
+                dbg_hitbox_line(g2,g3,gcol,galpha); dbg_hitbox_line(g3,g0,gcol,galpha);
+                dbg_hitbox_line(g4,g5,gcol,galpha); dbg_hitbox_line(g5,g6,gcol,galpha);
+                dbg_hitbox_line(g6,g7,gcol,galpha); dbg_hitbox_line(g7,g4,gcol,galpha);
+                dbg_hitbox_line(g0,g4,gcol,galpha); dbg_hitbox_line(g1,g5,gcol,galpha);
+                dbg_hitbox_line(g2,g6,gcol,galpha); dbg_hitbox_line(g3,g7,gcol,galpha);
+            }
+
+            if ((mode == 2 || mode == 3) && tx > 0 && ty > 0 && tz > 0)
+            {
+                // Trace-inflated AABB — always axis-aligned (server wraps
+                // it around hitscan traces without rotation).
+                vector ocol = '1 0.4 0';
+                float oalpha = 0.5;
+                vector t0 = o + [-tx, -ty, -tz];
+                vector t1 = o + [ tx, -ty, -tz];
+                vector t2 = o + [ tx,  ty, -tz];
+                vector t3 = o + [-tx,  ty, -tz];
+                vector t4 = o + [-tx, -ty,  tz];
+                vector t5 = o + [ tx, -ty,  tz];
+                vector t6 = o + [ tx,  ty,  tz];
+                vector t7 = o + [-tx,  ty,  tz];
+                dbg_hitbox_line(t0,t1,ocol,oalpha); dbg_hitbox_line(t1,t2,ocol,oalpha);
+                dbg_hitbox_line(t2,t3,ocol,oalpha); dbg_hitbox_line(t3,t0,ocol,oalpha);
+                dbg_hitbox_line(t4,t5,ocol,oalpha); dbg_hitbox_line(t5,t6,ocol,oalpha);
+                dbg_hitbox_line(t6,t7,ocol,oalpha); dbg_hitbox_line(t7,t4,ocol,oalpha);
+                dbg_hitbox_line(t0,t4,ocol,oalpha); dbg_hitbox_line(t1,t5,ocol,oalpha);
+                dbg_hitbox_line(t2,t6,ocol,oalpha); dbg_hitbox_line(t3,t7,ocol,oalpha);
+            }
+        }
+        w = w.chain;
     }
 };
 

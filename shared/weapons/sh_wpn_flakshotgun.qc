@@ -2,8 +2,32 @@
 //  shared/weapons/sh_wpn_flakshotgun.qc  -  Flak Shotgun
 //
 //  Slot  : SLOT_PRIMARY  (impulse 1 / key 1)
-//  Stats : 8-shell magazine, no reserve, pump-action
+//  Stats : 24-shell magazine, no reserve, pump-action
 //  Fire  : multi-pellet hitscan, linear damage falloff
+//
+//  ----------------------------------------------------------
+//  ANATOMY OF A WEAPON FILE  (use this file as the baseline)
+//  ----------------------------------------------------------
+//  (1) Constants — balance, frame/sequence indices, sound paths,
+//      model paths, muzzle offsets.
+//  (2) State-machine wrappers — one-liner functions calling
+//      SH_StandardTickState / SH_SimpleTickState / SH_SeqDrivenTickState
+//      and SH_StandardTryFire / SH_StandardTryReload / SH_StandardTryAction
+//      with this weapon's constants.
+//  (3) W_*Fire / W_*Reload / W_*AltFire / W_*Special — server-side
+//      action: gate via the wrapper, then trace + sound + effect.
+//  (4) W_*Frame — fire timed sound/effect events (per-weapon
+//      `weapon_snd_stage` counter), then call the tick wrapper.
+//  (5) W_*Equip + W_*Drop + weapon_* map-spawn — equip via
+//      W_StandardEquipSetup + per-weapon function-pointer assignments;
+//      drop + world entity inline (use SH_GoldSrcSetupWorld for
+//      GoldSrc world models).
+//  (6) CSQC mirror — CSQC_Predict*Command + CSQC_Predict*Reload +
+//      CSQC_*DisplayFrame + CSQC_*Equip + CSQC_*DropClear.
+//
+//  Per-weapon state lives in: .float mag_*, .float weapon_snd_stage,
+//  plus the universal weaponstate / wep_anim_start / attack_finished.
+//  Anything beyond "actionable now or not" is a code smell.
 //
 //  This file is compiled by BOTH sv_progs and cl_progs.
 // ============================================================
@@ -27,6 +51,15 @@ const float FLAKSHOTGUN_IDLE_FRAME     = 0;
 
 const float MAX_MAG_FLAKSHOTGUN        = 24;
 const float FLAKSHOTGUN_DRYFIRE_DELAY  = 0.5;
+// sv_gunkick — heavy auto-shotgun, big per-shot kick.
+const float FLAKSHOTGUN_KICK_PITCH    = 2.5;
+const float FLAKSHOTGUN_KICK_VARIANCE = 0.6;
+const float FLAKSHOTGUN_KICK_STRENGTH = 1.5;
+
+// Muzzle offset — see cl_debug_muzzle for live-tune marker.
+const float FLAKSHOTGUN_MUZZLE_FORWARD = 42;
+const float FLAKSHOTGUN_MUZZLE_RIGHT   = 6.5;
+const float FLAKSHOTGUN_MUZZLE_DOWN    = 8.5;
 
 // --- Balance ---
 const float FLAKSHOTGUN_PELLETS              = 8;
@@ -74,7 +107,15 @@ void() W_FlakShotgunShoot =
     vector src, dir, end;
     float  pellet, sx, sy, dist, damage;
 
+    // sv_gunkick — one impulse per trigger pull.
+    SH_ApplyViewKick(FLAKSHOTGUN_KICK_PITCH, FLAKSHOTGUN_KICK_VARIANCE, FLAKSHOTGUN_KICK_STRENGTH);
+
+    vector saved_v_angle = self.v_angle;
+    self.v_angle_x += self.view_kick_pitch;
+    self.v_angle_y += self.view_kick_yaw;
     makevectors(self.v_angle);
+    self.v_angle = saved_v_angle;
+
     src = self.origin + self.view_ofs;
 
     pellet = 0;
@@ -207,7 +248,7 @@ void() W_FlakShotgunDrop =
     self.mag_flakshotgun = 0;
 
     setmodel(tgt, "models/weapons/wpn_flakshotgun/w_flakshotgun.mdl");
-    setsize(tgt, '-16 -16 0', '16 16 32');
+    setsize(tgt, '-16 -16 0', '16 16 48');
     tgt.classname    = "weapon_flakshotgun";
     tgt.solid        = SOLID_NOT;
     tgt.movetype     = MOVETYPE_TOSS;
@@ -217,7 +258,7 @@ void() W_FlakShotgunDrop =
     tgt.weap_drop_func = W_FlakShotgunDrop;
     tgt.pickupcopy   = W_FlakShotgunPickupCopy;
     tgt.touch        = weapon_touch;
-    tgt.dropped_spin = 1;   // classic-Quake spin on dropped pickup
+    tgt.dropped_spin = 0;
     tgt.think        = weapon_become_solid;
     tgt.nextthink    = time + 0.7;
 };
@@ -225,7 +266,7 @@ void() W_FlakShotgunDrop =
 void() weapon_flakshotgun =
 {
     setmodel(self, "models/weapons/wpn_flakshotgun/w_flakshotgun.mdl");
-    setsize(self, '-16 -16 0', '16 16 32');
+    setsize(self, '-16 -16 0', '16 16 48');
     self.classname     = "weapon_flakshotgun";
     self.solid         = SOLID_TRIGGER;
     self.movetype      = MOVETYPE_TOSS;
@@ -235,7 +276,7 @@ void() weapon_flakshotgun =
     self.weap_drop_func = W_FlakShotgunDrop;
     self.pickupcopy    = W_FlakShotgunPickupCopy;
     self.touch         = weapon_touch;
-    self.dropped_spin  = 1;
+    self.dropped_spin  = 0;
     self.mag_flakshotgun = MAX_MAG_FLAKSHOTGUN;
     W_RegisterMapWeapon(weapon_flakshotgun);
 };
@@ -265,7 +306,7 @@ void() CSQC_PredictFlakShotgunCommand =
             CSQC_MarkPendingWeaponAck();
             csqc_flaksg_pump_played = FALSE;
             csqc_flaksg_casing_spawned = FALSE;
-            if (!pm_suppress_sounds)
+            if (CSQC_BeginFireActionEffects())
             {
                 r = random();
                 if (r < 0.25)
@@ -278,7 +319,14 @@ void() CSQC_PredictFlakShotgunCommand =
                     localsound("sounds/weapons/wpn_flakshotgun/fire4.wav");
                 CSQC_RecordPredictedWeaponSound();
                 CSQC_PredictedShotgunImpact(FLAKSHOTGUN_PELLETS, FLAKSHOTGUN_SPREAD,
-                    FLAKSHOTGUN_PELLET_CLOSE_DAMAGE, FLAKSHOTGUN_PELLET_MIN_DAMAGE, FLAKSHOTGUN_DAMAGE_FALLOFF_RANGE);
+                    FLAKSHOTGUN_PELLET_CLOSE_DAMAGE, FLAKSHOTGUN_PELLET_MIN_DAMAGE, FLAKSHOTGUN_DAMAGE_FALLOFF_RANGE,
+                    FLAKSHOTGUN_KICK_PITCH, FLAKSHOTGUN_KICK_VARIANCE, FLAKSHOTGUN_KICK_STRENGTH);
+                // Shotgun muzzle flash — AK47_MUZZLE_* shared default.
+                CSQC_MuzzleFlashAtMuzzle(FLAKSHOTGUN_MUZZLE_FORWARD, FLAKSHOTGUN_MUZZLE_RIGHT,
+                    FLAKSHOTGUN_MUZZLE_DOWN, self.wep_action_id);
+                CSQC_MuzzleSmokeAtMuzzle(FLAKSHOTGUN_MUZZLE_FORWARD, FLAKSHOTGUN_MUZZLE_RIGHT,
+                    FLAKSHOTGUN_MUZZLE_DOWN, self.wep_action_id, FLAKSHOTGUN_PELLETS);
+                CSQC_EndFireActionEffects();
             }
         }
         else if (r == -1)

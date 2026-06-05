@@ -1,6 +1,7 @@
 // Forward declarations (defined in m_scoreboard.qc, compiled later)
 float hud_scoreboard_teamselect;
 void() HUD_DrawScoreboard;
+void() HUD_ScoreboardSnapHidden;     // snap-hide the slide/fade animation (no fade-out tail)
 
 float team_menu_cursor_active;
 float team_menu_join_pending;
@@ -157,6 +158,10 @@ void() TeamMenuUpdateCursorState =
     team_menu_join_pending = TEAM_NONE;
 };
 
+// Forward decl — defined immediately below.  Needed because TeamMenuSelect
+// invokes it on the sv_playerselect fast path.
+void(float model_idx) CharacterMenuSelect;
+
 // Team select → go to character select instead of joining immediately
 void(float team_id) TeamMenuSelect =
 {
@@ -170,6 +175,20 @@ void(float team_id) TeamMenuSelect =
     // Transition to character select (even if same team — allows model reselection)
     team_menu_pending_team = team_id;
     team_menu_hover_model = 0;
+
+    // sv_playerselect: main-menu picker owns model choice.  Skip
+    // Phase 1 and join immediately with the cvar-stored player_model
+    // _index.  CharacterMenuSelect reads team_menu_pending_team to
+    // build the "blue"/"red" command string, so the assignment above
+    // is required.
+    if (cvar("sv_playerselect") > 0)
+    {
+        float idx = cvar("cl_player_model_choice");
+        if (idx < 0) idx = 7;        // numberK fallback
+        CharacterMenuSelect(idx);
+        return;
+    }
+
     team_menu_state = 1;
 };
 
@@ -185,6 +204,14 @@ void(float model_idx) CharacterMenuSelect =
         team_str = "red";
 
     localcmd(sprintf("cmd jointeam %s %d\n", team_str, model_idx));
+
+    // Skip the scoreboard's fade-out tail when the team menu closes
+    // post-join — the user just confirmed a model and is about to
+    // spawn, so the picker should vanish instantly rather than play
+    // the going-away animation.  Snapping sb_anim_progress to 0 means
+    // the next time HUD_DrawScoreboard sees TeamMenuIsOpen() flip to
+    // false, the bail-out branch fires immediately with no fade ticks.
+    HUD_ScoreboardSnapHidden();
 };
 
 float(string id, vector pos, vector size, string title, string subtitle, vector fill_colour, vector border_colour) TeamMenuButton =
@@ -563,6 +590,72 @@ void() DrawCharacterSelect =
     if (sui_is_clicked("cs_sini"))
         CharacterMenuSelect(5); // model index 5 = sini
 
+    // Chickenman button — sits to the LEFT of the Sini button
+    vector chk_col = '0.25 0.2 0.1';
+    if (sui_is_hovered("cs_chickenman"))
+    {
+        chk_col = '0.45 0.35 0.18';
+        team_menu_hover_model = 6; // special: chickenman
+    }
+    if (sui_is_held("cs_chickenman"))
+        chk_col = chk_col * 0.85;
+
+    sui_set_align([SUI_ALIGN_START, SUI_ALIGN_START]);
+    sui_push_frame([panel_w - 138, 8], [60, 24]);
+    sui_fill([0, 0], [60, 24], chk_col, 0.85, 0);
+    sui_border_box([0, 0], [60, 24], 1, '0.6 0.45 0.2', 0.6, 0);
+    sui_action_element([0, 0], [60, 24], "cs_chickenman", sui_noop);
+    sui_set_align([SUI_ALIGN_CENTER, SUI_ALIGN_CENTER]);
+    sui_text([0, 0], [8, 8, 0], "Chicken", '0.95 0.8 0.4', 1.0, 0);
+    sui_pop_frame();
+
+    if (sui_is_clicked("cs_chickenman"))
+        CharacterMenuSelect(6); // model index 6 = chickenman
+
+    // NumberK button — sits to the LEFT of the Chickenman button
+    vector nk_col = '0.1 0.18 0.25';
+    if (sui_is_hovered("cs_numberk"))
+    {
+        nk_col = '0.18 0.32 0.45';
+        team_menu_hover_model = 7; // special: numberK
+    }
+    if (sui_is_held("cs_numberk"))
+        nk_col = nk_col * 0.85;
+
+    sui_set_align([SUI_ALIGN_START, SUI_ALIGN_START]);
+    sui_push_frame([panel_w - 206, 8], [60, 24]);
+    sui_fill([0, 0], [60, 24], nk_col, 0.85, 0);
+    sui_border_box([0, 0], [60, 24], 1, '0.3 0.55 0.75', 0.6, 0);
+    sui_action_element([0, 0], [60, 24], "cs_numberk", sui_noop);
+    sui_set_align([SUI_ALIGN_CENTER, SUI_ALIGN_CENTER]);
+    sui_text([0, 0], [8, 8, 0], "NumberK", '0.55 0.8 1', 1.0, 0);
+    sui_pop_frame();
+
+    if (sui_is_clicked("cs_numberk"))
+        CharacterMenuSelect(7); // model index 7 = numberK
+
+    // Kilmer button — sits to the LEFT of the NumberK button
+    vector km_col = '0.2 0.15 0.1';
+    if (sui_is_hovered("cs_kilmer"))
+    {
+        km_col = '0.4 0.28 0.18';
+        team_menu_hover_model = 8; // special: kilmer
+    }
+    if (sui_is_held("cs_kilmer"))
+        km_col = km_col * 0.85;
+
+    sui_set_align([SUI_ALIGN_START, SUI_ALIGN_START]);
+    sui_push_frame([panel_w - 274, 8], [60, 24]);
+    sui_fill([0, 0], [60, 24], km_col, 0.85, 0);
+    sui_border_box([0, 0], [60, 24], 1, '0.7 0.5 0.3', 0.6, 0);
+    sui_action_element([0, 0], [60, 24], "cs_kilmer", sui_noop);
+    sui_set_align([SUI_ALIGN_CENTER, SUI_ALIGN_CENTER]);
+    sui_text([0, 0], [8, 8, 0], "Kilmer", '1 0.85 0.6', 1.0, 0);
+    sui_pop_frame();
+
+    if (sui_is_clicked("cs_kilmer"))
+        CharacterMenuSelect(8); // model index 8 = kilmer
+
     sui_pop_frame();
 
     // Right side: 3D model preview (drawn outside SUI using raw renderscene)
@@ -578,6 +671,12 @@ void() DrawCharacterSelect =
     string preview_mdl;
     if (hover_idx == 5)
         preview_mdl = "models/player/sini.mdl";
+    else if (hover_idx == 6)
+        preview_mdl = "models/player/chickenman.mdl";
+    else if (hover_idx == 7)
+        preview_mdl = "models/player/numberk/numberK.iqm";
+    else if (hover_idx == 8)
+        preview_mdl = "models/player/kilmer/kilmer.iqm";
     else if (team_menu_pending_team == TEAM_BLUE)
         preview_mdl = team_blue_models[bound(0, hover_idx, TEAM_MODEL_COUNT - 1)];
     else
@@ -607,6 +706,27 @@ void() TeamMenuDraw =
     float in_ffa = Gamemode_HasUnifiedTeams();
     if (in_ffa)
         team_menu_state = 1;
+
+    // sv_playerselect: when on, the main-menu picker owns the model
+    // choice and the in-game character grid should never appear.
+    //
+    // Team mode is already handled in TeamMenuSelect (clicking blue/red
+    // auto-commits with the cvar pick), but FFA never goes through that
+    // path — it has no Phase 0, so it lands here with state==1 and
+    // would normally render the character grid. Fire the auto-commit
+    // here, gated on join_pending so we only do it once.
+    if (in_ffa && cvar("sv_playerselect") > 0
+        && team_menu_join_pending == TEAM_NONE)
+    {
+        float auto_idx = cvar("cl_player_model_choice");
+        if (auto_idx < 0) auto_idx = 7;     // numberK fallback
+        // FFA backend team is implementation detail (any model works
+        // either way under the special-index path 5/6/7/8) — pick
+        // BLUE so CharacterMenuSelect builds a valid jointeam string.
+        team_menu_pending_team = TEAM_BLUE;
+        CharacterMenuSelect(auto_idx);
+        // Fall through to draw the "Joining..." overlay block below.
+    }
 
     // Keep the server's camera phase in sync with the menu state.  The world
     // view during char-select rides the Team_Blue/Team_Red-flagged cameras;
@@ -689,7 +809,14 @@ float(float evtype, float scanx, float chary, float devid) TeamMenuInputEvent =
             // exit everywhere. The on-screen Back button in team mode's
             // DrawCharacterSelect still navigates back to Phase 0 for
             // users who explicitly want it.
-            localcmd("togglemenu\n");
+            //
+            // ESC closes the team picker WITHOUT also popping the main
+            // menu — earlier behaviour stacked them open with one
+            // press, but users expect ESC to mean "back out one step"
+            // not "back out one step and also open something else".
+            // The user can still manually open the main menu via ESC
+            // afterward if they want it.
+            TeamMenuClose();
         }
         return TRUE;
     }

@@ -87,7 +87,7 @@ void() W_EgonBeamDamage =
     end = src + dir * EGON_BEAM_RANGE;
     W_WeaponTraceLine(src, end);
     beam_end = (trace_fraction < 1.0) ? trace_endpos : end;
-    te_beam(self, src, beam_end);
+    HLBeam_Multicast(HL_BEAM_EGON, self, src + v_right * 4 + v_up * -8, beam_end);
     if (trace_fraction < 1.0)
     {
         if (W_CanDamageTarget(trace_ent))
@@ -101,6 +101,8 @@ void() W_EgonBeamDamage =
 // Called by W_WeaponFrame when button0 is pressed
 void() W_EgonFire =
 {
+    if (Weapon_SprintBlocksFire()) return;
+    if (Weapon_LowerBlocksFire()) return;
     if (self.weaponstate == WS_FIRE) return;  // already firing
     if (self.weaponstate == WS_DRAW) return;
     if (self.ammo_hlegon <= 0)
@@ -139,6 +141,11 @@ void() W_EgonFrame =
 
     if (self.weaponstate == WS_FIRE)
     {
+        if (Weapon_LowerBlocksFire()) {
+            self.weaponstate = WS_IDLE;
+            return;
+        }
+
         // Released +attack or out of ammo → stop
         if (!self.button0 || self.ammo_hlegon <= 0)
         {
@@ -181,7 +188,7 @@ void() W_EgonFrame =
             end = src + v_forward * EGON_BEAM_RANGE;
             W_WeaponTraceLine(src, end);
             beam_end = (trace_fraction < 1.0) ? trace_endpos : end;
-            te_beam(self, src, beam_end);
+            HLBeam_Multicast(HL_BEAM_EGON, self, src + v_right * 4 + v_up * -8, beam_end);
         }
 
         // Cycle fire animation
@@ -218,7 +225,7 @@ void() W_EgonDrop =
     tgt.ammo_hlegon = self.ammo_hlegon;
     self.ammo_hlegon = 0;
     setmodel(tgt, EGON_WORLDMODEL);
-    setsize(tgt, '-16 -16 0', '16 16 32');
+    setsize(tgt, '-16 -16 0', '16 16 48');
     tgt.classname = "weapon_hlegon"; tgt.solid = SOLID_NOT; tgt.movetype = MOVETYPE_TOSS;
     tgt.weapon = WEP_HLEGON; tgt.weapon_slot = SLOT_PRIMARY;
     tgt.weap_draw = W_EgonEquip; tgt.weap_drop_func = W_EgonDrop;
@@ -229,7 +236,7 @@ void() W_EgonDrop =
 void() weapon_hlegon =
 {
     setmodel(self, EGON_WORLDMODEL);
-    setsize(self, '-16 -16 0', '16 16 32');
+    setsize(self, '-16 -16 0', '16 16 48');
     self.classname = "weapon_hlegon"; self.solid = SOLID_TRIGGER; self.movetype = MOVETYPE_TOSS;
     self.weapon = WEP_HLEGON; self.weapon_slot = SLOT_PRIMARY;
     self.weap_draw = W_EgonEquip; self.weap_drop_func = W_EgonDrop;
@@ -314,8 +321,9 @@ void() CSQC_PredictEgonCommand =
         makevectors(input_angles);
         vector src = self.origin + self.view_ofs;
         vector end = src + v_forward * EGON_BEAM_RANGE;
-        traceline(src, end, MOVE_NORMAL, self);
-        te_beam(self, src, trace_endpos);
+        CSQC_WeaponTraceLine(src, end, MOVE_NORMAL, self);
+        vector beam_end = (trace_fraction < 1.0) ? trace_endpos : end;
+        HLBeam_Draw(HL_BEAM_EGON, self, src + v_right * 4 + v_up * -8, beam_end);
     }
 
     SH_EgonTickState(csqc_pred_time);

@@ -231,7 +231,19 @@ void() SH_PlayerAnim_Death =
         mdlidx = self.player_visual_proxy.modelindex;
 
     float deathframe;
-    if (self.player_model_index == 5)
+#ifdef SSQC
+    float gm = cvar("sv_gamemode");
+#else
+    float gm = getstatf(STAT_GAMEMODE);
+#endif
+    if (gm == GAMEMODE_PAINTGUN)
+    {
+        // Paintgun mode plays one fixed "tag-out" animation across
+        // every kill so the visual reads as a clean elimination.
+        // Skip the hitgroup / crouch / model-specific branches.
+        deathframe = CSANIM_DEATH2;
+    }
+    else if (self.player_model_index == 5)
     {
         deathframe = Sini_GetRandomDeathAnim(mdlidx);
     }
@@ -276,6 +288,224 @@ void(float anim, float duration) SH_PlayerAnim_PlayTop =
     self.anim_top_delay = duration;
     self.anim_top_gen   = (self.anim_top_gen + 1) & 255; // wrapping byte counter
     self.anim_top_start = time;                          // wall-clock anchor
+};
+
+.float player_spine_skel_modelindex;
+.float player_spine_debug_next;
+
+const float PLAYER_SPINE_PI_RAD = 3.14159265358979;
+
+float(float f) SH_PlayerAnim_FloatGood =
+{
+    return (fabs(f) < 100000);
+};
+
+float(vector v) SH_PlayerAnim_VectorGood =
+{
+    return (SH_PlayerAnim_FloatGood(v_x)
+         && SH_PlayerAnim_FloatGood(v_y)
+         && SH_PlayerAnim_FloatGood(v_z));
+};
+
+float(float skel, float bone_idx) SH_PlayerAnim_LoadBoneBasis =
+{
+    if (bone_idx <= 0 || skel == 0)
+        return FALSE;
+
+    skel_get_bonerel(skel, bone_idx);
+
+    if (!SH_PlayerAnim_VectorGood(v_forward)
+        || !SH_PlayerAnim_VectorGood(v_right)
+        || !SH_PlayerAnim_VectorGood(v_up)
+        || vlen(v_forward) < 0.001
+        || vlen(v_right) < 0.001
+        || vlen(v_up) < 0.001)
+        return FALSE;
+
+    vector old_f = v_forward;
+    vector old_r = v_right;
+    vector old_u = v_up;
+    vector lf = normalize(old_f);
+    vector lu = old_u - lf * (old_u * lf);
+    if (vlen(lu) < 0.001)
+        lu = crossproduct(old_r, lf);
+    if (vlen(lu) < 0.001)
+        return FALSE;
+    lu = normalize(lu);
+    vector lr = crossproduct(lf, lu);
+    if (vlen(lr) < 0.001)
+        return FALSE;
+    lr = normalize(lr);
+    if (lr * old_r < 0)
+    {
+        lr = -lr;
+        lu = -lu;
+    }
+
+    v_forward = lf;
+    v_right   = lr;
+    v_up      = lu;
+    return TRUE;
+};
+
+void(float skel) SH_PlayerAnim_OrthonormalizeSkeleton =
+{
+    float n = skel_get_numbones(skel);
+    float i;
+    for (i = 1; i <= n; i++)
+    {
+        vector bone_org = skel_get_bonerel(skel, i);
+        if (!SH_PlayerAnim_VectorGood(bone_org))
+            bone_org = '0 0 0';
+        if (SH_PlayerAnim_LoadBoneBasis(skel, i))
+            skel_set_bone(skel, i, bone_org, v_forward, v_right, v_up);
+        else
+            skel_set_bone(skel, i, bone_org, '1 0 0', '0 1 0', '0 0 1');
+    }
+};
+
+void(float skel) SH_PlayerAnim_BuildPoseSkeleton =
+{
+    float splitbone = self.basebone;
+
+    // Match the client-side IQM spine path: build the base/torso and
+    // regular/leg ranges separately so the explicit skeleton keeps the
+    // current frame2 lerps instead of freezing locomotion bones.
+    if (splitbone > 1)
+    {
+        skel_build(skel, self, self.modelindex, 0, 1, splitbone);
+        skel_build(skel, self, self.modelindex, 0, splitbone, 0);
+    }
+    else
+    {
+        skel_build(skel, self, self.modelindex, 0, 0, 0);
+    }
+};
+
+float() SH_PlayerAnim_ModelIsIQM =
+{
+    float len = strlen(self.model);
+    if (len < 4)
+        return FALSE;
+    return (substring(strtolower(self.model), len - 4, 4) == ".iqm");
+};
+
+void(float skel, float bone_idx, float deg) SH_PlayerAnim_TwistBone =
+{
+    vector bone_org = skel_get_bonerel(skel, bone_idx);
+    if (!SH_PlayerAnim_LoadBoneBasis(skel, bone_idx))
+        return;
+
+    vector lf = v_forward, lr = v_right, lu = v_up;
+    float c = cos(deg * PLAYER_SPINE_PI_RAD / 180);
+    float s = sin(deg * PLAYER_SPINE_PI_RAD / 180);
+    skel_set_bone(skel, bone_idx, bone_org, lf, lr * c + lu * s, -lr * s + lu * c);
+};
+
+void(float skel, float bone_idx, float deg) SH_PlayerAnim_PitchBone =
+{
+    vector bone_org = skel_get_bonerel(skel, bone_idx);
+    if (!SH_PlayerAnim_LoadBoneBasis(skel, bone_idx))
+        return;
+
+    vector lf = v_forward, lr = v_right, lu = v_up;
+    float c = cos(deg * PLAYER_SPINE_PI_RAD / 180);
+    float s = sin(deg * PLAYER_SPINE_PI_RAD / 180);
+    skel_set_bone(skel, bone_idx, bone_org, lf * c - lr * s, lf * s + lr * c, lu);
+};
+
+void(float leg_twist) SH_PlayerAnim_ApplyIQMSpine =
+{
+    if (!cvar("cl_player_spine_deform") || !self.modelindex || !SH_PlayerAnim_ModelIsIQM())
+    {
+        if (self.skeletonindex)
+        {
+            skel_delete(self.skeletonindex);
+            self.skeletonindex = 0;
+            self.player_spine_skel_modelindex = 0;
+        }
+        return;
+    }
+
+    float twist_scale = cvar("cl_player_spine_twist_scale");
+    float pitch_scale = cvar("cl_player_spine_pitch_scale");
+    if (twist_scale == 0 && pitch_scale == 0)
+    {
+        if (self.skeletonindex)
+        {
+            skel_delete(self.skeletonindex);
+            self.skeletonindex = 0;
+            self.player_spine_skel_modelindex = 0;
+        }
+        return;
+    }
+
+    if (self.skeletonindex && self.player_spine_skel_modelindex != self.modelindex)
+    {
+        skel_delete(self.skeletonindex);
+        self.skeletonindex = 0;
+        self.player_spine_skel_modelindex = 0;
+    }
+
+    if (!self.skeletonindex)
+    {
+        self.skeletonindex = skel_create(self.modelindex);
+        self.player_spine_skel_modelindex = self.modelindex;
+    }
+
+    if (!self.skeletonindex)
+        return;
+
+    SH_PlayerAnim_BuildPoseSkeleton(self.skeletonindex);
+    SH_PlayerAnim_OrthonormalizeSkeleton(self.skeletonindex);
+
+    float iqm_twist = -leg_twist * twist_scale;
+    float pitch_max = cvar("cl_player_spine_pitch_max");
+    if (pitch_max <= 0)
+        pitch_max = 35;
+    float pitch_frac = bound(-1, self.v_angle_x / 90, 1);
+    float iqm_pitch = bound(-pitch_max, pitch_frac * pitch_max * pitch_scale, pitch_max);
+
+    float sb0 = skel_find_bone(self.skeletonindex, "Bip01 Spine");
+    float sb1 = skel_find_bone(self.skeletonindex, "Bip01 Spine1");
+    float sb2 = skel_find_bone(self.skeletonindex, "Bip01 Spine2");
+    float sb3 = skel_find_bone(self.skeletonindex, "Bip01 Spine3");
+    float sbn = skel_find_bone(self.skeletonindex, "Bip01 Neck");
+
+    if (iqm_twist != 0)
+    {
+        SH_PlayerAnim_TwistBone(self.skeletonindex, sb0, iqm_twist);
+        SH_PlayerAnim_TwistBone(self.skeletonindex, sb1, iqm_twist * 0.5);
+        SH_PlayerAnim_TwistBone(self.skeletonindex, sb2, iqm_twist * 0.25);
+        SH_PlayerAnim_TwistBone(self.skeletonindex, sb3, iqm_twist * 0.125);
+    }
+
+    if (iqm_pitch != 0)
+    {
+        SH_PlayerAnim_PitchBone(self.skeletonindex, sb0, iqm_pitch * 0.05);
+        SH_PlayerAnim_PitchBone(self.skeletonindex, sb1, iqm_pitch * 0.15);
+        SH_PlayerAnim_PitchBone(self.skeletonindex, sb2, iqm_pitch * 0.30);
+        SH_PlayerAnim_PitchBone(self.skeletonindex, sb3, iqm_pitch * 0.35);
+        SH_PlayerAnim_PitchBone(self.skeletonindex, sbn, iqm_pitch * 0.15);
+    }
+
+    if (cvar("cl_player_spine_debug") && time >= self.player_spine_debug_next)
+    {
+        sprint(self, PRINT_HIGH, sprintf("[spine sv] model='%s' skel=%g\n", self.model, self.skeletonindex));
+        sprint(self, PRINT_HIGH, sprintf("           bones=%g/%g/%g/%g/%g\n", sb0, sb1, sb2, sb3, sbn));
+        sprint(self, PRINT_HIGH, sprintf("           leg=%.1f twist=%.1f pitch=%.1f max=%.1f\n", leg_twist, iqm_twist, iqm_pitch, pitch_max));
+        self.player_spine_debug_next = time + 0.5;
+    }
+};
+
+void() SH_PlayerAnim_ClearIQMSpine =
+{
+    if (self.skeletonindex && self.player_spine_skel_modelindex)
+    {
+        skel_delete(self.skeletonindex);
+        self.skeletonindex = 0;
+        self.player_spine_skel_modelindex = 0;
+    }
 };
 
 void() SH_PlayerAnim_Update =
@@ -348,12 +578,23 @@ void() SH_PlayerAnim_Update =
 
     // --- Strafe body twist + backpedal detection ---
     // Computed BEFORE animation timer so locomotion can use backpedaling flag.
-    // Matches CSQC cl_player.qc exactly so hitboxes line up with visual model.
+    // Mirrors CSQC cl_player.qc's hysteresis exactly (cl_player_backpedal_*_angle
+    // cvars + .sv_backpedaling latch) so hitboxes flip at the same instant the
+    // visual model does.  Without this, the server used a hardcoded ±95° flip
+    // while the client had wider hysteresis, so hitboxes desynced from visuals
+    // during small mouse corrections near 90°.
     vector vel2d = self.velocity;
     vel2d_z = 0;
     float speed2d = vlen(vel2d);
     float leg_twist = 0;
     float backpedaling = FALSE;
+
+    float bp_enter = cvar("cl_player_backpedal_enter_angle");
+    float bp_exit  = cvar("cl_player_backpedal_exit_angle");
+    if (bp_enter <= 0) bp_enter = 150;
+    if (bp_exit  <= 0) bp_exit  = 100;
+    bp_enter = bound(91, bp_enter, 179);
+    bp_exit  = bound(1, bp_exit, bp_enter - 1);
 
     if (speed2d > 10)
     {
@@ -362,10 +603,21 @@ void() SH_PlayerAnim_Update =
         // Normalize to -180..180
         yaw_diff -= floor((yaw_diff + 180) / 360) * 360;
 
-        // Beyond ±95° = backpedaling — mirror angle so legs face opposite dir
-        if (fabs(yaw_diff) > 95)
+        // Hysteresis: enter backpedal late, leave it earlier — keeps pure
+        // strafing stable while the player makes small aim corrections.
+        float abs_yaw = fabs(yaw_diff);
+        if (self.sv_backpedaling)
+        {
+            if (abs_yaw < bp_exit)
+                self.sv_backpedaling = FALSE;
+        }
+        else if (abs_yaw > bp_enter)
+            self.sv_backpedaling = TRUE;
+
+        if (self.sv_backpedaling)
         {
             backpedaling = TRUE;
+            // Mirror angle so legs face opposite dir
             if (yaw_diff > 0)
                 yaw_diff = yaw_diff - 180;
             else
@@ -375,6 +627,8 @@ void() SH_PlayerAnim_Update =
         float speed_frac = bound(0, speed2d / 250, 1);
         leg_twist = yaw_diff * speed_frac;
     }
+    else
+        self.sv_backpedaling = FALSE;
 
     // Rotate whole model toward movement (legs face walk direction)
     self.angles_y += leg_twist;
@@ -492,6 +746,13 @@ void() SH_PlayerAnim_Update =
     self.bonecontrol2 = fCorrect * 0.5;
     self.bonecontrol3 = fCorrect * 0.25;
     self.bonecontrol4 = fCorrect * 0.125;
+
+    // Keep the server entity on FTE's normal framestate path.  An
+    // explicit IQM skeleton here is visible to MOVE_HITMODEL lagcomp
+    // traces during firing, and the converted split-body poses can make
+    // that path unstable while players are moving.  CSQC still applies
+    // the visual spine deformation on the player_visual_proxy.
+    SH_PlayerAnim_ClearIQMSpine();
 
     // Debug: verify blend values are being written (remove after testing)
     if (cvar("sv_debug_blendfracs"))

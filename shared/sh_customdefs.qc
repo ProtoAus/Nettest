@@ -3,28 +3,37 @@
 #define printf(x, ...) print(sprintf(x, __VA_ARGS__))
 
 const float FL_DUCKING = 8192;
-const float PM_CSQC_PROXY_VERSION = 16;  // bump on wire-layout change.  MUST NOT collide with any CSQC_ENT_* id below (CSQC_Ent_Update dispatches by equality before falling through to the pm_proxy parse — v13 collided with CSQC_ENT_CAMERA and silently routed proxy updates into the camera parser).  v14: ammo bitmask + movement byte/short re-encoding.  v15: origin/velocity now WriteFloat (full 32-bit) instead of WriteCoord (1/8 qu) — eliminates snapshot-rounding as a source of reconcile drift.  v16: weapon-state section now also carries pm_weapon_blend_progress + pm_weapon_prev_factor so the speed-factor blend is input-tick-driven instead of wall-clock-driven (deterministic between client live, client replay, and server pmove regardless of ping).
+const float PM_CSQC_PROXY_VERSION = 19;  // bump on wire-layout change.  MUST NOT collide with any CSQC_ENT_* id below (CSQC_Ent_Update dispatches by equality before falling through to the pm_proxy parse — v13 collided with CSQC_ENT_CAMERA and silently routed proxy updates into the camera parser).  v14: ammo bitmask + movement byte/short re-encoding.  v15: origin/velocity now WriteFloat (full 32-bit) instead of WriteCoord (1/8 qu) — eliminates snapshot-rounding as a source of reconcile drift.  v16: weapon-state section now also carries pm_weapon_blend_progress + pm_weapon_prev_factor so the speed-factor blend is input-tick-driven instead of wall-clock-driven.  v17: utility proxy includes CS HE/flash/smoke ammo.  v18: primary/secondary ammo is slot-based.  v19: weapon-state section adds 4 floats + 1 byte for the sv_gunkick view-kick state (pitch/yaw offsets + spring velocities + per-burst shot index).
 const string PM_CSQC_PROXY_CLASSNAME = "pm_csqc_proxy";
 
 // PM_CSQC_PROXY SendFlags section bits — each section is gated separately
 // so ticks where only one section changed don't drag the other ~100 B along.
 const float PM_SF_MOVEMENT     = 1;  // origin, velocity, view_ofs, flags, pm_* timers, spread
 const float PM_SF_WEAPON_STATE = 2;  // slots, weapon, weaponstate, attack_finished, anim, zoomstage
-const float PM_SF_AMMO         = 4;  // all mag_*/ammo_*/silencer bytes
+const float PM_SF_AMMO         = 4;  // slot ammo + utility ammo bytes
 
 // CSQC entity type IDs (first byte sent by SendEntity)
 const float CSQC_ENT_PUSH_TRIGGER = 2;
 const float CSQC_ENT_SOLID_BRUSH    = 5;
 const float CSQC_ENT_DROPPED_WEAPON = 7;
 const float CSQC_ENT_PLAYER_VISUAL  = 8;
-// MUST NOT collide with PM_CSQC_PROXY_VERSION (14 currently) or any other
+// MUST NOT collide with PM_CSQC_PROXY_VERSION or any other
 // CSQC_ENT_* id — engine dispatches by this byte and same-value collision
 // silently routes the wrong parser → wire desync (Host_EndGame).
 const float CSQC_ENT_PROJECTILE     = 9;  // server projectiles routed through cl_tosssmooth.qc extrap+smooth
+const float CSQC_ENT_C4             = 14; // planted_c4 — fixed-position bomb with beep-pulse dlight
+const float CSQC_ENT_ENV_BEAM       = 15; // env_beam — sprite-strip beam between two named entities
+const float CSQC_ENT_FUNC_RAIN      = 16; // func_rain — brush volume constraining cl_rain drops
+const float CSQC_ENT_ENV_SOUND      = 17; // env_sound — GoldSrc room/reverb trigger points
 
 // trigger_push spawnflags
 const float PUSH_ONCE     = 1;  // remove after first touch
-const float PUSH_SILENT   = 2;  // no wind sound
+// PUSH_START_OFF moved to bit 2 to match HL spec — many community maps
+// set bit 2 expecting "Start Off" semantics, and silently routing that
+// to "silent" left the triggers always-active with no use handler
+// (buttons targeting them did nothing).  PUSH_SILENT moved to bit 64.
+const float PUSH_START_OFF = 2;
+const float PUSH_SILENT   = 64; // no wind sound (moved from bit 2)
 const float PUSH_ADDITIVE = 4;  // add to velocity rather than replace
 const float PUSH_TUNNEL   = 8;  // pull toward trigger centerline while pushing
 const float PUSH_SOURCE   = 16; // boost along movedir up to speed, don't overwrite sideways
@@ -33,6 +42,105 @@ const float PUSH_SOURCE   = 16; // boost along movedir up to speed, don't overwr
 .entity push_next;
 .entity tele_next;
 .entity ladder_next;
+.entity conveyor_next;
+.entity rotating_brush_next;
+.entity moving_brush_next;
+
+// Platform-carry state.  Set by Mover_PlatformCarry when the player is
+// standing on a moving brush (func_train / func_tracktrain).  The same
+// helper translates the player by the brush's per-tick delta (locking
+// them 1:1 to platform motion) and rotates them around the brush's
+// origin by the brush's per-tick yaw delta.  When the carry detection
+// fails the next tick (player jumped or stepped off), the helper adds
+// platform_carry_velocity to the player's .velocity once — that's the
+// "inherit platform velocity on departure" path the user asked for.
+//
+// Set on PLAYER:
+.entity platform_carry;          // brush we're currently locked to (world if none)
+.vector platform_carry_velocity; // mirrored from carry.velocity each tick — used for inherit
+.float  platform_carry_prev_yaw; // brush.angles_y at the previous carry tick.
+// Rotating-brush contact marker.  Set to `time` (SSQC) or `cltime`
+// (CSQC) whenever PM_CheckRotatingCarry's Phase 1 (standing on brush)
+// or Phase 3 (ground player swept by mesh) applies a slide/carry this
+// substep.  Read by CSQC_ReconcilePrediction to zero err during
+// rotator contact — the per-substep CSQC slide and the per-func_tick
+// server slide integrate to the same per-second rate but don't match
+// at every snapshot moment, and the smoother fading those differences
+// is what the user perceives as "push then snap back" jitter.  100 ms
+// staleness window after the last contact lets the smoother resume
+// once the player walks clear of the rotator.
+.float  rotcarry_active_cltime;
+
+// Linear-brush geometry push contact marker.  Same shape as
+// rotcarry_active_cltime — set by PM_CheckMovingPushers's door push
+// branch (sh_pmove.qc:~3216) AND by SSQC Mover_GeometryBlockPush_Player
+// each substep / tick the player is being pushed but NOT carried
+// (platform_carry is only set when riding on top).  Without this
+// marker the drift-lock at cl_player.qc:~1668 holds the camera at
+// the pre-reset origin while the player isn't pressing movement
+// keys, so the visible position lags the server's authoritative
+// push — symptoms: "drift builds up to 24qu, player sinks into the
+// door".  The smoother branch's err filter also reads this marker
+// to skip fading the per-snapshot integration gap.
+.float  mover_push_active_cltime;
+                                  // Per-PLAYER (not per-brush) so the CSQC
+                                  // preview pmove doesn't leak its writes
+                                  // forward into the next real pmove —
+                                  // CSQC_BuildPresentationView save/restores
+                                  // this field around the preview loop.
+
+// SNAP-JUMP CONSUMPTION (CSQC carry).  The pmove carry math is
+// velocity-based per substep (rb.velocity * pm_frametime) which is
+// smooth at INPUT rate; using origin-delta would jitter at render rate
+// since rb.origin only updates when predraw fires.  The drawback of
+// pure velocity-based: CSQC extrapolation uses the LAST snapshot's
+// velocity, but the server may have changed velocity mid-snap-interval
+// (path_corner turn, speed ramp).  When the new-velocity snapshot
+// finally arrives, rb.origin jumps by exactly the amount that V_extrap
+// diverged from V_actual — the "cab snaps forward, player stays put"
+// lurch.  We capture that discontinuity in brush_snap_origin_cumulative
+// at snapshot-receive time (see CSQC_SolidBrush_Update) and let each
+// carrying player consume it once via platform_carry_jump_*_consumed.
+// In the constant-velocity case the per-snap delta is ~0, so this
+// mechanism is invisible.  Only matters at velocity transitions.
+.vector platform_carry_jump_origin_consumed;
+.float  platform_carry_jump_yaw_consumed;
+
+// Set on MOVER (func_train / func_tracktrain):
+.vector platform_prev_origin;    // brush origin at the previous carry tick
+.float  platform_prev_yaw;       // brush yaw at the previous carry tick
+.float  platform_prev_seeded;    // 1 once we've snapshotted at least one tick (so the first frame doesn't apply a giant delta)
+
+// Snap-jump cumulative counters on the mover.  Populated only on CSQC
+// inside CSQC_SolidBrush_Update each time a brushsync snapshot lands:
+//   cumulative += (post-setorigin self.origin) - (pre-setorigin self.origin)
+// The pre value is whatever predraw / engine integration last set
+// rb.origin to (the CSQC extrap of where the brush "should" be).  The
+// post value is the authoritative position the server reported.  Their
+// difference is the discontinuous "snap" the cab does at the moment
+// of arrival — zero in the constant-velocity case, non-zero whenever
+// the server changed velocity mid-snap-interval.  Carrying players
+// consume this in PM_CheckMovingPushers so they jump with the cab.
+// SSQC leaves these at 0 (no snapshot arrivals on the authoritative
+// side — server-side pmove already uses correct velocity each tick).
+.vector brush_snap_origin_cumulative;
+.float  brush_snap_yaw_cumulative;
+
+// Brush replication fields — declared authoritatively in
+// cl_brushsync.qc (CSQC) and sv_brushsync.qc / sv_customdefs.qc
+// (SSQC), but the client compile order puts cl_brushsync.qc AFTER
+// sh_pmove.qc, so PM_CheckRotatingCarry can't reference them
+// without an earlier slot.  Re-declaring at this scope shares
+// storage on both sides — QC accepts duplicate `.field` decls of
+// matching type.  Vector pos1/pos2 are also declared in
+// sv_customdefs.qc; this duplicate is harmless.
+.float  brush_type;
+.float  mover_state;
+.float  brush_is_rotating;
+.float  has_custom_pivot;
+.vector pos1;
+.vector pos2;
+.vector custom_pivot;
 
 // Generic movement/entity fields not declared in the engine-generated defs
 .float speed;
@@ -93,18 +201,57 @@ void() Camera_ResetState;                       // call from worldspawn to clear
 // Server projectile networking (sv_weapons.qc projectile_SendEntity +
 // per-weapon spawn sites). proj_type is one of PROJ_TYPE_* (sh_weapons.qc)
 // and tells the CSQC parser which model + gravity factor to apply.
-// proj_fuse_end is the absolute server time when the projectile's existing
-// one-shot think (explode, expire) should fire — the periodic-tick wrapper
-// in each weapon checks against this each tick at sv_toss_tickrate to drive
-// CSQC SendFlags pulses without losing the original fuse semantics.
 .float proj_type;
-.float proj_fuse_end;
 
 // Forward decl — defined in server/sv_player.qc — so sv_cameras.qc can
 // push the proxy origin while the player is still in team-select (where
 // PlayerPreThink returns early and doesn't call this itself).
 void(entity player) PM_SyncPredictionProxy;
 #endif
+
+// proj_fuse_end is the absolute time at which the projectile's existing
+// one-shot think (explode, expire) should fire.  SSQC's periodic-tick
+// wrapper checks against this every sv_toss_tickrate tick to drive CSQC
+// SendFlags pulses without losing the original fuse semantics.  Shared
+// scope because the CSQC fake-projectile path also needs it: a glancing-
+// bbox pass-through window temporarily replaces the expire think, then
+// the pass-through restore re-arms nextthink to proj_fuse_end.
+.float proj_fuse_end;
+
+// Previous-tick origin for swept-trace tunneling protection.  SSQC
+// projectiles (snowball + paintball) snapshot self.origin BEFORE the
+// engine integrates the next step; the next think then trace-sweeps
+// from this point to the new self.origin to catch any hits the
+// engine's per-frame SV_PushEntity sweep might have missed (fast
+// players, frame-time jitter, etc.).
+//
+// Also referenced by the CSQC fake-projectile touch handlers — they
+// use it as a fallback probe segment when the engine zeroed velocity
+// before the touch callback fired.  Declared at shared scope so both
+// progs see the field.
+.vector proj_prev_origin;
+
+// Pass-through window state for projectiles that glanced a player
+// bbox without intersecting the actual mesh.  During the window the
+// projectile is switched to MOVETYPE_NOCLIP and SOLID_NOT so it
+// keeps flying past the player rather than vanishing mid-air; the
+// owning tick restores MOVETYPE_TOSS / SOLID_BBOX once `time` passes
+// proj_passthrough_until.  Zero = not in a pass-through window.
+//
+// MOVETYPE_NOCLIP specifically (not just SOLID_NOT) — FTE's
+// SV_Physics_Toss always runs ClipVelocity after touch returns, even
+// for SOLID_NOT entities, which slides the projectile flat against
+// the bbox face and clears velocity outright on top-down impacts
+// (see sv_phys.c:1467).  Switching the movetype routes physics
+// through SV_Physics_Noclip which just does origin += vel*dt.
+//
+// proj_passthrough_savedvel is the velocity at the moment of the
+// glancing touch; restored verbatim on exit so the parabolic arc
+// resumes from where it was instead of from whatever value pmove
+// integrated during the (brief) NOCLIP segment.
+.float  proj_passthrough_until;
+.vector proj_passthrough_savedvel;
+
 .float spread_penalty;       // decaying spread penalty from jump/landing (0 = none)
 .float fire_spread_penalty;  // decaying spread penalty from sustained fire (0 = none)
 .float fire_spread_pending;  // pending penalty to apply AFTER current shot resolves
@@ -137,6 +284,34 @@ void(entity player) PM_SyncPredictionProxy;
 // survives CSQC_ResetToConfirmedState.
 .float csqc_reload_guard;
 
+// Highest wep_action_id whose shooter-local effects have already been
+// emitted — a strict high-water mark.  BeginFireActionEffects fires
+// iff `wep_action_id > csqc_fire_effect_action_id`, and advances the
+// mark to the new action_id on success.
+//
+// Why high-water (>) rather than equality:
+//   • At high render-rate / low cl_maxfps, multiple TryFire successes
+//     can occur within a SINGLE input command — cltime advances past
+//     attack_finished between render frames while csqc_pred_sequence
+//     stays.  Each success advances wep_action_id, so an action_id-
+//     keyed gate naturally distinguishes them.
+//   • At reconcile a snapshot can REWIND wep_action_id down to the
+//     server's last-acked value.  If we then re-pinned this latch on
+//     reset, replay would compare a re-pinned (high) value against
+//     re-advanced (still lower) action_ids and either:
+//       — refuse to re-emit a shot that needs effects, OR
+//       — emit a doubled effect when action_id eventually catches
+//         the rewound mark.
+//     Leaving the high-water mark intact across reconcile means
+//     replay re-runs of already-effected shots correctly skip
+//     (their action_id ≤ mark), while shots whose action_id climbs
+//     PAST the mark (new live tick or freshly-buffered cmd) get
+//     emitted exactly once.
+//
+// Reset paths: ONLY full predicted-entity re-init (fresh spawn / new
+// connection) zeroes this field.  Reconcile must NOT touch it.
+.float csqc_fire_effect_action_id;
+
 // Visual proxy death flag, set in CSQC_PlayerVisual_Update from server's
 // owner.is_dead byte. Declared here (rather than in cl_player.qc) so
 // shared/sh_pmove.qc — which compiles earlier — can reference it from
@@ -148,6 +323,27 @@ void(entity player) PM_SyncPredictionProxy;
 // death so a multi-pellet shotgun spread doesn't re-trigger predictions
 // across pellets after the first lethal one.
 .float vis_health;
+// Bodygroup bitfield mirrored from the visual-proxy IDENTITY section.
+// Bit 0 = "backpack" bodypart submodel toggle (red/T-side player
+// carrying C4, but not actively holding it, shows bomb on back).
+// Translated to a "geomset 2 N" line during setcustomskin in
+// CSQC_PlayerVisual_Update. More bits available for future bodypart
+// toggles without bumping the wire format.
+.float vis_bodygroup;
+.float vis_last_applied_bodygroup;   // last bodygroup state we applied via setcustomskin (0 = never applied yet)
+// Life generation for trusted hitclaims. The server increments
+// player_life_serial on every PlayerSpawn and mirrors it to each
+// player_visual_proxy as vis_life_serial. Client hitclaims carry the
+// value they hit; the server rejects claims whose serial no longer
+// matches the live player slot. This prevents stale dead/corpse
+// proxies from damaging a player who has already respawned.
+.float vis_life_serial;
+// Visual proxy's team — derived from team_model_byte during the IDENTITY
+// section parse (cl_player.qc CSQC_PlayerVisual_Update). Used by
+// CSQC_TryPredictDeath to skip lethal-hit prediction on teammates when
+// mp_friendlyfire is off, so the local "they died" animation doesn't
+// fire on hits the server will reject.
+.float vis_team;
 // Forward-declared here so CSQC_TryPredictDeath (sh_weapon_logic.qc, which
 // compiles before cl_player.qc) can write the death animation frames into
 // the proxy's anim slots. Authoritative declaration + writer is in
@@ -192,6 +388,11 @@ void(vector trace_src, vector trace_end) CSQC_PhysProp_OverrideTrace;
 // ending on entry.  Defined in client/cl_physprop.qc.
 void(vector trace_src, vector trace_end) CSQC_PhysProp_OverrideBackTrace;
 
+// Dropped weapons stay SOLID_NOT on CSQC so player prediction ignores them,
+// but bullet prediction still needs to hit their visible pickup bodies.
+// Defined in client/cl_weapons.qc.
+void(vector trace_src, vector trace_end) CSQC_DroppedWeapon_OverrideTrace;
+
 // CSQC-side dropped-weapon prediction. Server networks dropped weapons
 // via CSQC_ENT_DROPPED_WEAPON so the client can predict pickups for
 // high-ping players (instant viewmodel swap on touch). State lives on
@@ -204,6 +405,7 @@ entity dropped_weapon_list;
 .float  dropped_weapon_mag;               // mag_X value to apply on pickup (option B)
 .float  dropped_weapon_ammo;              // ammo_X reserve to apply on pickup
 .float  dropped_weapon_silencer;          // silencer toggle (M4A1, USP)
+.float  dropped_weapon_physdrop;          // server-authoritative ODE body
 .float  dropped_weapon_logged;            // debug: set after confirm/catchup printed,
                                           // cleared on transition back to visible,
                                           // prevents repeated prints from the server's
@@ -211,17 +413,17 @@ entity dropped_weapon_list;
 
 // Earliest cltime the fake drop is eligible to be predict-picked.
 // Mirrors the server's weapon_become_solid gate: drop_ent starts as
-// SOLID_NOT and only flips to SOLID_TRIGGER after 0.7s, so the
-// dropper can't instantly re-grab their own toss.  Real networked
-// entities arrive past this gate (SendEntity is wired inside
-// weapon_become_solid itself), so they leave this field at 0.
+// SOLID_NOT and only flips to SOLID_TRIGGER after
+// WEAPON_DROP_PICKUP_DELAY, so the dropper can't instantly re-grab their
+// own toss. Real networked entities may arrive before the pickup gate, so
+// CSQC tracks this separately for local fake pickup prediction.
 .float dropped_weapon_pickup_time;
 
 // CSQC fake-drop visuals — tossed-weapon entity rendered locally for the
-// dropper during the 0.7s window before weapon_become_solid wires the
-// networked SendEntity.  Now a linked list (previously a single global)
-// so a death-drop burst of up to four weapons can coexist.  Each ent
-// self-expires via cltime vs csqc_fake_drop_expire_time.
+// dropper until the server-confirmed dropped-weapon entity arrives. Now a
+// linked list (previously a single global) so a death-drop burst of up to
+// four weapons can coexist. Each ent self-expires via cltime vs
+// csqc_fake_drop_expire_time.
 entity csqc_fake_drop_list;
 .entity csqc_fake_drop_next;
 .float  csqc_fake_drop_expire_time;
@@ -233,16 +435,113 @@ entity csqc_fake_drop_list;
 .float weapon_settle_deadline;
 #endif
 
+// Server-owned life generation for trusted hitclaims. Mirrored to CSQC
+// visual proxies as vis_life_serial in the IDENTITY payload.
+.float player_life_serial;
+
+// Server-side hysteresis state for the backpedal flip in
+// SH_PlayerAnim_Update (sh_player_anims.qc).  Declared shared (not inside
+// the CSQC/SSQC blocks above) so both progs see the field — the function
+// is in shared/ but only the server actually calls it.  Mirrors
+// .vis_backpedaling on the client; both use the same
+// cl_player_backpedal_*_angle cvars so hitboxes flip at the same instant
+// the visual model does.
+.float sv_backpedaling;
+
 // Dropped-weapon "classic Quake spin" opt-in. Server-side each weapon's
 // drop / map-spawn function sets this to 1 to get a continuous yaw
 // rotation; CSQC replicates the flag and does the rotation locally in
 // a predraw (no angle sync required — derived from cltime).
 .float dropped_spin;
 
+// Server-side ODE weapon-drop rest state. Declared shared so server-only
+// shared weapon helpers can identify sleeping physics drops during traces.
+.float weapon_physdrop_sleeping;
+
 // --- Fire spread penalty tuning ---
-const float FIRE_SPREAD_PENALTY_PER_SHOT = 3.0;  // penalty added per bullet fired
-const float FIRE_SPREAD_PENALTY_DECAY    = 30.0;   // decay rate per second
-const float FIRE_SPREAD_PENALTY_MAX      = 10;   // maximum penalty cap
+//
+// Behaviour: each fire bumps penalty by PER_SHOT (after the current
+// shot's spread is computed — first shot of a fresh burst is accurate),
+// penalty decays at `DECAY + DECAY_K * penalty` units/second, capped
+// at MAX.
+//
+// The decay has two components:
+//   DECAY    — linear floor.  Keeps a single shot's penalty decaying
+//              to 0 in finite time (~1.5s) instead of an exponential
+//              tail that lingers forever.
+//   DECAY_K  — proportional accelerator.  Scales decay with the
+//              current penalty so high values bleed off faster.
+//              Sustained fire then reaches a soft equilibrium below
+//              MAX rather than ramping linearly to the cap.
+//
+// AK at 10 shots/sec adds 30 penalty/sec.  Equilibrium where
+// accumulation == decay:
+//   30 = DECAY + penalty * DECAY_K = 2 + penalty * 4 → penalty = 7.0
+// so spread asymptotes around 7/10 of MAX.  Slower-firing weapons
+// settle proportionally lower.  Stop firing → high-penalty decay is
+// fast (decay_rate at penalty=7 is 2 + 28 = 30/sec), low-penalty
+// decay is the linear floor — both single shots and bursts feel
+// snappy when you stop firing.
+const float FIRE_SPREAD_PENALTY_PER_SHOT = 0.5;
+const float FIRE_SPREAD_PENALTY_DECAY    = 7.0;   // linear floor (units/sec)
+const float FIRE_SPREAD_PENALTY_DECAY_K  = 10.0;   // proportional rate (1/sec)
+const float FIRE_SPREAD_PENALTY_MAX      = 10;    // hard cap (safety net)
+
+// ============================================================
+//  sv_gunkick view-kick state — applied per-shot, decays each
+//  pmove tick via spring-damper integration. Shared between CSQC
+//  and SSQC; also carried in PM_CSQC_PROXY (v19) so client-replay
+//  and server pmove never drift more than one snapshot apart.
+//
+//  pitch / yaw  : current angular OFFSET added to the player's
+//                 v_angle when the camera renders + when a bullet
+//                 trace fires. Negative pitch = view kicked UP.
+//  pitch_vel    : angular velocity used by the spring integrator.
+//                 Each shot adds an upward impulse here; the
+//                 spring (-K * displacement) integrates it back
+//                 to zero with damping (-C * velocity).
+//  burst_idx    : Nth shot in the current sustained-fire burst.
+//                 Resets to 0 after a couple of pmove ticks of
+//                 not-firing so per-burst patterns restart cleanly.
+// ============================================================
+.float view_kick_pitch;
+.float view_kick_yaw;
+.float view_kick_pitch_vel;
+.float view_kick_yaw_vel;
+.float view_kick_burst_idx;
+// Counts pmove ticks since the fire button was last released.
+// Used by the burst-idx reset gate (≥ 2 release ticks → reset)
+// so a single-frame stutter at high tickrate doesn't reset the
+// per-burst pattern mid-spray.
+.float view_kick_release_ticks;
+// sv_gunkick_instant: pending displacement that gets folded into
+// view_kick_pitch / view_kick_yaw at the end of the firing tick,
+// AFTER the hitscan trace has already read the un-kicked angles.
+// Without this defer the instant-displacement impulse would land
+// on view_kick_pitch before the trace, biasing the bullet to the
+// kicked crosshair instead of the one the player saw at fire time.
+// Zero on every tick; ApplyViewKick adds, TickViewKickFrame consumes.
+.float view_kick_pending_pitch;
+.float view_kick_pending_yaw;
+
+// Linear-spring constants for the gunkick decay integrator.
+// Cvar-overridable via sv_gunkick_decay_rate / sv_gunkick_damping;
+// these are the fallback values if the cvars are zero. K = Hooke
+// pull-back stiffness, C = damping. Critical damping (no overshoot,
+// fastest non-oscillating return) is at C = 2*sqrt(K). Defaults
+// here are critical at K=25, C=10 → ~0.5 s settle from a single
+// shot, snappy without bouncing. The accumulation cap during
+// sustained fire is handled separately in SH_ApplyViewKick via a
+// diminishing-returns multiplier on the per-shot impulse — so the
+// spring itself stays a clean linear system that's easy to tune.
+const float GUNKICK_SPRING_K_DEFAULT = 25;
+const float GUNKICK_DAMPING_DEFAULT  = 10;
+// Displacement (degrees) at which a new shot's impulse contributes
+// zero. Linear ramp from full impulse at 0° to zero at this cap.
+// CS-style sustained-fire response: the first few shots punch
+// hard, subsequent shots soften, reaches a soft equilibrium at
+// roughly this many degrees of pitch.
+const float GUNKICK_SOFT_CAP_DEG     = 8;
 
 // Jump/landing spread penalty — applied to spread_penalty in PM_Jump and
 // on airborne→grounded transition. Landing is deliberately smaller than
@@ -256,6 +555,21 @@ const float SPREAD_PENALTY_LAND = 1.5;
 entity push_trigger_list;
 entity teleport_trigger_list;
 entity ladder_trigger_list;
+entity conveyor_list;
+// Rotating-brush carry list — populated by Mover_RotateStart server-side
+// and by CSQC_SolidBrush_Update on the client whenever avelocity != 0.
+// Pmove iterates this list to predict the carry math identically on
+// both sides so reconcile error stays at 0 during rotation.
+entity rotating_brush_list;
+// Linear-motion brush list — populated by Mover_Start server-side and
+// by CSQC_SolidBrush_Update on the client whenever a non-conveyor
+// brush has non-zero velocity (sliding func_door / func_button while
+// in transit).  Conveyors get their own list (continuous static
+// motion); this is for transient door-style motion.  Client-side
+// PM_CheckMovingPushers iterates and pushes players whose bbox
+// intersects the brush BSP geometry (dimension-bit probe) to
+// predict the server-side Mover_GeometryBlockPush pass.
+entity moving_brush_list;
 
 const float CSQC_ENT_LADDER_TRIGGER = 4;
 const float CSQC_ENT_CAMERA         = 13;  // team-select preview cameras (Team_Blue/Red_Player flagged)
@@ -281,6 +595,11 @@ const float TELEPORT_KEEPANGLE        = 8;  // spawnflag: keep current view angl
 // Per-player entity fields for teleport state
 .float  pm_teleport_time;       // countdown guard: seconds remaining before player can re-teleport
 .float  pm_ladder_detach_time;  // countdown guard: seconds remaining before player can re-grab a ladder
+.float  codstamina;             // sv_codstamina: 0..1 stamina pool, depletes during sprint (1/4.5 per sec) and during hold-breath while scoped (1/8 per sec); refills otherwise (1/3 per sec).  Both sides run the same drain/refill so prediction stays in sync.
+.float  codstamina_punished;    // sv_codstamina: 1 = depleted-and-still-recovering punish state (sprint locked out, hold-breath locked out + heavy-breathing punish, bar drawn red).  Clears when codstamina refills to >= STAMINA_PUNISH_RECOVER_AT.
+.float  pm_last_onground_time;  // sv_codstamina: absolute world-time of the most recent on-ground tick — drives the sv_codstamina_ground_grace hysteresis in the sprint drain so single-frame FL_ONGROUND drops on clip-brush stairs don't pause the drain.  Uses `time` (pmove clock) so CSQC and SSQC agree across reconcile-replay.
+.float  pm_fire_suppress_until; // sv_codstamina + cl_codscope: absolute `time` at which the post-fire scope-suppression window ends.  Set by SH_StandardTryFire on a successful shot; while time < this value, (a) the pmove stamina drain treats st_scope as 0 even with +attack2 held (fixes "drain continues after auto-unscope"), (b) cl_viewfx ADS target is forced to 0 (gun drops out of ADS), (c) the CoD scope state machine's OFF→RAISING re-entry is blocked.  When the window expires with +attack2 still held, the scope auto-re-engages (the user-requested "return to ADS scoping in after the shot is complete" behaviour).
+.float  pm_on_ladder_cached;    // pm_on_ladder latched at end of PM_PlayerMoveStep so CSQC view-fx (cl_viewfx.qc) and the Weapon_LowerBlocksFire helper can read it without re-running PM_CheckLadder.  Recomputed every pmove tick; NOT replicated through the prediction proxy (the trigger list and BSP contents are already replicated, so PM_CheckLadder reproduces the value deterministically on reconcile-replay).
 .float  pm_fuser2;              // CS 1.6 stamina: msec of landing fatigue remaining (0 = none)
 .float  pm_step_time;           // seconds until next footstep sound fires
 .float  sv_last_step_time;      // SSQC-only: time of last PM_EmitStepSound fire, used by sv_debug_footsteps to print cadence delta between server step events
@@ -300,7 +619,7 @@ const float ZOOM_FOV_STAGE1           = 24;
 const float ZOOM_FOV_STAGE2           = 12;
 
 // Per-player model choice (shared so animation lookups can branch on it)
-.float player_model_index;  // 0-3 = team models, 5 = sini
+.float player_model_index;  // 0-3 = team models, 5 = sini, 6 = chickenman, 7 = numberK, 8 = kilmer
 .entity player_visual_proxy;
 
 // Hitgroup constants (GoldSrc standard)
@@ -337,19 +656,24 @@ const float CAM_PHASE_BLUE_PLAYER    = 3;
 const float CAM_PHASE_RED_PLAYER     = 4;
 
 // Player model choices per team (indices 0-3)
+// All player models migrated from HL studio .mdl to IQM so the
+// FTE Alias_BlendBoneData renderer can blend between sequences
+// (.frame2 + .lerpfrac).  Each .iqm + its BMP textures sit in
+// models/player/<name>/.  Generated by
+// C:/Users/Lex/Desktop/playermodels/generate_iqm.py.
 string team_blue_models[] = {
-    "models/player/urban/urban.mdl",
-    "models/player/gign/gign.mdl",
-    "models/player/gsg9/gsg9.mdl",
-    "models/player/sas/sas.mdl"
+    "models/player/urban/urban.iqm",
+    "models/player/gign/gign.iqm",
+    "models/player/gsg9/gsg9.iqm",
+    "models/player/sas/sas.iqm"
 };
 string team_blue_names[] = { "Urban", "GIGN", "GSG9", "SAS" };
 
 string team_red_models[] = {
-    "models/player/guerilla/guerilla.mdl",
-    "models/player/leet/leet.mdl",
-    "models/player/terror/terror.mdl",
-    "models/player/arctic/arctic.mdl"
+    "models/player/guerilla/guerilla.iqm",
+    "models/player/leet/leet.iqm",
+    "models/player/terror/terror.iqm",
+    "models/player/arctic/arctic.iqm"
 };
 string team_red_names[] = { "Guerilla", "Leet", "Terror", "Arctic" };
 
@@ -372,12 +696,34 @@ const float STAT_DEATH_DELAY_LEFT = 50;
 const float STAT_IS_DEAD          = 51;
 const float STAT_BLUE_SCORE       = 52;
 const float STAT_RED_SCORE        = 53;
+// Per-player defuse progress (0..CFC4_DEFUSE_TIME).  Set by
+// C4_TickDefuseInteraction in sh_wpn_cfc4.qc on the active defuser
+// only; everyone else reads 0.  HUD bar visibility gates on > 0.
+const float STAT_DEFUSE_PROGRESS  = 54;
+
+// sv_func_tickrate mirror.  The cvar is registered with CVAR_SIDE_SV
+// (sh_cvar_table.qc:996) so cvar() on CSQC returns 0 and prediction
+// hits the hardcoded fallback in PM_CheckRotatingCarry — which causes
+// a per-second slide-rate mismatch with the server when the admin
+// changes sv_func_tickrate from its default.  Publishing the value
+// per-snapshot via this stat closes the loop: CSQC reads getstatf()
+// and matches the server's authoritative rate within one tick.
+const float STAT_FUNC_TICKRATE    = 55;
 
 // Gamemode constants
 const float GAMEMODE_TDM         = 0;
 const float GAMEMODE_ELIMINATION = 1;
 const float GAMEMODE_BHOP        = 2;
 const float GAMEMODE_FFA         = 3;
+// Paintgun: elimination-style round flow + paintball-only loadout +
+// any tag (paintball or snowball hit) is lethal with a fixed DEATH2
+// animation so getting "tagged" reads visually clean.
+const float GAMEMODE_PAINTGUN    = 4;
+// Defuse: red team auto-receives one C4 charge per round (random pick at
+// RoundStart, fallback to first-red-spawn).  Round ends on bomb explode
+// (red wins) or full defuse (blue wins).  Standard team elimination
+// still applies as a fallback win condition.
+const float GAMEMODE_DEFUSE      = 5;
 
 // Returns TRUE for gamemodes that present every player as one big team:
 // no Phase 0 team-pick (one unified character-select panel), single
@@ -415,7 +761,7 @@ void() phys_barrel_precache;
 // read these constants without paying for cvar() every call.  Declared
 // here because sh_player_anims.qc references them and compiles before
 // sv_main.qc in sv_progs.src.
-float sv_cached_pose_keepalive_interval;
+float sv_cached_anim_resend_interval;
 float sv_cached_anim_qu_per_sec;
 float sv_cached_anim_qu_per_sec_crouch;
 #endif
@@ -431,18 +777,23 @@ void() precache_everything =
 
     // Player Models
     precache_model("models/testplayer.iqm");
-    precache_model("models/player/arctic/arctic.mdl");
-    precache_model("models/player/gign/gign.mdl");
-    precache_model("models/player/gsg9/gsg9.mdl");
-    precache_model("models/player/sas/sas.mdl");
-    precache_model("models/player/guerilla/guerilla.mdl");
-    precache_model("models/player/leet/leet.mdl");
-    precache_model("models/player/terror/terror.mdl");
-    precache_model("models/player/urban/urban.mdl");
+    precache_model("models/player/arctic/arctic.iqm");
+    precache_model("models/player/gign/gign.iqm");
+    precache_model("models/player/gsg9/gsg9.iqm");
+    precache_model("models/player/sas/sas.iqm");
+    precache_model("models/player/guerilla/guerilla.iqm");
+    precache_model("models/player/leet/leet.iqm");
+    precache_model("models/player/terror/terror.iqm");
+    precache_model("models/player/urban/urban.iqm");
     precache_model("models/player/sini.mdl");
+    precache_model("models/player/chickenman.mdl");
+    precache_model("models/player/numberk/numberK.iqm");
+    precache_model("models/player/kilmer/kilmer.iqm");
 
 	// Player Models / Sounds
 	precache_sound("sounds/player/use.wav");
+	precache_sound("sounds/player/spray.wav");
+	precache_sound("sounds/player/weapondrop.wav");
 	precache_sound("sounds/player/step1.wav");
 	precache_sound("sounds/player/step2.wav");
 	precache_sound("sounds/player/step3.wav");
@@ -463,6 +814,33 @@ void() precache_everything =
 	precache_sound("sounds/player/waterstep10.wav");
 	precache_sound("sounds/player/fallpain1.wav");
 	precache_sound("sounds/player/fallpain2.wav");
+	// sv_sliding random one-shot pool — PM_TryEngageSlide picks one of
+	// these uniformly at every engage.
+	precache_sound("sounds/player/slide1.wav");
+	precache_sound("sounds/player/slide2.wav");
+	precache_sound("sounds/player/slide3.wav");
+	precache_sound("sounds/player/slide4.wav");
+	precache_sound("sounds/player/slide5.wav");
+	// sv_snipersway + cl_codscope hold-breath cues — played on
+	// +button4 press / release while the player is scoped.
+	precache_sound("sounds/player/breathin.wav");
+	precache_sound("sounds/player/breathout.wav");
+	// Heartbeat — 1 Hz pulse during hold-breath (cl_codscope.qc).
+	// outofbreath — fires once when codstamina_punished latches.
+	precache_sound("sounds/player/heartbeat.wav");
+	precache_sound("sounds/player/outofbreath.wav");
+	// sv_grappling — fire, hook-impact, pull-loop.
+	precache_sound("sounds/player/grappling.wav");
+	precache_sound("sounds/player/hook.wav");
+	precache_sound("sounds/player/grapplingpull.wav");
+	precache_sound("sounds/player/grappledisconnect.wav");
+	// Grapple hook anchor entity — bubble sprite as a known-present
+	// placeholder so the engine assigns a real modelindex and broadcasts
+	// the entity to clients.  EF_NODRAW on the entity keeps it
+	// invisible; CSQC walks entities by this modelindex to find the
+	// rope's far endpoint.  progs/s_null.spr was the cleaner choice but
+	// isn't shipped with the gamedir.
+	precache_model("progs/s_bubble.spr");
 	precache_sound("sounds/player/bullethit1.wav");
 	precache_sound("sounds/player/bullethit2.wav");
 	precache_sound("sounds/weapons/hitmarker.wav");
@@ -568,31 +946,26 @@ void() precache_everything =
     precache_sound("sounds/debris/impact_metal.wav");
 
 	// CS 1.6 USP with actually GoldSrc MDL
-	precache_model("models/weapons/wpn_csusp/w_usp.mdl");
-	precache_model("models/weapons/wpn_csusp/v_usp.mdl");
-    precache_model("models/weapons/wpn_csusp/p_usp.mdl");
 
     // Third-person weapon models (p_models)
     precache_model("models/weapons/wpn_csak47/p_ak47.mdl");
+    precache_model("models/weapons/wpn_hdak47/p_ak47.mdl");
     precache_model("models/weapons/wpn_csawp/p_awp.mdl");
     precache_model("models/weapons/wpn_csdeagle/p_deagle.mdl");
     precache_model("models/weapons/wpn_csg3sg1/p_g3sg1.mdl");
     precache_model("models/weapons/wpn_csglock/p_glock.mdl");
     precache_model("models/weapons/wpn_csknife/p_knife.mdl");
+    precache_model("models/weapons/wpn_butteryfly/p_knife.mdl");
+    precache_model("models/weapons/wpn_cfaug/p_aug.mdl");
+    precache_model("models/weapons/wpn_cffamas/p_famas.mdl");
+    precache_model("models/weapons/wpn_cfmac10/p_mac10.mdl");
+    precache_model("models/weapons/wpn_cfc4/p_c4.mdl");
     precache_model("models/weapons/wpn_csm3/p_m3.mdl");
     precache_model("models/weapons/wpn_csm4a1/p_m4a1.mdl");
     precache_model("models/weapons/wpn_csm249/p_m249.mdl");
     precache_model("models/weapons/wpn_csmp5/p_mp5.mdl");
     precache_model("models/weapons/wpn_csscout/p_scout.mdl");
     precache_model("models/weapons/wpn_dod98k/p_k98.mdl");
-    precache_sound("sounds/weapons/wpn_csusp/clipin.wav");
-    precache_sound("sounds/weapons/wpn_csusp/clipout.wav");
-    precache_sound("sounds/weapons/wpn_csusp/silenceroff.wav");
-    precache_sound("sounds/weapons/wpn_csusp/silenceron.wav");
-    precache_sound("sounds/weapons/wpn_csusp/slideback.wav");
-    precache_sound("sounds/weapons/wpn_csusp/sliderelease.wav");
-    precache_sound("sounds/weapons/wpn_csusp/fire.wav");
-    precache_sound("sounds/weapons/wpn_csusp/sfire.wav");
 
 	// HL SMG
 	precache_model("models/weapons/wpn_hlsmg/w_smg.mdl");
@@ -622,6 +995,56 @@ void() precache_everything =
     precache_sound("sounds/weapons/wpn_hlgrenade/hit1.wav");
     precache_sound("sounds/weapons/wpn_hlgrenade/hit2.wav");
     precache_sound("sounds/weapons/wpn_hlgrenade/hit3.wav");
+
+	// CS throwable utilities
+    precache_model("models/weapons/wpn_cshegrenade/v_hegrenade.mdl");
+    precache_model("models/weapons/wpn_cshegrenade/w_hegrenade.mdl");
+    precache_model("models/weapons/wpn_cshegrenade/p_hegrenade.mdl");
+    precache_sound("sounds/weapons/wpn_cshegrenade/pinpull.wav");
+    precache_sound("sounds/weapons/wpn_cshegrenade/bounce.wav");
+    precache_sound("sounds/weapons/wpn_cshegrenade/explode1.wav");
+    precache_sound("sounds/weapons/wpn_cshegrenade/explode2.wav");
+    precache_sound("sounds/weapons/wpn_cshegrenade/explode3.wav");
+    precache_model("models/weapons/wpn_csflashbang/v_flashbang.mdl");
+    precache_model("models/weapons/wpn_csflashbang/w_flashbang.mdl");
+    precache_model("models/weapons/wpn_csflashbang/p_flashbang.mdl");
+    precache_sound("sounds/weapons/wpn_csflashbang/pinpull.wav");
+    precache_sound("sounds/weapons/wpn_csflashbang/bounce1.wav");
+    precache_sound("sounds/weapons/wpn_csflashbang/bounce2.wav");
+    precache_sound("sounds/weapons/wpn_csflashbang/explode1.wav");
+    precache_sound("sounds/weapons/wpn_csflashbang/explode2.wav");
+    precache_sound("sounds/weapons/wpn_csflashbang/ringing.wav");
+    precache_model("models/weapons/wpn_cssmokegrenade/v_smokegrenade.mdl");
+    precache_model("models/weapons/wpn_cssmokegrenade/w_smokegrenade.mdl");
+    precache_model("models/weapons/wpn_cssmokegrenade/p_smokegrenade.mdl");
+    precache_sound("sounds/weapons/wpn_cssmokegrenade/pinpull.wav");
+    precache_sound("sounds/weapons/wpn_cssmokegrenade/bounce1.wav");
+    precache_sound("sounds/weapons/wpn_cssmokegrenade/bounce2.wav");
+    precache_sound("sounds/weapons/wpn_cssmokegrenade/explode.wav");
+    // CS HE-grenade explosion sprite (single new asset; replaces
+    // the old hl_explode 3-variant set).
+    precache_model("gfx/eexplo.spr");
+
+	// Snowball / slingshot
+    precache_model("models/weapons/wpn_snowball/v_snowball.mdl");
+    precache_model("models/weapons/wpn_snowball/w_snowball.mdl");
+    precache_model("models/weapons/wpn_snowball/p_snowball.mdl");
+    precache_model("models/weapons/wpn_snowball/v_slingshot.mdl");
+    precache_model("models/weapons/wpn_snowball/w_slingshot.mdl");
+    precache_model("models/weapons/wpn_snowball/p_slingshot.mdl");
+    precache_sound("sounds/weapons/wpn_snowball/hit.wav");
+    precache_sound("sounds/weapons/wpn_snowball/throw.wav");
+    precache_sound("sounds/weapons/wpn_snowball/stretch.wav");
+    precache_sound("sounds/weapons/wpn_snowball/snap.wav");
+
+	// Paintball
+    precache_model("models/weapons/wpn_paintball/v_excal.mdl");
+    precache_model("models/weapons/wpn_paintball/w_excal.mdl");
+    precache_model("models/weapons/wpn_paintball/p_excal.mdl");
+    precache_sound("sounds/weapons/wpn_paintball/fire.wav");
+    precache_sound("sounds/weapons/wpn_paintball/lidopen.wav");
+    precache_sound("sounds/weapons/wpn_paintball/lidclose.wav");
+    precache_sound("sounds/weapons/wpn_paintball/reload.wav");
 
 	// HL Glock
     precache_model("models/weapons/wpn_hlglock/w_glock.mdl");
@@ -812,6 +1235,230 @@ void() precache_everything =
 	precache_sound("sounds/weapons/wpn_csknife/slash.wav");
 	precache_sound("sounds/weapons/wpn_csknife/stab.wav");
 
+	// Butterfly Knife (Balisong) — model folder spelled "wpn_butteryfly",
+	// sound folder spelled "wpn_butterfly" (intentional, matches assets).
+	precache_model("models/weapons/wpn_butteryfly/v_knife.mdl");
+	precache_model("models/weapons/wpn_butteryfly/w_knife.mdl");
+	precache_sound("sounds/weapons/wpn_butterfly/Balisong_LE_Select.wav");
+	precache_sound("sounds/weapons/wpn_butterfly/Balisong_LE_Att_1.wav");
+	precache_sound("sounds/weapons/wpn_butterfly/Balisong_LE_Att_2.wav");
+	precache_sound("sounds/weapons/wpn_butterfly/Balisong_LE_Combo_1_Spin.wav");
+	precache_sound("sounds/weapons/wpn_butterfly/Balisong_LE_Combo_2_Spin.wav");
+	precache_sound("sounds/weapons/wpn_butterfly/Balisong_LE_BigShot.wav");
+	precache_sound("sounds/weapons/wpn_butterfly/Balisong_LE_BigShot_R.wav");
+	precache_sound("sounds/weapons/wpn_butterfly/Balisong_LE_BigShot_Spin.wav");
+	precache_sound("sounds/weapons/wpn_butterfly/Balisong_LE_BigShot_R_Spin.wav");
+	precache_sound("sounds/weapons/wpn_butterfly/Balisong_LE_Observe.wav");
+	precache_sound("sounds/weapons/wpn_butterfly/Balisong_LE_Observe_02.wav");
+	precache_sound("sounds/weapons/wpn_butterfly/hit1.wav");
+	precache_sound("sounds/weapons/wpn_butterfly/hit2.wav");
+	precache_sound("sounds/weapons/wpn_butterfly/hit3.wav");
+	precache_sound("sounds/weapons/wpn_butterfly/hit4.wav");
+	precache_sound("sounds/weapons/wpn_butterfly/hitwall1.wav");
+
+	// Fists (wpn_melee) — view-model only, no p_/w_ models.
+	// Sound set: miss1 / punchhit1 / kickhit1 / block1.
+	precache_model("models/weapons/wpn_melee/v_melee.mdl");
+	precache_sound("sounds/weapons/wpn_melee/miss1.wav");
+	precache_sound("sounds/weapons/wpn_melee/punchhit1.wav");
+	precache_sound("sounds/weapons/wpn_melee/kickhit1.wav");
+	precache_sound("sounds/weapons/wpn_melee/block1.wav");
+
+	// Katana — full p/w/v model set, droppable melee.
+	precache_model("models/weapons/wpn_katana/v_katana.mdl");
+	precache_model("models/weapons/wpn_katana/w_katana.mdl");
+	precache_model("models/weapons/wpn_katana/p_katana.mdl");
+	precache_sound("sounds/weapons/wpn_katana/hitbody1.wav");
+	precache_sound("sounds/weapons/wpn_katana/hitwall1.wav");
+	precache_sound("sounds/weapons/wpn_katana/hitwall2.wav");
+	precache_sound("sounds/weapons/wpn_katana/miss1.wav");
+	precache_sound("sounds/weapons/wpn_katana/miss2.wav");
+
+	// CF AUG
+	precache_model("models/weapons/wpn_cfaug/v_aug.mdl");
+	precache_model("models/weapons/wpn_cfaug/w_aug.mdl");
+	precache_sound("sounds/weapons/wpn_cfaug/fire1.wav");
+	precache_sound("sounds/weapons/wpn_cfaug/reload.wav");
+	precache_sound("sounds/weapons/wpn_cfaug/clipin.wav");
+	precache_sound("sounds/weapons/wpn_cfaug/clipout.wav");
+	precache_sound("sounds/weapons/wpn_cfaug/bcy.wav");
+	precache_sound("sounds/weapons/wpn_cfaug/cy.wav");
+
+	// CF FAMAS
+	precache_model("models/weapons/wpn_cffamas/v_famas.mdl");
+	precache_model("models/weapons/wpn_cffamas/w_famas.mdl");
+	precache_sound("sounds/weapons/wpn_cffamas/fire1.wav");
+	precache_sound("sounds/weapons/wpn_cffamas/fire2.wav");
+	precache_sound("sounds/weapons/wpn_cffamas/reload.wav");
+	precache_sound("sounds/weapons/wpn_cffamas/clipin.wav");
+	precache_sound("sounds/weapons/wpn_cffamas/clipout.wav");
+	precache_sound("sounds/weapons/wpn_cffamas/blockback.wav");
+
+	// CF MAC10
+	precache_model("models/weapons/wpn_cfmac10/v_mac10.mdl");
+	precache_model("models/weapons/wpn_cfmac10/w_mac10.mdl");
+	precache_sound("sounds/weapons/wpn_cfmac10/fire.wav");
+	precache_sound("sounds/weapons/wpn_cfmac10/draw.wav");
+	precache_sound("sounds/weapons/wpn_cfmac10/reload.wav");
+	precache_sound("sounds/weapons/wpn_cfmac10/clipin.wav");
+	precache_sound("sounds/weapons/wpn_cfmac10/clipout.wav");
+
+	// CF Beretta M9 (cffiveseven) — note the sound folder name diverges
+	// from the model folder name (wpn_fiveseven vs wpn_cffiveseven).
+	precache_model("models/weapons/wpn_cffiveseven/v_fiveseven.mdl");
+	precache_model("models/weapons/wpn_cffiveseven/w_fiveseven.mdl");
+	precache_model("models/weapons/wpn_cffiveseven/p_fiveseven.mdl");
+	precache_sound("sounds/weapons/wpn_fiveseven/fire.WAV");
+	precache_sound("sounds/weapons/wpn_fiveseven/reload.WAV");
+	precache_sound("sounds/weapons/wpn_fiveseven/bback.WAV");
+	precache_sound("sounds/weapons/wpn_fiveseven/bcback.WAV");
+	precache_sound("sounds/weapons/wpn_fiveseven/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_fiveseven/clipout.WAV");
+
+	// CF Colt Anaconda (cfdeagle)
+	precache_model("models/weapons/wpn_cfdeagle/v_deagle.mdl");
+	precache_model("models/weapons/wpn_cfdeagle/w_deagle.mdl");
+	precache_model("models/weapons/wpn_cfdeagle/p_deagle.mdl");
+	precache_sound("sounds/weapons/wpn_cfdeagle/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfdeagle/reload1.WAV");
+	precache_sound("sounds/weapons/wpn_cfdeagle/reload2.WAV");
+	precache_sound("sounds/weapons/wpn_cfdeagle/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfdeagle/clipout.WAV");
+	precache_sound("sounds/weapons/wpn_cfdeagle/bcback.WAV");
+
+	// CF Barrett M82 (cfawp)
+	precache_model("models/weapons/wpn_cfawp/v_awp.mdl");
+	precache_model("models/weapons/wpn_cfawp/w_awp.mdl");
+	precache_model("models/weapons/wpn_cfawp/p_awp.mdl");
+	precache_sound("sounds/weapons/wpn_cfawp/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfawp/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfawp/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfawp/clipout.WAV");
+	precache_sound("sounds/weapons/wpn_cfawp/draw.WAV");
+
+	// CF PSG1 (cfg3sg1)
+	precache_model("models/weapons/wpn_cfg3sg1/v_g3sg1.mdl");
+	precache_model("models/weapons/wpn_cfg3sg1/w_g3sg1.mdl");
+	precache_model("models/weapons/wpn_cfg3sg1/p_g3sg1.mdl");
+	precache_sound("sounds/weapons/wpn_cfg3sg1/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfg3sg1/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfg3sg1/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfg3sg1/clipout.WAV");
+	precache_sound("sounds/weapons/wpn_cfg3sg1/cy.WAV");
+	precache_sound("sounds/weapons/wpn_cfg3sg1/bcy.WAV");
+
+	// CF Dual Desert Deagle (cfelite)
+	precache_model("models/weapons/wpn_cfelite/v_elite.mdl");
+	precache_model("models/weapons/wpn_cfelite/w_elite.mdl");
+	precache_model("models/weapons/wpn_cfelite/p_elite.mdl");
+	precache_sound("sounds/weapons/wpn_cfelite/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfelite/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfelite/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfelite/clipout.WAV");
+	precache_sound("sounds/weapons/wpn_cfelite/select.WAV");
+
+	// CF SPAS-12 (cfxm1014) — sounds available: clipin/clipout/draw/fire/reload (all .WAV).
+	// In the QC: bulletin event → clipin.WAV (shell insert), bback event → clipout.WAV (pump back).
+	precache_model("models/weapons/wpn_cfxm1014/v_xm1014.mdl");
+	precache_model("models/weapons/wpn_cfxm1014/w_xm1014.mdl");
+	precache_model("models/weapons/wpn_cfxm1014/p_xm1014.mdl");
+	precache_sound("sounds/weapons/wpn_cfxm1014/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfxm1014/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfxm1014/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfxm1014/clipout.WAV");
+	precache_sound("sounds/weapons/wpn_cfxm1014/draw.WAV");
+
+	// CF Remington M700 (cfscout) — disk has v_scout/w_scout/p_scout
+	// (NOT v_m700) and draw.WAV (NOT select.wav).
+	precache_model("models/weapons/wpn_cfscout/v_scout.mdl");
+	precache_model("models/weapons/wpn_cfscout/w_scout.mdl");
+	precache_model("models/weapons/wpn_cfscout/p_scout.mdl");
+	precache_sound("sounds/weapons/wpn_cfscout/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfscout/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfscout/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfscout/clipout.WAV");
+	precache_sound("sounds/weapons/wpn_cfscout/draw.WAV");
+
+	// CF Winchester (cfm3) — disk has v_m3/w_m3/p_m3 (NOT v_winchester)
+	// and bulletin.WAV/draw.WAV (no clipin/clipout for this gun).
+	precache_model("models/weapons/wpn_cfm3/v_m3.mdl");
+	precache_model("models/weapons/wpn_cfm3/w_m3.mdl");
+	precache_model("models/weapons/wpn_cfm3/p_m3.mdl");
+	precache_sound("sounds/weapons/wpn_cfm3/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfm3/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfm3/bulletin.WAV");
+	precache_sound("sounds/weapons/wpn_cfm3/draw.WAV");
+
+	// CF FN SCAR (cfgalil) — disk has v_galil/w_galil/p_galil (NOT v_scar).
+	// No bback.wav on disk — draw clack uses reload.WAV instead.
+	precache_model("models/weapons/wpn_cfgalil/v_galil.mdl");
+	precache_model("models/weapons/wpn_cfgalil/w_galil.mdl");
+	precache_model("models/weapons/wpn_cfgalil/p_galil.mdl");
+	precache_sound("sounds/weapons/wpn_cfgalil/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfgalil/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfgalil/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfgalil/clipout.WAV");
+
+	// CF C96 Mauser (cfglock) — disk has v_glock18 / w_glock18 / p_glock18
+	// (NOT v_mauser etc.) and draw.WAV (NOT select.wav).  No reload.WAV
+	// on disk for this weapon.
+	precache_model("models/weapons/wpn_cfglock/v_glock18.mdl");
+	precache_model("models/weapons/wpn_cfglock/w_glock18.mdl");
+	precache_model("models/weapons/wpn_cfglock/p_glock18.mdl");
+	precache_sound("sounds/weapons/wpn_cfglock/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfglock/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfglock/clipout.WAV");
+	precache_sound("sounds/weapons/wpn_cfglock/draw.WAV");
+
+	// CF SVD Dragunov (cfsg550) — folder is wpn_cfsg550 (WITH cf prefix),
+	// model files are v_sg550/w_sg550/p_sg550 (NOT v_dragunov).
+	precache_model("models/weapons/wpn_cfsg550/v_sg550.mdl");
+	precache_model("models/weapons/wpn_cfsg550/w_sg550.mdl");
+	precache_model("models/weapons/wpn_cfsg550/p_sg550.mdl");
+	precache_sound("sounds/weapons/wpn_cfsg550/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfsg550/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfsg550/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfsg550/clipout.WAV");
+
+	// CF MP5 (cfmp5) — sounds clipin/clipout/fire/reload (.WAV); NO draw,
+	// deploy reuses reload.WAV.  Bone-attached muzzle (Bone01).
+	precache_model("models/weapons/wpn_cfmp5/v_mp5.mdl");
+	precache_model("models/weapons/wpn_cfmp5/w_mp5.mdl");
+	precache_model("models/weapons/wpn_cfmp5/p_mp5.mdl");
+	precache_sound("sounds/weapons/wpn_cfmp5/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfmp5/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfmp5/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfmp5/clipout.WAV");
+
+	// CF Vector (cfvector) — sounds clipin/clipout/draw/fire/reload (.WAV).
+	precache_model("models/weapons/wpn_cfvector/v_vector.mdl");
+	precache_model("models/weapons/wpn_cfvector/w_vector.mdl");
+	precache_model("models/weapons/wpn_cfvector/p_vector.mdl");
+	precache_sound("sounds/weapons/wpn_cfvector/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfvector/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfvector/draw.WAV");
+	precache_sound("sounds/weapons/wpn_cfvector/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfvector/clipout.WAV");
+
+	// CF Type 89 (cftype89) — sounds clipin/clipout/draw/fire/reload (.WAV).
+	precache_model("models/weapons/wpn_cftype89/v_type89.mdl");
+	precache_model("models/weapons/wpn_cftype89/w_type89.mdl");
+	precache_model("models/weapons/wpn_cftype89/p_type89.mdl");
+	precache_sound("sounds/weapons/wpn_cftype89/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cftype89/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cftype89/draw.WAV");
+	precache_sound("sounds/weapons/wpn_cftype89/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cftype89/clipout.WAV");
+
+	// CF C4
+	precache_model("models/weapons/wpn_cfc4/v_c4.mdl");
+	precache_model("models/weapons/wpn_cfc4/w_c4.mdl");
+	precache_sound("sounds/weapons/wpn_cfc4/pullout.wav");
+	precache_sound("sounds/weapons/wpn_cfc4/plant.wav");
+	precache_sound("sounds/weapons/wpn_cfc4/beep.wav");
+	precache_sound("sounds/weapons/wpn_cfc4/disarm.wav");
+	precache_sound("sounds/weapons/wpn_cfc4/explode.wav");
+
 	// CS AK47
 	precache_model("models/weapons/wpn_csak47/v_ak47.mdl");
 	precache_model("models/weapons/wpn_csak47/w_ak47.mdl");
@@ -820,6 +1467,9 @@ void() precache_everything =
 	precache_sound("sounds/weapons/wpn_csak47/clipin.wav");
 	precache_sound("sounds/weapons/wpn_csak47/clipout.wav");
 	precache_sound("sounds/weapons/wpn_csak47/boltpull.wav");
+	// HD AK47 — shares wpn_csak47 sounds, only new model files.
+	precache_model("models/weapons/wpn_hdak47/v_ak47.mdl");
+	precache_model("models/weapons/wpn_hdak47/w_ak47.mdl");
 
 	// CS M4a1
 	precache_model("models/weapons/wpn_csm4a1/v_m4a1.mdl");
@@ -855,3 +1505,6 @@ void() precache_everything =
 	precache_sound("sounds/weapons/wpn_pistol/reload.wav");
 	precache_sound("sounds/weapons/wpn_pistol/magdrop.wav");
 };
+
+
+float sv_cached_pose_keepalive_interval;  // re-added after CSUSP-removal pass
