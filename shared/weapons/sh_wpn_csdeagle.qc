@@ -181,6 +181,7 @@ void() W_DeagleFrame =
 
 void() W_DeagleEquip =
 {
+    W_SetADSProfile(TRUE, "cl_ads_deagle", SCOPE_CLASS_NONE);
     W_StandardEquipSetup(DEAGLE_VIEWMODEL, DEAGLE_DISPLAY_NAME, DEAGLE_DRAW_START,
         DEAGLE_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
     self.fire     = W_DeagleFire;
@@ -333,6 +334,7 @@ void() CSQC_DeagleDropClear =
 
 void() CSQC_DeagleEquip =
 {
+    W_SetADSProfile(TRUE, "cl_ads_deagle", SCOPE_CLASS_NONE);
 	self.weapon_name         = DEAGLE_DISPLAY_NAME;
 	self.weapon_viewmodel    = DEAGLE_VIEWMODEL;
 	self.weapon_worldmodel   = DEAGLE_WORLDMODEL;

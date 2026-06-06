@@ -200,6 +200,7 @@ void() W_CFType89Frame =
 
 void() W_CFType89Equip =
 {
+    W_SetADSProfile(TRUE, "cl_ads_type89", SCOPE_CLASS_NONE);
     W_StandardEquipSetup(CFTYPE89_VIEWMODEL, CFTYPE89_DISPLAY_NAME, CFTYPE89_SEQ_SELECT,
         CFTYPE89_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
     self.fire     = W_CFType89Fire;
@@ -385,6 +386,7 @@ void() CSQC_CFType89DropClear =
 
 void() CSQC_CFType89Equip =
 {
+    W_SetADSProfile(TRUE, "cl_ads_type89", SCOPE_CLASS_NONE);
     self.weapon_name         = CFTYPE89_DISPLAY_NAME;
     self.weapon_viewmodel    = CFTYPE89_VIEWMODEL;
     self.weapon_worldmodel   = CFTYPE89_WORLDMODEL;

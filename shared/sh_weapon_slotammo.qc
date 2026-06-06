@@ -106,22 +106,36 @@ void(entity player, float wep) W_SlotAmmo_LoadLegacy =
     else if (wep == WEP_CFMP5)           { player.mag_cfmp5 = slotammo_mag; player.ammo_cfmp5 = slotammo_ammo; }
     else if (wep == WEP_CFVECTOR)        { player.mag_cfvector = slotammo_mag; player.ammo_cfvector = slotammo_ammo; }
     else if (wep == WEP_CFTYPE89)        { player.mag_cftype89 = slotammo_mag; player.ammo_cftype89 = slotammo_ammo; }
+    else if (wep == WEP_CFUMP45)         { player.mag_cfump45 = slotammo_mag; player.ammo_cfump45 = slotammo_ammo; }
+    else if (wep == WEP_CFM249)          { player.mag_cfm249 = slotammo_mag; player.ammo_cfm249 = slotammo_ammo; }
+    else if (wep == WEP_CFAWM)           { player.mag_cfawm = slotammo_mag; player.ammo_cfawm = slotammo_ammo; }
+    else if (wep == WEP_CFKS23)          { player.mag_cfks23 = slotammo_mag; player.ammo_cfks23 = slotammo_ammo; }
+    else if (wep == WEP_CFM4)            { player.mag_cfm4 = slotammo_mag; player.ammo_cfm4 = slotammo_ammo; }
+    else if (wep == WEP_CFMK23)          { player.mag_cfmk23 = slotammo_mag; player.ammo_cfmk23 = slotammo_ammo; player.cfmk23_silenced = slotammo_aux; }
+    else if (wep == WEP_CSUSP)           { player.mag_csusp = slotammo_mag; player.ammo_csusp = slotammo_ammo; player.csusp_silenced = slotammo_aux; }
+    else if (wep == WEP_CFGALIL)         { player.mag_cfgalil = slotammo_mag; player.ammo_cfgalil = slotammo_ammo; }
+    else if (wep == WEP_CFGLOCK)         { player.mag_cfglock = slotammo_mag; player.ammo_cfglock = slotammo_ammo; }
+    else if (wep == WEP_CFELITE)         { player.mag_cfelite = slotammo_mag; player.ammo_cfelite = slotammo_ammo; }
+    else if (wep == WEP_CFP228)          { player.mag_cfp228 = slotammo_mag; player.ammo_cfp228 = slotammo_ammo; }
+    else if (wep == WEP_CFMSG90)         { player.mag_cfmsg90 = slotammo_mag; player.ammo_cfmsg90 = slotammo_ammo; }
+    else if (wep == WEP_CFSG552)         { player.mag_cfsg552 = slotammo_mag; player.ammo_cfsg552 = slotammo_ammo; }
+    else if (wep == WEP_CFSL8)           { player.mag_cfsl8 = slotammo_mag; player.ammo_cfsl8 = slotammo_ammo; }
     else if (wep == WEP_DEAGLE)          { player.mag_deagle = slotammo_mag; player.ammo_deagle = slotammo_ammo; }
     else if (wep == WEP_GLOCK)           { player.mag_glock = slotammo_mag; player.ammo_glock = slotammo_ammo; }
     else if (wep == WEP_357)             { player.mag_357 = slotammo_mag; player.ammo_357 = slotammo_ammo; }
     else if (wep == WEP_HLGLOCK)         { player.mag_hlglock = slotammo_mag; player.ammo_hlglock = slotammo_ammo; }
     else if (wep == WEP_PISTOL)          { player.mag_pistol = slotammo_mag; player.ammo_pistol = slotammo_ammo; }
-    else if (wep == WEP_CFFIVESEVEN)     { player.mag_cffiveseven = slotammo_mag; player.ammo_cffiveseven = slotammo_ammo; }
-    else if (wep == WEP_CFDEAGLE)        { player.mag_cfdeagle = slotammo_mag; player.ammo_cfdeagle = slotammo_ammo; }
-    else if (wep == WEP_CFAWP)           { player.mag_cfawp = slotammo_mag; player.ammo_cfawp = slotammo_ammo; }
-    else if (wep == WEP_CFG3SG1)         { player.mag_cfg3sg1 = slotammo_mag; player.ammo_cfg3sg1 = slotammo_ammo; }
-    else if (wep == WEP_CFELITE)         { player.mag_cfelite = slotammo_mag; player.ammo_cfelite = slotammo_ammo; }
-    else if (wep == WEP_CFXM1014)        { player.mag_cfxm1014 = slotammo_mag; player.ammo_cfxm1014 = slotammo_ammo; }
-    else if (wep == WEP_CFSCOUTM700)     { player.mag_cfscoutm700 = slotammo_mag; player.ammo_cfscoutm700 = slotammo_ammo; }
+    else if (wep == WEP_CFM9)     { player.mag_cfm9 = slotammo_mag; player.ammo_cfm9 = slotammo_ammo; }
+    else if (wep == WEP_CFREVOLVER)        { player.mag_cfrevolver = slotammo_mag; player.ammo_cfrevolver = slotammo_ammo; }
+    else if (wep == WEP_CFBARRETT)           { player.mag_cfbarrett = slotammo_mag; player.ammo_cfbarrett = slotammo_ammo; }
+    else if (wep == WEP_CFPSG1)         { player.mag_cfpsg1 = slotammo_mag; player.ammo_cfpsg1 = slotammo_ammo; }
+    else if (wep == WEP_CFDDEAGLE)         { player.mag_cfddeagle = slotammo_mag; player.ammo_cfddeagle = slotammo_ammo; }
+    else if (wep == WEP_CFSPAS12)        { player.mag_cfspas12 = slotammo_mag; player.ammo_cfspas12 = slotammo_ammo; }
+    else if (wep == WEP_CFM700)     { player.mag_cfm700 = slotammo_mag; player.ammo_cfm700 = slotammo_ammo; }
     else if (wep == WEP_CFM3)            { player.mag_cfm3 = slotammo_mag; player.ammo_cfm3 = slotammo_ammo; }
-    else if (wep == WEP_CFGALIL)         { player.mag_cfgalil = slotammo_mag; player.ammo_cfgalil = slotammo_ammo; }
-    else if (wep == WEP_CFGLOCK)         { player.mag_cfglock = slotammo_mag; player.ammo_cfglock = slotammo_ammo; }
-    else if (wep == WEP_CFSG550)         { player.mag_cfsg550 = slotammo_mag; player.ammo_cfsg550 = slotammo_ammo; }
+    else if (wep == WEP_CFSCAR)         { player.mag_cfscar = slotammo_mag; player.ammo_cfscar = slotammo_ammo; }
+    else if (wep == WEP_CFMAUSER)         { player.mag_cfmauser = slotammo_mag; player.ammo_cfmauser = slotammo_ammo; }
+    else if (wep == WEP_CFSVD)         { player.mag_cfsvd = slotammo_mag; player.ammo_cfsvd = slotammo_ammo; }
 };
 
 void(entity player, float wep) W_SlotAmmo_SaveLegacy =
@@ -151,22 +165,36 @@ void(entity player, float wep) W_SlotAmmo_SaveLegacy =
     else if (wep == WEP_CFMP5)           W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfmp5, player.ammo_cfmp5, 0);
     else if (wep == WEP_CFVECTOR)        W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfvector, player.ammo_cfvector, 0);
     else if (wep == WEP_CFTYPE89)        W_SlotAmmo_SetForWeapon(player, wep, player.mag_cftype89, player.ammo_cftype89, 0);
+    else if (wep == WEP_CFUMP45)         W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfump45, player.ammo_cfump45, 0);
+    else if (wep == WEP_CFM249)          W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfm249, player.ammo_cfm249, 0);
+    else if (wep == WEP_CFAWM)           W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfawm, player.ammo_cfawm, 0);
+    else if (wep == WEP_CFKS23)          W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfks23, player.ammo_cfks23, 0);
+    else if (wep == WEP_CFM4)            W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfm4, player.ammo_cfm4, 0);
+    else if (wep == WEP_CFMK23)          W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfmk23, player.ammo_cfmk23, player.cfmk23_silenced);
+    else if (wep == WEP_CSUSP)           W_SlotAmmo_SetForWeapon(player, wep, player.mag_csusp, player.ammo_csusp, player.csusp_silenced);
+    else if (wep == WEP_CFGALIL)         W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfgalil, player.ammo_cfgalil, 0);
+    else if (wep == WEP_CFGLOCK)         W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfglock, player.ammo_cfglock, 0);
+    else if (wep == WEP_CFELITE)         W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfelite, player.ammo_cfelite, 0);
+    else if (wep == WEP_CFP228)          W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfp228, player.ammo_cfp228, 0);
+    else if (wep == WEP_CFMSG90)         W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfmsg90, player.ammo_cfmsg90, 0);
+    else if (wep == WEP_CFSG552)         W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfsg552, player.ammo_cfsg552, 0);
+    else if (wep == WEP_CFSL8)           W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfsl8, player.ammo_cfsl8, 0);
     else if (wep == WEP_DEAGLE)          W_SlotAmmo_SetForWeapon(player, wep, player.mag_deagle, player.ammo_deagle, 0);
     else if (wep == WEP_GLOCK)           W_SlotAmmo_SetForWeapon(player, wep, player.mag_glock, player.ammo_glock, 0);
     else if (wep == WEP_357)             W_SlotAmmo_SetForWeapon(player, wep, player.mag_357, player.ammo_357, 0);
     else if (wep == WEP_HLGLOCK)         W_SlotAmmo_SetForWeapon(player, wep, player.mag_hlglock, player.ammo_hlglock, 0);
     else if (wep == WEP_PISTOL)          W_SlotAmmo_SetForWeapon(player, wep, player.mag_pistol, player.ammo_pistol, 0);
-    else if (wep == WEP_CFFIVESEVEN)     W_SlotAmmo_SetForWeapon(player, wep, player.mag_cffiveseven, player.ammo_cffiveseven, 0);
-    else if (wep == WEP_CFDEAGLE)        W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfdeagle, player.ammo_cfdeagle, 0);
-    else if (wep == WEP_CFAWP)           W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfawp, player.ammo_cfawp, 0);
-    else if (wep == WEP_CFG3SG1)         W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfg3sg1, player.ammo_cfg3sg1, 0);
-    else if (wep == WEP_CFELITE)         W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfelite, player.ammo_cfelite, 0);
-    else if (wep == WEP_CFXM1014)        W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfxm1014, player.ammo_cfxm1014, 0);
-    else if (wep == WEP_CFSCOUTM700)     W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfscoutm700, player.ammo_cfscoutm700, 0);
+    else if (wep == WEP_CFM9)     W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfm9, player.ammo_cfm9, 0);
+    else if (wep == WEP_CFREVOLVER)        W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfrevolver, player.ammo_cfrevolver, 0);
+    else if (wep == WEP_CFBARRETT)           W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfbarrett, player.ammo_cfbarrett, 0);
+    else if (wep == WEP_CFPSG1)         W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfpsg1, player.ammo_cfpsg1, 0);
+    else if (wep == WEP_CFDDEAGLE)         W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfddeagle, player.ammo_cfddeagle, 0);
+    else if (wep == WEP_CFSPAS12)        W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfspas12, player.ammo_cfspas12, 0);
+    else if (wep == WEP_CFM700)     W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfm700, player.ammo_cfm700, 0);
     else if (wep == WEP_CFM3)            W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfm3, player.ammo_cfm3, 0);
-    else if (wep == WEP_CFGALIL)         W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfgalil, player.ammo_cfgalil, 0);
-    else if (wep == WEP_CFGLOCK)         W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfglock, player.ammo_cfglock, 0);
-    else if (wep == WEP_CFSG550)         W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfsg550, player.ammo_cfsg550, 0);
+    else if (wep == WEP_CFSCAR)         W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfscar, player.ammo_cfscar, 0);
+    else if (wep == WEP_CFMAUSER)         W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfmauser, player.ammo_cfmauser, 0);
+    else if (wep == WEP_CFSVD)         W_SlotAmmo_SetForWeapon(player, wep, player.mag_cfsvd, player.ammo_cfsvd, 0);
 };
 
 void(entity player) W_SlotAmmo_LoadCurrent =

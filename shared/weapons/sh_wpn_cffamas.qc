@@ -213,6 +213,7 @@ void() W_CFFamasFrame =
 
 void() W_CFFamasEquip =
 {
+    W_SetADSProfile(TRUE, "cl_ads_famas", SCOPE_CLASS_NONE);
     W_StandardEquipSetup(CFFAMAS_VIEWMODEL, CFFAMAS_DISPLAY_NAME, CFFAMAS_SEQ_SELECT,
         CFFAMAS_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
     self.fire     = W_CFFamasFire;
@@ -411,6 +412,7 @@ void() CSQC_CFFamasDropClear =
 
 void() CSQC_CFFamasEquip =
 {
+    W_SetADSProfile(TRUE, "cl_ads_famas", SCOPE_CLASS_NONE);
     self.weapon_name         = CFFAMAS_DISPLAY_NAME;
     self.weapon_viewmodel    = CFFAMAS_VIEWMODEL;
     self.weapon_worldmodel   = CFFAMAS_WORLDMODEL;

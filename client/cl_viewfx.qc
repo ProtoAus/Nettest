@@ -263,22 +263,10 @@ void() CSQC_ViewFX_UpdateState =
         // Bar ADS while reloading on every ADS weapon — gun is busy
         // racking / inserting shells, can't be brought up to the eye.
         // Mirrors the grapple / lower-envelope cancellation pattern.
+        // Pose-ADS weapons — eligibility from the weapon's own field
+        // (set in its Equip via W_SetADSProfile), not a hardcoded list.
         if (predicted_player.weaponstate != WS_RELOAD
-         && (predicted_player.weapon == WEP_HDAK47
-          || predicted_player.weapon == WEP_AK47
-          || predicted_player.weapon == WEP_DEAGLE
-          || predicted_player.weapon == WEP_CFMAC10
-          || predicted_player.weapon == WEP_CFFAMAS
-          || predicted_player.weapon == WEP_CFFIVESEVEN
-          || predicted_player.weapon == WEP_CFDEAGLE
-          || predicted_player.weapon == WEP_CFELITE
-          || predicted_player.weapon == WEP_CFGALIL
-          || predicted_player.weapon == WEP_CFGLOCK
-          || predicted_player.weapon == WEP_CFXM1014
-          || predicted_player.weapon == WEP_CFM3
-          || predicted_player.weapon == WEP_CFMP5
-          || predicted_player.weapon == WEP_CFVECTOR
-          || predicted_player.weapon == WEP_CFTYPE89))
+         && predicted_player.weapon_ads_eligible)
             ads_target = 1;
         // sv_codscopes adds scout / awp to the ADS-eligible set so
         // the CoD scope state machine in cl_codscope.qc can ride the
@@ -290,13 +278,8 @@ void() CSQC_ViewFX_UpdateState =
         // +attack2 — that's what gives the "fire physically drops the
         // gun even with +attack2 still held" behaviour the user asked
         // for.
-        if ((predicted_player.weapon == WEP_SCOUT
-          || predicted_player.weapon == WEP_CSAWP
-          || predicted_player.weapon == WEP_CFAWP
-          || predicted_player.weapon == WEP_CFG3SG1
-          || predicted_player.weapon == WEP_CFSCOUTM700
-          || predicted_player.weapon == WEP_CFSG550
-          || predicted_player.weapon == WEP_CFAUG)
+        // CoD-scope weapons (snipers + scoped rifles) — scope_class field.
+        if (predicted_player.weapon_scope_class != SCOPE_CLASS_NONE
             && PM_ReadMovevar("sv_codscopes", 0)
             && predicted_player.weaponstate != WS_RELOAD
             && !predicted_player.grapple_rope_active
@@ -591,12 +574,14 @@ void(entity gun) CSQC_ViewFX_ComputeOffsets =
             ads_vm_flip = !ads_vm_flip;
         float ads_side = ads_vm_flip ? -1 : 1;
 
-        // Single shared ADS pose for every weapon — tuned via the
-        // global cl_ads_* set (cl_ads_pitch / _yaw / _roll / _forward
-        // / _right / _down).  The former per-weapon prefixes
-        // (cl_ads_deagle_*, cl_ads_mac10_*, …) were removed in favour
-        // of one shared pose for all guns.
+        // Per-weapon ADS pose.  The weapon's Equip sets weapon_ads_prefix
+        // to its own cl_ads_<weapon>_* set (pitch/yaw/roll/forward/right/
+        // down); an empty prefix falls back to the shared cl_ads_* pose.
+        // The per-weapon cvars default to the shared values, so a weapon's
+        // ADS is identical to the shared one until its cvars are tuned.
         string ads_pfx = "cl_ads";
+        if (predicted_player.weapon_ads_prefix != "")
+            ads_pfx = predicted_player.weapon_ads_prefix;
 
         ang_x += cvar(strcat(ads_pfx, "_pitch"))   * ae;
         ang_y += cvar(strcat(ads_pfx, "_yaw"))     * ae * ads_side;

@@ -21,13 +21,16 @@ const float CVAR_SIDE_CL   = 1;
 const float CVAR_SIDE_SV   = 2;
 const float CVAR_SIDE_BOTH = 3;
 
-// 540+ entries today (grep -E "^\s*CVar_Add(UI)?\(" sh_cvar_table.qc | wc -l)
-// — must stay strictly larger than the current entry count or CVar_Add's
-// overflow guard silently drops everything past the cap (e.g. raising
-// from 256 here recovered sv_debug_hitclaim; bumped from 512 to 768 after
-// sv_physdrop_trace_bbox_{x,y,z} plus the rest of the trailing physdrop /
-// pm_ramp_bumpcount block fell off the end and silently failed to register).
-const float CVAR_TABLE_MAX = 768;
+// The cvar registry (g_cvar_* parallel arrays below) is what auto-generates
+// data/allcommands.cfg and the settings menu — it must list every cvar with
+// its default.  QuakeC has no dynamic arrays, so the arrays are STATICALLY
+// sized to this cap, and CVar_Add's overflow guard SILENTLY drops everything
+// past it (a dropped cl_ads_* shows up as the "cl_ads_<weapon> missing" bug).
+// So this must stay comfortably above the live entry count
+//   (grep -cE "^\s*CVar_Add(UI)?\(" sh_cvar_table.qc, plus 6 per
+//    ADS_RegisterPoseCvars call).  ~705 used at 1280 → lots of headroom for
+// the growing weapon roster.  History: 256 → 512 → 768 → 1280.
+const float CVAR_TABLE_MAX = 1280;
 
 // ---------- UI metadata constants ----------
 //
@@ -147,6 +150,20 @@ float(string name) CVar_FindIndex =
         if (g_cvar_name[i] == name)
             return i;
     return -1;
+};
+
+// Register a per-weapon ADS pose override set: <prefix>_pitch/yaw/roll/
+// forward/right/down, defaulted to the shared baseline so a weapon's ADS
+// is unchanged until tuned.  cl_viewfx.qc reads them via the weapon's
+// weapon_ads_prefix field.
+void(string prefix) ADS_RegisterPoseCvars =
+{
+    CVar_Add("Client", strcat(prefix, "_pitch"),   "0",    CVAR_SIDE_CL);
+    CVar_Add("Client", strcat(prefix, "_yaw"),     "0",    CVAR_SIDE_CL);
+    CVar_Add("Client", strcat(prefix, "_roll"),    "0",    CVAR_SIDE_CL);
+    CVar_Add("Client", strcat(prefix, "_forward"), "-5",   CVAR_SIDE_CL);
+    CVar_Add("Client", strcat(prefix, "_right"),   "6.69", CVAR_SIDE_CL);
+    CVar_Add("Client", strcat(prefix, "_down"),    "2",    CVAR_SIDE_CL);
 };
 
 // ============================================================
@@ -308,15 +325,57 @@ void() CVar_Init =
     CVar_Add("Client", "cl_ads_fov",                 "8",    CVAR_SIDE_CL);
     CVar_Add("Client", "cl_sprinting_fov",           "5",    CVAR_SIDE_CL);
     CVar_Add("Client", "cl_ads_fade",      "0.5",  CVAR_SIDE_CL);
-    // Shared ADS pose for ALL weapons.  cl_viewfx.qc applies this single
-    // cl_ads_* set to every ADS weapon (the former per-weapon
-    // cl_ads_<weapon>_* sets were removed).
+    // Shared ADS pose — the fallback pose for any weapon without its own
+    // per-weapon cl_ads_<weapon>_* set (see cl_viewfx.qc ads_pfx select).
     CVar_Add("Client", "cl_ads_pitch",     "0",    CVAR_SIDE_CL);
     CVar_Add("Client", "cl_ads_yaw",       "0",    CVAR_SIDE_CL);
     CVar_Add("Client", "cl_ads_roll",      "0",    CVAR_SIDE_CL);
     CVar_Add("Client", "cl_ads_forward",   "-5",   CVAR_SIDE_CL);
     CVar_Add("Client", "cl_ads_right",     "6.69", CVAR_SIDE_CL);
     CVar_Add("Client", "cl_ads_down",      "2",    CVAR_SIDE_CL);
+
+    // Per-weapon ADS pose overrides.  Each defaults to the shared pose
+    // above, so a weapon's ADS is unchanged until tuned to align that
+    // model's sights.  The weapon's Equip sets weapon_ads_prefix to the
+    // matching prefix; cl_viewfx.qc reads it.
+    ADS_RegisterPoseCvars("cl_ads_mp5");
+    ADS_RegisterPoseCvars("cl_ads_vector");
+    ADS_RegisterPoseCvars("cl_ads_type89");
+    ADS_RegisterPoseCvars("cl_ads_ump45");
+    ADS_RegisterPoseCvars("cl_ads_m249");
+    ADS_RegisterPoseCvars("cl_ads_ks23");
+    ADS_RegisterPoseCvars("cl_ads_m4");
+    ADS_RegisterPoseCvars("cl_ads_galil");
+    ADS_RegisterPoseCvars("cl_ads_glock");
+    ADS_RegisterPoseCvars("cl_ads_elite");
+    ADS_RegisterPoseCvars("cl_ads_p228");
+    ADS_RegisterPoseCvars("cl_ads_msg90");
+    ADS_RegisterPoseCvars("cl_ads_sg552");
+    ADS_RegisterPoseCvars("cl_ads_sl8");
+    ADS_RegisterPoseCvars("cl_ads_mk23");
+    // Remaining ADS weapons — every gun gets its own pose set.
+    ADS_RegisterPoseCvars("cl_ads_mac10");
+    ADS_RegisterPoseCvars("cl_ads_famas");
+    ADS_RegisterPoseCvars("cl_ads_m9");
+    ADS_RegisterPoseCvars("cl_ads_anaconda");
+    ADS_RegisterPoseCvars("cl_ads_ddeagle");
+    ADS_RegisterPoseCvars("cl_ads_scar");
+    ADS_RegisterPoseCvars("cl_ads_mauser");
+    ADS_RegisterPoseCvars("cl_ads_spas12");
+    ADS_RegisterPoseCvars("cl_ads_winchester");
+    ADS_RegisterPoseCvars("cl_ads_barrett");
+    ADS_RegisterPoseCvars("cl_ads_m700");
+    ADS_RegisterPoseCvars("cl_ads_awm");
+    ADS_RegisterPoseCvars("cl_ads_psg1");
+    ADS_RegisterPoseCvars("cl_ads_dragunov");
+    ADS_RegisterPoseCvars("cl_ads_aug");
+    ADS_RegisterPoseCvars("cl_ads_ak47");
+    ADS_RegisterPoseCvars("cl_ads_hdak47");
+    ADS_RegisterPoseCvars("cl_ads_awp");
+    ADS_RegisterPoseCvars("cl_ads_deagle");
+    ADS_RegisterPoseCvars("cl_ads_m4a1");
+    ADS_RegisterPoseCvars("cl_ads_scout");
+    ADS_RegisterPoseCvars("cl_ads_usp");
 
     // Weapon-lower pose — drives the off-screen viewmodel offset when
     // the player is grappling or (with sv_codladders 1) climbing a

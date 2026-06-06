@@ -1364,6 +1364,12 @@ void() CSQC_PredictWeaponImpulse =
             CSQC_PredictButterflySpecial();
         else if (self.weapon == WEP_MELEE)
             CSQC_PredictMeleeSpecial();
+        else if (self.weapon == WEP_M4A1)
+            CSQC_PredictM4A1Special();
+        else if (self.weapon == WEP_CSUSP)
+            CSQC_PredictCSUSPSpecial();
+        else if (self.weapon == WEP_CFMK23)
+            CSQC_PredictCFMk23Special();
         break;
     case WEAPON_IMPULSE_C4:
         // Dedicated C4 select — gated on having a charge.  Skips the
@@ -1667,26 +1673,11 @@ void(float weapon_id) CSQC_PrimeMuzzleSmokeOffsets =
     else if (weapon_id == WEP_HLGLOCK)      CSQC_MuzzleSmokeSetOffsets(HLGLOCK_MUZZLE_FORWARD, HLGLOCK_MUZZLE_RIGHT, HLGLOCK_MUZZLE_DOWN);
     else if (weapon_id == WEP_PAINTBALL)    CSQC_MuzzleSmokeSetOffsets(PAINTBALL_PROJ_MUZZLE_FORWARD, PAINTBALL_PROJ_MUZZLE_RIGHT, PAINTBALL_PROJ_MUZZLE_DOWN);
     else if (weapon_id == WEP_CFAUG)        CSQC_MuzzleSmokeSetOffsets(CFAUG_MUZZLE_FORWARD, CFAUG_MUZZLE_RIGHT, CFAUG_MUZZLE_DOWN);
-    // CF/HD weapons resolve muzzle via $attachment each shot; mark
-    // offsets valid with zeros so the producer guard passes — first
-    // shot's AtWorld call overwrites with real basis on the same tick.
-    else if (weapon_id == WEP_HDAK47
-          || weapon_id == WEP_CFFAMAS
-          || weapon_id == WEP_CFMAC10
-          || weapon_id == WEP_CFFIVESEVEN
-          || weapon_id == WEP_CFDEAGLE
-          || weapon_id == WEP_CFAWP
-          || weapon_id == WEP_CFG3SG1
-          || weapon_id == WEP_CFELITE
-          || weapon_id == WEP_CFXM1014
-          || weapon_id == WEP_CFSCOUTM700
-          || weapon_id == WEP_CFM3
-          || weapon_id == WEP_CFGALIL
-          || weapon_id == WEP_CFGLOCK
-          || weapon_id == WEP_CFSG550
-          || weapon_id == WEP_CFMP5
-          || weapon_id == WEP_CFVECTOR
-          || weapon_id == WEP_CFTYPE89)
+    // Bone-attached weapons resolve the muzzle via $attachment each shot;
+    // mark offsets valid with zeros so the producer guard passes — the
+    // first shot's AtWorld call overwrites with the real basis on the same
+    // tick.  Keyed off the weapon_muzzle_bone the equip set (no WEP_* list).
+    else if (self.weapon_muzzle_bone != "")
         CSQC_MuzzleSmokeSetOffsets(0, 0, 0);
 };
 
@@ -1702,8 +1693,12 @@ void(float weapon_id) CSQC_WeaponEquip =
     self.weapon_deploy_sound = "";
     self.weapon_uses_sequences = FALSE;
     self.weapon_viewmodel_flip = FALSE;
-
-    CSQC_PrimeMuzzleSmokeOffsets(weapon_id);
+    // ADS/scope profile + muzzle bone default to "no ADS, no bone"; each
+    // weapon's CSQC equip re-asserts what it needs (see W_SetADSProfile).
+    self.weapon_ads_eligible = 0;
+    self.weapon_ads_prefix   = "";
+    self.weapon_scope_class  = SCOPE_CLASS_NONE;
+    self.weapon_muzzle_bone  = "";
 
     if (weapon_id == WEP_DEAGLE)            CSQC_DeagleEquip();
     else if (weapon_id == WEP_KNIFE)        CSQC_KnifeEquip();
@@ -1747,16 +1742,34 @@ void(float weapon_id) CSQC_WeaponEquip =
     else if (weapon_id == WEP_CFMP5)        CSQC_CFMp5Equip();
     else if (weapon_id == WEP_CFVECTOR)     CSQC_CFVectorEquip();
     else if (weapon_id == WEP_CFTYPE89)     CSQC_CFType89Equip();
-    else if (weapon_id == WEP_CFC4)         CSQC_CFC4Equip();
-    else if (weapon_id == WEP_CFFIVESEVEN)  CSQC_CFFiveSevenEquip();
-    else if (weapon_id == WEP_CFDEAGLE)     CSQC_CFDeagleEquip();
-    else if (weapon_id == WEP_CFAWP)        CSQC_CFAwpEquip();
-    else if (weapon_id == WEP_CFG3SG1)      CSQC_CFG3SG1Equip();
-    else if (weapon_id == WEP_CFELITE)      CSQC_CFEliteEquip();
-    else if (weapon_id == WEP_CFXM1014)     CSQC_CFXM1014Equip();
-    else if (weapon_id == WEP_CFSCOUTM700)  CSQC_CFScoutM700Equip();
-    else if (weapon_id == WEP_CFM3)         CSQC_CFM3Equip();
+    else if (weapon_id == WEP_CFUMP45)      CSQC_CFUmp45Equip();
+    else if (weapon_id == WEP_CFM249)       CSQC_CFM249Equip();
+    else if (weapon_id == WEP_CFAWM)        CSQC_CFAwmEquip();
+    else if (weapon_id == WEP_CFKS23)       CSQC_CFKs23Equip();
+    else if (weapon_id == WEP_CFM4)         CSQC_CFM4Equip();
+    else if (weapon_id == WEP_CFMK23)       CSQC_CFMk23Equip();
+    else if (weapon_id == WEP_CSUSP)        CSQC_CSUSPEquip();
     else if (weapon_id == WEP_CFGALIL)      CSQC_CFGalilEquip();
     else if (weapon_id == WEP_CFGLOCK)      CSQC_CFGlockEquip();
-    else if (weapon_id == WEP_CFSG550)      CSQC_CFSG550Equip();
+    else if (weapon_id == WEP_CFELITE)      CSQC_CFEliteEquip();
+    else if (weapon_id == WEP_CFP228)       CSQC_CFP228Equip();
+    else if (weapon_id == WEP_CFMSG90)      CSQC_CFMsg90Equip();
+    else if (weapon_id == WEP_CFSG552)      CSQC_CFSG552Equip();
+    else if (weapon_id == WEP_CFSL8)        CSQC_CFSl8Equip();
+    else if (weapon_id == WEP_CFC4)         CSQC_CFC4Equip();
+    else if (weapon_id == WEP_CFM9)  CSQC_CFM9Equip();
+    else if (weapon_id == WEP_CFREVOLVER)     CSQC_CFRevolverEquip();
+    else if (weapon_id == WEP_CFBARRETT)        CSQC_CFBarrettEquip();
+    else if (weapon_id == WEP_CFPSG1)      CSQC_CFPSG1Equip();
+    else if (weapon_id == WEP_CFDDEAGLE)      CSQC_CFDdeagleEquip();
+    else if (weapon_id == WEP_CFSPAS12)     CSQC_CFSPAS12Equip();
+    else if (weapon_id == WEP_CFM700)  CSQC_CFM700Equip();
+    else if (weapon_id == WEP_CFM3)         CSQC_CFM3Equip();
+    else if (weapon_id == WEP_CFSCAR)      CSQC_CFScarEquip();
+    else if (weapon_id == WEP_CFMAUSER)      CSQC_CFMauserEquip();
+    else if (weapon_id == WEP_CFSVD)      CSQC_CFSVDEquip();
+
+    // Prime the muzzle-smoke offset AFTER the equip ran, so the bone path
+    // can key off the weapon_muzzle_bone the equip just set.
+    CSQC_PrimeMuzzleSmokeOffsets(weapon_id);
 };

@@ -11,7 +11,7 @@
 //  Sequence-driven GoldSrc viewmodel (v_winchester.mdl) — setting
 //  self.weaponframe = N plays sequence N as a whole and the engine
 //  animates it internally.  Same pattern as HDAK47 / CFFamas /
-//  CFAwp.  W_CFM3Frame does NOT step weaponframe per tick.
+//  CFBarrett.  W_CFM3Frame does NOT step weaponframe per tick.
 //
 //  Sequence layout (from v_winchester.mdl source .qc):
 //      0  idle_0    30 fps
@@ -33,7 +33,7 @@
 //  bug fix commit for why the single-variable approach corrupts
 //  state under the every-reconcile CSQC_WeaponEquip call.
 //
-//  SHELL-BY-SHELL RELOAD LIMITATION (same as cfxm1014): a single R
+//  SHELL-BY-SHELL RELOAD LIMITATION (same as cfspas12): a single R
 //  press loads exactly ONE shell.  To refill all 7 chambers the
 //  player must press R seven times.  Reload_1 inserts the shell
 //  (bulletin.wav); reload_2 caps the cycle (reload.wav pump).
@@ -59,7 +59,7 @@
 .float cfm3_draw_snd_played;
 .float cfm3_reload_snd_stage;
 .float cfm3_post_fire_pump_played;
-// Shell-by-shell reload state — same scheme as cfxm1014 (SPAS-12).
+// Shell-by-shell reload state — same scheme as cfspas12 (SPAS-12).
 // wep_anim_start is re-stamped at each phase transition so the
 // engine's frame1time rewinds and the looped reload_1 plays fresh
 // for each shell.
@@ -102,7 +102,7 @@ const float MAX_AMMO_CFM3          = 28;
 // --- Balance ---
 // Winchester reclassified as a single-bullet rifle (lever-action) —
 // routes through W_PenetratingHitscanShoot / CSQC_PredictedPenetratingImpact
-// like the CF rifles.  Tuning mirrors CFGALIL but heavier per-shot:
+// like the CF rifles.  Tuning mirrors CFSCAR but heavier per-shot:
 // slow cadence, higher close damage, longer falloff.
 const float CFM3_BASE_SPREAD           = 0.010;
 const float CFM3_MOVE_SPREAD           = 0.08;
@@ -193,7 +193,7 @@ float(float now) SH_CFM3TickState =
 };
 
 // Shell-by-shell reload driver — same shape as the SPAS-12's
-// SH_CFXM1014ReloadTick.  Phases:
+// SH_CFSPAS12ReloadTick.  Phases:
 //   0 = playing reload_0 (in-reload idle / pre-load)
 //   1 = playing reload_1 (shell insert, looped per shell)
 //   2 = playing reload_2 (pump close)
@@ -338,7 +338,7 @@ void(entity player) W_CFM3PickupCopy =
 
 // Single-bullet penetrating hitscan — Winchester runs the rifle path
 // (W_PenetratingHitscanShoot) since the reclassification.  Same shape
-// as CFGALIL / CFFAMAS so behaviour stays consistent across the CF
+// as CFSCAR / CFFAMAS so behaviour stays consistent across the CF
 // rifle line.
 void() W_CFM3Shoot =
 {
@@ -464,6 +464,7 @@ void() W_CFM3Frame =
 
 void() W_CFM3Equip =
 {
+    W_SetADSProfile(TRUE, "cl_ads_winchester", SCOPE_CLASS_NONE);
     W_StandardEquipSetup(CFM3_VIEWMODEL, CFM3_DISPLAY_NAME, CFM3_SEQ_DRAW,
         CFM3_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
     self.fire     = W_CFM3Fire;
@@ -699,6 +700,7 @@ void() CSQC_CFM3DropClear =
 
 void() CSQC_CFM3Equip =
 {
+    W_SetADSProfile(TRUE, "cl_ads_winchester", SCOPE_CLASS_NONE);
     self.weapon_name         = CFM3_DISPLAY_NAME;
     self.weapon_viewmodel    = CFM3_VIEWMODEL;
     self.weapon_worldmodel   = CFM3_WORLDMODEL;
@@ -732,7 +734,7 @@ void() CSQC_CFM3Equip =
     // this branch — predicted draw sound still fires.  Mid-RELOAD /
     // mid-FIRE reconciles also skip the stomp (avoiding the HDAK47
     // collapsed-tracker bug — see commit history).  Same shape as
-    // cffiveseven / cfawp / cfg3sg1.
+    // cfm9 / cfbarrett / cfpsg1.
     if (self.weaponstate != WS_DRAW
         && self.weaponstate != WS_RELOAD
         && self.weaponstate != WS_FIRE)

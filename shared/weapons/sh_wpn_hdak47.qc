@@ -229,6 +229,7 @@ void() W_HDAK47Frame =
 
 void() W_HDAK47Equip =
 {
+    W_SetADSProfile(TRUE, "cl_ads_hdak47", SCOPE_CLASS_NONE);
     W_StandardEquipSetup(HDAK47_VIEWMODEL, HDAK47_DISPLAY_NAME, HDAK47_SEQ_DRAW,
         HDAK47_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
     self.fire     = W_HDAK47Fire;
@@ -432,6 +433,7 @@ void() CSQC_HDAK47DropClear =
 
 void() CSQC_HDAK47Equip =
 {
+    W_SetADSProfile(TRUE, "cl_ads_hdak47", SCOPE_CLASS_NONE);
     self.weapon_name         = HDAK47_DISPLAY_NAME;
     self.weapon_viewmodel    = HDAK47_VIEWMODEL;
     self.weapon_worldmodel   = HDAK47_WORLDMODEL;

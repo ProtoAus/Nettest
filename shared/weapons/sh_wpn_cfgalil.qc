@@ -1,35 +1,35 @@
 // ============================================================
-//  shared/weapons/sh_wpn_cfgalil.qc  -  FN SCAR (CF series, galil slot)
+//  shared/weapons/sh_wpn_cfgalil.qc  -  Galil (CF series)
 //
 //  Slot  : SLOT_PRIMARY  (impulse 1 / key 1)
-//  Stats : 30-round magazine, 90 reserve, full-auto 5.56
+//  Stats : 35-round magazine, 90 reserve, full-auto rifle
 //  Fire  : lag-compensated penetrating hitscan, linear damage falloff
 //
-//  Sequence-driven GoldSrc viewmodel (v_scar.mdl).  Setting
+//  Sequence-driven GoldSrc viewmodel (v_galil.mdl).  Setting
 //  self.weaponframe = N plays sequence N as a whole and the engine
-//  animates it internally — same pattern as HDAK47 / CFFiveSeven /
-//  CFG3SG1.  W_CFGalilFrame does NOT step weaponframe per tick.
+//  animates it internally — same pattern as HDAK47 / CFM9 /
+//  CFPSG1 / CFScar.  W_CFGalilFrame does NOT step weaponframe per tick.
 //
-//  Sequence layout (from v_scar.mdl):
-//      0  idle_0    30 fps
-//      1  reload    34 fps  (clipout @ 2, clipin @ 44, reload @ 61)
-//      2  select    40 fps  (bback @ 16  — draw bolt back)
-//      3  prefire   30 fps  (shoot variant A — event 5001 "22")
-//      4  prefire   30 fps  (shoot variant B)
-//      5  prefire   30 fps  (shoot variant C)
+//  Sequence layout (from v_galil.mdl):
+//      0  idle      idle
+//      1  reload    34 fps  (clipout @ 0, clipin @ 33, reload @ 60)
+//      2  select    35 fps  (draw @ 8)
+//      3  shoot1            (shoot variant A)
+//      4  shoot2            (shoot variant B)
+//      5  shoot3            (shoot variant C)
 //
-//  The reload sequence's third event ("reload" at frame 61) is the
+//  The reload sequence's third event ("reload" at frame 60) is the
 //  final bolt-rack — we play reload.wav on CHAN_AUTO at that point.
 //  Three reload events total drive a 4-stage tracker (0..3).
 //
 //  Per-reload sound trackers use SEPARATE fields (.cfgalil_draw_snd_played
 //  and .cfgalil_reload_snd_stage) — NOT a single collapsed stage
-//  variable.  This is the CFFiveSeven / CFG3SG1 / CSUSP / CSAK47 pattern;
+//  variable.  This is the CFM9 / CFPSG1 / CSUSP / CSAK47 pattern;
 //  see the HDAK47 reload-sound bug fix commit for why the single-
 //  variable approach corrupts state under the every-reconcile
 //  CSQC_WeaponEquip call.
 //
-//  Muzzle is bone-attached via $attachment 0 "Bone01" (22.8 0 0) —
+//  Muzzle is bone-attached via $attachment 0 "Bone01" (36 0 0) —
 //  CSQC_ViewmodelAttachmentWorldPos resolves the world position each
 //  shot so the flash tracks the firing animation.  Static
 //  CSQC_MuzzleFlashAtWorld (NOT the *Animated frame-walked variant) per
@@ -56,50 +56,50 @@ const float CFGALIL_SEQ_SHOOT3  = 5;
 
 // --- Sound event timings (elapsed seconds from wep_anim_start) ---
 // Reload sequence @ 34 fps:
-//   clipout at frame  2 / 34 = 0.059s   — mag drops out
-//   clipin  at frame 44 / 34 = 1.294s   — fresh mag in
-//   reload  at frame 61 / 34 = 1.794s   — final bolt rack (reload.wav)
-// Select sequence @ 40 fps:
-//   bback   at frame 16 / 40 = 0.400s   — draw bolt back (bback.wav)
-const float CFGALIL_RELOAD_CLIPOUT_TIME  = 0.059;
-const float CFGALIL_RELOAD_CLIPIN_TIME   = 1.294;
-const float CFGALIL_RELOAD_FINAL_TIME    = 1.794;
-const float CFGALIL_DRAW_BBACK_TIME      = 0.400;
+//   clipout at frame  0 / 34 = 0.000s   — mag drops out
+//   clipin  at frame 33 / 34 = 0.970s   — fresh mag in
+//   reload  at frame 60 / 34 = 1.760s   — final bolt rack (reload.wav)
+// Select sequence @ 35 fps:
+//   draw    at frame  8 / 35 = 0.230s   — deploy (draw.wav)
+const float CFGALIL_RELOAD_CLIPOUT_TIME  = 0.000;
+const float CFGALIL_RELOAD_CLIPIN_TIME   = 0.970;
+const float CFGALIL_RELOAD_FINAL_TIME    = 1.760;
+const float CFGALIL_DRAW_BBACK_TIME      = 0.230;
 
 // Ammo applies right after clipin lands (mag visually seated).
-const float CFGALIL_RELOAD_APPLY_TIME    = 1.30;
+const float CFGALIL_RELOAD_APPLY_TIME    = 0.97;
 
 // --- Gameplay tuning ---
-const float CFGALIL_FIRE_DELAY        = 0.090;   // full-auto, ~666 RPM
+const float CFGALIL_FIRE_DELAY        = 0.0857;  // full-auto, ~700 RPM
 const float CFGALIL_DRYFIRE_DELAY     = 0.20;
 const float CFGALIL_FRAME_INTERVAL    = 0.05;    // state-machine tick rate
 
-const float MAX_MAG_CFGALIL           = 30;
+const float MAX_MAG_CFGALIL           = 35;
 const float MAX_AMMO_CFGALIL          = 90;
 
 // --- Balance ---
 const float CFGALIL_BASE_SPREAD          = 0.012;
 const float CFGALIL_MOVE_SPREAD          = 0.07;
 const float CFGALIL_FULL_SPREAD_SPEED    = 320;
-const float CFGALIL_CLOSE_DAMAGE         = 28;
-const float CFGALIL_MIN_DAMAGE           = 14;
-const float CFGALIL_DAMAGE_FALLOFF_RANGE = 4096;
+const float CFGALIL_CLOSE_DAMAGE         = 30;
+const float CFGALIL_MIN_DAMAGE           = 20;
+const float CFGALIL_DAMAGE_FALLOFF_RANGE = 2200;
 const float CFGALIL_KICK_PITCH    = 0.7;
 const float CFGALIL_KICK_VARIANCE = 0.35;
 const float CFGALIL_KICK_STRENGTH = 0.85;
 
-// Muzzle attachment — sourced from the v_scar.mdl's $attachment 0:
-//     $attachment 0 "Bone01" 22.8 0 0
+// Muzzle attachment — sourced from the v_galil.mdl's $attachment 0:
+//     $attachment 0 "Bone01" 36 0 0
 // Bone name + local-frame offset come straight from the .qc; if the
 // muzzle appears in the wrong spot, re-check those values in HLAM /
 // the model's .qc and update here, not in camera-local space.
 const string CFGALIL_MUZZLE_BONE   = "Bone01";
-#define CFGALIL_MUZZLE_OFFSET ('22.8 0 0')
+#define CFGALIL_MUZZLE_OFFSET ('36 0 0')
 
 const string CFGALIL_VIEWMODEL    = "models/weapons/wpn_cfgalil/v_galil.mdl";
 const string CFGALIL_WORLDMODEL   = "models/weapons/wpn_cfgalil/w_galil.mdl";
 const string CFGALIL_DEPLOY_SOUND = "";
-const string CFGALIL_DISPLAY_NAME = "FN SCAR";
+const string CFGALIL_DISPLAY_NAME = "Galil";
 
 // ============================================================
 //  SHARED — sequence pick + state-machine helpers
@@ -203,7 +203,7 @@ void() W_CFGalilFrame =
     {
         if (elapsed >= CFGALIL_DRAW_BBACK_TIME && !self.cfgalil_draw_snd_played)
         {
-            sound(self, CHAN_AUTO, "sounds/weapons/wpn_cfgalil/reload.WAV", 1, ATTN_NORM);
+            sound(self, CHAN_AUTO, "sounds/weapons/wpn_cfgalil/draw.WAV", 1, ATTN_NORM);
             self.cfgalil_draw_snd_played = 1;
         }
     }
@@ -240,6 +240,7 @@ void() W_CFGalilFrame =
 
 void() W_CFGalilEquip =
 {
+    W_SetADSProfile(TRUE, "cl_ads_galil", SCOPE_CLASS_NONE);
     W_StandardEquipSetup(CFGALIL_VIEWMODEL, CFGALIL_DISPLAY_NAME, CFGALIL_SEQ_DRAW,
         CFGALIL_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
     self.fire     = W_CFGalilFire;
@@ -375,7 +376,7 @@ void() CSQC_PredictCFGalilCommand =
         {
             if (!csqc_cfgalil_draw_snd_played && elapsed >= CFGALIL_DRAW_BBACK_TIME)
             {
-                localsound("sounds/weapons/wpn_cfgalil/reload.WAV");
+                localsound("sounds/weapons/wpn_cfgalil/draw.WAV");
                 CSQC_RecordPredictedAutoSound();
                 csqc_cfgalil_draw_snd_played = 1;
             }
@@ -448,6 +449,7 @@ void() CSQC_CFGalilDropClear =
 
 void() CSQC_CFGalilEquip =
 {
+    W_SetADSProfile(TRUE, "cl_ads_galil", SCOPE_CLASS_NONE);
     self.weapon_name         = CFGALIL_DISPLAY_NAME;
     self.weapon_viewmodel    = CFGALIL_VIEWMODEL;
     self.weapon_worldmodel   = CFGALIL_WORLDMODEL;

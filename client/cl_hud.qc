@@ -632,28 +632,56 @@ string() HUD_GetAmmoString =
         return HUD_CacheAmmoString(WEP_CFVECTOR, 1, predicted_player.mag_cfvector, predicted_player.ammo_cfvector);
     else if (predicted_player.weapon == WEP_CFTYPE89)
         return HUD_CacheAmmoString(WEP_CFTYPE89, 1, predicted_player.mag_cftype89, predicted_player.ammo_cftype89);
-    else if (predicted_player.weapon == WEP_CFFIVESEVEN)
-        return HUD_CacheAmmoString(WEP_CFFIVESEVEN, 1, predicted_player.mag_cffiveseven, predicted_player.ammo_cffiveseven);
-    else if (predicted_player.weapon == WEP_CFDEAGLE)
-        return HUD_CacheAmmoString(WEP_CFDEAGLE, 1, predicted_player.mag_cfdeagle, predicted_player.ammo_cfdeagle);
-    else if (predicted_player.weapon == WEP_CFAWP)
-        return HUD_CacheAmmoString(WEP_CFAWP, 1, predicted_player.mag_cfawp, predicted_player.ammo_cfawp);
-    else if (predicted_player.weapon == WEP_CFG3SG1)
-        return HUD_CacheAmmoString(WEP_CFG3SG1, 1, predicted_player.mag_cfg3sg1, predicted_player.ammo_cfg3sg1);
-    else if (predicted_player.weapon == WEP_CFELITE)
-        return HUD_CacheAmmoString(WEP_CFELITE, 1, predicted_player.mag_cfelite, predicted_player.ammo_cfelite);
-    else if (predicted_player.weapon == WEP_CFXM1014)
-        return HUD_CacheAmmoString(WEP_CFXM1014, 1, predicted_player.mag_cfxm1014, predicted_player.ammo_cfxm1014);
-    else if (predicted_player.weapon == WEP_CFSCOUTM700)
-        return HUD_CacheAmmoString(WEP_CFSCOUTM700, 1, predicted_player.mag_cfscoutm700, predicted_player.ammo_cfscoutm700);
-    else if (predicted_player.weapon == WEP_CFM3)
-        return HUD_CacheAmmoString(WEP_CFM3, 1, predicted_player.mag_cfm3, predicted_player.ammo_cfm3);
+    else if (predicted_player.weapon == WEP_CFUMP45)
+        return HUD_CacheAmmoString(WEP_CFUMP45, 1, predicted_player.mag_cfump45, predicted_player.ammo_cfump45);
+    else if (predicted_player.weapon == WEP_CFM249)
+        return HUD_CacheAmmoString(WEP_CFM249, 1, predicted_player.mag_cfm249, predicted_player.ammo_cfm249);
+    else if (predicted_player.weapon == WEP_CFAWM)
+        return HUD_CacheAmmoString(WEP_CFAWM, 1, predicted_player.mag_cfawm, predicted_player.ammo_cfawm);
+    else if (predicted_player.weapon == WEP_CFKS23)
+        return HUD_CacheAmmoString(WEP_CFKS23, 1, predicted_player.mag_cfks23, predicted_player.ammo_cfks23);
+    else if (predicted_player.weapon == WEP_CFM4)
+        return HUD_CacheAmmoString(WEP_CFM4, 1, predicted_player.mag_cfm4, predicted_player.ammo_cfm4);
+    else if (predicted_player.weapon == WEP_CFMK23)
+        return HUD_CacheAmmoString(WEP_CFMK23, 1, predicted_player.mag_cfmk23, predicted_player.ammo_cfmk23);
+    else if (predicted_player.weapon == WEP_CSUSP)
+        return HUD_CacheAmmoString(WEP_CSUSP, 1, predicted_player.mag_csusp, predicted_player.ammo_csusp);
     else if (predicted_player.weapon == WEP_CFGALIL)
         return HUD_CacheAmmoString(WEP_CFGALIL, 1, predicted_player.mag_cfgalil, predicted_player.ammo_cfgalil);
     else if (predicted_player.weapon == WEP_CFGLOCK)
         return HUD_CacheAmmoString(WEP_CFGLOCK, 1, predicted_player.mag_cfglock, predicted_player.ammo_cfglock);
-    else if (predicted_player.weapon == WEP_CFSG550)
-        return HUD_CacheAmmoString(WEP_CFSG550, 1, predicted_player.mag_cfsg550, predicted_player.ammo_cfsg550);
+    else if (predicted_player.weapon == WEP_CFELITE)
+        return HUD_CacheAmmoString(WEP_CFELITE, 1, predicted_player.mag_cfelite, predicted_player.ammo_cfelite);
+    else if (predicted_player.weapon == WEP_CFP228)
+        return HUD_CacheAmmoString(WEP_CFP228, 1, predicted_player.mag_cfp228, predicted_player.ammo_cfp228);
+    else if (predicted_player.weapon == WEP_CFMSG90)
+        return HUD_CacheAmmoString(WEP_CFMSG90, 1, predicted_player.mag_cfmsg90, predicted_player.ammo_cfmsg90);
+    else if (predicted_player.weapon == WEP_CFSG552)
+        return HUD_CacheAmmoString(WEP_CFSG552, 1, predicted_player.mag_cfsg552, predicted_player.ammo_cfsg552);
+    else if (predicted_player.weapon == WEP_CFSL8)
+        return HUD_CacheAmmoString(WEP_CFSL8, 1, predicted_player.mag_cfsl8, predicted_player.ammo_cfsl8);
+    else if (predicted_player.weapon == WEP_CFM9)
+        return HUD_CacheAmmoString(WEP_CFM9, 1, predicted_player.mag_cfm9, predicted_player.ammo_cfm9);
+    else if (predicted_player.weapon == WEP_CFREVOLVER)
+        return HUD_CacheAmmoString(WEP_CFREVOLVER, 1, predicted_player.mag_cfrevolver, predicted_player.ammo_cfrevolver);
+    else if (predicted_player.weapon == WEP_CFBARRETT)
+        return HUD_CacheAmmoString(WEP_CFBARRETT, 1, predicted_player.mag_cfbarrett, predicted_player.ammo_cfbarrett);
+    else if (predicted_player.weapon == WEP_CFPSG1)
+        return HUD_CacheAmmoString(WEP_CFPSG1, 1, predicted_player.mag_cfpsg1, predicted_player.ammo_cfpsg1);
+    else if (predicted_player.weapon == WEP_CFDDEAGLE)
+        return HUD_CacheAmmoString(WEP_CFDDEAGLE, 1, predicted_player.mag_cfddeagle, predicted_player.ammo_cfddeagle);
+    else if (predicted_player.weapon == WEP_CFSPAS12)
+        return HUD_CacheAmmoString(WEP_CFSPAS12, 1, predicted_player.mag_cfspas12, predicted_player.ammo_cfspas12);
+    else if (predicted_player.weapon == WEP_CFM700)
+        return HUD_CacheAmmoString(WEP_CFM700, 1, predicted_player.mag_cfm700, predicted_player.ammo_cfm700);
+    else if (predicted_player.weapon == WEP_CFM3)
+        return HUD_CacheAmmoString(WEP_CFM3, 1, predicted_player.mag_cfm3, predicted_player.ammo_cfm3);
+    else if (predicted_player.weapon == WEP_CFSCAR)
+        return HUD_CacheAmmoString(WEP_CFSCAR, 1, predicted_player.mag_cfscar, predicted_player.ammo_cfscar);
+    else if (predicted_player.weapon == WEP_CFMAUSER)
+        return HUD_CacheAmmoString(WEP_CFMAUSER, 1, predicted_player.mag_cfmauser, predicted_player.ammo_cfmauser);
+    else if (predicted_player.weapon == WEP_CFSVD)
+        return HUD_CacheAmmoString(WEP_CFSVD, 1, predicted_player.mag_cfsvd, predicted_player.ammo_cfsvd);
 
     return "";
 };

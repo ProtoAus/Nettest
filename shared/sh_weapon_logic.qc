@@ -280,31 +280,15 @@ float bh_shotgun_ric_played;
 // by adding to the weapon test.
 float() Weapon_IsADSActive =
 {
+    // ADS/scope eligibility comes from per-weapon fields set in each
+    // weapon's Equip (W_SetADSProfile) — no hardcoded WEP_* lists.
+    //  - weapon_ads_eligible: pose-ADS weapons that aim on +attack2.
+    //  - weapon_scope_class != NONE: CoD-scope weapons (snipers + scoped
+    //    rifles), gated on sv_codscopes for the gun-raise spread tighten.
     float is_ads_weapon = 0;
-    if (self.weapon == WEP_HDAK47 || self.weapon == WEP_AK47
-        || self.weapon == WEP_DEAGLE
-        || self.weapon == WEP_CFMAC10
-        || self.weapon == WEP_CFFAMAS
-        || self.weapon == WEP_CFFIVESEVEN
-        || self.weapon == WEP_CFDEAGLE
-        || self.weapon == WEP_CFELITE
-        || self.weapon == WEP_CFGALIL
-        || self.weapon == WEP_CFGLOCK
-        || self.weapon == WEP_CFXM1014
-        || self.weapon == WEP_CFM3
-        || self.weapon == WEP_CFMP5
-        || self.weapon == WEP_CFVECTOR
-        || self.weapon == WEP_CFTYPE89)
+    if (self.weapon_ads_eligible)
         is_ads_weapon = 1;
-    // sv_codscopes opts the sniper lineup into ADS-spread tightening
-    // for the gun-raise portion of the CoD scope sequence.  All snipers
-    // share this hook — bolt-action and semi-auto alike — even though
-    // PSG1 and SVD skip the post-fire scope-out (see cl_codscope.qc).
-    if ((self.weapon == WEP_SCOUT || self.weapon == WEP_CSAWP
-         || self.weapon == WEP_CFAWP || self.weapon == WEP_CFG3SG1
-         || self.weapon == WEP_CFSCOUTM700 || self.weapon == WEP_CFSG550
-         || self.weapon == WEP_CFAUG)
-        && PM_ReadMovevar("sv_codscopes", 0))
+    if (self.weapon_scope_class != SCOPE_CLASS_NONE && PM_ReadMovevar("sv_codscopes", 0))
         is_ads_weapon = 1;
     if (!is_ads_weapon)
         return 0;

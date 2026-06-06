@@ -203,6 +203,7 @@ void() W_CFMac10Frame =
 
 void() W_CFMac10Equip =
 {
+    W_SetADSProfile(TRUE, "cl_ads_mac10", SCOPE_CLASS_NONE);
     W_StandardEquipSetup(CFMAC10_VIEWMODEL, CFMAC10_DISPLAY_NAME, CFMAC10_SEQ_SELECT,
         CFMAC10_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
     self.fire     = W_CFMac10Fire;
@@ -394,6 +395,7 @@ void() CSQC_CFMac10DropClear =
 
 void() CSQC_CFMac10Equip =
 {
+    W_SetADSProfile(TRUE, "cl_ads_mac10", SCOPE_CLASS_NONE);
     self.weapon_name         = CFMAC10_DISPLAY_NAME;
     self.weapon_viewmodel    = CFMAC10_VIEWMODEL;
     self.weapon_worldmodel   = CFMAC10_WORLDMODEL;

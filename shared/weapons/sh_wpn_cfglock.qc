@@ -1,24 +1,25 @@
 // ============================================================
-//  shared/weapons/sh_wpn_cfglock.qc  -  C96 Mauser (CF series)
+//  shared/weapons/sh_wpn_cfglock.qc  -  Glock 18 (CF series)
 //
 //  Slot  : SLOT_SECONDARY  (impulse 2 / key 2)
-//  Stats : 10-round magazine, 60 reserve, semi-auto 7.63x25 Mauser
+//  Stats : 20-round magazine, 120 reserve, full-auto 9mm
 //  Fire  : lag-compensated penetrating hitscan, linear damage falloff
 //
-//  Sequence-driven GoldSrc viewmodel (v_mauser.mdl).  Setting
+//  Sequence-driven GoldSrc viewmodel (v_glock18.mdl).  Setting
 //  self.weaponframe = N plays sequence N as a whole and the engine
-//  animates it internally — same pattern as CFFIVESEVEN / HDAK47 /
-//  CFAWP.  W_CFGlockFrame does NOT step weaponframe per tick.
+//  animates it internally — same pattern as CFM9 / HDAK47 /
+//  CFBARRETT.  W_CFGlockFrame does NOT step weaponframe per tick.
 //
-//  Sequence layout (from v_mauser.mdl source):
+//  Sequence layout (from v_glock18.mdl source):
 //      0  idle      30 fps
 //      3  shoot1    50 fps  (prefire — event 5001 "21")
 //      4  shoot2    50 fps  (prefire — event 5001 "21")
 //      5  shoot3    50 fps  (prefire — event 5001 "21")
-//      7  reload    42 fps  (clipout @ frame 1, clipin @ frame 18)
-//      8  select    30 fps  (select.wav at frame 2)
+//      6  shoot4    50 fps  (prefire — event 5001 "21")
+//      7  reload    30 fps  (bback / clipout / clipin / bcback events)
+//      8  select    30 fps  (select clack at frame 6)
 //
-//  Indices 1/2/6 in the source $sequence dump are duplicate idle /
+//  Indices 1/2 in the source $sequence dump are duplicate idle /
 //  variant frames the artist authored — we deliberately ignore those
 //  and only reference the indices listed above.  FTE does NOT
 //  auto-play $sequence event 5001 / 5004 markers; sound events are
@@ -26,15 +27,15 @@
 //
 //  Per-reload sound trackers use SEPARATE fields (NOT a single
 //  collapsed stage variable like the original HDAK47).  This is the
-//  CFFIVESEVEN / CFAWP pattern — see the HDAK47 reload-sound bug fix
+//  CFM9 / CFBARRETT pattern — see the HDAK47 reload-sound bug fix
 //  commit for why the single-variable approach corrupts state under
 //  the every-reconcile CSQC_WeaponEquip call.
 //
-//  Muzzle is bone-attached.  The bone name in v_mauser.mdl is
-//  literally "Box01" (3DS Max default — NOT "Bone01").  Local offset
-//  is zero — the bone pivot sits exactly at the muzzle tip.  If the
-//  flash appears off, re-check the model's $attachment dump and
-//  update HERE rather than overriding in camera-local space.
+//  Muzzle is bone-attached.  The bone name in v_glock18.mdl is
+//  "Bone01"; the local offset (8.2 -0.2 0.2) advances along the bone
+//  to the muzzle tip.  If the flash appears off, re-check the model's
+//  $attachment dump and update HERE rather than overriding in
+//  camera-local space.
 //
 //  This file is compiled by BOTH sv_progs and cl_progs.
 // ============================================================
@@ -52,86 +53,91 @@ const float CFGLOCK_SEQ_IDLE    = 0;
 const float CFGLOCK_SEQ_SHOOT1  = 3;
 const float CFGLOCK_SEQ_SHOOT2  = 4;
 const float CFGLOCK_SEQ_SHOOT3  = 5;
+const float CFGLOCK_SEQ_SHOOT4  = 6;
 const float CFGLOCK_SEQ_RELOAD  = 7;
 const float CFGLOCK_SEQ_DRAW    = 8;
 
 // --- Sound event timings (elapsed seconds from wep_anim_start) ---
-// Reload sequence @ 42 fps:
-//   clipout at frame  1 / 42 = 0.024s   — mag drops out
-//   clipin  at frame 18 / 42 = 0.429s   — fresh stripper-clip seated
+// Reload sequence @ 30 fps:
+//   bback   at frame  0 / 30 = 0.000s   — slide pulled back
+//   clipout at frame 16 / 30 = 0.533s   — empty mag drops out
+//   clipin  at frame 31 / 30 = 1.033s   — fresh mag seated
+//   bcback  at frame 52 / 30 = 1.733s   — slide released, chamber
 // Select sequence @ 30 fps:
-//   select  at frame  2 / 30 = 0.067s   — draw clack
-const float CFGLOCK_RELOAD_CLIPOUT_TIME  = 0.024;
-const float CFGLOCK_RELOAD_CLIPIN_TIME   = 0.429;
-const float CFGLOCK_DRAW_CLACK_TIME      = 0.067;
+//   select  at frame  6 / 30 = 0.200s   — draw clack
+const float CFGLOCK_RELOAD_BBACK_TIME    = 0.000;
+const float CFGLOCK_RELOAD_CLIPOUT_TIME  = 0.533;
+const float CFGLOCK_RELOAD_CLIPIN_TIME   = 1.033;
+const float CFGLOCK_RELOAD_BCBACK_TIME   = 1.733;
+const float CFGLOCK_DRAW_CLACK_TIME      = 0.200;
 
 // Ammo applies right after clipin lands (mag visually seated).
-const float CFGLOCK_RELOAD_APPLY_TIME    = 0.45;
+const float CFGLOCK_RELOAD_APPLY_TIME    = 1.05;
 
 // --- Gameplay tuning ---
-const float CFGLOCK_FIRE_DELAY        = 0.090;   // semi-auto, fast tap rate
+const float CFGLOCK_FIRE_DELAY        = 0.090;   // full-auto cyclic rate
 const float CFGLOCK_DRYFIRE_DELAY     = 0.20;
 const float CFGLOCK_FRAME_INTERVAL    = 0.05;    // state-machine tick rate
 
-const float MAX_MAG_CFGLOCK           = 10;
-const float MAX_AMMO_CFGLOCK          = 60;
+const float MAX_MAG_CFGLOCK           = 20;
+const float MAX_AMMO_CFGLOCK          = 120;
 
 // --- Balance ---
 const float CFGLOCK_BASE_SPREAD          = 0.011;
 const float CFGLOCK_MOVE_SPREAD          = 0.058;
 const float CFGLOCK_FULL_SPREAD_SPEED    = 320;
-const float CFGLOCK_CLOSE_DAMAGE         = 28;
+const float CFGLOCK_CLOSE_DAMAGE         = 25;
 const float CFGLOCK_MIN_DAMAGE           = 14;
-const float CFGLOCK_DAMAGE_FALLOFF_RANGE = 2048;
+const float CFGLOCK_DAMAGE_FALLOFF_RANGE = 1800;
 const float CFGLOCK_KICK_PITCH    = 0.65;
 const float CFGLOCK_KICK_VARIANCE = 0.35;
 const float CFGLOCK_KICK_STRENGTH = 0.75;
 
-// Muzzle attachment — bone-attached (HDAK47 pattern).  v_mauser.mdl
-// exposes the muzzle bone as literal "Box01" (3DS Max default name —
-// NOT "Bone01"); the local-frame offset is zero because the bone pivot
-// sits exactly at the muzzle tip.  Do NOT "fix" the bone string.
-const string CFGLOCK_MUZZLE_BONE   = "Box01";
-#define CFGLOCK_MUZZLE_OFFSET ('0 0 0')
+// Muzzle attachment — bone-attached (HDAK47 pattern).  v_glock18.mdl
+// exposes the muzzle bone as "Bone01"; the local-frame offset advances
+// along the bone to the muzzle tip.
+const string CFGLOCK_MUZZLE_BONE   = "Bone01";
+#define CFGLOCK_MUZZLE_OFFSET ('8.2 -0.2 0.2')
 
 const string CFGLOCK_VIEWMODEL    = "models/weapons/wpn_cfglock/v_glock18.mdl";
 const string CFGLOCK_WORLDMODEL   = "models/weapons/wpn_cfglock/w_glock18.mdl";
 const string CFGLOCK_DEPLOY_SOUND = "";
-const string CFGLOCK_DISPLAY_NAME = "C96 Mauser";
+const string CFGLOCK_DISPLAY_NAME = "Glock 18";
 
 // ============================================================
 //  SHARED — sequence pick + state-machine helpers
 // ============================================================
 
 // Deterministic shoot-sequence pick from wep_action_id so client and
-// server agree which of shoot1/2/3 plays for this shot.
+// server agree which of shoot1/2/3/4 plays for this shot.
 float() SH_CFGlockPickShootSeq =
 {
     float r = SH_SpreadHash(self.wep_action_id);
-    if (r < 0.34) return CFGLOCK_SEQ_SHOOT1;
-    if (r < 0.67) return CFGLOCK_SEQ_SHOOT2;
-    return CFGLOCK_SEQ_SHOOT3;
+    if (r < 0.25) return CFGLOCK_SEQ_SHOOT1;
+    if (r < 0.50) return CFGLOCK_SEQ_SHOOT2;
+    if (r < 0.75) return CFGLOCK_SEQ_SHOOT3;
+    return CFGLOCK_SEQ_SHOOT4;
 };
 
 float(float now) SH_CFGlockTickState =
 {
     return SH_StandardTickState(now, mag_cfglock, ammo_cfglock, MAX_MAG_CFGLOCK,
         SH_SeqDuration(CFGLOCK_VIEWMODEL, CFGLOCK_SEQ_DRAW,   1.0),
-        SH_SeqDuration(CFGLOCK_VIEWMODEL, self.weaponframe,    0.3),
-        SH_SeqDuration(CFGLOCK_VIEWMODEL, CFGLOCK_SEQ_RELOAD, 1.5),
+        SH_SeqDuration(CFGLOCK_VIEWMODEL, self.weaponframe,   0.3),
+        SH_SeqDuration(CFGLOCK_VIEWMODEL, CFGLOCK_SEQ_RELOAD, 1.9),
         CFGLOCK_RELOAD_APPLY_TIME);
 };
 
 float(float now) SH_CFGlockTryFire =
 {
-    // Semi-auto: must release +attack between shots.
-    return SH_StandardTryFireSemiAuto(now, mag_cfglock, CFGLOCK_FIRE_DELAY, CFGLOCK_DRYFIRE_DELAY);
+    // Full-auto: holding +attack keeps firing at the cyclic rate.
+    return SH_StandardTryFire(now, mag_cfglock, CFGLOCK_FIRE_DELAY, CFGLOCK_DRYFIRE_DELAY);
 };
 
 float(float now) SH_CFGlockTryReload =
 {
     return SH_StandardTryReload(now, mag_cfglock, ammo_cfglock, MAX_MAG_CFGLOCK,
-        SH_SeqDuration(CFGLOCK_VIEWMODEL, CFGLOCK_SEQ_RELOAD, 1.5));
+        SH_SeqDuration(CFGLOCK_VIEWMODEL, CFGLOCK_SEQ_RELOAD, 1.9));
 };
 
 // ============================================================
@@ -199,22 +205,32 @@ void() W_CFGlockFrame =
     {
         if (elapsed >= CFGLOCK_DRAW_CLACK_TIME && !self.cfglock_draw_snd_played)
         {
-            sound(self, CHAN_AUTO, "sounds/weapons/wpn_cfglock/draw.WAV", 1, ATTN_NORM);
+            sound(self, CHAN_AUTO, "sounds/weapons/wpn_cfglock/reload.WAV", 1, ATTN_NORM);
             self.cfglock_draw_snd_played = 1;
         }
     }
     else if (self.weaponstate == WS_RELOAD)
     {
-        if (elapsed >= CFGLOCK_RELOAD_CLIPOUT_TIME && self.cfglock_reload_snd_stage < 1)
+        if (elapsed >= CFGLOCK_RELOAD_BBACK_TIME && self.cfglock_reload_snd_stage < 1)
+        {
+            sound(self, CHAN_AUTO, "sounds/weapons/wpn_cfglock/bback.WAV", 1, ATTN_NORM);
+            self.cfglock_reload_snd_stage = 1;
+        }
+        if (elapsed >= CFGLOCK_RELOAD_CLIPOUT_TIME && self.cfglock_reload_snd_stage < 2)
         {
             sound(self, CHAN_AUTO, "sounds/weapons/wpn_cfglock/clipout.WAV", 1, ATTN_NORM);
             W_MagDropEffect(MAG_PISTOL_HL, '4 -4 -6', '0 -30 -20');
-            self.cfglock_reload_snd_stage = 1;
+            self.cfglock_reload_snd_stage = 2;
         }
-        if (elapsed >= CFGLOCK_RELOAD_CLIPIN_TIME && self.cfglock_reload_snd_stage < 2)
+        if (elapsed >= CFGLOCK_RELOAD_CLIPIN_TIME && self.cfglock_reload_snd_stage < 3)
         {
             sound(self, CHAN_AUTO, "sounds/weapons/wpn_cfglock/clipin.WAV", 1, ATTN_NORM);
-            self.cfglock_reload_snd_stage = 2;
+            self.cfglock_reload_snd_stage = 3;
+        }
+        if (elapsed >= CFGLOCK_RELOAD_BCBACK_TIME && self.cfglock_reload_snd_stage < 4)
+        {
+            sound(self, CHAN_AUTO, "sounds/weapons/wpn_cfglock/bcback.WAV", 1, ATTN_NORM);
+            self.cfglock_reload_snd_stage = 4;
         }
     }
 
@@ -229,6 +245,7 @@ void() W_CFGlockFrame =
 
 void() W_CFGlockEquip =
 {
+    W_SetADSProfile(TRUE, "cl_ads_glock", SCOPE_CLASS_NONE);
     W_StandardEquipSetup(CFGLOCK_VIEWMODEL, CFGLOCK_DISPLAY_NAME, CFGLOCK_SEQ_DRAW,
         CFGLOCK_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
     self.fire     = W_CFGlockFire;
@@ -363,25 +380,37 @@ void() CSQC_PredictCFGlockCommand =
         {
             if (!csqc_cfglock_draw_snd_played && elapsed >= CFGLOCK_DRAW_CLACK_TIME)
             {
-                localsound("sounds/weapons/wpn_cfglock/draw.WAV");
+                localsound("sounds/weapons/wpn_cfglock/reload.WAV");
                 CSQC_RecordPredictedAutoSound();
                 csqc_cfglock_draw_snd_played = 1;
             }
         }
         else if (self.weaponstate == WS_RELOAD)
         {
-            if (csqc_cfglock_reload_snd_stage < 1 && elapsed >= CFGLOCK_RELOAD_CLIPOUT_TIME)
+            if (csqc_cfglock_reload_snd_stage < 1 && elapsed >= CFGLOCK_RELOAD_BBACK_TIME)
+            {
+                localsound("sounds/weapons/wpn_cfglock/bback.WAV");
+                CSQC_RecordPredictedAutoSound();
+                csqc_cfglock_reload_snd_stage = 1;
+            }
+            if (csqc_cfglock_reload_snd_stage < 2 && elapsed >= CFGLOCK_RELOAD_CLIPOUT_TIME)
             {
                 localsound("sounds/weapons/wpn_cfglock/clipout.WAV");
                 CSQC_RecordPredictedAutoSound();
                 CSQC_SpawnMag("models/weapons/pistolmaghl.mdl", '4 -4 -6', '0 -30 -20', '4 8 8', '0 180 0', '0 90 90');
-                csqc_cfglock_reload_snd_stage = 1;
+                csqc_cfglock_reload_snd_stage = 2;
             }
-            if (csqc_cfglock_reload_snd_stage < 2 && elapsed >= CFGLOCK_RELOAD_CLIPIN_TIME)
+            if (csqc_cfglock_reload_snd_stage < 3 && elapsed >= CFGLOCK_RELOAD_CLIPIN_TIME)
             {
                 localsound("sounds/weapons/wpn_cfglock/clipin.WAV");
                 CSQC_RecordPredictedAutoSound();
-                csqc_cfglock_reload_snd_stage = 2;
+                csqc_cfglock_reload_snd_stage = 3;
+            }
+            if (csqc_cfglock_reload_snd_stage < 4 && elapsed >= CFGLOCK_RELOAD_BCBACK_TIME)
+            {
+                localsound("sounds/weapons/wpn_cfglock/bcback.WAV");
+                CSQC_RecordPredictedAutoSound();
+                csqc_cfglock_reload_snd_stage = 4;
             }
         }
     }
@@ -408,9 +437,10 @@ float(float elapsed) CSQC_CFGlockDisplayFrame =
     if (predicted_player.weaponstate == WS_FIRE)
     {
         r = SH_SpreadHash(predicted_player.wep_action_id);
-        if (r < 0.34) return CFGLOCK_SEQ_SHOOT1;
-        if (r < 0.67) return CFGLOCK_SEQ_SHOOT2;
-        return CFGLOCK_SEQ_SHOOT3;
+        if (r < 0.25) return CFGLOCK_SEQ_SHOOT1;
+        if (r < 0.50) return CFGLOCK_SEQ_SHOOT2;
+        if (r < 0.75) return CFGLOCK_SEQ_SHOOT3;
+        return CFGLOCK_SEQ_SHOOT4;
     }
     if (predicted_player.weaponstate == WS_RELOAD)
         return CFGLOCK_SEQ_RELOAD;
@@ -426,6 +456,7 @@ void() CSQC_CFGlockDropClear =
 
 void() CSQC_CFGlockEquip =
 {
+    W_SetADSProfile(TRUE, "cl_ads_glock", SCOPE_CLASS_NONE);
     self.weapon_name         = CFGLOCK_DISPLAY_NAME;
     self.weapon_viewmodel    = CFGLOCK_VIEWMODEL;
     self.weapon_worldmodel   = CFGLOCK_WORLDMODEL;

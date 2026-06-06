@@ -277,13 +277,14 @@ void() W_M4A1Frame =
 
 void() W_M4A1Equip =
 {
+    W_SetADSProfile(TRUE, "cl_ads_m4a1", SCOPE_CLASS_NONE);
     W_StandardEquipSetup(M4A1_VIEWMODEL, M4A1_DISPLAY_NAME, M4A1_DRAW_START,
         M4A1_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
     self.weaponmodel = SH_M4A1ViewModel();  // override: silencer-dependent
     self.fire     = W_M4A1Fire;
     self.reload   = W_M4A1Reload;
     self.wepframe = W_M4A1Frame;
-    self.altfire  = W_M4A1AltFire;
+    self.special  = W_M4A1AltFire;   // silencer toggle on weapon-special (impulse 7)
     self.shoot    = W_M4A1Shoot;
     W_SetCrosshairProfile(M4A1_BASE_SPREAD, M4A1_MOVE_SPREAD, M4A1_FULL_SPREAD_SPEED, 1.9, TRUE);
 };
@@ -410,15 +411,6 @@ void() CSQC_PredictM4A1Command =
         }
     }
 
-    // Try alt-fire (silencer toggle)
-    if (input_buttons & 4)
-    {
-        if (SH_M4A1TryAltFire(csqc_pred_time))
-        {
-            CSQC_MarkPendingWeaponAck();
-            csqc_m4a1_silencer_snd_played = FALSE;
-        }
-    }
 
     // Predicted reload sounds
     if (self.weaponstate == WS_RELOAD && !pm_suppress_sounds && self.wep_anim_start > 0)
@@ -482,8 +474,20 @@ void() CSQC_M4A1DropClear =
 	self.m4a1_silenced = 0;
 };
 
+// Weapon special (impulse 7) — silencer toggle, predicted client-side so
+// the viewmodel swap is responsive.  Dispatched from CSQC_PredictWeaponImpulse.
+void() CSQC_PredictM4A1Special =
+{
+    if (SH_M4A1TryAltFire(csqc_pred_time))
+    {
+        CSQC_MarkPendingWeaponAck();
+        csqc_m4a1_silencer_snd_played = FALSE;
+    }
+};
+
 void() CSQC_M4A1Equip =
 {
+    W_SetADSProfile(TRUE, "cl_ads_m4a1", SCOPE_CLASS_NONE);
 	self.weapon_name         = M4A1_DISPLAY_NAME;
 	self.weapon_viewmodel    = SH_M4A1ViewModel();
 	self.weapon_worldmodel   = M4A1_WORLDMODEL;

@@ -202,6 +202,7 @@ void() W_CFMp5Frame =
 
 void() W_CFMp5Equip =
 {
+    W_SetADSProfile(TRUE, "cl_ads_mp5", SCOPE_CLASS_NONE);
     W_StandardEquipSetup(CFMP5_VIEWMODEL, CFMP5_DISPLAY_NAME, CFMP5_SEQ_SELECT,
         CFMP5_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
     self.fire     = W_CFMp5Fire;
@@ -387,6 +388,7 @@ void() CSQC_CFMp5DropClear =
 
 void() CSQC_CFMp5Equip =
 {
+    W_SetADSProfile(TRUE, "cl_ads_mp5", SCOPE_CLASS_NONE);
     self.weapon_name         = CFMP5_DISPLAY_NAME;
     self.weapon_viewmodel    = CFMP5_VIEWMODEL;
     self.weapon_worldmodel   = CFMP5_WORLDMODEL;

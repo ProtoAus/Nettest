@@ -446,20 +446,34 @@ void(vector org, float weapon_id) SV_DebugSpawnWeaponId =
 	else if (weapon_id == WEP_CFAUG)          SV_DebugSpawnWeapon(org, weapon_cfaug);
 	else if (weapon_id == WEP_CFFAMAS)        SV_DebugSpawnWeapon(org, weapon_cffamas);
 	else if (weapon_id == WEP_CFMAC10)        SV_DebugSpawnWeapon(org, weapon_cfmac10);
-	else if (weapon_id == WEP_CFAWP)          SV_DebugSpawnWeapon(org, weapon_cfawp);
-	else if (weapon_id == WEP_CFG3SG1)        SV_DebugSpawnWeapon(org, weapon_cfg3sg1);
-	else if (weapon_id == WEP_CFXM1014)       SV_DebugSpawnWeapon(org, weapon_cfxm1014);
-	else if (weapon_id == WEP_CFSCOUTM700)    SV_DebugSpawnWeapon(org, weapon_cfscoutm700);
+	else if (weapon_id == WEP_CFBARRETT)          SV_DebugSpawnWeapon(org, weapon_cfbarrett);
+	else if (weapon_id == WEP_CFPSG1)        SV_DebugSpawnWeapon(org, weapon_cfpsg1);
+	else if (weapon_id == WEP_CFSPAS12)       SV_DebugSpawnWeapon(org, weapon_cfspas12);
+	else if (weapon_id == WEP_CFM700)    SV_DebugSpawnWeapon(org, weapon_cfm700);
 	else if (weapon_id == WEP_CFM3)           SV_DebugSpawnWeapon(org, weapon_cfm3);
-	else if (weapon_id == WEP_CFGALIL)        SV_DebugSpawnWeapon(org, weapon_cfgalil);
-	else if (weapon_id == WEP_CFSG550)        SV_DebugSpawnWeapon(org, weapon_cfsg550);
+	else if (weapon_id == WEP_CFSCAR)        SV_DebugSpawnWeapon(org, weapon_cfscar);
+	else if (weapon_id == WEP_CFSVD)        SV_DebugSpawnWeapon(org, weapon_cfsvd);
 	else if (weapon_id == WEP_CFMP5)          SV_DebugSpawnWeapon(org, weapon_cfmp5);
 	else if (weapon_id == WEP_CFVECTOR)       SV_DebugSpawnWeapon(org, weapon_cfvector);
 	else if (weapon_id == WEP_CFTYPE89)       SV_DebugSpawnWeapon(org, weapon_cftype89);
-	else if (weapon_id == WEP_CFFIVESEVEN)    SV_DebugSpawnWeapon(org, weapon_cffiveseven);
-	else if (weapon_id == WEP_CFDEAGLE)       SV_DebugSpawnWeapon(org, weapon_cfdeagle);
-	else if (weapon_id == WEP_CFELITE)        SV_DebugSpawnWeapon(org, weapon_cfelite);
+	else if (weapon_id == WEP_CFUMP45)        SV_DebugSpawnWeapon(org, weapon_cfump45);
+	else if (weapon_id == WEP_CFM249)         SV_DebugSpawnWeapon(org, weapon_cfm249);
+	else if (weapon_id == WEP_CFAWM)          SV_DebugSpawnWeapon(org, weapon_cfawm);
+	else if (weapon_id == WEP_CFKS23)         SV_DebugSpawnWeapon(org, weapon_cfks23);
+	else if (weapon_id == WEP_CFM4)           SV_DebugSpawnWeapon(org, weapon_cfm4);
+	else if (weapon_id == WEP_CFMK23)         SV_DebugSpawnWeapon(org, weapon_cfmk23);
+	else if (weapon_id == WEP_CSUSP)          SV_DebugSpawnWeapon(org, weapon_csusp);
+	else if (weapon_id == WEP_CFGALIL)        SV_DebugSpawnWeapon(org, weapon_cfgalil);
 	else if (weapon_id == WEP_CFGLOCK)        SV_DebugSpawnWeapon(org, weapon_cfglock);
+	else if (weapon_id == WEP_CFELITE)        SV_DebugSpawnWeapon(org, weapon_cfelite);
+	else if (weapon_id == WEP_CFP228)         SV_DebugSpawnWeapon(org, weapon_cfp228);
+	else if (weapon_id == WEP_CFMSG90)        SV_DebugSpawnWeapon(org, weapon_cfmsg90);
+	else if (weapon_id == WEP_CFSG552)        SV_DebugSpawnWeapon(org, weapon_cfsg552);
+	else if (weapon_id == WEP_CFSL8)          SV_DebugSpawnWeapon(org, weapon_cfsl8);
+	else if (weapon_id == WEP_CFM9)    SV_DebugSpawnWeapon(org, weapon_cfm9);
+	else if (weapon_id == WEP_CFREVOLVER)       SV_DebugSpawnWeapon(org, weapon_cfrevolver);
+	else if (weapon_id == WEP_CFDDEAGLE)        SV_DebugSpawnWeapon(org, weapon_cfddeagle);
+	else if (weapon_id == WEP_CFMAUSER)        SV_DebugSpawnWeapon(org, weapon_cfmauser);
 	else if (weapon_id == WEP_BUTTERFLY)      SV_DebugSpawnWeapon(org, weapon_butterfly);
 	else if (weapon_id == WEP_KATANA)         SV_DebugSpawnWeapon(org, weapon_katana);
 	else if (weapon_id == WEP_CFC4)           SV_DebugSpawnWeapon(org, weapon_cfc4);
@@ -859,6 +873,12 @@ void() SV_RunCommandContinuation =
 		input_buttons    = self.cmd_last_buttons;
 		input_angles     = self.cmd_last_angles;
 		input_timelength = tick;
+		// Mask off PM_BTN_GRAPPLE on synthesized ticks — without this an
+		// AFK / dropped-packet player whose last input had the grapple
+		// bind held would loop "still holding" forever and keep the rope
+		// live.  W_GrappleHeldTick (real ticks only) then sees the next
+		// real input as a falling edge and releases the hook.
+		input_buttons = input_buttons & ~PM_BTN_GRAPPLE;
 
 		if (round_phase == ROUND_PHASE_FREEZE)
 		{
@@ -907,6 +927,18 @@ void() PlayerPreThink =
 
 	CheckImpulses();
 	W_WeaponFrame();
+	// Grapple press-and-hold edge detect — rising edge of PM_BTN_GRAPPLE
+	// (+grapple / +button9) spawns the hook, falling edge releases it.
+	// Runs BEFORE PullTick so a falling-edge release in the same tick
+	// clears the hook before PullTick would re-assert grapple_rope_active.
+	W_GrappleHeldTick();
+	// Grappling-hook pull — additive force toward the anchor while the
+	// rope is attached; gravity still applies through MOVETYPE_WALK so the
+	// player swings under it.  No-op when no hook is out.
+	W_GrapplePullTick();
+	// Defuse poll — runs every server frame on every alive player; cheap
+	// single bit-test early-out when +use isn't held (see sh_wpn_cfc4.qc).
+	C4_TickDefuseInteraction(self);
 	makevectors(self.v_angle);
 	if (self.button2)
 		PlayerJump();
@@ -1995,40 +2027,40 @@ void() W_GiveStartingAmmo =
 		self.slot_primary_drop  = W_CFMac10Drop;
 		self.mag_cfmac10 = MAX_MAG_CFMAC10;     self.ammo_cfmac10 = MAX_AMMO_CFMAC10;
 		break;
-	case WEP_CFAWP:
-		self.slot_primary_equip = W_CFAwpEquip;
-		self.slot_primary_drop  = W_CFAwpDrop;
-		self.mag_cfawp = MAX_MAG_CFAWP;         self.ammo_cfawp = MAX_AMMO_CFAWP;
+	case WEP_CFBARRETT:
+		self.slot_primary_equip = W_CFBarrettEquip;
+		self.slot_primary_drop  = W_CFBarrettDrop;
+		self.mag_cfbarrett = MAX_MAG_CFBARRETT;         self.ammo_cfbarrett = MAX_AMMO_CFBARRETT;
 		break;
-	case WEP_CFG3SG1:
-		self.slot_primary_equip = W_CFG3SG1Equip;
-		self.slot_primary_drop  = W_CFG3SG1Drop;
-		self.mag_cfg3sg1 = MAX_MAG_CFG3SG1;     self.ammo_cfg3sg1 = MAX_AMMO_CFG3SG1;
+	case WEP_CFPSG1:
+		self.slot_primary_equip = W_CFPSG1Equip;
+		self.slot_primary_drop  = W_CFPSG1Drop;
+		self.mag_cfpsg1 = MAX_MAG_CFPSG1;     self.ammo_cfpsg1 = MAX_AMMO_CFPSG1;
 		break;
-	case WEP_CFXM1014:
-		self.slot_primary_equip = W_CFXM1014Equip;
-		self.slot_primary_drop  = W_CFXM1014Drop;
-		self.mag_cfxm1014 = MAX_MAG_CFXM1014;   self.ammo_cfxm1014 = MAX_AMMO_CFXM1014;
+	case WEP_CFSPAS12:
+		self.slot_primary_equip = W_CFSPAS12Equip;
+		self.slot_primary_drop  = W_CFSPAS12Drop;
+		self.mag_cfspas12 = MAX_MAG_CFSPAS12;   self.ammo_cfspas12 = MAX_AMMO_CFSPAS12;
 		break;
-	case WEP_CFSCOUTM700:
-		self.slot_primary_equip = W_CFScoutM700Equip;
-		self.slot_primary_drop  = W_CFScoutM700Drop;
-		self.mag_cfscoutm700 = MAX_MAG_CFSCOUTM700; self.ammo_cfscoutm700 = MAX_AMMO_CFSCOUTM700;
+	case WEP_CFM700:
+		self.slot_primary_equip = W_CFM700Equip;
+		self.slot_primary_drop  = W_CFM700Drop;
+		self.mag_cfm700 = MAX_MAG_CFM700; self.ammo_cfm700 = MAX_AMMO_CFM700;
 		break;
 	case WEP_CFM3:
 		self.slot_primary_equip = W_CFM3Equip;
 		self.slot_primary_drop  = W_CFM3Drop;
 		self.mag_cfm3 = MAX_MAG_CFM3;           self.ammo_cfm3 = MAX_AMMO_CFM3;
 		break;
-	case WEP_CFGALIL:
-		self.slot_primary_equip = W_CFGalilEquip;
-		self.slot_primary_drop  = W_CFGalilDrop;
-		self.mag_cfgalil = MAX_MAG_CFGALIL;     self.ammo_cfgalil = MAX_AMMO_CFGALIL;
+	case WEP_CFSCAR:
+		self.slot_primary_equip = W_CFScarEquip;
+		self.slot_primary_drop  = W_CFScarDrop;
+		self.mag_cfscar = MAX_MAG_CFSCAR;     self.ammo_cfscar = MAX_AMMO_CFSCAR;
 		break;
-	case WEP_CFSG550:
-		self.slot_primary_equip = W_CFSG550Equip;
-		self.slot_primary_drop  = W_CFSG550Drop;
-		self.mag_cfsg550 = MAX_MAG_CFSG550;     self.ammo_cfsg550 = MAX_AMMO_CFSG550;
+	case WEP_CFSVD:
+		self.slot_primary_equip = W_CFSVDEquip;
+		self.slot_primary_drop  = W_CFSVDDrop;
+		self.mag_cfsvd = MAX_MAG_CFSVD;     self.ammo_cfsvd = MAX_AMMO_CFSVD;
 		break;
 	case WEP_CFMP5:
 		self.slot_primary_equip = W_CFMp5Equip;
@@ -2044,6 +2076,56 @@ void() W_GiveStartingAmmo =
 		self.slot_primary_equip = W_CFType89Equip;
 		self.slot_primary_drop  = W_CFType89Drop;
 		self.mag_cftype89 = MAX_MAG_CFTYPE89;   self.ammo_cftype89 = MAX_AMMO_CFTYPE89;
+		break;
+	case WEP_CFUMP45:
+		self.slot_primary_equip = W_CFUmp45Equip;
+		self.slot_primary_drop  = W_CFUmp45Drop;
+		self.mag_cfump45 = MAX_MAG_CFUMP45;     self.ammo_cfump45 = MAX_AMMO_CFUMP45;
+		break;
+	case WEP_CFM249:
+		self.slot_primary_equip = W_CFM249Equip;
+		self.slot_primary_drop  = W_CFM249Drop;
+		self.mag_cfm249 = MAX_MAG_CFM249;       self.ammo_cfm249 = MAX_AMMO_CFM249;
+		break;
+	case WEP_CFAWM:
+		self.slot_primary_equip = W_CFAwmEquip;
+		self.slot_primary_drop  = W_CFAwmDrop;
+		self.mag_cfawm = MAX_MAG_CFAWM;         self.ammo_cfawm = MAX_AMMO_CFAWM;
+		break;
+	case WEP_CFKS23:
+		self.slot_primary_equip = W_CFKs23Equip;
+		self.slot_primary_drop  = W_CFKs23Drop;
+		self.mag_cfks23 = MAX_MAG_CFKS23;       self.ammo_cfks23 = MAX_AMMO_CFKS23;
+		break;
+	case WEP_CFM4:
+		self.slot_primary_equip = W_CFM4Equip;
+		self.slot_primary_drop  = W_CFM4Drop;
+		self.mag_cfm4 = MAX_MAG_CFM4;           self.ammo_cfm4 = MAX_AMMO_CFM4;
+		break;
+	case WEP_CFGALIL:
+		self.slot_primary_equip = W_CFGalilEquip;
+		self.slot_primary_drop  = W_CFGalilDrop;
+		self.mag_cfgalil = MAX_MAG_CFGALIL;     self.ammo_cfgalil = MAX_AMMO_CFGALIL;
+		break;
+	case WEP_CFELITE:
+		self.slot_primary_equip = W_CFEliteEquip;
+		self.slot_primary_drop  = W_CFEliteDrop;
+		self.mag_cfelite = MAX_MAG_CFELITE;     self.ammo_cfelite = MAX_AMMO_CFELITE;
+		break;
+	case WEP_CFMSG90:
+		self.slot_primary_equip = W_CFMsg90Equip;
+		self.slot_primary_drop  = W_CFMsg90Drop;
+		self.mag_cfmsg90 = MAX_MAG_CFMSG90;     self.ammo_cfmsg90 = MAX_AMMO_CFMSG90;
+		break;
+	case WEP_CFSG552:
+		self.slot_primary_equip = W_CFSG552Equip;
+		self.slot_primary_drop  = W_CFSG552Drop;
+		self.mag_cfsg552 = MAX_MAG_CFSG552;     self.ammo_cfsg552 = MAX_AMMO_CFSG552;
+		break;
+	case WEP_CFSL8:
+		self.slot_primary_equip = W_CFSl8Equip;
+		self.slot_primary_drop  = W_CFSl8Drop;
+		self.mag_cfsl8 = MAX_MAG_CFSL8;         self.ammo_cfsl8 = MAX_AMMO_CFSL8;
 		break;
 	default:
 		self.slot_primary = WEP_NONE;
@@ -2082,25 +2164,47 @@ void() W_GiveStartingAmmo =
 		self.slot_secondary_drop  = W_PistolDrop;
 		self.mag_pistol = MAX_MAG_PISTOL; self.ammo_pistol = MAX_AMMO_PISTOL;
 		break;
-	case WEP_CFFIVESEVEN:
-		self.slot_secondary_equip = W_CFFiveSevenEquip;
-		self.slot_secondary_drop  = W_CFFiveSevenDrop;
-		self.mag_cffiveseven = MAX_MAG_CFFIVESEVEN; self.ammo_cffiveseven = MAX_AMMO_CFFIVESEVEN;
+	case WEP_CFM9:
+		self.slot_secondary_equip = W_CFM9Equip;
+		self.slot_secondary_drop  = W_CFM9Drop;
+		self.mag_cfm9 = MAX_MAG_CFM9; self.ammo_cfm9 = MAX_AMMO_CFM9;
 		break;
-	case WEP_CFDEAGLE:
-		self.slot_secondary_equip = W_CFDeagleEquip;
-		self.slot_secondary_drop  = W_CFDeagleDrop;
-		self.mag_cfdeagle = MAX_MAG_CFDEAGLE; self.ammo_cfdeagle = MAX_AMMO_CFDEAGLE;
+	case WEP_CFREVOLVER:
+		self.slot_secondary_equip = W_CFRevolverEquip;
+		self.slot_secondary_drop  = W_CFRevolverDrop;
+		self.mag_cfrevolver = MAX_MAG_CFREVOLVER; self.ammo_cfrevolver = MAX_AMMO_CFREVOLVER;
 		break;
-	case WEP_CFELITE:
-		self.slot_secondary_equip = W_CFEliteEquip;
-		self.slot_secondary_drop  = W_CFEliteDrop;
-		self.mag_cfelite = MAX_MAG_CFELITE; self.ammo_cfelite = MAX_AMMO_CFELITE;
+	case WEP_CFDDEAGLE:
+		self.slot_secondary_equip = W_CFDdeagleEquip;
+		self.slot_secondary_drop  = W_CFDdeagleDrop;
+		self.mag_cfddeagle = MAX_MAG_CFDDEAGLE; self.ammo_cfddeagle = MAX_AMMO_CFDDEAGLE;
+		break;
+	case WEP_CFMAUSER:
+		self.slot_secondary_equip = W_CFMauserEquip;
+		self.slot_secondary_drop  = W_CFMauserDrop;
+		self.mag_cfmauser = MAX_MAG_CFMAUSER; self.ammo_cfmauser = MAX_AMMO_CFMAUSER;
+		break;
+	case WEP_CFMK23:
+		self.slot_secondary_equip = W_CFMk23Equip;
+		self.slot_secondary_drop  = W_CFMk23Drop;
+		self.mag_cfmk23 = MAX_MAG_CFMK23; self.ammo_cfmk23 = MAX_AMMO_CFMK23;
+		self.cfmk23_silenced = TRUE;
+		break;
+	case WEP_CSUSP:
+		self.slot_secondary_equip = W_CSUSPEquip;
+		self.slot_secondary_drop  = W_CSUSPDrop;
+		self.mag_csusp = MAX_MAG_CSUSP; self.ammo_csusp = MAX_AMMO_CSUSP;
+		self.csusp_silenced = 0;
 		break;
 	case WEP_CFGLOCK:
 		self.slot_secondary_equip = W_CFGlockEquip;
 		self.slot_secondary_drop  = W_CFGlockDrop;
 		self.mag_cfglock = MAX_MAG_CFGLOCK; self.ammo_cfglock = MAX_AMMO_CFGLOCK;
+		break;
+	case WEP_CFP228:
+		self.slot_secondary_equip = W_CFP228Equip;
+		self.slot_secondary_drop  = W_CFP228Drop;
+		self.mag_cfp228 = MAX_MAG_CFP228; self.ammo_cfp228 = MAX_AMMO_CFP228;
 		break;
 	default:
 		self.slot_secondary = WEP_NONE;
@@ -2315,6 +2419,13 @@ void() PlayerSpawn =
 	self.pm_oldbuttons   = 0;
 	self.pm_timecarry    = 0;
 	self.pm_step_time    = 0;
+	// Drop any live grapple from the previous life so it doesn't leak the
+	// projectile entity or rope state past respawn; clear the held-edge
+	// latch so the next life registers a fresh +grapple rising edge.
+	W_GrappleRelease(self);
+	self.grapple_rope_active  = 0;
+	self.grapple_anchor       = '0 0 0';
+	self.pm_grapple_held_last = 0;
 	self.flags           = self.flags & ~FL_DUCKING;
 	self.wep_action_id   = 0;
 	self.gauss_charge_state = 0;

@@ -218,6 +218,7 @@ void() W_CFAugFrame =
 
 void() W_CFAugEquip =
 {
+    W_SetADSProfile(FALSE, "cl_ads_aug", SCOPE_CLASS_RIFLE_LOWPOWER);
     W_StandardEquipSetup(CFAUG_VIEWMODEL, CFAUG_DISPLAY_NAME, CFAUG_SEQ_SELECT,
         CFAUG_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
     self.fire     = W_CFAugFire;
@@ -409,6 +410,7 @@ void() CSQC_CFAugDropClear =
 
 void() CSQC_CFAugEquip =
 {
+    W_SetADSProfile(FALSE, "cl_ads_aug", SCOPE_CLASS_RIFLE_LOWPOWER);
     self.weapon_name         = CFAUG_DISPLAY_NAME;
     self.weapon_viewmodel    = CFAUG_VIEWMODEL;
     self.weapon_worldmodel   = CFAUG_WORLDMODEL;

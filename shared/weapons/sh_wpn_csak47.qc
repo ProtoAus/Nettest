@@ -176,6 +176,7 @@ void() W_AK47Frame =
 
 void() W_AK47Equip =
 {
+    W_SetADSProfile(TRUE, "cl_ads_ak47", SCOPE_CLASS_NONE);
     W_StandardEquipSetup(AK47_VIEWMODEL, AK47_DISPLAY_NAME, AK47_DRAW_START,
         AK47_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
     self.fire     = W_AK47Fire;
@@ -344,6 +345,7 @@ void() CSQC_AK47DropClear =
 
 void() CSQC_AK47Equip =
 {
+    W_SetADSProfile(TRUE, "cl_ads_ak47", SCOPE_CLASS_NONE);
 	self.weapon_name         = AK47_DISPLAY_NAME;
 	self.weapon_viewmodel    = AK47_VIEWMODEL;
 	self.weapon_worldmodel   = AK47_WORLDMODEL;

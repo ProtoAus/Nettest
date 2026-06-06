@@ -1303,81 +1303,79 @@ void() precache_everything =
 	precache_sound("sounds/weapons/wpn_cfmac10/clipin.wav");
 	precache_sound("sounds/weapons/wpn_cfmac10/clipout.wav");
 
-	// CF Beretta M9 (cffiveseven) — note the sound folder name diverges
-	// from the model folder name (wpn_fiveseven vs wpn_cffiveseven).
-	precache_model("models/weapons/wpn_cffiveseven/v_fiveseven.mdl");
-	precache_model("models/weapons/wpn_cffiveseven/w_fiveseven.mdl");
-	precache_model("models/weapons/wpn_cffiveseven/p_fiveseven.mdl");
-	precache_sound("sounds/weapons/wpn_fiveseven/fire.WAV");
-	precache_sound("sounds/weapons/wpn_fiveseven/reload.WAV");
-	precache_sound("sounds/weapons/wpn_fiveseven/bback.WAV");
-	precache_sound("sounds/weapons/wpn_fiveseven/bcback.WAV");
-	precache_sound("sounds/weapons/wpn_fiveseven/clipin.WAV");
-	precache_sound("sounds/weapons/wpn_fiveseven/clipout.WAV");
+	// CF Beretta M9 (cfm9 QC) — models + sounds both under wpn_cfm9.
+	precache_model("models/weapons/wpn_cfm9/v_m9.mdl");
+	precache_model("models/weapons/wpn_cfm9/w_m9.mdl");
+	precache_model("models/weapons/wpn_cfm9/p_m9.mdl");
+	precache_sound("sounds/weapons/wpn_cfm9/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfm9/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfm9/bback.WAV");
+	precache_sound("sounds/weapons/wpn_cfm9/bcback.WAV");
+	precache_sound("sounds/weapons/wpn_cfm9/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfm9/clipout.WAV");
 
-	// CF Colt Anaconda (cfdeagle)
-	precache_model("models/weapons/wpn_cfdeagle/v_deagle.mdl");
-	precache_model("models/weapons/wpn_cfdeagle/w_deagle.mdl");
-	precache_model("models/weapons/wpn_cfdeagle/p_deagle.mdl");
-	precache_sound("sounds/weapons/wpn_cfdeagle/fire.WAV");
-	precache_sound("sounds/weapons/wpn_cfdeagle/reload1.WAV");
-	precache_sound("sounds/weapons/wpn_cfdeagle/reload2.WAV");
-	precache_sound("sounds/weapons/wpn_cfdeagle/clipin.WAV");
-	precache_sound("sounds/weapons/wpn_cfdeagle/clipout.WAV");
-	precache_sound("sounds/weapons/wpn_cfdeagle/bcback.WAV");
+	// CF Colt Anaconda (cfrevolver)
+	precache_model("models/weapons/wpn_cfrevolver/v_revolver.mdl");
+	precache_model("models/weapons/wpn_cfrevolver/w_revolver.mdl");
+	precache_model("models/weapons/wpn_cfrevolver/p_revolver.mdl");
+	precache_sound("sounds/weapons/wpn_cfrevolver/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfrevolver/reload1.WAV");
+	precache_sound("sounds/weapons/wpn_cfrevolver/reload2.WAV");
+	precache_sound("sounds/weapons/wpn_cfrevolver/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfrevolver/clipout.WAV");
+	precache_sound("sounds/weapons/wpn_cfrevolver/bcback.WAV");
 
-	// CF Barrett M82 (cfawp)
-	precache_model("models/weapons/wpn_cfawp/v_awp.mdl");
-	precache_model("models/weapons/wpn_cfawp/w_awp.mdl");
-	precache_model("models/weapons/wpn_cfawp/p_awp.mdl");
-	precache_sound("sounds/weapons/wpn_cfawp/fire.WAV");
-	precache_sound("sounds/weapons/wpn_cfawp/reload.WAV");
-	precache_sound("sounds/weapons/wpn_cfawp/clipin.WAV");
-	precache_sound("sounds/weapons/wpn_cfawp/clipout.WAV");
-	precache_sound("sounds/weapons/wpn_cfawp/draw.WAV");
+	// CF Barrett M82 (cfbarrett)
+	precache_model("models/weapons/wpn_cfbarrett/v_barrett.mdl");
+	precache_model("models/weapons/wpn_cfbarrett/w_barrett.mdl");
+	precache_model("models/weapons/wpn_cfbarrett/p_barrett.mdl");
+	precache_sound("sounds/weapons/wpn_cfbarrett/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfbarrett/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfbarrett/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfbarrett/clipout.WAV");
+	precache_sound("sounds/weapons/wpn_cfbarrett/draw.WAV");
 
-	// CF PSG1 (cfg3sg1)
-	precache_model("models/weapons/wpn_cfg3sg1/v_g3sg1.mdl");
-	precache_model("models/weapons/wpn_cfg3sg1/w_g3sg1.mdl");
-	precache_model("models/weapons/wpn_cfg3sg1/p_g3sg1.mdl");
-	precache_sound("sounds/weapons/wpn_cfg3sg1/fire.WAV");
-	precache_sound("sounds/weapons/wpn_cfg3sg1/reload.WAV");
-	precache_sound("sounds/weapons/wpn_cfg3sg1/clipin.WAV");
-	precache_sound("sounds/weapons/wpn_cfg3sg1/clipout.WAV");
-	precache_sound("sounds/weapons/wpn_cfg3sg1/cy.WAV");
-	precache_sound("sounds/weapons/wpn_cfg3sg1/bcy.WAV");
+	// CF PSG1 (cfpsg1)
+	precache_model("models/weapons/wpn_psg1/v_psg1.mdl");
+	precache_model("models/weapons/wpn_psg1/w_psg1.mdl");
+	precache_model("models/weapons/wpn_psg1/p_psg1.mdl");
+	precache_sound("sounds/weapons/wpn_psg1/fire.WAV");
+	precache_sound("sounds/weapons/wpn_psg1/reload.WAV");
+	precache_sound("sounds/weapons/wpn_psg1/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_psg1/clipout.WAV");
+	precache_sound("sounds/weapons/wpn_psg1/cy.WAV");
+	precache_sound("sounds/weapons/wpn_psg1/bcy.WAV");
 
-	// CF Dual Desert Deagle (cfelite)
-	precache_model("models/weapons/wpn_cfelite/v_elite.mdl");
-	precache_model("models/weapons/wpn_cfelite/w_elite.mdl");
-	precache_model("models/weapons/wpn_cfelite/p_elite.mdl");
-	precache_sound("sounds/weapons/wpn_cfelite/fire.WAV");
-	precache_sound("sounds/weapons/wpn_cfelite/reload.WAV");
-	precache_sound("sounds/weapons/wpn_cfelite/clipin.WAV");
-	precache_sound("sounds/weapons/wpn_cfelite/clipout.WAV");
-	precache_sound("sounds/weapons/wpn_cfelite/select.WAV");
+	// CF Dual Desert Deagle (cfddeagle)
+	precache_model("models/weapons/wpn_cfddeagle/v_ddeagle.mdl");
+	precache_model("models/weapons/wpn_cfddeagle/w_ddeagle.mdl");
+	precache_model("models/weapons/wpn_cfddeagle/p_ddeagle.mdl");
+	precache_sound("sounds/weapons/wpn_cfddeagle/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfddeagle/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfddeagle/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfddeagle/clipout.WAV");
+	precache_sound("sounds/weapons/wpn_cfddeagle/select.WAV");
 
-	// CF SPAS-12 (cfxm1014) — sounds available: clipin/clipout/draw/fire/reload (all .WAV).
+	// CF SPAS-12 (cfspas12) — sounds available: clipin/clipout/draw/fire/reload (all .WAV).
 	// In the QC: bulletin event → clipin.WAV (shell insert), bback event → clipout.WAV (pump back).
-	precache_model("models/weapons/wpn_cfxm1014/v_xm1014.mdl");
-	precache_model("models/weapons/wpn_cfxm1014/w_xm1014.mdl");
-	precache_model("models/weapons/wpn_cfxm1014/p_xm1014.mdl");
-	precache_sound("sounds/weapons/wpn_cfxm1014/fire.WAV");
-	precache_sound("sounds/weapons/wpn_cfxm1014/reload.WAV");
-	precache_sound("sounds/weapons/wpn_cfxm1014/clipin.WAV");
-	precache_sound("sounds/weapons/wpn_cfxm1014/clipout.WAV");
-	precache_sound("sounds/weapons/wpn_cfxm1014/draw.WAV");
+	precache_model("models/weapons/wpn_cfspas12/v_spas12.mdl");
+	precache_model("models/weapons/wpn_cfspas12/w_spas12.mdl");
+	precache_model("models/weapons/wpn_cfspas12/p_spas12.mdl");
+	precache_sound("sounds/weapons/wpn_cfspas12/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfspas12/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfspas12/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfspas12/clipout.WAV");
+	precache_sound("sounds/weapons/wpn_cfspas12/draw.WAV");
 
-	// CF Remington M700 (cfscout) — disk has v_scout/w_scout/p_scout
-	// (NOT v_m700) and draw.WAV (NOT select.wav).
-	precache_model("models/weapons/wpn_cfscout/v_scout.mdl");
-	precache_model("models/weapons/wpn_cfscout/w_scout.mdl");
-	precache_model("models/weapons/wpn_cfscout/p_scout.mdl");
-	precache_sound("sounds/weapons/wpn_cfscout/fire.WAV");
-	precache_sound("sounds/weapons/wpn_cfscout/reload.WAV");
-	precache_sound("sounds/weapons/wpn_cfscout/clipin.WAV");
-	precache_sound("sounds/weapons/wpn_cfscout/clipout.WAV");
-	precache_sound("sounds/weapons/wpn_cfscout/draw.WAV");
+	// CF Remington M700 (cfm700 QC) — assets under wpn_cfm700 (v_m700 etc.).
+	precache_model("models/weapons/wpn_cfm700/v_m700.mdl");
+	precache_model("models/weapons/wpn_cfm700/w_m700.mdl");
+	precache_model("models/weapons/wpn_cfm700/p_m700.mdl");
+	precache_sound("sounds/weapons/wpn_cfm700/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfm700/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfm700/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfm700/clipout.WAV");
+	precache_sound("sounds/weapons/wpn_cfm700/draw.WAV");
 
 	// CF Winchester (cfm3) — disk has v_m3/w_m3/p_m3 (NOT v_winchester)
 	// and bulletin.WAV/draw.WAV (no clipin/clipout for this gun).
@@ -1389,36 +1387,34 @@ void() precache_everything =
 	precache_sound("sounds/weapons/wpn_cfm3/bulletin.WAV");
 	precache_sound("sounds/weapons/wpn_cfm3/draw.WAV");
 
-	// CF FN SCAR (cfgalil) — disk has v_galil/w_galil/p_galil (NOT v_scar).
+	// CF FN SCAR (cfscar QC) — assets under wpn_cfscar (v_scar etc.).
 	// No bback.wav on disk — draw clack uses reload.WAV instead.
-	precache_model("models/weapons/wpn_cfgalil/v_galil.mdl");
-	precache_model("models/weapons/wpn_cfgalil/w_galil.mdl");
-	precache_model("models/weapons/wpn_cfgalil/p_galil.mdl");
-	precache_sound("sounds/weapons/wpn_cfgalil/fire.WAV");
-	precache_sound("sounds/weapons/wpn_cfgalil/reload.WAV");
-	precache_sound("sounds/weapons/wpn_cfgalil/clipin.WAV");
-	precache_sound("sounds/weapons/wpn_cfgalil/clipout.WAV");
+	precache_model("models/weapons/wpn_cfscar/v_scar.mdl");
+	precache_model("models/weapons/wpn_cfscar/w_scar.mdl");
+	precache_model("models/weapons/wpn_cfscar/p_scar.mdl");
+	precache_sound("sounds/weapons/wpn_cfscar/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfscar/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfscar/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfscar/clipout.WAV");
 
-	// CF C96 Mauser (cfglock) — disk has v_glock18 / w_glock18 / p_glock18
-	// (NOT v_mauser etc.) and draw.WAV (NOT select.wav).  No reload.WAV
-	// on disk for this weapon.
-	precache_model("models/weapons/wpn_cfglock/v_glock18.mdl");
-	precache_model("models/weapons/wpn_cfglock/w_glock18.mdl");
-	precache_model("models/weapons/wpn_cfglock/p_glock18.mdl");
-	precache_sound("sounds/weapons/wpn_cfglock/fire.WAV");
-	precache_sound("sounds/weapons/wpn_cfglock/clipin.WAV");
-	precache_sound("sounds/weapons/wpn_cfglock/clipout.WAV");
-	precache_sound("sounds/weapons/wpn_cfglock/draw.WAV");
+	// CF C96 Mauser (cfmauser QC) — assets under wpn_cfmauser (v_mauser etc.).
+	// draw.WAV used for deploy; no reload.WAV on disk for this weapon.
+	precache_model("models/weapons/wpn_cfmauser/v_mauser.mdl");
+	precache_model("models/weapons/wpn_cfmauser/w_mauser.mdl");
+	precache_model("models/weapons/wpn_cfmauser/p_mauser.mdl");
+	precache_sound("sounds/weapons/wpn_cfmauser/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfmauser/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfmauser/clipout.WAV");
+	precache_sound("sounds/weapons/wpn_cfmauser/draw.WAV");
 
-	// CF SVD Dragunov (cfsg550) — folder is wpn_cfsg550 (WITH cf prefix),
-	// model files are v_sg550/w_sg550/p_sg550 (NOT v_dragunov).
-	precache_model("models/weapons/wpn_cfsg550/v_sg550.mdl");
-	precache_model("models/weapons/wpn_cfsg550/w_sg550.mdl");
-	precache_model("models/weapons/wpn_cfsg550/p_sg550.mdl");
-	precache_sound("sounds/weapons/wpn_cfsg550/fire.WAV");
-	precache_sound("sounds/weapons/wpn_cfsg550/reload.WAV");
-	precache_sound("sounds/weapons/wpn_cfsg550/clipin.WAV");
-	precache_sound("sounds/weapons/wpn_cfsg550/clipout.WAV");
+	// CF SVD Dragunov (cfsvd QC) — assets under wpn_cfsvd (v_svd etc.).
+	precache_model("models/weapons/wpn_cfsvd/v_svd.mdl");
+	precache_model("models/weapons/wpn_cfsvd/w_svd.mdl");
+	precache_model("models/weapons/wpn_cfsvd/p_svd.mdl");
+	precache_sound("sounds/weapons/wpn_cfsvd/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfsvd/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfsvd/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfsvd/clipout.WAV");
 
 	// CF MP5 (cfmp5) — sounds clipin/clipout/fire/reload (.WAV); NO draw,
 	// deploy reuses reload.WAV.  Bone-attached muzzle (Bone01).
@@ -1449,6 +1445,155 @@ void() precache_everything =
 	precache_sound("sounds/weapons/wpn_cftype89/draw.WAV");
 	precache_sound("sounds/weapons/wpn_cftype89/clipin.WAV");
 	precache_sound("sounds/weapons/wpn_cftype89/clipout.WAV");
+
+	// CF UMP45 (cfump45) — sounds clipin/clipout/draw/fire/reload (.WAV).
+	precache_model("models/weapons/wpn_cfump45/v_ump45.mdl");
+	precache_model("models/weapons/wpn_cfump45/w_ump45.mdl");
+	precache_model("models/weapons/wpn_cfump45/p_ump45.mdl");
+	precache_sound("sounds/weapons/wpn_cfump45/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfump45/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfump45/draw.WAV");
+	precache_sound("sounds/weapons/wpn_cfump45/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfump45/clipout.WAV");
+
+	// CF M249 (cfm249) — sounds clipin/clipout/draw/fire/reload (.WAV).
+	precache_model("models/weapons/wpn_cfm249/v_m249.mdl");
+	precache_model("models/weapons/wpn_cfm249/w_m249.mdl");
+	precache_model("models/weapons/wpn_cfm249/p_m249.mdl");
+	precache_sound("sounds/weapons/wpn_cfm249/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfm249/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfm249/draw.WAV");
+	precache_sound("sounds/weapons/wpn_cfm249/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfm249/clipout.WAV");
+
+	// CF AWM (cfawm) — sounds clipin/clipout/fire/reload (.WAV); NO draw,
+	// deploy + bolt cycle reuse reload.WAV.  Bolt-action sniper.
+	precache_model("models/weapons/wpn_cfawm/v_awm.mdl");
+	precache_model("models/weapons/wpn_cfawm/w_awm.mdl");
+	precache_model("models/weapons/wpn_cfawm/p_awm.mdl");
+	precache_sound("sounds/weapons/wpn_cfawm/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfawm/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfawm/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfawm/clipout.WAV");
+
+	// CF KS-23 (cfks23) — pump shotgun, shell-by-shell (clipin = shell insert,
+	// reload = pump, blowback = post-fire blow).  Has draw.WAV.
+	precache_model("models/weapons/wpn_cfks23/v_ks23.mdl");
+	precache_model("models/weapons/wpn_cfks23/w_ks23.mdl");
+	precache_model("models/weapons/wpn_cfks23/p_ks23.mdl");
+	precache_sound("sounds/weapons/wpn_cfks23/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfks23/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfks23/draw.WAV");
+	precache_sound("sounds/weapons/wpn_cfks23/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfks23/blowback.WAV");
+
+	// CF M4 Super 90 (cfm4) — auto shotgun, shell-by-shell (shellin = shell insert,
+	// reload = pump + deploy).  NO draw.WAV; deploy reuses reload.WAV.
+	precache_model("models/weapons/wpn_cfm4/v_m4.mdl");
+	precache_model("models/weapons/wpn_cfm4/w_m4.mdl");
+	precache_model("models/weapons/wpn_cfm4/p_m4.mdl");
+	precache_sound("sounds/weapons/wpn_cfm4/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfm4/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfm4/shellin.WAV");
+
+	// CF MK23 SOCOM (cfmk23) — semi-auto .45 pistol, silencer toggle (+attack2).
+	// draw = deploy + toggle click; 4-event reload.
+	precache_model("models/weapons/wpn_cfmk23/v_mk23.mdl");
+	precache_model("models/weapons/wpn_cfmk23/w_mk23.mdl");
+	precache_model("models/weapons/wpn_cfmk23/p_mk23.mdl");
+	precache_sound("sounds/weapons/wpn_cfmk23/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfmk23/fire-silenced.WAV");
+	precache_sound("sounds/weapons/wpn_cfmk23/draw.WAV");
+	precache_sound("sounds/weapons/wpn_cfmk23/blowback.WAV");
+	precache_sound("sounds/weapons/wpn_cfmk23/clipout.WAV");
+	precache_sound("sounds/weapons/wpn_cfmk23/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfmk23/delblowback.WAV");
+
+	// CS USP-45 (csusp) — semi-auto .45 pistol, silencer toggle (+attack2).
+	// Camera-local muzzle; lowercase .wav assets.  sfire = silenced fire,
+	// silenceron/off = toggle, slideback/sliderelease = slide rack.
+	precache_model("models/weapons/wpn_csusp/v_usp.mdl");
+	precache_model("models/weapons/wpn_csusp/w_usp.mdl");
+	precache_model("models/weapons/wpn_csusp/p_usp.mdl");
+	precache_sound("sounds/weapons/wpn_csusp/fire.wav");
+	precache_sound("sounds/weapons/wpn_csusp/sfire.wav");
+	precache_sound("sounds/weapons/wpn_csusp/clipin.wav");
+	precache_sound("sounds/weapons/wpn_csusp/clipout.wav");
+	precache_sound("sounds/weapons/wpn_csusp/silenceron.wav");
+	precache_sound("sounds/weapons/wpn_csusp/silenceroff.wav");
+	precache_sound("sounds/weapons/wpn_csusp/slideback.wav");
+	precache_sound("sounds/weapons/wpn_csusp/sliderelease.wav");
+
+	// CF Galil (cfgalil) — full-auto rifle.  Bone-attached muzzle (Bone01).
+	precache_model("models/weapons/wpn_cfgalil/v_galil.mdl");
+	precache_model("models/weapons/wpn_cfgalil/w_galil.mdl");
+	precache_model("models/weapons/wpn_cfgalil/p_galil.mdl");
+	precache_sound("sounds/weapons/wpn_cfgalil/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfgalil/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfgalil/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfgalil/clipout.WAV");
+	precache_sound("sounds/weapons/wpn_cfgalil/draw.WAV");
+
+	// CF Glock 18 (cfglock) — full-auto pistol.
+	precache_model("models/weapons/wpn_cfglock/v_glock18.mdl");
+	precache_model("models/weapons/wpn_cfglock/w_glock18.mdl");
+	precache_model("models/weapons/wpn_cfglock/p_glock18.mdl");
+	precache_sound("sounds/weapons/wpn_cfglock/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfglock/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfglock/bback.WAV");
+	precache_sound("sounds/weapons/wpn_cfglock/bcback.WAV");
+	precache_sound("sounds/weapons/wpn_cfglock/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfglock/clipout.WAV");
+
+	// CF Scout Elite (cfelite) — semi-auto scout sniper (CoD-scope).  Uses v_scout models.
+	precache_model("models/weapons/wpn_cfelite/v_scout.mdl");
+	precache_model("models/weapons/wpn_cfelite/w_scout.mdl");
+	precache_model("models/weapons/wpn_cfelite/p_scout.mdl");
+	precache_sound("sounds/weapons/wpn_cfelite/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfelite/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfelite/blowback.WAV");
+	precache_sound("sounds/weapons/wpn_cfelite/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfelite/clipout.WAV");
+	precache_sound("sounds/weapons/wpn_cfelite/draw.WAV");
+
+	// CF P228 (cfp228) — semi-auto pistol.
+	precache_model("models/weapons/wpn_cfp228/v_p228.mdl");
+	precache_model("models/weapons/wpn_cfp228/w_p228.mdl");
+	precache_model("models/weapons/wpn_cfp228/p_p228.mdl");
+	precache_sound("sounds/weapons/wpn_cfp228/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfp228/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfp228/bback.WAV");
+	precache_sound("sounds/weapons/wpn_cfp228/bcback.WAV");
+	precache_sound("sounds/weapons/wpn_cfp228/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfp228/clipout.WAV");
+
+	// CF MSG90 (cfmsg90) — semi-auto sniper (CoD-scope).
+	precache_model("models/weapons/wpn_cfmsg90/v_msg90.mdl");
+	precache_model("models/weapons/wpn_cfmsg90/w_msg90.mdl");
+	precache_model("models/weapons/wpn_cfmsg90/p_msg90.mdl");
+	precache_sound("sounds/weapons/wpn_cfmsg90/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfmsg90/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfmsg90/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfmsg90/clipout.WAV");
+	precache_sound("sounds/weapons/wpn_cfmsg90/draw.WAV");
+
+	// CF SG552 (cfsg552) — full-auto scoped assault rifle.  Deploy reuses reload.WAV.
+	precache_model("models/weapons/wpn_cfsg552/v_sg552.mdl");
+	precache_model("models/weapons/wpn_cfsg552/w_sg552.mdl");
+	precache_model("models/weapons/wpn_cfsg552/p_sg552.mdl");
+	precache_sound("sounds/weapons/wpn_cfsg552/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfsg552/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfsg552/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfsg552/clipout.WAV");
+
+	// CF SL8 (cfsl8) — semi-auto marksman rifle.  Deploy reuses reload.WAV.
+	precache_model("models/weapons/wpn_cfsl8/v_sl8.mdl");
+	precache_model("models/weapons/wpn_cfsl8/w_sl8.mdl");
+	precache_model("models/weapons/wpn_cfsl8/p_sl8.mdl");
+	precache_sound("sounds/weapons/wpn_cfsl8/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfsl8/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfsl8/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfsl8/clipout.WAV");
 
 	// CF C4
 	precache_model("models/weapons/wpn_cfc4/v_c4.mdl");

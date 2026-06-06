@@ -205,6 +205,7 @@ void() W_AWPFrame =
 
 void() W_AWPEquip =
 {
+    W_SetADSProfile(FALSE, "cl_ads_awp", SCOPE_CLASS_SNIPER_BOLT);
     W_StandardEquipSetup(AWP_VIEWMODEL, AWP_DISPLAY_NAME, AWP_DRAW_START,
         AWP_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
     self.fire     = W_AWPFire;
@@ -360,6 +361,7 @@ void() CSQC_AWPDropClear =
 
 void() CSQC_AWPEquip =
 {
+    W_SetADSProfile(FALSE, "cl_ads_awp", SCOPE_CLASS_SNIPER_BOLT);
 	self.weapon_name         = AWP_DISPLAY_NAME;
 	self.weapon_viewmodel    = AWP_VIEWMODEL;
 	self.weapon_worldmodel   = AWP_WORLDMODEL;

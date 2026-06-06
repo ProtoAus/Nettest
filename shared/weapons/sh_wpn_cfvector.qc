@@ -200,6 +200,7 @@ void() W_CFVectorFrame =
 
 void() W_CFVectorEquip =
 {
+    W_SetADSProfile(TRUE, "cl_ads_vector", SCOPE_CLASS_NONE);
     W_StandardEquipSetup(CFVECTOR_VIEWMODEL, CFVECTOR_DISPLAY_NAME, CFVECTOR_SEQ_SELECT,
         CFVECTOR_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
     self.fire     = W_CFVectorFire;
@@ -385,6 +386,7 @@ void() CSQC_CFVectorDropClear =
 
 void() CSQC_CFVectorEquip =
 {
+    W_SetADSProfile(TRUE, "cl_ads_vector", SCOPE_CLASS_NONE);
     self.weapon_name         = CFVECTOR_DISPLAY_NAME;
     self.weapon_viewmodel    = CFVECTOR_VIEWMODEL;
     self.weapon_worldmodel   = CFVECTOR_WORLDMODEL;

@@ -210,6 +210,7 @@ void() W_ScoutFrame =
 
 void() W_ScoutEquip =
 {
+    W_SetADSProfile(FALSE, "cl_ads_scout", SCOPE_CLASS_SNIPER_BOLT);
     W_StandardEquipSetup(SCOUT_VIEWMODEL, SCOUT_DISPLAY_NAME, SCOUT_DRAW_START,
         SCOUT_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
     self.fire     = W_ScoutFire;
@@ -391,6 +392,7 @@ void() CSQC_ScoutDropClear =
 
 void() CSQC_ScoutEquip =
 {
+    W_SetADSProfile(FALSE, "cl_ads_scout", SCOPE_CLASS_SNIPER_BOLT);
 	self.weapon_name         = SCOUT_DISPLAY_NAME;
 	self.weapon_viewmodel    = SCOUT_VIEWMODEL;
 	self.weapon_worldmodel   = SCOUT_WORLDMODEL;

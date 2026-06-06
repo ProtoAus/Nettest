@@ -4883,24 +4883,18 @@ done:
         // (catastrophic for full-auto CFAUG which bumps the timer every
         // shot).  Keep them draining.
         float fire_suppressed = time < self.pm_fire_suppress_until
-                             && self.weapon != WEP_CFG3SG1
-                             && self.weapon != WEP_CFSG550
-                             && self.weapon != WEP_CFAUG;
+                             && self.weapon_scope_class != SCOPE_CLASS_SNIPER_SEMI
+                             && self.weapon_scope_class != SCOPE_CLASS_RIFLE_LOWPOWER;
         // Cod-scope fallback whitelist mirrors CodScope_Eligible in
         // cl_codscope.qc — the CF* sniper family drives ADS through
         // csqc_codscope_phase, never touches zoomstage, so the
         // zoomstage-only branch above would miss them and stamina
         // would refill while +button4 is held.
+        // Legacy zoomstage snipers (e.g. G3SG1) keep draining via the
+        // zoomstage>0 clause; CoD-scope weapons via weapon_scope_class.
         float st_scope = !fire_suppressed
                       && ( (self.zoomstage > 0)
-                        || ((self.weapon == WEP_SCOUT
-                          || self.weapon == WEP_CSAWP
-                          || self.weapon == WEP_G3SG1
-                          || self.weapon == WEP_CFAWP
-                          || self.weapon == WEP_CFG3SG1
-                          || self.weapon == WEP_CFSCOUTM700
-                          || self.weapon == WEP_CFSG550
-                          || self.weapon == WEP_CFAUG)
+                        || (self.weapon_scope_class != SCOPE_CLASS_NONE
                             && PM_ReadMovevar("sv_codscopes", 0)
                             && (input_buttons & 4)) );
         float st_holdbreath = st_scope

@@ -34,6 +34,7 @@ const float WMF_WEP_HLRPG           = 24;
 const float WMF_WEP_HLGRENADE       = 25;
 const float WMF_WEP_HLGLOCK         = 26;
 const float WMF_WEP_HLEGON          = 27;
+const float WMF_WEP_CSUSP           = 28;
 const float WMF_WEP_HDAK47          = 29;
 const float WMF_WEP_SNOWBALL        = 30;
 const float WMF_WEP_SLINGSHOT       = 31;
@@ -48,21 +49,34 @@ const float WMF_WEP_CFMAC10         = 39;
 const float WMF_WEP_CFC4            = 40;
 const float WMF_WEP_MELEE           = 41;
 const float WMF_WEP_KATANA          = 42;
-const float WMF_WEP_CFFIVESEVEN     = 43;
-const float WMF_WEP_CFDEAGLE        = 44;
-const float WMF_WEP_CFAWP           = 45;
-const float WMF_WEP_CFG3SG1         = 46;
-const float WMF_WEP_CFELITE         = 47;
-const float WMF_WEP_CFXM1014        = 48;
-const float WMF_WEP_CFSCOUTM700     = 49;
+const float WMF_WEP_CFM9     = 43;
+const float WMF_WEP_CFREVOLVER        = 44;
+const float WMF_WEP_CFBARRETT           = 45;
+const float WMF_WEP_CFPSG1         = 46;
+const float WMF_WEP_CFDDEAGLE         = 47;
+const float WMF_WEP_CFSPAS12        = 48;
+const float WMF_WEP_CFM700     = 49;
 const float WMF_WEP_CFM3            = 50;
-const float WMF_WEP_CFGALIL         = 51;
-const float WMF_WEP_CFGLOCK         = 52;
-const float WMF_WEP_CFSG550         = 53;
+const float WMF_WEP_CFSCAR         = 51;
+const float WMF_WEP_CFMAUSER         = 52;
+const float WMF_WEP_CFSVD         = 53;
 const float WMF_WEP_CFMP5           = 54;
 const float WMF_WEP_CFVECTOR        = 55;
 const float WMF_WEP_CFTYPE89        = 56;
-const float WMF_WEP_LAST            = 56;
+const float WMF_WEP_CFUMP45         = 57;
+const float WMF_WEP_CFM249          = 58;
+const float WMF_WEP_CFAWM           = 59;
+const float WMF_WEP_CFKS23          = 60;
+const float WMF_WEP_CFM4            = 61;
+const float WMF_WEP_CFMK23          = 62;
+const float WMF_WEP_CFGALIL         = 63;
+const float WMF_WEP_CFGLOCK         = 64;
+const float WMF_WEP_CFELITE         = 65;
+const float WMF_WEP_CFP228          = 66;
+const float WMF_WEP_CFMSG90         = 67;
+const float WMF_WEP_CFSG552         = 68;
+const float WMF_WEP_CFSL8           = 69;
+const float WMF_WEP_LAST            = 69;
 
 const float WMF_SLOT_NONE      = 0;
 const float WMF_SLOT_PRIMARY   = 1;
@@ -175,6 +189,8 @@ float(float wep) WeaponManifest_Load =
     case WMF_WEP_SCOUT:
         WeaponManifest_Set(WMF_SLOT_PRIMARY, "Scout", "SCOUT", "Scout", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_SCOPE, 0.945, WMF_PANIM_CARBINE, "models/weapons/wpn_csscout/p_scout.mdl", 10, 30, 0, 20, 20); return TRUE;
 
+    case WMF_WEP_CSUSP:
+        WeaponManifest_Set(WMF_SLOT_SECONDARY, "USP", "USP-45", "USP", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.985, WMF_PANIM_ONEHAND, "models/weapons/wpn_csusp/p_usp.mdl", 12, 24, 0, 1, 27); return TRUE;
     case WMF_WEP_DEAGLE:
         WeaponManifest_Set(WMF_SLOT_SECONDARY, "Desert Eagle", "DEAGLE", "Desert Eagle", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.97, WMF_PANIM_ONEHAND, "models/weapons/wpn_csdeagle/p_deagle.mdl", 7, 35, 0, 2, 28); return TRUE;
     case WMF_WEP_GLOCK:
@@ -185,34 +201,60 @@ float(float wep) WeaponManifest_Load =
         WeaponManifest_Set(WMF_SLOT_SECONDARY, "HL Glock", "HL GLOCK", "HL Glock", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.985, WMF_PANIM_ONEHAND, "", 17, 250, 0, 5, 31); return TRUE;
     case WMF_WEP_PISTOL:
         WeaponManifest_Set(WMF_SLOT_SECONDARY, "9mm", "PISTOL", "9mm", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.985, WMF_PANIM_ONEHAND, "", 12, 24, 0, 6, 32); return TRUE;
-    case WMF_WEP_CFFIVESEVEN:
-        WeaponManifest_Set(WMF_SLOT_SECONDARY, "Beretta M9", "M9", "Beretta M9", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.985, WMF_PANIM_ONEHAND, "models/weapons/wpn_cffiveseven/p_fiveseven.mdl", 15, 90, 0, 7, 42); return TRUE;
-    case WMF_WEP_CFDEAGLE:
-        WeaponManifest_Set(WMF_SLOT_SECONDARY, "Colt Anaconda", "ANACONDA", "Colt Anaconda", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.97, WMF_PANIM_ONEHAND, "models/weapons/wpn_cfdeagle/p_deagle.mdl", 6, 36, 0, 8, 43); return TRUE;
-    case WMF_WEP_CFELITE:
-        WeaponManifest_Set(WMF_SLOT_SECONDARY, "Dual Desert Deagle", "ELITE", "Dual Desert Deagle", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.97, WMF_PANIM_ONEHAND, "models/weapons/wpn_cfelite/p_elite.mdl", 30, 90, 0, 9, 44); return TRUE;
-    case WMF_WEP_CFAWP:
-        WeaponManifest_Set(WMF_SLOT_PRIMARY, "Barrett M82", "BARRETT", "Barrett M82", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_SCOPE, 0.889, WMF_PANIM_RIFLE, "models/weapons/wpn_cfawp/p_awp.mdl", 10, 30, 0, 24, 45); return TRUE;
-    case WMF_WEP_CFG3SG1:
-        WeaponManifest_Set(WMF_SLOT_PRIMARY, "PSG1", "PSG1", "PSG1", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_SCOPE, 0.926, WMF_PANIM_RIFLE, "models/weapons/wpn_cfg3sg1/p_g3sg1.mdl", 20, 60, 0, 25, 46); return TRUE;
-    case WMF_WEP_CFXM1014:
-        WeaponManifest_Set(WMF_SLOT_PRIMARY, "SPAS-12", "SPAS-12", "SPAS-12", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.945, WMF_PANIM_SHOTGUN, "models/weapons/wpn_cfxm1014/p_xm1014.mdl", 8, 32, 0, 26, 47); return TRUE;
-    case WMF_WEP_CFSCOUTM700:
-        WeaponManifest_Set(WMF_SLOT_PRIMARY, "M700", "M700", "M700", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_SCOPE, 0.945, WMF_PANIM_RIFLE, "models/weapons/wpn_cfscout/p_scout.mdl", 5, 30, 0, 27, 48); return TRUE;
+    case WMF_WEP_CFM9:
+        WeaponManifest_Set(WMF_SLOT_SECONDARY, "Beretta M9", "M9", "Beretta M9", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.985, WMF_PANIM_ONEHAND, "models/weapons/wpn_cfm9/p_m9.mdl", 15, 90, 0, 7, 42); return TRUE;
+    case WMF_WEP_CFREVOLVER:
+        WeaponManifest_Set(WMF_SLOT_SECONDARY, "Colt Anaconda", "ANACONDA", "Colt Anaconda", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.97, WMF_PANIM_ONEHAND, "models/weapons/wpn_cfrevolver/p_revolver.mdl", 6, 36, 0, 8, 43); return TRUE;
+    case WMF_WEP_CFDDEAGLE:
+        WeaponManifest_Set(WMF_SLOT_SECONDARY, "Dual Desert Deagle", "ELITE", "Dual Desert Deagle", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.97, WMF_PANIM_ONEHAND, "models/weapons/wpn_cfddeagle/p_ddeagle.mdl", 30, 90, 0, 9, 44); return TRUE;
+    case WMF_WEP_CFBARRETT:
+        WeaponManifest_Set(WMF_SLOT_PRIMARY, "Barrett M82", "BARRETT", "Barrett M82", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_SCOPE, 0.889, WMF_PANIM_RIFLE, "models/weapons/wpn_cfbarrett/p_barrett.mdl", 10, 30, 0, 24, 45); return TRUE;
+    case WMF_WEP_CFPSG1:
+        WeaponManifest_Set(WMF_SLOT_PRIMARY, "PSG1", "PSG1", "PSG1", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_SCOPE, 0.926, WMF_PANIM_RIFLE, "models/weapons/wpn_psg1/p_psg1.mdl", 20, 60, 0, 25, 46); return TRUE;
+    case WMF_WEP_CFSPAS12:
+        WeaponManifest_Set(WMF_SLOT_PRIMARY, "SPAS-12", "SPAS-12", "SPAS-12", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.945, WMF_PANIM_SHOTGUN, "models/weapons/wpn_cfspas12/p_spas12.mdl", 8, 32, 0, 26, 47); return TRUE;
+    case WMF_WEP_CFM700:
+        WeaponManifest_Set(WMF_SLOT_PRIMARY, "M700", "M700", "M700", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_SCOPE, 0.945, WMF_PANIM_RIFLE, "models/weapons/wpn_cfm700/p_m700.mdl", 5, 30, 0, 27, 48); return TRUE;
     case WMF_WEP_CFM3:
         WeaponManifest_Set(WMF_SLOT_PRIMARY, "Winchester", "WINCHESTER", "Winchester", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.945, WMF_PANIM_RIFLE, "models/weapons/wpn_cfm3/p_m3.mdl", 7, 28, 0, 28, 49); return TRUE;
-    case WMF_WEP_CFGALIL:
-        WeaponManifest_Set(WMF_SLOT_PRIMARY, "FN SCAR", "SCAR", "FN SCAR", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.945, WMF_PANIM_RIFLE, "models/weapons/wpn_cfgalil/p_galil.mdl", 30, 90, 0, 29, 50); return TRUE;
-    case WMF_WEP_CFGLOCK:
-        WeaponManifest_Set(WMF_SLOT_SECONDARY, "C96 Mauser", "MAUSER", "C96 Mauser", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.985, WMF_PANIM_ONEHAND, "models/weapons/wpn_cfglock/p_glock18.mdl", 10, 60, 0, 10, 51); return TRUE;
-    case WMF_WEP_CFSG550:
-        WeaponManifest_Set(WMF_SLOT_PRIMARY, "SVD Dragunov", "DRAGUNOV", "SVD Dragunov", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_SCOPE, 0.926, WMF_PANIM_RIFLE, "models/weapons/wpn_cfsg550/p_sg550.mdl", 10, 30, 0, 30, 52); return TRUE;
+    case WMF_WEP_CFSCAR:
+        WeaponManifest_Set(WMF_SLOT_PRIMARY, "FN SCAR", "SCAR", "FN SCAR", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.945, WMF_PANIM_RIFLE, "models/weapons/wpn_cfscar/p_scar.mdl", 30, 90, 0, 29, 50); return TRUE;
+    case WMF_WEP_CFMAUSER:
+        WeaponManifest_Set(WMF_SLOT_SECONDARY, "C96 Mauser", "MAUSER", "C96 Mauser", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.985, WMF_PANIM_ONEHAND, "models/weapons/wpn_cfmauser/p_mauser.mdl", 10, 60, 0, 10, 51); return TRUE;
+    case WMF_WEP_CFSVD:
+        WeaponManifest_Set(WMF_SLOT_PRIMARY, "SVD Dragunov", "DRAGUNOV", "SVD Dragunov", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_SCOPE, 0.926, WMF_PANIM_RIFLE, "models/weapons/wpn_cfsvd/p_svd.mdl", 10, 30, 0, 30, 52); return TRUE;
     case WMF_WEP_CFMP5:
         WeaponManifest_Set(WMF_SLOT_PRIMARY, "CF MP5", "CF MP5", "CF MP5", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.96, WMF_PANIM_MP5, "models/weapons/wpn_cfmp5/p_mp5.mdl", 30, 120, 0, 31, 53); return TRUE;
     case WMF_WEP_CFVECTOR:
         WeaponManifest_Set(WMF_SLOT_PRIMARY, "Vector", "VECTOR", "Vector", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.96, WMF_PANIM_MP5, "models/weapons/wpn_cfvector/p_vector.mdl", 25, 125, 0, 32, 54); return TRUE;
     case WMF_WEP_CFTYPE89:
         WeaponManifest_Set(WMF_SLOT_PRIMARY, "Type 89", "TYPE89", "Type 89", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.945, WMF_PANIM_RIFLE, "models/weapons/wpn_cftype89/p_type89.mdl", 30, 90, 0, 33, 55); return TRUE;
+    case WMF_WEP_CFUMP45:
+        WeaponManifest_Set(WMF_SLOT_PRIMARY, "UMP45", "UMP45", "UMP45", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.96, WMF_PANIM_MP5, "models/weapons/wpn_cfump45/p_ump45.mdl", 25, 100, 0, 34, 56); return TRUE;
+    case WMF_WEP_CFM249:
+        WeaponManifest_Set(WMF_SLOT_PRIMARY, "M249", "M249", "M249", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.889, WMF_PANIM_PARA, "models/weapons/wpn_cfm249/p_m249.mdl", 100, 200, 0, 35, 57); return TRUE;
+    case WMF_WEP_CFAWM:
+        WeaponManifest_Set(WMF_SLOT_PRIMARY, "AWM", "AWM", "AWM", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_SCOPE, 0.889, WMF_PANIM_RIFLE, "models/weapons/wpn_cfawm/p_awm.mdl", 10, 30, 0, 36, 58); return TRUE;
+    case WMF_WEP_CFKS23:
+        WeaponManifest_Set(WMF_SLOT_PRIMARY, "KS-23", "KS-23", "KS-23", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.889, WMF_PANIM_SHOTGUN, "models/weapons/wpn_cfks23/p_ks23.mdl", 3, 12, 0, 37, 59); return TRUE;
+    case WMF_WEP_CFM4:
+        WeaponManifest_Set(WMF_SLOT_PRIMARY, "M4 Super 90", "M4SUPER90", "M4 Super 90", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.93, WMF_PANIM_SHOTGUN, "models/weapons/wpn_cfm4/p_m4.mdl", 7, 32, 0, 38, 60); return TRUE;
+    case WMF_WEP_CFMK23:
+        WeaponManifest_Set(WMF_SLOT_SECONDARY, "MK23 SOCOM", "MK23", "MK23 SOCOM", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.97, WMF_PANIM_ONEHAND, "models/weapons/wpn_cfmk23/p_mk23.mdl", 12, 36, 0, 11, 61); return TRUE;
+    case WMF_WEP_CFGALIL:
+        WeaponManifest_Set(WMF_SLOT_PRIMARY, "Galil", "GALIL", "Galil", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.945, WMF_PANIM_RIFLE, "models/weapons/wpn_cfgalil/p_galil.mdl", 35, 90, 0, 39, 62); return TRUE;
+    case WMF_WEP_CFGLOCK:
+        WeaponManifest_Set(WMF_SLOT_SECONDARY, "Glock 18", "GLOCK18", "Glock 18", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.985, WMF_PANIM_ONEHAND, "models/weapons/wpn_cfglock/p_glock18.mdl", 20, 120, 0, 12, 63); return TRUE;
+    case WMF_WEP_CFELITE:
+        WeaponManifest_Set(WMF_SLOT_PRIMARY, "Scout Elite", "SCOUTELITE", "Scout Elite", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_SCOPE, 0.889, WMF_PANIM_RIFLE, "models/weapons/wpn_cfelite/p_scout.mdl", 10, 30, 0, 40, 64); return TRUE;
+    case WMF_WEP_CFP228:
+        WeaponManifest_Set(WMF_SLOT_SECONDARY, "P228", "P228", "P228", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.985, WMF_PANIM_ONEHAND, "models/weapons/wpn_cfp228/p_p228.mdl", 13, 52, 0, 13, 65); return TRUE;
+    case WMF_WEP_CFMSG90:
+        WeaponManifest_Set(WMF_SLOT_PRIMARY, "MSG90", "MSG90", "MSG90", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_SCOPE, 0.889, WMF_PANIM_RIFLE, "models/weapons/wpn_cfmsg90/p_msg90.mdl", 10, 30, 0, 41, 66); return TRUE;
+    case WMF_WEP_CFSG552:
+        WeaponManifest_Set(WMF_SLOT_PRIMARY, "SG552", "SG552", "SG552", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.945, WMF_PANIM_RIFLE, "models/weapons/wpn_cfsg552/p_sg552.mdl", 30, 90, 0, 42, 67); return TRUE;
+    case WMF_WEP_CFSL8:
+        WeaponManifest_Set(WMF_SLOT_PRIMARY, "SL8", "SL8", "SL8", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.945, WMF_PANIM_RIFLE, "models/weapons/wpn_cfsl8/p_sl8.mdl", 20, 80, 0, 43, 68); return TRUE;
 
     case WMF_WEP_WRENCH:
         WeaponManifest_Set(WMF_SLOT_MELEE, "Wrench", "WRENCH", "Wrench", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG, 1.0, WMF_PANIM_KNIFE, "", 0, 0, 0, 1, 33); return TRUE;
@@ -277,6 +319,7 @@ string(string raw) WeaponManifest_NameKey =
 float(string key) WeaponManifest_IdFromKey =
 {
     if (key == "none" || key == "wepnone") return WMF_WEP_NONE;
+    if (key == "usp" || key == "csusp" || key == "wepcsusp" || key == "wpncsusp") return WMF_WEP_CSUSP;
     if (key == "deagle" || key == "deserteagle" || key == "wepdeagle") return WMF_WEP_DEAGLE;
     if (key == "knife" || key == "wepknife") return WMF_WEP_KNIFE;
     if (key == "ak47" || key == "wepak47") return WMF_WEP_AK47;
@@ -315,21 +358,34 @@ float(string key) WeaponManifest_IdFromKey =
     if (key == "aug" || key == "cfaug" || key == "wepcfaug" || key == "wpncfaug") return WMF_WEP_CFAUG;
     if (key == "famas" || key == "cffamas" || key == "wepcffamas" || key == "wpncffamas") return WMF_WEP_CFFAMAS;
     if (key == "mac10" || key == "cfmac10" || key == "wepcfmac10" || key == "wpncfmac10") return WMF_WEP_CFMAC10;
-    if (key == "m9" || key == "beretta" || key == "fiveseven" || key == "cffiveseven" || key == "wepcffiveseven" || key == "wpncffiveseven") return WMF_WEP_CFFIVESEVEN;
-    if (key == "anaconda" || key == "colt" || key == "cfdeagle" || key == "wepcfdeagle" || key == "wpncfdeagle") return WMF_WEP_CFDEAGLE;
-    if (key == "barrett" || key == "cfawp" || key == "wepcfawp" || key == "wpncfawp") return WMF_WEP_CFAWP;
-    if (key == "psg1" || key == "cfg3sg1" || key == "wepcfg3sg1" || key == "wpncfg3sg1") return WMF_WEP_CFG3SG1;
-    if (key == "elite" || key == "elites" || key == "duals" || key == "cfelite" || key == "wepcfelite" || key == "wpncfelite") return WMF_WEP_CFELITE;
-    if (key == "spas" || key == "spas12" || key == "xm1014" || key == "cfxm1014") return WMF_WEP_CFXM1014;
-    if (key == "m700" || key == "remington" || key == "cfscout" || key == "cfscoutm700") return WMF_WEP_CFSCOUTM700;
+    if (key == "m9" || key == "beretta" || key == "fiveseven" || key == "cfm9" || key == "wepcfm9" || key == "wpncfm9") return WMF_WEP_CFM9;
+    if (key == "anaconda" || key == "colt" || key == "cfrevolver" || key == "wepcfrevolver" || key == "wpncfrevolver") return WMF_WEP_CFREVOLVER;
+    if (key == "barrett" || key == "cfbarrett" || key == "wepcfbarrett" || key == "wpncfbarrett") return WMF_WEP_CFBARRETT;
+    if (key == "psg1" || key == "cfpsg1" || key == "wepcfpsg1" || key == "wpncfpsg1") return WMF_WEP_CFPSG1;
+    if (key == "ddeagle" || key == "elites" || key == "duals" || key == "cfddeagle" || key == "wepcfddeagle" || key == "wpncfddeagle") return WMF_WEP_CFDDEAGLE;
+    if (key == "spas" || key == "spas12" || key == "xm1014" || key == "cfspas12") return WMF_WEP_CFSPAS12;
+    if (key == "m700" || key == "remington" || key == "cfscout" || key == "cfm700") return WMF_WEP_CFM700;
     if (key == "winchester" || key == "cfm3") return WMF_WEP_CFM3;
-    if (key == "scar" || key == "fnscar" || key == "cfgalil") return WMF_WEP_CFGALIL;
-    if (key == "mauser" || key == "c96" || key == "cfglock") return WMF_WEP_CFGLOCK;
-    if (key == "dragunov" || key == "svd" || key == "cfsg550" || key == "sg550") return WMF_WEP_CFSG550;
+    if (key == "scar" || key == "fnscar" || key == "cfscar") return WMF_WEP_CFSCAR;
+    if (key == "mauser" || key == "c96" || key == "cfmauser") return WMF_WEP_CFMAUSER;
+    if (key == "dragunov" || key == "svd" || key == "cfsvd" || key == "sg550") return WMF_WEP_CFSVD;
     if (key == "c4" || key == "cfc4" || key == "wepcfc4" || key == "wpncfc4") return WMF_WEP_CFC4;
     if (key == "cfmp5" || key == "wepcfmp5" || key == "wpncfmp5") return WMF_WEP_CFMP5;
     if (key == "vector" || key == "cfvector" || key == "wepcfvector" || key == "wpncfvector") return WMF_WEP_CFVECTOR;
     if (key == "type89" || key == "cftype89" || key == "wepcftype89" || key == "wpncftype89") return WMF_WEP_CFTYPE89;
+    if (key == "ump45" || key == "ump" || key == "cfump45" || key == "wepcfump45" || key == "wpncfump45") return WMF_WEP_CFUMP45;
+    if (key == "cfm249" || key == "wepcfm249" || key == "wpncfm249") return WMF_WEP_CFM249;
+    if (key == "awm" || key == "cfawm" || key == "wepcfawm" || key == "wpncfawm") return WMF_WEP_CFAWM;
+    if (key == "ks23" || key == "cfks23" || key == "wepcfks23" || key == "wpncfks23") return WMF_WEP_CFKS23;
+    if (key == "m4" || key == "cfm4" || key == "m4super90" || key == "wepcfm4" || key == "wpncfm4") return WMF_WEP_CFM4;
+    if (key == "mk23" || key == "socom" || key == "cfmk23" || key == "wepcfmk23" || key == "wpncfmk23") return WMF_WEP_CFMK23;
+    if (key == "galil" || key == "cfgalil" || key == "wepcfgalil" || key == "wpncfgalil") return WMF_WEP_CFGALIL;
+    if (key == "glock18" || key == "cfglock" || key == "wepcfglock" || key == "wpncfglock") return WMF_WEP_CFGLOCK;
+    if (key == "elite" || key == "scoutelite" || key == "cfelite" || key == "wepcfelite" || key == "wpncfelite") return WMF_WEP_CFELITE;
+    if (key == "p228" || key == "cfp228" || key == "wepcfp228" || key == "wpncfp228") return WMF_WEP_CFP228;
+    if (key == "msg90" || key == "cfmsg90" || key == "wepcfmsg90" || key == "wpncfmsg90") return WMF_WEP_CFMSG90;
+    if (key == "sg552" || key == "cfsg552" || key == "wepcfsg552" || key == "wpncfsg552") return WMF_WEP_CFSG552;
+    if (key == "sl8" || key == "cfsl8" || key == "wepcfsl8" || key == "wpncfsl8") return WMF_WEP_CFSL8;
     return -1;
 };
 

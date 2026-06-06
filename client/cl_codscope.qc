@@ -183,13 +183,7 @@ float() CodScope_Eligible =
         return 0;
     if (!PM_ReadMovevar("sv_codscopes", 0))
         return 0;
-    if (predicted_player.weapon != WEP_SCOUT
-        && predicted_player.weapon != WEP_CSAWP
-        && predicted_player.weapon != WEP_CFAWP
-        && predicted_player.weapon != WEP_CFG3SG1
-        && predicted_player.weapon != WEP_CFSCOUTM700
-        && predicted_player.weapon != WEP_CFSG550
-        && predicted_player.weapon != WEP_CFAUG)
+    if (predicted_player.weapon_scope_class == SCOPE_CLASS_NONE)
         return 0;
     // Grapple / codladder are hard cancels — the lower envelope is
     // dropping the gun off-screen, scoping makes no sense.
@@ -326,11 +320,12 @@ void() CSQC_CodScope_UpdateState =
     // CFAUG is full-auto — exempt like the semi-auto snipers so the
     // post-fire ADS-drop never triggers and the scope stays up while
     // the player empties the mag.
+    // Only BOLT-action snipers block re-ADS after a shot (the bolt cycle
+    // drops the scope); semi-auto snipers + low-power scoped rifles stay
+    // scoped.  Driven by weapon_scope_class.
     csqc_codscope_fire_blocks_ads =
         (time < predicted_player.pm_fire_suppress_until
-         && predicted_player.weapon != WEP_CFG3SG1
-         && predicted_player.weapon != WEP_CFSG550
-         && predicted_player.weapon != WEP_CFAUG) ? 1 : 0;
+         && predicted_player.weapon_scope_class == SCOPE_CLASS_SNIPER_BOLT) ? 1 : 0;
 
     // Fire detection — any increment of wep_action_id while we're in
     // a "scope is forming or formed" phase forces a scope-out so the
@@ -344,9 +339,8 @@ void() CSQC_CodScope_UpdateState =
     // snipers (Scout, AWP, Barrett M82, Remington M700) still scope
     // out because the bolt-cycle animation visually races the scope.
     float fire_scopes_out = 1;
-    if (predicted_player.weapon == WEP_CFG3SG1
-        || predicted_player.weapon == WEP_CFSG550
-        || predicted_player.weapon == WEP_CFAUG)
+    if (predicted_player.weapon_scope_class == SCOPE_CLASS_SNIPER_SEMI
+        || predicted_player.weapon_scope_class == SCOPE_CLASS_RIFLE_LOWPOWER)
         fire_scopes_out = 0;
     float cur_action = predicted_player.wep_action_id;
     if (csqc_codscope_prev_action_id != 0
@@ -753,8 +747,9 @@ void() CSQC_CodScope_ApplyFOV =
     // remote servers' value is honoured.
     float zoom_fov = PM_ReadMovevar("sv_codscope_fov", 0);
     if (zoom_fov <= 0) zoom_fov = ZOOM_FOV_STAGE2;
-    // CFAUG carries a low-power optic — 20% wider FOV than the sniper baseline.
-    if (predicted_player.weapon == WEP_CFAUG)
+    // Scoped assault rifles (AUG / SG552 / SL8) carry a low-power optic —
+    // 20% wider FOV than the sniper baseline.  Driven by weapon_scope_class.
+    if (predicted_player.weapon_scope_class == SCOPE_CLASS_RIFLE_LOWPOWER)
         zoom_fov *= 1.2;
     setproperty(VF_AFOV, zoom_fov);
     setsensitivityscaler(zoom_fov / cvar("fov"));

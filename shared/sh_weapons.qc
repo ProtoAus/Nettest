@@ -66,6 +66,7 @@ const float WEP_HLRPG            = 24;
 const float WEP_HLGRENADE        = 25;
 const float WEP_HLGLOCK          = 26;
 const float WEP_HLEGON           = 27;
+const float WEP_CSUSP            = 28;   // CS 1.6 USP-45 (semi-auto .45 pistol, secondary, silencer toggle)
 // HD AK47 — sequence-driven GoldSrc viewmodel variant of WEP_AK47.
 // Shares the same ammo pool (mag_ak47 / ammo_ak47) and balance numbers,
 // only differs in v/w/p models + animation system.
@@ -90,23 +91,36 @@ const float WEP_MELEE            = 41;
 const float WEP_KATANA           = 42;
 // CF-series new weapons (Beretta M9, Colt Anaconda, Barrett, PSG1, Dual
 // Desert Deagle).  Each gets its own ammo pool — no sharing across
-// look-alike pairs (e.g. WEP_CFDEAGLE is independent from WEP_DEAGLE).
-const float WEP_CFFIVESEVEN      = 43;   // Beretta M9 (pistol, secondary)
-const float WEP_CFDEAGLE         = 44;   // Colt Anaconda (revolver, secondary)
-const float WEP_CFAWP            = 45;   // Barrett M82 (bolt-action sniper, primary, CoD-scope)
-const float WEP_CFG3SG1          = 46;   // PSG1 (semi-auto sniper, primary, CoD-scope, no scope-out on fire)
-const float WEP_CFELITE          = 47;   // Dual Desert Deagle (dual-wield pistol, secondary)
-const float WEP_CFXM1014         = 48;   // SPAS-12 (pump shotgun, primary)
-const float WEP_CFSCOUTM700      = 49;   // Remington M700 (bolt-action sniper, primary, CoD-scope)
+// look-alike pairs (e.g. WEP_CFREVOLVER is independent from WEP_DEAGLE).
+const float WEP_CFM9      = 43;   // Beretta M9 (pistol, secondary)
+const float WEP_CFREVOLVER         = 44;   // Colt Anaconda (revolver, secondary)
+const float WEP_CFBARRETT            = 45;   // Barrett M82 (bolt-action sniper, primary, CoD-scope)
+const float WEP_CFPSG1          = 46;   // PSG1 (semi-auto sniper, primary, CoD-scope, no scope-out on fire)
+const float WEP_CFDDEAGLE          = 47;   // Dual Desert Deagle (dual-wield pistol, secondary)
+const float WEP_CFSPAS12         = 48;   // SPAS-12 (pump shotgun, primary)
+const float WEP_CFM700      = 49;   // Remington M700 (bolt-action sniper, primary, CoD-scope)
 const float WEP_CFM3             = 50;   // Winchester (pump shotgun, primary)
-const float WEP_CFGALIL          = 51;   // FN SCAR (full-auto rifle, primary)
-const float WEP_CFGLOCK          = 52;   // C96 Mauser (semi-auto pistol, secondary)
-const float WEP_CFSG550          = 53;   // SVD Dragunov (semi-auto sniper, primary, CoD-scope, no scope-out on fire)
+const float WEP_CFSCAR          = 51;   // FN SCAR (full-auto rifle, primary)
+const float WEP_CFMAUSER          = 52;   // C96 Mauser (semi-auto pistol, secondary)
+const float WEP_CFSVD          = 53;   // SVD Dragunov (semi-auto sniper, primary, CoD-scope, no scope-out on fire)
 // CrossFire SMG/rifle additions — sequence-driven GoldSrc viewmodels,
 // full-auto, penetrating hitscan.  Each has its own ammo pool.
 const float WEP_CFMP5            = 54;   // CF MP5 (full-auto 9mm SMG, primary)
 const float WEP_CFVECTOR         = 55;   // CF Vector (full-auto .45 SMG, primary)
 const float WEP_CFTYPE89         = 56;   // CF Type 89 (full-auto 5.56 rifle, primary)
+const float WEP_CFUMP45          = 57;   // CF UMP45 (full-auto .45 SMG, primary)
+const float WEP_CFM249           = 58;   // CF M249 (full-auto 5.56 LMG, primary)
+const float WEP_CFAWM            = 59;   // CF AWM (bolt-action sniper, primary, CoD-scope)
+const float WEP_CFKS23           = 60;   // CF KS-23 (pump shotgun, primary, 3-shell big-bore)
+const float WEP_CFM4             = 61;   // CF M4 Super 90 (auto shotgun, primary, shell-by-shell)
+const float WEP_CFMK23           = 62;   // CF MK23 SOCOM (semi-auto .45 pistol, secondary, silencer toggle)
+const float WEP_CFGALIL          = 63;   // CF Galil (full-auto rifle, primary)
+const float WEP_CFGLOCK          = 64;   // CF Glock 18 (full-auto pistol, secondary)
+const float WEP_CFELITE          = 65;   // CF Scout Elite (semi-auto scout sniper, primary, CoD-scope)
+const float WEP_CFP228           = 66;   // CF P228 (semi-auto pistol, secondary)
+const float WEP_CFMSG90          = 67;   // CF MSG90 (semi-auto sniper, primary, CoD-scope)
+const float WEP_CFSG552          = 68;   // CF SG552 (full-auto scoped assault rifle, primary, CoD-scope like CFAUG)
+const float WEP_CFSL8            = 69;   // CF SL8 (semi-auto marksman rifle, primary)
 
 // --- Slot IDs ---
 const float SLOT_NONE      = 0;
@@ -606,6 +620,26 @@ float() Weapon_SpeedFactor_Smooth =
 // flash also describe the pivot point.
 .string weapon_muzzle_bone;
 .vector weapon_muzzle_offset;
+
+// --- ADS / scope classification (set per-weapon in Equip; read by the
+//     shared ADS + CoD-scope logic in sh_weapon_logic.qc / sh_pmove.qc /
+//     cl_viewfx.qc / cl_codscope.qc instead of hardcoded WEP_* lists). ---
+.float  weapon_ads_eligible;   // 1 => pose-ADS on +attack2 without codscope
+.string weapon_ads_prefix;     // cl_ads cvar prefix ("" => shared "cl_ads")
+.float  weapon_scope_class;    // SCOPE_CLASS_*
+const float SCOPE_CLASS_NONE           = 0;
+const float SCOPE_CLASS_SNIPER_BOLT    = 1;  // post-fire scope-out (scout/awp/awm/elite)
+const float SCOPE_CLASS_SNIPER_SEMI    = 2;  // stay scoped through fire (psg1/svd/msg90)
+const float SCOPE_CLASS_RIFLE_LOWPOWER = 3;  // 1.2x FOV, full-auto, stay scoped (aug/sg552/sl8)
+
+// Set a weapon's ADS/scope profile in one call from its Equip (both the
+// SSQC W_*Equip and the CSQC CSQC_*Equip).  Compiled both sides.
+void(float eligible, string prefix, float scope_class) W_SetADSProfile =
+{
+    self.weapon_ads_eligible = eligible;
+    self.weapon_ads_prefix   = prefix;
+    self.weapon_scope_class  = scope_class;
+};
 
 // --- World weapon entity fields ---
 .float weapon_slot;           // SLOT_* this pickup belongs to
