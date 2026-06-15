@@ -1,11 +1,13 @@
 
 //
-//  sv_ladder.qc  –  trigger_ladder entity
+//  sv_ladder.qc  –  func_ladder entity (the only ladder method)
 //
 //  Ladder detection and GoldSrc-style movement live in PM_PlayerMove
 //  (sh_pmove.qc) so both server physics and client-side prediction run
 //  identical code.  The entity is replicated to CSQC so the client list
-//  stays in sync with the server list.
+//  stays in sync with the server list.  (Internal identifiers keep the
+//  historical "trigger_ladder"/"ladder_trigger_list" names to avoid churn
+//  across the SSQC/CSQC wire format — only the legacy spawn alias is gone.)
 //
 
 // ---------------------------------------------------------------------------
@@ -109,13 +111,4 @@ void() func_ladder =
     self.pvsflags   = PVSF_NOREMOVE;
     self.SendEntity = trigger_ladder_SendEntity;
     self.SendFlags  = 1;
-};
-
-/*QUAKED trigger_ladder (.5 .5 .5) ?
-Backwards-compatibility alias for func_ladder.  Older maps in this mod
-were authored with this classname; new maps should prefer func_ladder.
-*/
-void() trigger_ladder =
-{
-    func_ladder();
 };

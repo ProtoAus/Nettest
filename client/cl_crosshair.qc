@@ -15,6 +15,19 @@ float  hud_xhair_cache_length_setting;
 float  hud_xhair_cache_thickness_setting;
 float  hud_xhair_cache_gap_setting;
 vector hud_xhair_cache_colour;
+float  hud_xhair_cache_next;        // 30Hz timer gate (was refreshed every frame)
+float  hud_xhair_cache_enabled;     // cl_crosshair
+float  hud_xhair_cache_sv_gate;     // serverkeyfloat("sv_crosshair", 1)
+float  hud_xhair_cache_weapongap;   // cl_crosshairweapongap
+float  hud_xhair_cache_dynamic;     // cl_crosshairdynamic
+
+// Single-entry memo for Weapon_HasCrosshair (a full WeaponManifest_Load switch).
+// Kept OUT of the 30Hz cache on purpose: a weapon switch must flip the crosshair
+// instantly (predicted), so this recomputes the moment predicted_player.weapon
+// changes, not on the slider-cache cadence.
+float  hud_xhair_memo_valid;
+float  hud_xhair_memo_wep;
+float  hud_xhair_memo_has;
 
 float HUD_CROSSHAIR_DEFAULT_LENGTH = 6;
 float HUD_CROSSHAIR_DEFAULT_THICKNESS = 1;
@@ -70,6 +83,15 @@ vector() HUD_GetCrosshairColour =
 
 void() HUD_RefreshCrosshairCache =
 {
+    // 30Hz timer gate — mirrors CSQC_ViewFX_RefreshCvarCache (cl_viewfx.qc).
+    // These are user sliders / server toggles; refreshing them at render rate
+    // (uncapped fps) was pure waste — cvar_string + tokenize() every frame.
+    if (cltime < hud_xhair_cache_next)
+        return;
+    float hz = cvar("cl_hud_fps");
+    if (hz <= 0) hz = 30;
+    hud_xhair_cache_next = cltime + 1.0 / hz;
+
     hud_xhair_cache_length_text     = cvar_string("cl_crosshairlength");
     hud_xhair_cache_thickness_text  = cvar_string("cl_crosshairthickness");
     hud_xhair_cache_gap_text        = cvar_string("cl_crosshairgap");
@@ -77,6 +99,11 @@ void() HUD_RefreshCrosshairCache =
     hud_xhair_cache_thickness_setting = cvar("cl_crosshairthickness");
     hud_xhair_cache_gap_setting     = cvar("cl_crosshairgap");
     hud_xhair_cache_colour          = HUD_GetCrosshairColour();
+    // Folded out of the per-frame draw path (was cvar/serverkeyfloat each frame).
+    hud_xhair_cache_enabled         = cvar("cl_crosshair");
+    hud_xhair_cache_sv_gate         = serverkeyfloat("sv_crosshair", 1);
+    hud_xhair_cache_weapongap       = cvar("cl_crosshairweapongap");
+    hud_xhair_cache_dynamic         = cvar("cl_crosshairdynamic");
 };
 
 // Returns the predicted player's horizontal speed this render frame.
@@ -152,8 +179,8 @@ float() HUD_GetCrosshairGapBonus =
     //                             spread_scale that previously leaked
     //                             through the weapon baseline.
     // Both off → gap_bonus = 0 (caller uses cl_crosshairgap unchanged).
-    float want_weapon_gap = cvar("cl_crosshairweapongap");
-    float want_dynamic    = cvar("cl_crosshairdynamic");
+    float want_weapon_gap = hud_xhair_cache_weapongap;
+    float want_dynamic    = hud_xhair_cache_dynamic;
 
     if (!want_weapon_gap)
         gap_scale = 1;
@@ -216,7 +243,13 @@ void(float zoomstage) HUD_DrawCrosshair =
     // so this flips instantly on a switch regardless of ping.  The stat
     // still arrives from the server but we intentionally ignore it here.
     float wep = predicted_player ? predicted_player.weapon : WEP_NONE;
-    scoped_weapon = !Weapon_HasCrosshair(wep);
+    if (!hud_xhair_memo_valid || wep != hud_xhair_memo_wep)
+    {
+        hud_xhair_memo_valid = TRUE;
+        hud_xhair_memo_wep = wep;
+        hud_xhair_memo_has = Weapon_HasCrosshair(wep);   // WeaponManifest_Load switch — only on weapon change
+    }
+    scoped_weapon = !hud_xhair_memo_has;
 
     if (zoomstage > 0 || scoped_weapon)
     {
@@ -229,7 +262,7 @@ void(float zoomstage) HUD_DrawCrosshair =
     // so existing clients keep their crosshair.  Keep the smoothed gap
     // reset above active so a previous-tick dynamic-spread state doesn't
     // bleed back in when re-enabled.
-    if (!cvar("cl_crosshair") || serverkeyfloat("sv_crosshair", 1) <= 0)
+    if (!hud_xhair_cache_enabled || hud_xhair_cache_sv_gate <= 0)
     {
         hud_crosshair_gap_bonus_smoothed = 0;
         return;

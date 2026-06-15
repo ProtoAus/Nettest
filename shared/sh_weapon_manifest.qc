@@ -76,7 +76,8 @@ const float WMF_WEP_CFP228          = 66;
 const float WMF_WEP_CFMSG90         = 67;
 const float WMF_WEP_CFSG552         = 68;
 const float WMF_WEP_CFSL8           = 69;
-const float WMF_WEP_LAST            = 69;
+const float WMF_WEP_GRAVITYGUN      = 70;
+const float WMF_WEP_LAST            = 70;
 
 const float WMF_SLOT_NONE      = 0;
 const float WMF_SLOT_PRIMARY   = 1;
@@ -100,6 +101,22 @@ const float WMF_PANIM_KNIFE   = 7;
 const float WMF_PANIM_GRENADE = 8;
 const float WMF_PANIM_AK47    = 9;
 
+// Buy-menu categories (the 8 buy-menu screens).  These SUBDIVIDE the 4
+// internal slots: SECONDARY -> HANDGUN, MELEE -> MELEE, UTILITY -> EQUIPMENT,
+// and PRIMARY is split into SHOTGUN/SMG/SNIPER/RIFLE/LMG.  Tagged explicitly
+// per weapon in WeaponManifest_LoadBuy (NOT derived from anim — unreliable:
+// AWP/G3SG1 use a rifle anim but are snipers).
+const float BUYCAT_NONE      = 0;   // not buyable (fists, C4, intrinsic)
+const float BUYCAT_HANDGUN   = 1;
+const float BUYCAT_SHOTGUN   = 2;
+const float BUYCAT_SMG       = 3;
+const float BUYCAT_SNIPER    = 4;
+const float BUYCAT_RIFLE     = 5;
+const float BUYCAT_LMG       = 6;
+const float BUYCAT_MELEE     = 7;
+const float BUYCAT_EQUIPMENT = 8;
+const float BUYCAT_LAST      = 8;
+
 float  weapon_manifest_slot;
 float  weapon_manifest_flags;
 float  weapon_manifest_speed;
@@ -113,6 +130,23 @@ string weapon_manifest_display;
 string weapon_manifest_hud;
 string weapon_manifest_menu;
 string weapon_manifest_pmodel;
+float  weapon_manifest_price;       // buy-menu cost (CS-style; pure data)
+float  weapon_manifest_buycat;      // BUYCAT_* — which buy screen it lives on
+float  weapon_manifest_buy_order;   // contiguous 1..N index within its buycat
+
+// Single-entry memo for WeaponManifest_Load.  The thin accessors below
+// (SpeedFactor / HasScope / HasCrosshair / ...) each re-call Load(wep) then read
+// ONE of the 13 globals, and Load is hit ~13x/frame + once per pmove step on an
+// UNCHANGED weapon — re-running the ~60-case switch + 13 stores every time.  A hit
+// leaves exactly the state a miss would (every Load fully repopulates all 13
+// globals via WeaponManifest_Set, and nothing else writes them), so returning the
+// cached result for the same wep is bit-identical.  Invalidated in
+// WeaponManifest_LoadBuy as defensive insurance (see note there).  A separate
+// "valid" flag (not a sentinel wep value) guarantees the first call always runs
+// the switch even if some wep id is negative.
+float  weapon_manifest_cached_valid;
+float  weapon_manifest_cached_wep;
+float  weapon_manifest_cached_ret;
 
 void(float slot, string display, string hud, string menu,
      float flags, float speed, float anim, string pmodel,
@@ -134,7 +168,7 @@ void(float slot, string display, string hud, string menu,
     weapon_manifest_debug_order = debug_order;
 };
 
-float(float wep) WeaponManifest_Load =
+float(float wep) WeaponManifest_LoadUncached =
 {
     switch (wep)
     {
@@ -255,6 +289,9 @@ float(float wep) WeaponManifest_Load =
         WeaponManifest_Set(WMF_SLOT_PRIMARY, "SG552", "SG552", "SG552", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.945, WMF_PANIM_RIFLE, "models/weapons/wpn_cfsg552/p_sg552.mdl", 30, 90, 0, 42, 67); return TRUE;
     case WMF_WEP_CFSL8:
         WeaponManifest_Set(WMF_SLOT_PRIMARY, "SL8", "SL8", "SL8", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.945, WMF_PANIM_RIFLE, "models/weapons/wpn_cfsl8/p_sl8.mdl", 20, 80, 0, 43, 68); return TRUE;
+    case WMF_WEP_GRAVITYGUN:
+        // Infinite energy (mag/ammo/aux all 0); no p-model (only v_/w_ provided).
+        WeaponManifest_Set(WMF_SLOT_PRIMARY, "Gravity Gun", "GRAVGUN", "Gravity Gun", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.945, WMF_PANIM_CARBINE, "", 0, 0, 0, 44, 69); return TRUE;
 
     case WMF_WEP_WRENCH:
         WeaponManifest_Set(WMF_SLOT_MELEE, "Wrench", "WRENCH", "Wrench", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG, 1.0, WMF_PANIM_KNIFE, "", 0, 0, 0, 1, 33); return TRUE;
@@ -304,6 +341,21 @@ float(float wep) WeaponManifest_Load =
 
     WeaponManifest_Set(WMF_SLOT_NONE, "?", "", "", 0, 1.0, WMF_PANIM_ONEHAND, "", 0, 0, 0, 0, 0);
     return FALSE;
+};
+
+// Memoized public entry — see the weapon_manifest_cached_wep note above.  On a hit
+// the 13 globals already hold this wep's data (only WeaponManifest_Set, called
+// solely from the uncached body, ever writes them), so we return without re-running
+// the switch.  Every accessor (and the per-step / per-frame HUD callers) goes
+// through here.
+float(float wep) WeaponManifest_Load =
+{
+    if (weapon_manifest_cached_valid && wep == weapon_manifest_cached_wep)
+        return weapon_manifest_cached_ret;
+    weapon_manifest_cached_valid = TRUE;
+    weapon_manifest_cached_wep = wep;
+    weapon_manifest_cached_ret = WeaponManifest_LoadUncached(wep);
+    return weapon_manifest_cached_ret;
 };
 
 string(string raw) WeaponManifest_NameKey =
@@ -386,6 +438,7 @@ float(string key) WeaponManifest_IdFromKey =
     if (key == "msg90" || key == "cfmsg90" || key == "wepcfmsg90" || key == "wpncfmsg90") return WMF_WEP_CFMSG90;
     if (key == "sg552" || key == "cfsg552" || key == "wepcfsg552" || key == "wpncfsg552") return WMF_WEP_CFSG552;
     if (key == "sl8" || key == "cfsl8" || key == "wepcfsl8" || key == "wpncfsl8") return WMF_WEP_CFSL8;
+    if (key == "gravitygun" || key == "gravgun" || key == "wpngravitygun") return WMF_WEP_GRAVITYGUN;
     return -1;
 };
 
@@ -565,4 +618,219 @@ float() WeaponManifest_DebugCount =
             count = count + 1;
     }
     return count;
+};
+
+// ============================================================
+//  Buy-menu data — price + category.  Kept in a PARALLEL switch so the
+//  existing ~69 WeaponManifest_Set call sites stay untouched.  buy_order
+//  must be CONTIGUOUS 1..N within each buycat (same no-gap rule as
+//  loadout_order — BuyCat_Weapon walks 1..N for an exact match; a gap
+//  leaves a blank buy-menu row).  Prices are CS 1.6-style defaults — pure
+//  data, tweak freely.  Fists / C4 / NONE fall through (not buyable).
+// ============================================================
+float(float wep) WeaponManifest_LoadBuy =
+{
+    // Defensive: LoadBuy writes only the 3 buy globals (not the 13 core), so it
+    // can't corrupt the Load memo today — but invalidate it anyway so any future
+    // code that writes a core global from a buy path can't be masked by a stale
+    // memo hit.  LoadBuy is buy-menu only (never per-frame in gameplay), so this
+    // costs the hot path nothing.
+    weapon_manifest_cached_valid = FALSE;
+    weapon_manifest_price = 0;
+    weapon_manifest_buycat = BUYCAT_NONE;
+    weapon_manifest_buy_order = 0;
+    switch (wep)
+    {
+    // --- Handguns (secondary slot) ---
+    case WMF_WEP_CSUSP:      weapon_manifest_price = 0;    weapon_manifest_buycat = BUYCAT_HANDGUN; weapon_manifest_buy_order = 1;  return TRUE;
+    case WMF_WEP_DEAGLE:     weapon_manifest_price = 700;  weapon_manifest_buycat = BUYCAT_HANDGUN; weapon_manifest_buy_order = 2;  return TRUE;
+    case WMF_WEP_GLOCK:      weapon_manifest_price = 0;    weapon_manifest_buycat = BUYCAT_HANDGUN; weapon_manifest_buy_order = 3;  return TRUE;
+    case WMF_WEP_357:        weapon_manifest_price = 600;  weapon_manifest_buycat = BUYCAT_HANDGUN; weapon_manifest_buy_order = 4;  return TRUE;
+    case WMF_WEP_HLGLOCK:    weapon_manifest_price = 300;  weapon_manifest_buycat = BUYCAT_HANDGUN; weapon_manifest_buy_order = 5;  return TRUE;
+    case WMF_WEP_PISTOL:     weapon_manifest_price = 200;  weapon_manifest_buycat = BUYCAT_HANDGUN; weapon_manifest_buy_order = 6;  return TRUE;
+    case WMF_WEP_CFM9:       weapon_manifest_price = 400;  weapon_manifest_buycat = BUYCAT_HANDGUN; weapon_manifest_buy_order = 7;  return TRUE;
+    case WMF_WEP_CFREVOLVER: weapon_manifest_price = 600;  weapon_manifest_buycat = BUYCAT_HANDGUN; weapon_manifest_buy_order = 8;  return TRUE;
+    case WMF_WEP_CFDDEAGLE:  weapon_manifest_price = 800;  weapon_manifest_buycat = BUYCAT_HANDGUN; weapon_manifest_buy_order = 9;  return TRUE;
+    case WMF_WEP_CFMAUSER:   weapon_manifest_price = 500;  weapon_manifest_buycat = BUYCAT_HANDGUN; weapon_manifest_buy_order = 10; return TRUE;
+    case WMF_WEP_CFMK23:     weapon_manifest_price = 500;  weapon_manifest_buycat = BUYCAT_HANDGUN; weapon_manifest_buy_order = 11; return TRUE;
+    case WMF_WEP_CFGLOCK:    weapon_manifest_price = 400;  weapon_manifest_buycat = BUYCAT_HANDGUN; weapon_manifest_buy_order = 12; return TRUE;
+    case WMF_WEP_CFP228:     weapon_manifest_price = 600;  weapon_manifest_buycat = BUYCAT_HANDGUN; weapon_manifest_buy_order = 13; return TRUE;
+
+    // --- Shotguns (primary subset) ---
+    case WMF_WEP_CSM3:        weapon_manifest_price = 1700; weapon_manifest_buycat = BUYCAT_SHOTGUN; weapon_manifest_buy_order = 1; return TRUE;
+    case WMF_WEP_FLAKSHOTGUN: weapon_manifest_price = 1700; weapon_manifest_buycat = BUYCAT_SHOTGUN; weapon_manifest_buy_order = 2; return TRUE;
+    case WMF_WEP_HLSHOTGUN:   weapon_manifest_price = 1700; weapon_manifest_buycat = BUYCAT_SHOTGUN; weapon_manifest_buy_order = 3; return TRUE;
+    case WMF_WEP_CFSPAS12:    weapon_manifest_price = 2000; weapon_manifest_buycat = BUYCAT_SHOTGUN; weapon_manifest_buy_order = 4; return TRUE;
+    case WMF_WEP_CFM3:        weapon_manifest_price = 1800; weapon_manifest_buycat = BUYCAT_SHOTGUN; weapon_manifest_buy_order = 5; return TRUE;
+    case WMF_WEP_CFKS23:      weapon_manifest_price = 2000; weapon_manifest_buycat = BUYCAT_SHOTGUN; weapon_manifest_buy_order = 6; return TRUE;
+    case WMF_WEP_CFM4:        weapon_manifest_price = 3000; weapon_manifest_buycat = BUYCAT_SHOTGUN; weapon_manifest_buy_order = 7; return TRUE;
+
+    // --- SMG (primary subset) ---
+    case WMF_WEP_CSMP5:    weapon_manifest_price = 1500; weapon_manifest_buycat = BUYCAT_SMG; weapon_manifest_buy_order = 1; return TRUE;
+    case WMF_WEP_HLSMG:    weapon_manifest_price = 1500; weapon_manifest_buycat = BUYCAT_SMG; weapon_manifest_buy_order = 2; return TRUE;
+    case WMF_WEP_CFMAC10:  weapon_manifest_price = 1050; weapon_manifest_buycat = BUYCAT_SMG; weapon_manifest_buy_order = 3; return TRUE;
+    case WMF_WEP_CFMP5:    weapon_manifest_price = 1500; weapon_manifest_buycat = BUYCAT_SMG; weapon_manifest_buy_order = 4; return TRUE;
+    case WMF_WEP_CFVECTOR: weapon_manifest_price = 2350; weapon_manifest_buycat = BUYCAT_SMG; weapon_manifest_buy_order = 5; return TRUE;
+    case WMF_WEP_CFUMP45:  weapon_manifest_price = 1050; weapon_manifest_buycat = BUYCAT_SMG; weapon_manifest_buy_order = 6; return TRUE;
+    case WMF_WEP_PAINTBALL:weapon_manifest_price = 1000; weapon_manifest_buycat = BUYCAT_SMG; weapon_manifest_buy_order = 7; return TRUE;
+
+    // --- Snipers (primary subset; Crossbow is here) ---
+    case WMF_WEP_CSAWP:    weapon_manifest_price = 4750; weapon_manifest_buycat = BUYCAT_SNIPER; weapon_manifest_buy_order = 1;  return TRUE;
+    case WMF_WEP_G3SG1:    weapon_manifest_price = 5000; weapon_manifest_buycat = BUYCAT_SNIPER; weapon_manifest_buy_order = 2;  return TRUE;
+    case WMF_WEP_DOD98K:   weapon_manifest_price = 2750; weapon_manifest_buycat = BUYCAT_SNIPER; weapon_manifest_buy_order = 3;  return TRUE;
+    case WMF_WEP_SCOUT:    weapon_manifest_price = 2750; weapon_manifest_buycat = BUYCAT_SNIPER; weapon_manifest_buy_order = 4;  return TRUE;
+    case WMF_WEP_CROSSBOW: weapon_manifest_price = 2000; weapon_manifest_buycat = BUYCAT_SNIPER; weapon_manifest_buy_order = 5;  return TRUE;
+    case WMF_WEP_CFBARRETT:weapon_manifest_price = 6000; weapon_manifest_buycat = BUYCAT_SNIPER; weapon_manifest_buy_order = 6;  return TRUE;
+    case WMF_WEP_CFPSG1:   weapon_manifest_price = 5000; weapon_manifest_buycat = BUYCAT_SNIPER; weapon_manifest_buy_order = 7;  return TRUE;
+    case WMF_WEP_CFM700:   weapon_manifest_price = 3000; weapon_manifest_buycat = BUYCAT_SNIPER; weapon_manifest_buy_order = 8;  return TRUE;
+    case WMF_WEP_CFSVD:    weapon_manifest_price = 4200; weapon_manifest_buycat = BUYCAT_SNIPER; weapon_manifest_buy_order = 9;  return TRUE;
+    case WMF_WEP_CFAWM:    weapon_manifest_price = 5500; weapon_manifest_buycat = BUYCAT_SNIPER; weapon_manifest_buy_order = 10; return TRUE;
+    case WMF_WEP_CFELITE:  weapon_manifest_price = 3000; weapon_manifest_buycat = BUYCAT_SNIPER; weapon_manifest_buy_order = 11; return TRUE;
+    case WMF_WEP_CFMSG90:  weapon_manifest_price = 5000; weapon_manifest_buycat = BUYCAT_SNIPER; weapon_manifest_buy_order = 12; return TRUE;
+
+    // --- Rifles (primary subset + exotic catch-all) ---
+    case WMF_WEP_AK47:     weapon_manifest_price = 2500; weapon_manifest_buycat = BUYCAT_RIFLE; weapon_manifest_buy_order = 1;  return TRUE;
+    case WMF_WEP_HDAK47:   weapon_manifest_price = 2500; weapon_manifest_buycat = BUYCAT_RIFLE; weapon_manifest_buy_order = 2;  return TRUE;
+    case WMF_WEP_M4A1:     weapon_manifest_price = 3100; weapon_manifest_buycat = BUYCAT_RIFLE; weapon_manifest_buy_order = 3;  return TRUE;
+    case WMF_WEP_CFAUG:    weapon_manifest_price = 3500; weapon_manifest_buycat = BUYCAT_RIFLE; weapon_manifest_buy_order = 4;  return TRUE;
+    case WMF_WEP_CFFAMAS:  weapon_manifest_price = 2250; weapon_manifest_buycat = BUYCAT_RIFLE; weapon_manifest_buy_order = 5;  return TRUE;
+    case WMF_WEP_CFSCAR:   weapon_manifest_price = 3000; weapon_manifest_buycat = BUYCAT_RIFLE; weapon_manifest_buy_order = 6;  return TRUE;
+    case WMF_WEP_CFTYPE89: weapon_manifest_price = 3000; weapon_manifest_buycat = BUYCAT_RIFLE; weapon_manifest_buy_order = 7;  return TRUE;
+    case WMF_WEP_CFGALIL:  weapon_manifest_price = 2000; weapon_manifest_buycat = BUYCAT_RIFLE; weapon_manifest_buy_order = 8;  return TRUE;
+    case WMF_WEP_CFSG552:  weapon_manifest_price = 3500; weapon_manifest_buycat = BUYCAT_RIFLE; weapon_manifest_buy_order = 9;  return TRUE;
+    case WMF_WEP_CFSL8:    weapon_manifest_price = 3000; weapon_manifest_buycat = BUYCAT_RIFLE; weapon_manifest_buy_order = 10; return TRUE;
+    case WMF_WEP_GAUSS:    weapon_manifest_price = 5000; weapon_manifest_buycat = BUYCAT_RIFLE; weapon_manifest_buy_order = 11; return TRUE;
+    case WMF_WEP_GRENADELAUNCHER: weapon_manifest_price = 4000; weapon_manifest_buycat = BUYCAT_RIFLE; weapon_manifest_buy_order = 12; return TRUE;
+    case WMF_WEP_HLEGON:   weapon_manifest_price = 6000; weapon_manifest_buycat = BUYCAT_RIFLE; weapon_manifest_buy_order = 13; return TRUE;
+    case WMF_WEP_HLRPG:    weapon_manifest_price = 6000; weapon_manifest_buycat = BUYCAT_RIFLE; weapon_manifest_buy_order = 14; return TRUE;
+    case WMF_WEP_REBAR:    weapon_manifest_price = 4000; weapon_manifest_buycat = BUYCAT_RIFLE; weapon_manifest_buy_order = 15; return TRUE;
+
+    // --- LMG (primary subset) ---
+    case WMF_WEP_M249:    weapon_manifest_price = 5750; weapon_manifest_buycat = BUYCAT_LMG; weapon_manifest_buy_order = 1; return TRUE;
+    case WMF_WEP_CFM249:  weapon_manifest_price = 5750; weapon_manifest_buycat = BUYCAT_LMG; weapon_manifest_buy_order = 2; return TRUE;
+
+    // --- Melee (free) ---
+    case WMF_WEP_WRENCH:    weapon_manifest_price = 0; weapon_manifest_buycat = BUYCAT_MELEE; weapon_manifest_buy_order = 1; return TRUE;
+    case WMF_WEP_KNIFE:     weapon_manifest_price = 0; weapon_manifest_buycat = BUYCAT_MELEE; weapon_manifest_buy_order = 2; return TRUE;
+    case WMF_WEP_HLCROWBAR: weapon_manifest_price = 0; weapon_manifest_buycat = BUYCAT_MELEE; weapon_manifest_buy_order = 3; return TRUE;
+    case WMF_WEP_BUTTERFLY: weapon_manifest_price = 0; weapon_manifest_buycat = BUYCAT_MELEE; weapon_manifest_buy_order = 4; return TRUE;
+    case WMF_WEP_KATANA:    weapon_manifest_price = 0; weapon_manifest_buycat = BUYCAT_MELEE; weapon_manifest_buy_order = 5; return TRUE;
+
+    // --- Equipment (utility grenades; armor + defuse kit are separate
+    //     non-weapon items appended by the buy menu, see cl_buymenu.qc) ---
+    case WMF_WEP_CSHEGRENADE:    weapon_manifest_price = 300; weapon_manifest_buycat = BUYCAT_EQUIPMENT; weapon_manifest_buy_order = 1; return TRUE;
+    case WMF_WEP_CSFLASHBANG:    weapon_manifest_price = 200; weapon_manifest_buycat = BUYCAT_EQUIPMENT; weapon_manifest_buy_order = 2; return TRUE;
+    case WMF_WEP_CSSMOKEGRENADE: weapon_manifest_price = 300; weapon_manifest_buycat = BUYCAT_EQUIPMENT; weapon_manifest_buy_order = 3; return TRUE;
+    case WMF_WEP_HLGRENADE:      weapon_manifest_price = 300; weapon_manifest_buycat = BUYCAT_EQUIPMENT; weapon_manifest_buy_order = 4; return TRUE;
+    case WMF_WEP_SNOWBALL:       weapon_manifest_price = 100; weapon_manifest_buycat = BUYCAT_EQUIPMENT; weapon_manifest_buy_order = 5; return TRUE;
+    case WMF_WEP_SLINGSHOT:      weapon_manifest_price = 200; weapon_manifest_buycat = BUYCAT_EQUIPMENT; weapon_manifest_buy_order = 6; return TRUE;
+    }
+    return FALSE;   // WMF_WEP_MELEE (fists), WMF_WEP_CFC4, NONE -> not buyable
+};
+
+float(float wep) WeaponManifest_Price =
+{
+    if (!WeaponManifest_LoadBuy(wep)) return 0;
+    return weapon_manifest_price;
+};
+
+float(float wep) WeaponManifest_BuyCat =
+{
+    if (!WeaponManifest_LoadBuy(wep)) return BUYCAT_NONE;
+    return weapon_manifest_buycat;
+};
+
+// 1-based enumeration within a buy category (no synthetic "None" row).
+float(float cat, float idx) BuyCat_Weapon =
+{
+    float wep;
+    if (idx <= 0)
+        return WMF_WEP_NONE;
+    for (wep = 1; wep <= WMF_WEP_LAST; wep = wep + 1)
+    {
+        if (!WeaponManifest_LoadBuy(wep))
+            continue;
+        if (weapon_manifest_buycat == cat && weapon_manifest_buy_order == idx)
+            return wep;
+    }
+    return WMF_WEP_NONE;
+};
+
+float(float cat) BuyCat_Count =
+{
+    float count = 0;
+    float wep;
+    for (wep = 1; wep <= WMF_WEP_LAST; wep = wep + 1)
+    {
+        if (!WeaponManifest_LoadBuy(wep))
+            continue;
+        if (weapon_manifest_buycat == cat)
+            count = count + 1;
+    }
+    return count;
+};
+
+string(float cat) BuyCat_Label =
+{
+    switch (cat)
+    {
+    case BUYCAT_HANDGUN:   return "Handguns";
+    case BUYCAT_SHOTGUN:   return "Shotguns";
+    case BUYCAT_SMG:       return "SMG";
+    case BUYCAT_SNIPER:    return "Snipers";
+    case BUYCAT_RIFLE:     return "Rifles";
+    case BUYCAT_LMG:       return "LMG";
+    case BUYCAT_MELEE:     return "Melee";
+    case BUYCAT_EQUIPMENT: return "Equipment";
+    }
+    return "?";
+};
+
+// ============================================================
+//  Non-weapon buy items (Equipment screen): armor + defuse kit.  Reserved
+//  ids >= 10000 so they never collide with WMF_WEP_* (0..69).  Shared so the
+//  CSQC buy menu can list/price them and the SSQC buy handler can apply them.
+//  Appended after the EQUIPMENT grenades on the buy menu's 8th screen.
+// ============================================================
+const float BUYITEM_KEVLAR     = 10001;
+const float BUYITEM_KEVLARHELM = 10002;
+const float BUYITEM_DEFUSEKIT  = 10003;
+const float BUYITEM_COUNT      = 3;
+
+float(float idx) BuyItem_ByIndex =   // idx 1..BUYITEM_COUNT
+{
+    switch (idx)
+    {
+    case 1: return BUYITEM_KEVLAR;
+    case 2: return BUYITEM_KEVLARHELM;
+    case 3: return BUYITEM_DEFUSEKIT;
+    }
+    return 0;
+};
+
+float(float item) BuyItem_IsItem =
+{
+    return (item >= BUYITEM_KEVLAR && item <= BUYITEM_DEFUSEKIT);
+};
+
+string(float item) BuyItem_Name =
+{
+    switch (item)
+    {
+    case BUYITEM_KEVLAR:     return "Kevlar";
+    case BUYITEM_KEVLARHELM: return "Kevlar+Helmet";
+    case BUYITEM_DEFUSEKIT:  return "Defuse Kit";
+    }
+    return "?";
+};
+
+float(float item) BuyItem_Price =
+{
+    switch (item)
+    {
+    case BUYITEM_KEVLAR:     return 650;
+    case BUYITEM_KEVLARHELM: return 1000;
+    case BUYITEM_DEFUSEKIT:  return 400;
+    }
+    return 0;
 };

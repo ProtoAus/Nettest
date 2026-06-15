@@ -113,6 +113,7 @@ shared/weapons/sh_wpn_cfp228.qc
 shared/weapons/sh_wpn_cfmsg90.qc
 shared/weapons/sh_wpn_cfsg552.qc
 shared/weapons/sh_wpn_cfsl8.qc
+shared/weapons/sh_wpn_gravitygun.qc
 shared/sh_weapon_slotammo.qc
 client/cl_weapons.qc
 client/cl_player.qc
@@ -127,4 +128,5 @@ client/cl_serverpanel.qc
 client/cl_env_hud.qc
 client/cl_env_explosion.qc
 client/cl_radio.qc
+client/cl_buymenu.qc
 client/cl_main.qc

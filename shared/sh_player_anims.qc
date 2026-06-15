@@ -527,6 +527,16 @@ void() SH_PlayerAnim_Update =
     crouching = (self.flags & FL_DUCKING) != 0;
     onground  = (self.flags & FL_ONGROUND) != 0;
 
+    // func_vehicle: a seated driver carries the car's velocity (so a dismount
+    // inherits its momentum) but isn't actually running — present them as
+    // stationary & grounded so the legs play idle instead of run/jump.  The
+    // velocity-driven leg-twist below is also gated off (see speed2d use).
+    if (self.pm_driving)
+    {
+        speed    = 0;
+        onground = TRUE;
+    }
+
     // Tick timers
     self.anim_top_time  += frametime;
     self.anim_top_delay -= frametime;
@@ -596,7 +606,7 @@ void() SH_PlayerAnim_Update =
     bp_enter = bound(91, bp_enter, 179);
     bp_exit  = bound(1, bp_exit, bp_enter - 1);
 
-    if (speed2d > 10)
+    if (speed2d > 10 && !self.pm_driving)
     {
         float vel_yaw = vectoyaw(vel2d);
         float yaw_diff = vel_yaw - self.v_angle_y;

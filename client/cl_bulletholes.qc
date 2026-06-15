@@ -269,18 +269,18 @@ vector bh_io_sn;
 float bh_io_surf;
 float bh_io_hit_tri;
 
-trisoup_simple_vert_t bh_bullet_verts[BH_TRISOUP_MAX_QUADS * 4];
-int                   bh_bullet_idx  [BH_TRISOUP_MAX_QUADS * 6];
+auto trisoup_simple_vert_t bh_bullet_verts[BH_TRISOUP_MAX_QUADS * 4];
+auto int                   bh_bullet_idx  [BH_TRISOUP_MAX_QUADS * 6];
 int                   bh_bullet_static_count;          // high-water mark of static slots
 int                   bh_bullet_count;                 // submit count (static + per-frame dyn)
-int                   bh_bullet_free[BH_TRISOUP_MAX_QUADS];
+auto int                   bh_bullet_free[BH_TRISOUP_MAX_QUADS];
 int                   bh_bullet_free_count;
 
-trisoup_simple_vert_t bh_snow_verts  [BH_TRISOUP_MAX_QUADS * 4];
-int                   bh_snow_idx    [BH_TRISOUP_MAX_QUADS * 6];
+auto trisoup_simple_vert_t bh_snow_verts  [BH_TRISOUP_MAX_QUADS * 4];
+auto int                   bh_snow_idx    [BH_TRISOUP_MAX_QUADS * 6];
 int                   bh_snow_static_count;
 int                   bh_snow_count;
-int                   bh_snow_free[BH_TRISOUP_MAX_QUADS];
+auto int                   bh_snow_free[BH_TRISOUP_MAX_QUADS];
 int                   bh_snow_free_count;
 
 // Write one quad's worth of vertex+index data at the given slot.

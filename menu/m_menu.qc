@@ -166,12 +166,21 @@ void() Menu_DisconnectAndReturnToMenuMap =
 	{
 		mm_returning_to_backdrop = TRUE;
 		localcmd("set cl_menu_backdrop_active 1\n");
-		localcmd("set sv_backdrop 1\n");
-		// See m_main.qc backdrop launcher — keep the backdrop off
-		// the default 27500 port so other local servers can use it.
-		localcmd(sprintf("sv_port %g\n", 27501 + floor(random() * 100)));
+		// Backdrop latch (see m_main.qc + worldspawn in sv_main.qc): set the
+		// pending flag, not sv_backdrop directly, so a console `map X` stays
+		// a real game.
+		localcmd("set sv_backdrop_pending 1\n");
+		// See m_main.qc backdrop launcher — bind to port 0 (OS-assigned
+		// ephemeral) so the backdrop never occupies 27500 for a real local/
+		// dedicated server.  The backdrop client still uses the loopback socket.
+		localcmd("sv_port 0\n");
 		localcmd("deathmatch 1\n");
 		localcmd("maxclients 2\n");
+		// nettest (P26): returning to the nettest backdrop — drop the heavy game we were playing
+		// (HL2/CS:S/CoD) but keep the always-mounted base (valve+cstrike) the mod borrows.  Engine
+		// no-ops if the set is already exactly the base.  (Empty this to "" once nettest is fully
+		// self-contained — matches create_server_deps_for_spec's base.)
+		localcmd("fs_useaddons \"steam:Half-Life/valve\" \"steam:Half-Life/cstrike\"\n");
 		localcmd(sprintf("map %s\n", menumap));
 	}
 	else
@@ -595,12 +604,18 @@ string client_config_cvars[] =
     "cl_impact_particle_offset",
     "cl_impact_light",
     "cl_impact_light_scale",
+    "cl_impact_light_offset",
     "cl_ejectcasing",
     "cl_ejectmag",
 
     // --- Graphics: Lighting ---
     "cl_muzzleflash_light",
     "cl_muzzleflash_light_scale",
+    // Dynamic-light mode (RTLight vs lightmap rebuild) — persisted so a user's
+    // dlights_fast/dlights_classic choice survives restarts (see data/default.cfg).
+    "r_shadow_realtime_dlight",
+    "r_shadow_realtime_dlight_shadows",
+    "r_dynamic",
     "r_viewmodel_maxlight",
     "cl_viewmodel_nolight",
 

@@ -433,7 +433,7 @@ float() Brush_RotateCarry =
     float saved_solid = self.solid;
 
     float blocked = 0;
-    entity p = find(world, classname, "player");
+    entity p = player_chain_head;
     while (p)
     {
         if (!p.is_dead)
@@ -490,7 +490,7 @@ float() Brush_RotateCarry =
                 }
             }
         }
-        p = find(p, classname, "player");
+        p = p.player_chain_next;
     }
 
     // Restore solid for the air-push pass below — Phase 2 doesn't
@@ -517,7 +517,7 @@ float() Brush_RotateCarry =
     //   - airborne pass-through that doesn't touch a blade → no push
     //   - ground walk-through (FL_ONGROUND on floor) → still skipped
     //     by the FL_ONGROUND gate
-    entity p2 = find(world, classname, "player");
+    entity p2 = player_chain_head;
     while (p2)
     {
         if (!p2.is_dead && !(p2.flags & FL_ONGROUND))
@@ -560,7 +560,7 @@ float() Brush_RotateCarry =
                 p2.velocity = p2.velocity + tangent;
             }
         }
-        p2 = find(p2, classname, "player");
+        p2 = p2.player_chain_next;
     }
 
     // Phase 3 — ground players in the brush's mesh path.  Engine's
@@ -574,7 +574,7 @@ float() Brush_RotateCarry =
     // Skips players already handled by Phase 1 (on this brush as
     // ground — re-traces the down-check) so the carry doesn't
     // double-process them.
-    entity p3 = find(world, classname, "player");
+    entity p3 = player_chain_head;
     while (p3)
     {
         if (!p3.is_dead && (p3.flags & FL_ONGROUND))
@@ -682,7 +682,7 @@ float() Brush_RotateCarry =
             }
             self.solid = SOLID_NOT;
         }
-        p3 = find(p3, classname, "player");
+        p3 = p3.player_chain_next;
     }
 
     self.solid = saved_solid;

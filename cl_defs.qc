@@ -14,6 +14,19 @@ Available options:
 */
 #pragma noref 1
 //#pragma flag enable logicops
+// Enable fteqcc's `auto` storage class (off by default — a non-default
+// keyword).  Lets cl_rain.qc / cl_bulletholes.qc declare their big
+// trisoup/pool arrays `auto` so they're memalloc'd at load instead of
+// reserving ~600k compile-time globals (which pushed CSQC over 65530 and
+// hung the modern fteqcc at 32-bit codegen).  Requires fteqcc 2025+.
+#pragma flag enable auto
+// DO NOT enable `#pragma flag enable omitinternals` here.  CONFIRMED via A/B
+// test (2026-06-10): with omitinternals the engine HARD-CRASHES on map load
+// (0xC0000005 access violation a few seconds in, right after CSQC starts) —
+// it strips a CSQC symbol the engine resolves by name + dereferences
+// unguarded on this engine build (git-6748).  The `auto` arrays above are
+// what actually fix the fteqcc 32-bit-codegen hang; omitinternals was only a
+// filesize optimisation and is NOT needed.  Leave it off.
 #pragma warning error Q101 /*too many parms*/
 #pragma warning error Q105 /*too few parms*/
 #pragma warning error Q106 /*assignment to constant/lvalue*/

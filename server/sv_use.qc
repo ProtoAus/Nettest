@@ -137,9 +137,65 @@ void() SV_PlayerTryUse =
     float  best_dot, dot;
     float  best_is_weapon;
 
+    // func_vehicle mount/dismount toggle (HL2-carry-style: consume the +use).
+    // Dismount if already driving; else mount if standing on a vehicle's deck
+    // inside its controls zone (Vehicle_TryMount re-validates both).
+    if (self.driving != world)
+    {
+        Vehicle_Dismount(self);
+        return;
+    }
+    {
+        // NOTE: QuakeC && does NOT short-circuit — both operands are always
+        // evaluated.  Nest the calls so Vehicle_TryMount is reached only when a
+        // real vehicle is under the player (else it'd run with veh==world and
+        // try to write world's fields → "read-only entity 0").
+        entity veh = Vehicle_FindMountable(self);
+        if (veh != world)
+        {
+            if (Vehicle_TryMount(self, veh))
+                return;
+        }
+    }
+
     makevectors(self.v_angle);
     use_start = self.origin + self.view_ofs;
     use_end   = use_start + v_forward * PLAYER_USE_TRACE_LENGTH;
+
+    // HL2-style carry toggle (phys_files — see sv_physprop.qc Carry_*).  Otherwise
+    // trace forward and try to grab a cabinet; on success consume the +use so it doesn't
+    // also fire the prop's shove .use.  Non-carriables fall through to normal +use.
+    if (self.carried_prop != world)
+    {
+        // While carrying, a +use aimed at a door/button activates IT (so you can open
+        // doors / press buttons WITHOUT first dropping the prop, HL2-style).  Only a
+        // +use that isn't aimed at a usable drops the prop.  Without this, every +use
+        // while carrying dropped the prop and never reached the door/button logic below
+        // — which is exactly the "+use stopped working on doors/buttons" regression.
+        sv_use_is_player_direct = TRUE;
+        traceline(use_start, use_end, MOVE_NORMAL, self);
+        if (!Carry_IsCarriable(trace_ent) && SV_UseTarget(trace_ent))
+        {
+            sv_use_is_player_direct = FALSE;
+            return;   // opened a door / pressed a button — keep carrying the prop
+        }
+        sv_use_is_player_direct = FALSE;
+        Carry_Drop(self);
+        return;
+    }
+    {
+        vector grab_end;
+        grab_end = use_start + v_forward * cvar("sv_carry_grab_dist");
+        // Temporarily let the grab trace see the player-passthrough dimension
+        // (PHYSDROP_DIM), so you can grab a prop that's still MOVING — just dropped,
+        // thrown, or settling — not only once it has re-solidified at rest.
+        float saved_dim_hit = self.dimension_hit;
+        self.dimension_hit = self.dimension_hit | PHYSDROP_DIM;
+        traceline(use_start, grab_end, MOVE_NORMAL, self);
+        self.dimension_hit = saved_dim_hit;
+        if (Carry_TryGrab(self, trace_ent))
+            return;
+    }
 
     sv_use_is_player_direct = TRUE;
 

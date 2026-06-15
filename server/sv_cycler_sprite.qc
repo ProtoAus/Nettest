@@ -112,6 +112,15 @@ void() cycler_sprite =
         return;
     }
 
+    // nettest: Source sprites are .vmt materials, not models — loading one as a
+    // model (mod_dummy) crashes the sprite render path. See sv_env_sprite.qc.
+    if (substring(self.model, strlen(self.model) - 4, 4) == ".vmt")
+    {
+        dprint(sprintf("cycler_sprite: refusing Source .vmt sprite '%s'\n", self.model));
+        remove(self);
+        return;
+    }
+
     precache_model(self.model);
     setmodel(self, self.model);
     // setmodel adopts the sprite's bounds — but sprites typically

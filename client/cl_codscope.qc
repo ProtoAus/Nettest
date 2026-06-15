@@ -185,9 +185,11 @@ float() CodScope_Eligible =
         return 0;
     if (predicted_player.weapon_scope_class == SCOPE_CLASS_NONE)
         return 0;
-    // Grapple / codladder are hard cancels — the lower envelope is
+    // Grapple / carry / codladder are hard cancels — the lower envelope is
     // dropping the gun off-screen, scoping makes no sense.
     if (predicted_player.grapple_rope_active)
+        return 0;
+    if (predicted_player.pm_carrying)
         return 0;
     if (PM_ReadMovevar("sv_codladders", 0)
         && predicted_player.pm_on_ladder_cached)

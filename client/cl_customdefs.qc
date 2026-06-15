@@ -81,6 +81,14 @@ entity predicted_player;
 float csqc_prediction_valid;    // TRUE once predicted_player can drive view
 float csqc_live_buttons;        // live button bits captured by +cmd aliases
 
+// Freshest local presentation eye, computed in CSQC_BuildPresentationView
+// (cl_player.qc) and consumed by the render camera (cl_main.qc).  Declared
+// here so cl_physprop.qc (compiled before cl_player.qc) can read them to
+// predict the carried prop's hold point from the local view.
+vector csqc_present_origin;
+vector csqc_present_view_ofs;
+float  csqc_present_valid;
+
 // Pending yaw delta sent privately by func_door_rotating while it carries
 // us.  CSQC_Input_Frame folds it into input_angles_y once and zeroes it,
 // so the local view follows the door without disturbing pitch/roll.
@@ -122,11 +130,31 @@ float clframetime;
 // full set of vis_* fields.
 .float vis_owner_entnum;
 
+// --- Full OBB hitbox detection ---
+// The bullet ray is traced against the SAME 20 per-bone oriented boxes that
+// cl_debug_hitboxes / sv_debug_hitboxes draw, so what you shoot matches what you
+// see and the hitgroup is the box you hit (not a Z-height guess).  The table +
+// CSQC_TraceHitboxes implementation live in cl_debuginfo.qc (after the table);
+// these forward decls + result globals let CSQC_PredictedImpact / W_HitgroupClassify
+// in sh_weapon_logic.qc (compiled earlier) drive it.  Results from the last trace:
+float  csqc_obb_hit;     // TRUE if a box was hit
+entity csqc_obb_ent;     // the proxy whose box was hit
+vector csqc_obb_pos;     // world hit point
+float  csqc_obb_frac;    // parametric [0..1] distance of the hit along src..end
+float  csqc_obb_group;   // HITGROUP_* of the box that was hit
+void(vector src, vector end, float limit_frac) CSQC_TraceHitboxes;
+void() CSQC_PlayersUnsolid;
+void() CSQC_PlayersResolid;
+
 // Forward-declared for the same reason — CSQC_SendHitclaim writes
 // these to predict the flinch reaction on the target proxy.  Real
 // declarations and the predraw application live in cl_player.qc.
 .float vis_flinch_until;
 .float vis_flinch_hitgroup;
+// nettest Patch 36: set when WE predicted a flinch on this proxy; the server's
+// CSQC_EVENT_PLAYER_FLINCH handler skips re-stamping while this window is open, so the
+// shooter doesn't see the flinch fire twice (predicted now + server multicast ~RTT later).
+.float vis_flinch_pred_until;
 
 // Forward-declared so cl_player.qc's CSQC_PlayerVisual_Predraw can gate
 // own-body visibility on the death-cam window. Defined in cl_spectate.qc,
@@ -156,6 +184,18 @@ float() Spectate_InDeathCam;
 .float  toss_last_cltime;
 .float  toss_gravity;          // 0 = no gravity (rocket); 0.5 = grenade; 1 = full
 .float  toss_moving;           // cached velocity state for predraw smoothing
+
+// Per-entity brightness-cap cache for CSQC_MaxlightScale_Cached
+// (cl_teamtint.qc), used by the dropped-weapon predraw. A settled drop
+// never moves, so its getlight() lightmap sample is identical every
+// frame — store the resulting scalar and re-sample only when the origin
+// moves (>1qu) or the cap/knee cvars change. Removes the per-frame
+// getlight() on 200+ sleeping drops (the CSQC_MaxlightScale cost seen in
+// the profiler). General entity fields; only drops currently use them.
+.float  maxlight_cache_scale;
+.vector maxlight_cache_origin;
+.float  maxlight_cache_cap;
+.float  maxlight_cache_knee;
 
 // Forward — defined in cl_player.qc, dispatched from cl_main.qc's
 // CSQC_ConsoleCommand. Both files compile after cl_customdefs.qc.

@@ -160,7 +160,11 @@ void() BrushSync_ApplyRenderKeys =
     else if (self.rendermode == 3)   // Glow
     {
         self.alpha    = ra_alpha;
-        self.effects  = self.effects | SOLIDBRUSH_EF_ADDITIVE | SOLIDBRUSH_EF_NODEPTHTEST | SOLIDBRUSH_EF_FULLBRIGHT;
+        // Additive + fullbright, but DEPTH-TESTED so walls occlude it.  (HL's kRenderGlow
+        // is no-depth + a per-frame visibility trace; we don't do the trace, so leaving
+        // NODEPTHTEST on made the glow draw over ALL geometry — visible across the map
+        // through walls.  Depth-testing gives the wall occlusion the user expects.)
+        self.effects  = self.effects | SOLIDBRUSH_EF_ADDITIVE | SOLIDBRUSH_EF_FULLBRIGHT;
         if (self.rendercolor != '0 0 0')
             self.colormod = self.rendercolor / 255;
     }

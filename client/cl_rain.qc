@@ -45,7 +45,33 @@
 
 const float  RAIN_MAX             = 4096;
 const float  RAIN_INTENSITY_UNIT  = 128;
-const float  RAIN_SKY_OFFSET      = 1024;
+const float  RAIN_SKY_OFFSET      = 1024;  // rain spawn height above the eye (falls fast)
+// Snow falls ~7x slower than rain, so spawning it at RAIN_SKY_OFFSET makes it
+// appear absurdly high (a deep, slow column that drifts off-screen and can sit
+// above a low sky brush).  Spawn snow lower; the sky-clamp below drops it
+// further on low-ceiling maps.
+const float  SNOW_SKY_OFFSET      = 512;
+// Spawn this far BELOW a sky brush when the sky-clamp finds one — keeps flakes
+// from ever appearing ABOVE the skybox (the "spawning above the sky" bug).
+const float  WEATHER_SKY_MARGIN   = 32;
+// Never let the sky-clamp pull a spawn below ~head height.
+const float  WEATHER_SPAWN_MIN_Z  = 96;
+// Engine-weather spawn GRID: instead of one 2048-wide box (which overhangs
+// walls/roofs), spawn over GRID×GRID cells and skip the ones that are inside
+// solid or under a roof.  CELL_SPACING must equal 2× the weather.cfg spawnorg
+// (256) so the cells tile the footprint without gaps.  GRID×CELL_SPACING =
+// 4×512 = 2048 = the old footprint width.
+const float  WEATHER_GRID         = 4;     // fallback only; engine grid now derives from cl_rain_radius
+const float  WEATHER_CELL_SPACING = 512;
+// Engine-mode fast-movement fill: split each cell's per-frame budget across this
+// many heights down the column (top sky offset -> head height) so the whole
+// vertical extent is populated THIS frame instead of only the top (which takes a
+// full fall time to reach the eye — the gap seen when moving fast).  Snow uses 2x.
+const float  WEATHER_FILL_LAYERS  = 6;
+// Engine-mode particles alive at intensity 1.0 (replaces the removed
+// cl_weather_engine_density cvar).  Total crowd = cl_*_intensity x this, bounded
+// by the engine pool (r_part_maxparticles).
+const float  WEATHER_ENGINE_DENSITY = 10000;
 const float  RAIN_STREAK_LEN      = 64;
 const float  RAIN_STREAK_WIDTH    = 1.5;
 const float  RAIN_SPLASH_FRAMES     = 13;
@@ -80,8 +106,32 @@ const vector RAIN_COLOR           = '1 1 1';
 //      and the user sees neither engine particles nor the CSQC pool.
 float pe_weather_snow;
 float pe_weather_snow_bright;  // additive blend variant for cl_snow_fullbright
+float pe_weather_snow_square;  // white-square shader variant for cl_snow_simple
 float pe_weather_rain;
+float pe_weather_rain_nosplash; // rain variant w/o cliptype splash (cl_rain_splash 0)
+float pe_weather_rain_cheapsplash; // rain variant w/ a lean 3-droplet splash (cl_rain_splash 2)
+float pe_weather_ringsplash;   // water-surface ring (spawned by Rain_WaterRingTick)
+float pe_weather_splash;       // land droplet spray (full) — CSQC POOL land impacts
+float pe_weather_splash_cheap; // land droplet spray (cheap, cl_rain_splash 2)
+float pe_weather_splashbig;       // WATER droplet spray (full, big) — pool water impacts
+float pe_weather_splashbig_cheap; // WATER droplet spray (cheap, cl_rain_splash 2)
+float pe_weather_splash_logged; // 1 once we've printed the one-time resolve diagnostic
 float pe_weather_resolved;     // 1 once a successful lookup completes
+float weather_ring_accum;      // fractional water-ring budget carried between frames
+
+// --- cl_debug_weather overlay state -----------------------------------
+// Captured by whichever weather tick runs each frame, so the HUD-pass
+// draw (CSQC_Weather_DebugDraw, called from cl_main.qc) can report the
+// EXACT backend + config in use without re-deriving the branch logic.
+//   weather_dbg_backend: 0 idle/off, 1 engine r_part, 2 CSQC pool
+float  weather_dbg_backend;
+float  weather_dbg_effectnum;    // engine effect handle actually spawned
+float  weather_dbg_spawn_count;  // particles emitted this frame (engine)
+float  weather_dbg_pop;          // engine steady-state target population
+float  weather_dbg_density;      // WEATHER_ENGINE_DENSITY (engine particles per intensity unit)
+float  weather_dbg_intensity;    // clamped intensity used this frame
+float  weather_dbg_speed;        // fall-speed magnitude
+float  weather_dbg_lifetime;     // particle lifetime (== r_part `die`)
 
 string rain_streak_tex_current;
 string rain_splash_tex_current;
@@ -152,29 +202,30 @@ float  rain_was_snow_simple;   // edge-detect for the RGB reset on entry
 //   1 = falling — between rd_fall_start and rd_fall_start+rd_fall_time
 //   2 = splashing — between (rd_splash_end - SPLASH_TIME) and rd_splash_end
 //
-// NOTE on globals budget: an earlier attempt to wrap these in fteqcc's
-// `auto` storage class (which moves the alloc from compile-time globals
-// to runtime memalloc) failed — this codebase's fteqcc revision 6202
-// (Mar 2022) predates the auto-as-global feature.  The pragmatic
-// alternative is that src/qcc.cfg already raises MAX_REGS to 1,048,576
-// (1M slots), so the per-drop pools fit at compile time without needing
-// auto.  If you upgrade fteqcc and want to free the compile slots,
-// prepend `auto` to these declarations.
-float  rd_active[RAIN_MAX];
-vector rd_start[RAIN_MAX];
-vector rd_end[RAIN_MAX];
-vector rd_normal[RAIN_MAX];
-float  rd_fall_start[RAIN_MAX];
-float  rd_fall_time[RAIN_MAX];
-float  rd_splash_end[RAIN_MAX];
+// NOTE on globals budget: these per-drop pools + the trisoup batch
+// buffers below are `auto` (fteqcc's runtime-memalloc storage class) so
+// they do NOT reserve compile-time globals.  Without this the pool's
+// ~425k float globals push CSQC numpr_globals over 65530, forcing 32-bit
+// (FTE32) codegen — which the modern fteqcc hangs on (the 2022 rev 6202
+// ground through it but is now too old to know the `auto` keyword).
+// memalloc (cl_defs.qc #384) zero-inits the block, so the rd_active[i]==0
+// free-slot logic stays valid.  REQUIRES fteqcc64_latest.exe / _dev
+// (2025+); the 2022 fteqcc64.exe can no longer compile this tree.
+auto float  rd_active[RAIN_MAX];
+auto vector rd_start[RAIN_MAX];
+auto vector rd_end[RAIN_MAX];
+auto vector rd_normal[RAIN_MAX];
+auto float  rd_fall_start[RAIN_MAX];
+auto float  rd_fall_time[RAIN_MAX];
+auto float  rd_splash_end[RAIN_MAX];
 // Snapshot of rain_tick_splash_total at splash spawn — used so a mid-
 // splash cl_rain_splash_fps change doesn't desync the frame index / alpha
 // calc for already-active splashes (they finish on their spawn-time
 // schedule; the cvar change applies to the next splash).
-float  rd_splash_total[RAIN_MAX];
+auto float  rd_splash_total[RAIN_MAX];
 // Per-slot flag: 1 = bullet-water splash (no falling streak, no settle
 // streak, sprite+ring only).  Cleared when the slot returns to idle.
-float  rd_bullet_splash[RAIN_MAX];
+auto float  rd_bullet_splash[RAIN_MAX];
 
 // Live count of slots with rd_active != 0.  Maintained as an invariant
 // at every site that mutates rd_active so CSQC_Rain_Tick can skip the
@@ -221,12 +272,12 @@ float  lightning_thunder_played;    // 1 once the current strike's thunder fired
 // Per-drop phase offset for snow-mode horizontal wobble.  Filled at
 // Rain_Restart; each drop gets a random phase so flakes don't all
 // wobble in unison.  Not read in rain mode.
-float  rd_drift_phase[RAIN_MAX];
+auto float  rd_drift_phase[RAIN_MAX];
 // Per-drop water-impact flag.  Set in Rain_Restart when the drop's
 // path crosses a CONTENT_WATER volume before hitting a solid surface;
 // makes Rain_DrawSplash render gfx/rain/watersplash at 2× size
 // instead of the default splash decal.
-float  rd_water[RAIN_MAX];
+auto float  rd_water[RAIN_MAX];
 
 // === Trisoup batching buffers ============================================
 // Replaces the per-drop R_BeginPolygon / R_PolygonVertex × 4 / R_EndPolygon
@@ -260,20 +311,20 @@ const float RAIN_STREAK_MAX_QUADS = RAIN_MAX;
 const float RAIN_RING_MAX_QUADS   = 1024;
 const float RAIN_SPL_BUCKET_QUADS = 256;
 
-trisoup_simple_vert_t rain_streak_verts[RAIN_MAX * 4];
-int                   rain_streak_idx  [RAIN_MAX * 6];
+auto trisoup_simple_vert_t rain_streak_verts[RAIN_MAX * 4];
+auto int                   rain_streak_idx  [RAIN_MAX * 6];
 int                   rain_streak_quads;
 int                   rain_streak_flags_cur;   // resolved per tick
 
-trisoup_simple_vert_t rain_ring_verts[1024 * 4];
-int                   rain_ring_idx  [1024 * 6];
+auto trisoup_simple_vert_t rain_ring_verts[1024 * 4];
+auto int                   rain_ring_idx  [1024 * 6];
 int                   rain_ring_quads;
 
 // Per-animation-frame splash sprite buckets.  Flat verts/idx arrays
 // addressed as buckets via `bucket * RAIN_SPL_BUCKET_QUADS * 4`
 // (verts) / `* 6` (idx) — same pattern cl_sprays.qc uses.
-trisoup_simple_vert_t rain_splash_verts[RAIN_SPLASH_FRAMES * 256 * 4];
-int                   rain_splash_idx  [RAIN_SPLASH_FRAMES * 256 * 6];
+auto trisoup_simple_vert_t rain_splash_verts[RAIN_SPLASH_FRAMES * 256 * 4];
+auto int                   rain_splash_idx  [RAIN_SPLASH_FRAMES * 256 * 6];
 int                   rain_splash_quads[RAIN_SPLASH_FRAMES];
 int                   rain_splash_flags_cur;   // resolved per tick
 
@@ -494,11 +545,11 @@ void(int slot, vector p0, vector p1, vector p2, vector p3,
 // inside one of the volumes instead of the default cylinder around
 // the viewer.
 const float CL_RAIN_VOLUME_MAX = 16;
-float  cl_rain_vol_used[CL_RAIN_VOLUME_MAX];     // 1 if slot holds a known func_rain
-float  cl_rain_vol_active[CL_RAIN_VOLUME_MAX];   // toggle state from server
-float  cl_rain_vol_entnum[CL_RAIN_VOLUME_MAX];   // CSQC entnum for re-find
-vector cl_rain_vol_mins[CL_RAIN_VOLUME_MAX];
-vector cl_rain_vol_maxs[CL_RAIN_VOLUME_MAX];
+auto float  cl_rain_vol_used[CL_RAIN_VOLUME_MAX];     // 1 if slot holds a known func_rain
+auto float  cl_rain_vol_active[CL_RAIN_VOLUME_MAX];   // toggle state from server
+auto float  cl_rain_vol_entnum[CL_RAIN_VOLUME_MAX];   // CSQC entnum for re-find
+auto vector cl_rain_vol_mins[CL_RAIN_VOLUME_MAX];
+auto vector cl_rain_vol_maxs[CL_RAIN_VOLUME_MAX];
 
 float() CSQC_FuncRain_HasActive =
 {
@@ -749,6 +800,38 @@ void() Rain_ResolveMedia =
 
 void() Rain_ResolveTuning =
 {
+    // Splash-critical subset — bullet-water splashes
+    // (CSQC_Rain_SpawnBulletWaterSplash) fire even with weather OFF and snapshot
+    // rain_tick_splash_total at spawn (rd_splash_total[i] = rain_tick_splash_total
+    // in CSQC_Rain_Tick), so these few must stay fresh every frame.  Cheap — 4 cvars.
+    rain_tick_splash_size = cvar("cl_rain_splash_size");
+    if (rain_tick_splash_size <= 0)
+        rain_tick_splash_size = RAIN_SPLASH_SIZE;
+    rain_tick_splash_size = bound(0.5, rain_tick_splash_size, 32);
+
+    rain_tick_splash_alpha = bound(0, cvar("cl_rain_splash_alpha"), 1);
+
+    // cl_rain_splash_fps drives both the per-frame cycle rate and the total
+    // splash lifetime (frames × frame_time).  Bound so pathological values can't
+    // stall (≈0fps) or strobe (>120fps).
+    float spl_fps = cvar("cl_rain_splash_fps");
+    if (spl_fps <= 0) spl_fps = 12.5;
+    spl_fps = bound(1, spl_fps, 120);
+    rain_tick_splash_frame_time = 1.0 / spl_fps;
+    rain_tick_splash_total      = RAIN_SPLASH_FRAMES * rain_tick_splash_frame_time;
+
+    // Splash fullbright (additive blend) — same semantics as snow.
+    rain_tick_splash_fullbright = cvar("cl_rain_splash_fullbright") != 0;
+
+    // Weather off and the drop/splash pool idle (the common case — e.g. an
+    // indoor firefight; ~0.05s self in profiling doing 20 cvar lookups nothing
+    // drew with) → skip the rest: ~20 cvar reads + getproperty(VF_ORIGIN) + the
+    // snow billboard basis.  Nothing downstream consumes them while idle, and a
+    // bullet-water splash bumps rd_total_active so the full resolve re-engages
+    // next tick.  Matches the codebase's own "weather off" gate (cl_rain/cl_snow).
+    if (!cvar("cl_rain") && !cvar("cl_snow") && rd_total_active <= 0)
+        return;
+
     rain_tick_view_pos = (vector)getproperty(VF_ORIGIN);
 
     rain_tick_radius = cvar("cl_rain_radius");
@@ -770,24 +853,7 @@ void() Rain_ResolveTuning =
 
     rain_tick_alpha = bound(0, cvar("cl_rain_alpha"), 1);
 
-    rain_tick_splash_size = cvar("cl_rain_splash_size");
-    if (rain_tick_splash_size <= 0)
-        rain_tick_splash_size = RAIN_SPLASH_SIZE;
-    rain_tick_splash_size = bound(0.5, rain_tick_splash_size, 32);
-
-    rain_tick_splash_alpha = bound(0, cvar("cl_rain_splash_alpha"), 1);
-
-    // cl_rain_splash_fps drives both the per-frame cycle rate and the total
-    // splash lifetime (frames × frame_time).  Bound to a sane range so
-    // pathological values can't stall (≈0fps) or strobe (>120fps).
-    float spl_fps = cvar("cl_rain_splash_fps");
-    if (spl_fps <= 0) spl_fps = 12.5;
-    spl_fps = bound(1, spl_fps, 120);
-    rain_tick_splash_frame_time = 1.0 / spl_fps;
-    rain_tick_splash_total      = RAIN_SPLASH_FRAMES * rain_tick_splash_frame_time;
-
-    // Splash fullbright (additive blend) — same semantics as snow.
-    rain_tick_splash_fullbright = cvar("cl_rain_splash_fullbright") != 0;
+    // (splash subset resolved at the top of this function, before the early-out)
 
     rain_tick_reseed_per_frame = cvar("cl_rain_reseed_per_frame");
     if (rain_tick_reseed_per_frame <= 0)
@@ -1183,31 +1249,36 @@ void(float i, float frac_override, float alpha_mul) Rain_DrawStreak =
                           draw_alpha);
 };
 
-// Public: spawn a one-off splash visual at the given world point.
-// Called from CSQC_BulletImpact when a hitscan impact lands in water.
-// Hijacks an idle slot in the rain drop pool — the existing tick/draw
-// loop animates it through the same 13-frame sprite + ring as a rain
-// drop hitting water.  Gated on cl_rain_splash so the splash visual
-// toggle suppresses it the same way it suppresses raindrop splashes.
+// Public: spawn a one-off WATER splash at the given surface point.  Called from
+// CSQC_BulletImpact (cl_bulletimpact.qc) when a hitscan impact lands in water.
+// Plays the SAME splash the weather system throws when RAIN hits water — the
+// engine `weather.splashbig` droplet spray PLUS the `weather.ringsplash` surface
+// ring — instead of the old rain-drop-pool sprite slot.  (The rain path gets its
+// ring for free from the engine `waterringtype` patch on its own rain particles;
+// a bullet has no engine rain particle, so we spawn the ring here ourselves.)
+// Gated on cl_rain_splash so the splash toggle suppresses it like raindrop
+// splashes.  Reuses Rain_SpawnWaterSpray (the same helper the CSQC rain pool
+// uses for a water hit) so a bullet splash is visually identical to a rain one.
+float(float cache, string ename)         Rain_ResolveSplash;     // defined below
+void(vector pos, vector normal, float c) Rain_SpawnWaterSpray;   // defined below
 void(vector pos) CSQC_Rain_SpawnBulletWaterSplash =
 {
     if (cvar("cl_rain_splash") <= 0) return;
-    if (rain_tick_splash_total <= 0) return;   // tuning not yet resolved
-    float i;
-    for (i = 0; i < RAIN_MAX; i = i + 1)
+
+    float cheap = (cvar("cl_rain_splash") >= 2);   // cl_rain_splash 2 = cheap-splash mode
+
+    // BIG droplet spray (weather.splashbig) — identical to the rain water hit;
+    // falls back to the land spray if splashbig isn't registered (stock engine).
+    Rain_SpawnWaterSpray(pos, '0 0 1', cheap);
+
+    // Flat surface ripple ring (weather.ringsplash).  The rain path's ring is
+    // engine-spawned (waterringtype); a bullet has none, so spawn it here.
+    // count 2 -> ~1 ring (the r_part's own count 0.5 is a per-spawn rate).
+    if (!cheap)
     {
-        if (rd_active[i] == 0)
-        {
-            rd_active[i]        = 2;           // splashing
-            rd_end[i]           = pos;
-            rd_normal[i]        = '0 0 1';     // water surface always faces up
-            rd_water[i]         = 1;           // water-mode rendering (2× scale)
-            rd_splash_total[i]  = rain_tick_splash_total;
-            rd_splash_end[i]    = cltime + rd_splash_total[i];
-            rd_bullet_splash[i] = 1;           // skip settle streak
-            rd_total_active     = rd_total_active + 1;
-            return;
-        }
+        pe_weather_ringsplash = Rain_ResolveSplash(pe_weather_ringsplash, "weather.ringsplash");
+        if (pe_weather_ringsplash != 0)
+            pointparticles(pe_weather_ringsplash, pos, '0 0 1', 2);
     }
 };
 
@@ -1275,13 +1346,12 @@ void(float i) Rain_DrawSplash =
     // per bucket per tick, so the per-drop R_BeginPolygon chain that
     // used to live here is gone.
     //
-    // Snow drops on water render the RING ONLY — the upward billboard
-    // sprite (rain splash up-flick) doesn't read as a "snowflake
-    // touched water" cue.  The ring still grows + fades below to
-    // signal contact.  Land hits in snow mode never reach here (the
-    // tick-loop short-circuits them straight to idle); this gate
-    // covers only the water + snow case.
-    if (!(rain_tick_snow_mode && rd_water[i]))
+    // The old animated 13-frame splash SPRITE is now reserved for BULLET-water
+    // splashes only.  Real rain now uses the droplet spray on BOTH land and
+    // water (spawned in the tick transition via Rain_SpawnLandSpray), water also
+    // keeps the ring below, and snow-on-water is ring-only — none of those want
+    // the sprite.  Bullet-water splashes (rd_bullet_splash) keep it as before.
+    if (rd_bullet_splash[i])
     {
         Rain_AppendSplashQuad((int)spl_frame - 1,
             sprite_c - ax_h - ax_v, sprite_c + ax_h - ax_v,
@@ -1572,21 +1642,150 @@ float() Rain_EngineActive =
             pe_weather_snow = particleeffectnum("weather.snow");
         if (pe_weather_snow_bright == 0)
             pe_weather_snow_bright = particleeffectnum("weather.snow_bright");
+        if (pe_weather_snow_square == 0)
+            pe_weather_snow_square = particleeffectnum("weather.snow_square");
         if (pe_weather_rain == 0)
             pe_weather_rain = particleeffectnum("weather.rain");
+        if (pe_weather_rain_nosplash == 0)
+            pe_weather_rain_nosplash = particleeffectnum("weather.rain_nosplash");
+        if (pe_weather_rain_cheapsplash == 0)
+            pe_weather_rain_cheapsplash = particleeffectnum("weather.rain_cheapsplash");
+        if (pe_weather_ringsplash == 0)
+            pe_weather_ringsplash = particleeffectnum("weather.ringsplash");
 
         float snow_ok        = (pe_weather_snow        != 0 && particleeffectquery(pe_weather_snow,        0) != "");
         float snow_bright_ok = (pe_weather_snow_bright != 0 && particleeffectquery(pe_weather_snow_bright, 0) != "");
+        float snow_square_ok = (pe_weather_snow_square != 0 && particleeffectquery(pe_weather_snow_square, 0) != "");
         float rain_ok        = (pe_weather_rain        != 0 && particleeffectquery(pe_weather_rain,        0) != "");
+        float rain_nosplash_ok = (pe_weather_rain_nosplash != 0 && particleeffectquery(pe_weather_rain_nosplash, 0) != "");
+        float rain_cheapsplash_ok = (pe_weather_rain_cheapsplash != 0 && particleeffectquery(pe_weather_rain_cheapsplash, 0) != "");
+        float ringsplash_ok    = (pe_weather_ringsplash    != 0 && particleeffectquery(pe_weather_ringsplash,    0) != "");
         if (!snow_ok)        pe_weather_snow        = 0;   // scrub so retry happens next tick
         if (!snow_bright_ok) pe_weather_snow_bright = 0;
+        if (!snow_square_ok) pe_weather_snow_square = 0;   // optional — base snow still active
         if (!rain_ok)        pe_weather_rain        = 0;
+        if (!rain_nosplash_ok) pe_weather_rain_nosplash = 0;  // optional — base rain still active
+        if (!rain_cheapsplash_ok) pe_weather_rain_cheapsplash = 0;  // optional — falls back to full splash
+        if (!ringsplash_ok)    pe_weather_ringsplash    = 0;  // optional — water rings just off
         if (snow_ok || rain_ok)
             pe_weather_resolved = 1;   // bright is optional — base snow is enough to declare active
         else
             return 0;   // weather.cfg not loaded yet — fall back to CSQC pool
     }
     return 1;
+};
+
+
+// (Rain_WaterRingTick removed — engine-path water rings are now spawned per-drop
+//  at the exact impact by the engine `waterringtype` patch; see weather.cfg
+//  `r_part rain -> waterringtype ringsplash` and ENGINE_PATCHES.md.  The pool
+//  path draws its own flat ring in Rain_DrawSplash, unchanged.)
+
+// Lazy-resolve a weather.<name> particle effect, RETRYING every call until it
+// loads (weather.cfg can exec a few frames after CSQC init, and the pool starts
+// dropping rain immediately).  particleeffectnum returns a slot even for an
+// UNREGISTERED name, so particleeffectquery (non-empty == registered) is the
+// real validator.  Returns the handle (0 = not loaded yet); caller caches it.
+float(float cache, string ename) Rain_ResolveSplash =
+{
+    if (cache != 0)
+        return cache;
+    cache = particleeffectnum(ename);
+    if (cache != 0 && particleeffectquery(cache, 0) == "")
+        cache = 0;   // not loaded YET — retry next call
+    return cache;
+};
+
+// Droplet spray for a CSQC-pool (cl_weather_engine 0) LAND impact — the same
+// burst the engine path throws on collision (cliptype splash).  cheap (cl_rain_
+// splash 2) uses the lean weather.splash_cheap + fewer droplets.
+void(vector pos, vector normal, float cheap) Rain_SpawnLandSpray =
+{
+    float id;
+    if (cheap)
+    {
+        pe_weather_splash_cheap = Rain_ResolveSplash(pe_weather_splash_cheap, "weather.splash_cheap");
+        id = pe_weather_splash_cheap;
+        if (id == 0)   // cheap variant not loaded -> fall back to the full one
+        {
+            pe_weather_splash = Rain_ResolveSplash(pe_weather_splash, "weather.splash");
+            id = pe_weather_splash;
+        }
+    }
+    else
+    {
+        pe_weather_splash = Rain_ResolveSplash(pe_weather_splash, "weather.splash");
+        id = pe_weather_splash;
+    }
+    if (id == 0)
+        return;
+    float n = cvar("cl_rain_splash_droplets");
+    if (n <= 0) n = 5;
+    if (cheap && n > 3) n = 3;   // cheap mode caps droplets (mirrors engine clipcount 3)
+    pointparticles(id, pos, normal, n);
+};
+
+// Droplet spray for a CSQC-pool WATER impact — the BIG burst (weather.splashbig),
+// matching the engine path's `watercliptype splashbig`.  cheap uses the lean
+// weather.splashbig_cheap.  Falls back to the land spray if splashbig is missing
+// (e.g. on a stock engine where the cfg never registered it).
+void(vector pos, vector normal, float cheap) Rain_SpawnWaterSpray =
+{
+    float id;
+    if (cheap)
+    {
+        pe_weather_splashbig_cheap = Rain_ResolveSplash(pe_weather_splashbig_cheap, "weather.splashbig_cheap");
+        id = pe_weather_splashbig_cheap;
+        if (id == 0)
+        {
+            pe_weather_splashbig = Rain_ResolveSplash(pe_weather_splashbig, "weather.splashbig");
+            id = pe_weather_splashbig;
+        }
+    }
+    else
+    {
+        pe_weather_splashbig = Rain_ResolveSplash(pe_weather_splashbig, "weather.splashbig");
+        id = pe_weather_splashbig;
+    }
+    if (id == 0)   // no big splash registered -> small land spray so water still splashes
+    {
+        Rain_SpawnLandSpray(pos, normal, cheap);
+        return;
+    }
+    float n = cvar("cl_rain_splash_droplets");
+    if (n <= 0) n = 5;
+    if (cheap && n > 3) n = 3;
+    pointparticles(id, pos, normal, n);
+};
+
+// Spawn height (above the eye) for a weather cell at horizontal offset
+// (offx,offy).  When cl_weather_skycheck is on, an up-trace finds the sky and
+// the spawn is dropped to just BELOW the sky brush — so flakes never appear
+// above the skybox, and a low sky pulls the spawn down to a believable height.
+// Returns -1 to SKIP the cell entirely (it sits under a solid roof, not open
+// sky).  base_offset is the nominal height (rain high, snow lower).
+float(vector view_pos, float offx, float offy, float base_offset, float skycheck) Rain_CellSpawnZ =
+{
+    float z = base_offset;
+    if (skycheck)
+    {
+        traceline(view_pos + [offx, offy, 0],
+                  view_pos + [offx, offy, 8192], MOVE_NORMAL, world);
+        if (trace_fraction < 1)
+        {
+            if (pointcontents(trace_endpos + [0, 0, 2]) != CONTENT_SKY)
+                return -1;   // a roof / overhang, not sky -> no weather here
+            // Hit the sky brush: drop the spawn just beneath it so nothing
+            // ever spawns above the skybox.
+            float sky_h = (trace_endpos_z - view_pos_z) - WEATHER_SKY_MARGIN;
+            if (sky_h < z)
+                z = sky_h;
+        }
+        // trace_fraction >= 1: genuinely open above (no brush) -> keep base.
+    }
+    if (z < WEATHER_SPAWN_MIN_Z)
+        z = WEATHER_SPAWN_MIN_Z;
+    return z;
 };
 
 // Engine-particle weather tick — replacement for the CSQC pool when
@@ -1605,8 +1804,57 @@ float() Rain_EngineActive =
 //     don't apply — visuals are entirely the r_part config's job.
 //   - Bonus: every per-frame CPU savings recovered here can be spent
 //     on much higher intensity than the CSQC pool sustains.
+// Per-frame column-fill parameters for Rain_SpawnColumn — kept as file globals so
+// the helper stays within QC's 8-argument limit.  Set once per frame in Rain_TickEngine.
+float  rain_col_effect;
+float  rain_col_view_z;
+vector rain_col_vel;
+vector rain_col_raindir;
+float  rain_col_center;   // 1 = back-project up-wind so impacts land at the cell XY
+float  rain_col_layers;
+
+// Spawn `count` engine particles for ONE cell (cx,cy), split down the column from
+// the sky-clamped height `gz` to head height (WEATHER_SPAWN_MIN_Z).  This is the
+// fast-movement fill: the entire vertical column is seeded THIS frame, so a fast-
+// moving (or just-teleported) player sees a full column immediately instead of
+// waiting for top-spawned drops to fall.  Per-layer solid reject.  The per-frame
+// total is unchanged (count is split, not multiplied), so steady-state population
+// and the pool clamp are identical — only the vertical distribution changes.
+// Returns the number actually emitted.
+float(float cx, float cy, float gz, float count) Rain_SpawnColumn =
+{
+    float clayers = rain_col_layers;
+    float per_layer = count / clayers;
+    if (per_layer < 1)
+    {   // fewer than one particle per layer — collapse layers so each gets >=1.
+        clayers = floor(count);
+        if (clayers < 1) clayers = 1;
+        per_layer = count / clayers;
+    }
+    float emitted = 0, li;
+    for (li = 0; li < clayers; li = li + 1)
+    {
+        float layer_z;
+        if (clayers <= 1)
+            layer_z = gz;
+        else
+            layer_z = gz - (gz - WEATHER_SPAWN_MIN_Z) * (li / (clayers - 1));
+        vector cell;
+        if (rain_col_center)
+            cell = [cx, cy, rain_col_view_z] - rain_col_raindir * (layer_z / -rain_col_raindir_z);
+        else
+            cell = [cx, cy, rain_col_view_z + layer_z];
+        if (pointcontents(cell) == CONTENT_SOLID)
+            continue;
+        pointparticles(rain_col_effect, cell, rain_col_vel, per_layer);
+        emitted = emitted + per_layer;
+    }
+    return emitted;
+};
+
 void() Rain_TickEngine =
 {
+    weather_dbg_spawn_count = 0;   // overwritten below if we actually emit
     if (!cvar("cl_rain") && !cvar("cl_snow")) return;
 
     // Pick the right r_part variant for the current mode + fullbright
@@ -1617,6 +1865,8 @@ void() Rain_TickEngine =
     {
         if (cvar("cl_snow_fullbright") && pe_weather_snow_bright != 0)
             effectnum = pe_weather_snow_bright;
+        else if (cvar("cl_snow_simple") && pe_weather_snow_square != 0)
+            effectnum = pe_weather_snow_square;   // untextured flat squares
         else if (pe_weather_snow != 0)
             effectnum = pe_weather_snow;
         else
@@ -1624,7 +1874,14 @@ void() Rain_TickEngine =
     }
     else
     {
-        if (pe_weather_rain != 0)
+        // cl_rain_splash: 0 = no-splash variant (collides + dies, no splash quad);
+        // 2 = cheap variant (lean 3-droplet splash); 1 (or anything else) = full.
+        float rsplash = cvar("cl_rain_splash");
+        if (rsplash == 0 && pe_weather_rain_nosplash != 0)
+            effectnum = pe_weather_rain_nosplash;
+        else if (rsplash == 2 && pe_weather_rain_cheapsplash != 0)
+            effectnum = pe_weather_rain_cheapsplash;
+        else if (pe_weather_rain != 0)
             effectnum = pe_weather_rain;
         else
             return;
@@ -1644,23 +1901,39 @@ void() Rain_TickEngine =
     else
         intensity = cvar("cl_rain_intensity");
     if (intensity <= 0) intensity = 0.5;
-    if (intensity > 32) intensity = 32;
+    // Engine mode is NOT bound by the CSQC pool's RAIN_MAX (4096) — the
+    // engine simulates particles in C.  cl_*_intensity x WEATHER_ENGINE_DENSITY
+    // drives tens of thousands of particles, bounded only by the engine pool
+    // (r_part_maxparticles) and GPU fill-rate.  e.g. intensity 4 = 40k;
+    // intensity 16 = 160k.  (Density is a fixed constant now — the old
+    // cl_weather_engine_density cvar was removed; intensity is the knob.)
+    if (intensity > 16) intensity = 16;
+    float density = WEATHER_ENGINE_DENSITY;
 
-    // LIFE chosen to roughly match the r_part template's die value
-    // (8s snow / 1s rain).  If you change `die` in weather.cfg, update
-    // both branches here so the population math tracks.
-    float lifetime = cvar("cl_snow") ? 8.0 : 1.0;
-    float pop = intensity * RAIN_INTENSITY_UNIT;
-    float spawn_count = (pop * frametime) / lifetime;
-    if (spawn_count < 1) spawn_count = 1;   // avoid sub-1 floor losing rate
-    if (spawn_count > pop) spawn_count = pop;
+    // pop = the target number of particles alive at once (the "crowd").
+    float pop = intensity * density;
+    // Don't let the requested crowd exceed the shared particle pool.  Once the
+    // pool is full the engine round-robin-recycles the OLDEST live particles
+    // (256/frame, no life check, p_script.c:7050) — so snow/rain would wink out
+    // MID-AIR before landing.  Cap pop to a fraction of r_part_maxparticles,
+    // leaving headroom for combat FX that share the same pool.  (No QC builtin
+    // exposes the live count, so this is an OPEN-LOOP guard — heavy concurrent
+    // FX can still briefly saturate the pool.)
+    float pool = cvar("r_part_maxparticles");
+    if (pool <= 0) pool = 65536;
+    if (pop > pool * 0.6) pop = pool * 0.6;
+    // (lifetime + spawn_count computed just below, after `speed`/`vel`, because
+    //  the snow lifetime is derived from the real fall speed.)
 
     // Velocity comes from the speed cvars + the rain angle cvars
     // (wind direction) — passed through pointparticles' `dir` arg so
     // every spawned particle inherits this initial velocity on top of
     // whatever per-particle randomness the r_part's spawnvel adds.
-    // The r_part's veladd is intentionally zeroed in weather.cfg so
-    // this dir is authoritative.
+    // Every r_part block sets `veladd 1`, so in FTE's box spawnmode this
+    // dir's MAGNITUDE becomes the particle's actual fall velocity (the
+    // dir is both the orientation basis AND the speed source — see the
+    // weather.cfg header).  cl_rain_speed / cl_snow_speed + the angle
+    // cvars therefore drive the fall directly.
     float speed;
     if (cvar("cl_snow"))
     {
@@ -1674,12 +1947,274 @@ void() Rain_TickEngine =
     }
     vector vel = normalize([cvar("cl_rain_angle_x"), cvar("cl_rain_angle_y"), -1]) * speed;
 
-    // Spawn at sky height above the camera.  spawnorg in the r_part
-    // config scatters them across the desired XY radius.
-    vector view_pos = (vector)getproperty(VF_ORIGIN);
-    vector spawn_pos = view_pos + [0, 0, RAIN_SKY_OFFSET];
+    // LIFE = the AVERAGE seconds a particle lives — used ONLY to turn the crowd
+    // (pop) into a per-frame spawn RATE: to keep pop alive when each lives LIFE
+    // seconds you spawn pop/LIFE per second (× frametime per frame).  SNOW dies
+    // on ground contact (clipbounce -1), so its REAL life is the FALL TIME from
+    // the spawn height to the ground; use that (the old hardcoded 12 was ~8×
+    // too long, so snow looked sparse — which tempted a density crank that then
+    // overran the pool and recycled flakes mid-air).  RAIN keeps a short fixed
+    // life (its cfg `die 1.0` + cliptype splash despawn it).
+    float vert_speed = -vel_z;          // downward fall speed (vel_z is negative)
+    if (vert_speed < 1) vert_speed = 1;
+    float lifetime;
+    if (cvar("cl_snow"))
+    {
+        lifetime = (SNOW_SKY_OFFSET + 96) / vert_speed;   // +96 ≈ eye→floor margin
+        if (lifetime < 0.4) lifetime = 0.4;
+    }
+    else
+        lifetime = 1.0;
+    float spawn_count = (pop * frametime) / lifetime;
+    if (spawn_count < 1) spawn_count = 1;   // avoid sub-1 floor losing rate
+    if (spawn_count > pop) spawn_count = pop;
 
-    pointparticles(effectnum, spawn_pos, vel, spawn_count);
+    // Spawn at sky height above the camera, as a GRID of sub-cells so we can
+    // skip cells inside solid geometry or under a roof instead of dumping one
+    // 2048-wide box that overhangs walls.  Each open cell emits a small
+    // pointparticles whose r_part spawnorg (256) covers exactly that cell.
+    // Cost: GRID*GRID cheap pointcontents + (optional) one up-trace per cell
+    // per frame, intensity-INDEPENDENT — vs the thousands of per-drop collision
+    // traces.  weather_dbg_spawn_count was zeroed at the top.
+    vector view_pos = (vector)getproperty(VF_ORIGIN);
+    float skycheck  = cvar("cl_weather_skycheck");
+    float base_offset = cvar("cl_snow") ? SNOW_SKY_OFFSET : RAIN_SKY_OFFSET;
+
+    // cl_rain_radius sizes the engine spawn FOOTPRINT.  Tile a (2*radius)-wide
+    // square with the fixed 512u WORLD-ALIGNED cells (the lattice snapping is what
+    // keeps each cell's sky-check column from sweeping under ledges as you move —
+    // see the grid comment below; do NOT make the cells camera-relative).  `grid`
+    // is the cell count per axis, clamped so a huge radius can't carpet the world.
+    // At the default radius 1024 this is 4 (= the old fixed WEATHER_GRID).
+    float radius  = cvar("cl_rain_radius");
+    if (radius < 64) radius = 1024;
+    float spacing = WEATHER_CELL_SPACING;
+    float grid    = floor((radius * 2) / spacing + 0.5);
+    if (grid < 1)  grid = 1;
+    if (grid > 16) grid = 16;
+
+    // VELOCITY LEAD.  Engine particles can't be relocated by QC after spawn, so to
+    // stay filled when moving fast we centre the footprint where the player WILL be
+    // (velocity * lead seconds), not where they are.  predicted_player.velocity is
+    // the working CSQC source (pmove_vel is 0 under csqc-owned prediction).  XY only
+    // — never lead the column vertically; clamp the lead to the radius so a grapple/
+    // teleport speed can't fling the footprint off the player.  cl_weather_lead is
+    // halved for snow below (it lingers in-air far longer, so it needs less lead).
+    float lead_t = cvar("cl_weather_lead");
+    if (lead_t < 0) lead_t = 0;
+    if (cvar("cl_snow")) lead_t = lead_t * 0.5;
+    vector pvel = predicted_player.velocity;
+    vector lead = [pvel_x, pvel_y, 0] * lead_t;
+    if (vlen(lead) > radius) lead = normalize(lead) * radius;
+    vector spawn_center = view_pos + lead;
+
+    // Per-frame column-fill params for Rain_SpawnColumn.  raindir back-projects
+    // up-wind so tilted rain LANDS at the cell XY (the dir_z guard avoids /0 on
+    // untilted rain).  Snow uses 2x fill layers over its shorter SNOW_SKY_OFFSET.
+    vector raindir   = normalize(vel);
+    rain_col_effect  = effectnum;
+    rain_col_view_z  = view_pos_z;
+    rain_col_vel     = vel;
+    rain_col_raindir = raindir;
+    rain_col_center  = (cvar("cl_rain_center_impacts") && raindir_z < -0.001);
+    rain_col_layers  = cvar("cl_snow") ? (WEATHER_FILL_LAYERS * 2) : WEATHER_FILL_LAYERS;
+
+    float emitted = 0;   // particles emitted this frame (set by whichever branch runs)
+    if (spawn_count < grid * grid)
+    {
+        // Sparse rain (low intensity, OR a high framerate splitting the per-second
+        // rate into a tiny per-frame count): one centred column would dump ALL of it
+        // on the player — the "focuses where I'm standing" clump.  Instead scatter
+        // this frame's few columns at RANDOM points across the radius DISC (uniform:
+        // sqrt(random)*radius, same as the CSQC pool), centred on the lead point, so
+        // over frames the whole footprint fills EVENLY and the radius reads as a
+        // consistent field at any intensity.  per_col is kept <= 1 so each point
+        // spawns exactly one drop (the engine rounds a fractional pointparticles
+        // count UP per call, so a per_col > 1 would over-spawn).
+        float ncols = floor(spawn_count);
+        if (ncols < spawn_count) ncols = ncols + 1;   // ceil
+        if (ncols < 1) ncols = 1;
+        float per_col = spawn_count / ncols;
+        float ci;
+        for (ci = 0; ci < ncols; ci = ci + 1)
+        {
+            float theta = random() * 6.2831853;
+            float rr    = sqrt(random()) * radius;
+            float sx    = spawn_center_x + cos(theta) * rr;
+            float sy    = spawn_center_y + sin(theta) * rr;
+            float cz    = Rain_CellSpawnZ(view_pos, sx - view_pos_x, sy - view_pos_y, base_offset, skycheck);
+            if (cz >= 0)
+                emitted = emitted + Rain_SpawnColumn(sx, sy, cz, per_col);
+        }
+        weather_dbg_spawn_count = emitted;
+    }
+    else
+    {
+        // WORLD-ALIGNED grid.  Snap each cell's XY to a fixed 512u lattice (centred
+        // on the lead point) instead of a camera-relative box, so a cell's sky-check
+        // column STAYS PUT as you move rather than sweeping across geometry — that
+        // sweep is what made a quarter of the sky blink on/off as you walked.  The
+        // SET of active cells still follows you (shifts by whole cells at 512u
+        // boundaries), but each individual cell's sky status is stable.
+        float gridhalf = floor(grid / 2);
+        float base_x   = floor(spawn_center_x / spacing) * spacing;
+        float base_y   = floor(spawn_center_y / spacing) * spacing;
+        float percell  = spawn_count / (grid * grid);
+        float gi, gj;
+        for (gi = 0; gi < grid; gi = gi + 1)
+        {
+            for (gj = 0; gj < grid; gj = gj + 1)
+            {
+                float cx = base_x + (gi - gridhalf) * spacing + spacing * 0.5;
+                float cy = base_y + (gj - gridhalf) * spacing + spacing * 0.5;
+                // Sky-clamp + roof-skip; trace at the player's eye for this cell XY.
+                float gz = Rain_CellSpawnZ(view_pos, cx - view_pos_x, cy - view_pos_y, base_offset, skycheck);
+                if (gz < 0)
+                    continue;
+                emitted = emitted + Rain_SpawnColumn(cx, cy, gz, percell);
+            }
+        }
+        weather_dbg_spawn_count = emitted;
+    }
+
+    // Water-surface rings are now spawned PER-DROP by the engine `waterringtype`
+    // patch (weather.cfg rain -> waterringtype ringsplash), at the exact drop
+    // impact — no QC sampling needed.  (The old Rain_WaterRingTick random sampler
+    // is removed; cl_weather_waterring / _rate no longer apply to the engine path
+    // — tune the ring density via the ringsplash `count` in weather.cfg instead.)
+
+    // Record the rest for the cl_debug_weather overlay.
+    weather_dbg_effectnum = effectnum;
+    weather_dbg_pop       = pop;
+    weather_dbg_density   = density;
+    weather_dbg_intensity = intensity;
+    weather_dbg_speed     = speed;
+    weather_dbg_lifetime  = lifetime;
+};
+
+// ============================================================
+//  cl_debug_weather — live top-left HUD overlay reporting the
+//  active weather backend and the EXACT particle config in use:
+//  system, selected effect, spawn rate / target population, and
+//  the engine's own reconstruction of the effect (type, blend,
+//  texture, alpha, rgb, scale) via particleeffectquery — i.e.
+//  the alpha / texture / fullbright knobs at a glance.  Drawn
+//  from the HUD 2D pass (cl_main.qc) AFTER renderscene so
+//  drawstring is legal.  Zero cost when cl_debug_weather is 0.
+// ============================================================
+float  wdbg_x;
+float  wdbg_y;
+vector wdbg_fs;
+float  wdbg_a;
+const float WDBG_LH = 10;   // line height (8px font + 2px lead)
+
+void(string s, vector col) Wdbg_Line =
+{
+    drawstring([wdbg_x, wdbg_y], s, wdbg_fs, col, wdbg_a, 0);
+    wdbg_y = wdbg_y + WDBG_LH;
+};
+
+void() CSQC_Weather_DebugDraw =
+{
+    if (!cvar("cl_debug_weather")) return;
+
+    float prev_font = drawfont;
+    drawfont = hud_font_mono;
+
+    wdbg_x  = 12;
+    wdbg_y  = 96;
+    wdbg_fs = '8 8 0';
+    wdbg_a  = 0.92;
+
+    vector cap = '0.55 0.85 1';    // caption / heading
+    vector val = '1 1 1';
+    vector dim = '0.82 0.82 0.82';
+    vector bad = '1 0.45 0.35';
+    vector good = '0.55 1 0.55';
+
+    Wdbg_Line("== cl_debug_weather ==", cap);
+
+    float snow_on = cvar("cl_snow");
+    float rain_on = cvar("cl_rain");
+    float active  = (snow_on || rain_on);
+
+    string backend_s;
+    if (weather_dbg_backend == 1)       backend_s = "ENGINE  (r_part particles)";
+    else if (weather_dbg_backend == 2)  backend_s = "CSQC POOL  (legacy quads)";
+    else                                backend_s = "idle";
+    Wdbg_Line(sprintf("backend  : %s", backend_s),
+              (weather_dbg_backend == 1) ? good : val);
+
+    string mode_s = snow_on ? "SNOW" : (rain_on ? "RAIN" : "OFF");
+    Wdbg_Line(sprintf("mode     : %s   fullbright=%g  simple=%g",
+                      mode_s, cvar("cl_snow_fullbright"), cvar("cl_snow_simple")), val);
+
+    if (weather_dbg_backend == 1)
+    {
+        string efname = "<none>";
+        if (weather_dbg_effectnum != 0)
+            efname = particleeffectquery(weather_dbg_effectnum, 0);
+        if (efname == "") efname = "<unresolved>";
+        Wdbg_Line(sprintf("effect   : %s  (#%g)", efname, weather_dbg_effectnum), val);
+
+        Wdbg_Line(sprintf("spawn/fr : %g   target pop : %g",
+                          weather_dbg_spawn_count, weather_dbg_pop), val);
+        Wdbg_Line(sprintf("density  : %g   intensity : %g",
+                          weather_dbg_density, weather_dbg_intensity), val);
+        Wdbg_Line(sprintf("speed    : %g   life : %gs   wind : %g %g",
+                          weather_dbg_speed, weather_dbg_lifetime,
+                          cvar("cl_rain_angle_x"), cvar("cl_rain_angle_y")), val);
+        Wdbg_Line(sprintf("pool cap : r_part_maxparticles = %g",
+                          cvar("r_part_maxparticles")), val);
+        Wdbg_Line(sprintf("handles  : snow=%s bright=%s square=%s rain=%s",
+                          pe_weather_snow        ? "OK" : "--",
+                          pe_weather_snow_bright ? "OK" : "--",
+                          pe_weather_snow_square ? "OK" : "--",
+                          pe_weather_rain        ? "OK" : "--"), val);
+
+        if (!active)
+            Wdbg_Line("(cl_rain/cl_snow both 0 — backend idle)", bad);
+
+        // Engine-reconstructed effect config: the authoritative view of
+        // type/blend/texture/alpha/rgb/scale for the live effect.
+        if (weather_dbg_effectnum != 0 && efname != "<unresolved>")
+        {
+            string body = particleeffectquery(weather_dbg_effectnum, 1);
+            if (body != "" && body != "0")
+            {
+                wdbg_y = wdbg_y + 4;
+                Wdbg_Line("-- effect config (engine view) --", cap);
+                float n = tokenizebyseparator(body, "\n");
+                float i;
+                float shown = 0;
+                for (i = 0; i < n; i = i + 1)
+                {
+                    string ln = argv(i);
+                    if (ln == "") continue;
+                    drawstring([wdbg_x + 8, wdbg_y], ln, wdbg_fs, dim, wdbg_a, 0);
+                    wdbg_y = wdbg_y + WDBG_LH;
+                    shown = shown + 1;
+                    if (shown >= 20)
+                    {
+                        drawstring([wdbg_x + 8, wdbg_y], "  ...(truncated)", wdbg_fs, dim, wdbg_a, 0);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    else if (weather_dbg_backend == 2)
+    {
+        Wdbg_Line(sprintf("live     : %g / %g particles (RAIN_MAX)",
+                          rd_total_active, RAIN_MAX), val);
+        Wdbg_Line("set cl_weather_engine 1 for the engine backend", val);
+    }
+    else
+    {
+        Wdbg_Line("weather off — set cl_rain 1 or cl_snow 1", bad);
+    }
+
+    drawfont = prev_font;
 };
 
 // Per-frame entry point — call from CSQC_UpdateView.  Cheap when
@@ -1692,20 +2227,27 @@ void() CSQC_Rain_Tick =
     CSQC_Rain_AmbientUpdate();
     CSQC_Rain_LightningUpdate();
 
-    // Engine-particle backend fork — when cl_weather_engine is 1 and
-    // weather.cfg's effects resolve valid, skip the CSQC pool entirely
-    // (Rain_TickEngine handles spawning; engine moves the particles
-    // in C).  Rain_EngineActive does lazy resolve + validity check.
-    if (Rain_EngineActive())
+    // Engine-particle backend (DEFAULT).  Rain_TickEngine spawns rain/snow and the
+    // engine moves the particles in C.  We do NOT early-return: bullet-water
+    // splashes (CSQC_Rain_SpawnBulletWaterSplash) still ride the rd_* pool, so we
+    // fall through to advance/draw them below — the rain RESEED is skipped in engine
+    // mode (after the tick scan), so no CSQC pool rain spawns.  Rain_EngineActive
+    // does the lazy resolve + validity check.
+    float engine_mode = Rain_EngineActive();
+    if (engine_mode)
     {
+        weather_dbg_backend = 1;   // engine r_part backend
         Rain_TickEngine();
-        return;
     }
+    else
+        weather_dbg_backend = 2;   // CSQC quad-pool path below
 
-    // Always resolve so bullet-water splashes (spawned via
-    // CSQC_Rain_SpawnBulletWaterSplash) have valid tuning even when
-    // cl_rain / cl_snow is off — they hijack idle slots in the rd_*
-    // pool and need the existing tick/draw loop to advance them.
+    // Resolve every frame in BOTH modes — bullet-water splashes
+    // (CSQC_Rain_SpawnBulletWaterSplash) need rain_tick_splash_total + the splash
+    // media set BEFORE a bullet can spawn one, and they fire in engine mode too.
+    // They hijack idle slots in the rd_* pool and need the tick/draw loop below to
+    // advance them.  Both resolves are idempotent + cheap when nothing changed
+    // (media only precaches on a texture-name change).
     Rain_ResolveMedia();
     Rain_ResolveTuning();
 
@@ -1750,7 +2292,12 @@ void() CSQC_Rain_Tick =
     // scoped local each.  cl_rain_splash gates the land-splash sprite
     // emission AND the streak→splash state transition below; capturing
     // the value once keeps both consistent within a tick.
-    float tick_want_splash = cvar("cl_rain_splash") > 0;
+    // cl_rain_splash: 0 = off, 1 = full, 2 = cheap.  tick_want_splash gates
+    // ON/OFF; tick_splash_mode carries the raw value so the spray helpers can
+    // pick full vs cheap (the pool used to treat this as a pure boolean, so
+    // cl_rain_splash 2 was a no-op here — now it threads through to the sprays).
+    float tick_splash_mode = cvar("cl_rain_splash");
+    float tick_want_splash = tick_splash_mode > 0;
     // Snow drops on land hit the floor and just vanish — no splash
     // animation (the rain splash sprite is wrong-looking for snow,
     // and snow doesn't actually splash in real life).  Water hits
@@ -1781,8 +2328,30 @@ void() CSQC_Rain_Tick =
                 float drop_can_splash = tick_want_splash;
                 if (tick_snow_kill_land_splash && !rd_water[i])
                     drop_can_splash = 0;
-                if (drop_can_splash)
+                if (drop_can_splash && !rd_water[i])
                 {
+                    // LAND hit: spawn the droplet spray, and HOLD a final streak
+                    // pinned at rd_end for ONE rain-update frame (1/cl_rain_fps) at
+                    // FULL alpha — so it reads exactly like a regular rain streak's
+                    // last 40fps frame, not a single-render-frame flicker.  Routed
+                    // through state 2 (the settle-streak path below) with a short
+                    // window; rd_water 0 -> no ring, rd_bullet_splash 0 -> no sprite,
+                    // so it's streak-only, recycled by Rain_DrawSplash at expiry.
+                    Rain_SpawnLandSpray(rd_end[i], rd_normal[i], tick_splash_mode == 2);
+                    rd_active[i] = 2;
+                    rd_splash_total[i] = (rain_tick_fps > 0) ? 1.0 / rain_tick_fps : frametime;
+                    rd_splash_end[i]   = rain_update_time + rd_splash_total[i];
+                    // Slot stays active (1 → 2) — Rain_DrawSplash decrements at expiry.
+                }
+                else if (drop_can_splash)
+                {
+                    // WATER hit: RAIN gets the BIG droplet spray (weather.splashbig,
+                    // matching the engine path) PLUS the ripple ring — replacing the
+                    // old animated sprite.  SNOW on water stays ring-only (no spray).
+                    // Slot stays active (1 → 2) so the ring animates over its window
+                    // and the settle streak draws the final frame.
+                    if (!rain_tick_snow_mode)
+                        Rain_SpawnWaterSpray(rd_end[i], rd_normal[i], tick_splash_mode == 2);
                     rd_active[i] = 2;
                     rd_splash_total[i] = rain_tick_splash_total;
                     rd_splash_end[i]   = rain_update_time + rd_splash_total[i];
@@ -1817,10 +2386,15 @@ void() CSQC_Rain_Tick =
                     ? 1.0 / rain_tick_fps
                     : frametime;
                 if (settle_dur <= 0) settle_dur = 0.05;
-                float splash_age = rain_update_time - (rd_splash_end[i] - rain_tick_splash_total);
+                // Use the slot's own splash_total (land = settle_dur, water =
+                // rain_tick_splash_total) so this resolves to "time since impact"
+                // for both.
+                float splash_age = rain_update_time - (rd_splash_end[i] - rd_splash_total[i]);
                 if (splash_age >= 0 && splash_age < settle_dur)
                 {
-                    float settle_alpha = 1 - (splash_age / settle_dur);
+                    // LAND: full alpha for the whole frame so it matches a regular
+                    // rain streak.  WATER: fade out over the window.
+                    float settle_alpha = rd_water[i] ? (1 - (splash_age / settle_dur)) : 1;
                     Rain_DrawStreak(i, 1, settle_alpha);
                 }
             }
@@ -1833,6 +2407,12 @@ void() CSQC_Rain_Tick =
     // emission used to make.  Safe to do here because the reseed loop
     // below only spawns new tracelines, no drawing.
     Rain_FlushBatches();
+
+    // Engine mode: the scan above already advanced/drew any in-flight bullet-water
+    // splashes; the engine owns the rain itself (Rain_TickEngine), so skip the CSQC
+    // pool reseed entirely — no pool rain is spawned in engine mode.
+    if (engine_mode)
+        return;
 
     // Re-arm idle slots until we hit the target.  The cursor avoids
     // rescanning from slot 0 every frame, while the cvar limits new

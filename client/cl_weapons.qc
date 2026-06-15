@@ -703,12 +703,43 @@ void(vector trace_src, vector trace_end) CSQC_DroppedWeapon_OverrideTrace =
 //      visually from the server-sent angular velocity if explicitly enabled.
 // Always assigned in CSQC_DroppedWeapon_Update so the smoothing path
 // is in effect for both spinning and settled drops.
-// Forward decl from cl_teamtint.qc — same brightness-cap helper used
-// by the player-tint pass.
-float(vector pos, float cap_byte) CSQC_MaxlightScale;
+// Forward decls from cl_teamtint.qc — same brightness-cap helpers used
+// by the player-tint pass. The _Cached form stores the getlight() sample
+// per entity (settled drops never move) so the predraw doesn't re-sample
+// the lightmap every frame.
+float(vector pos, float cap_byte, float knee_frac) CSQC_MaxlightScale;
+float(float cap_byte, float knee_frac)             CSQC_MaxlightScale_Cached;
+
+// Per-frame dropped-weapon state, refreshed once on the first drop of the
+// frame via the inline cltime gate at the top of the predraw below. Holds
+// the brightness-cap cvars (r_physdrops_maxlight / r_maxlight_softknee),
+// the camera origin, and the squared cull radius. Inlining the refresh
+// (rather than a helper call) avoids a QC CALL per drop; cltime is constant
+// across a frame's predraws, and the polled flag forces the very first
+// predraw ever to populate the globals.
+float  g_physdrop_maxlight;
+float  g_physdrop_knee;
+float  g_physdrop_maxdist_sq;   // squared r_physdrops_maxdist; 0 = cull disabled
+float  g_physdrop_pvscull;      // r_physdrops_pvscull; checkpvs() occlusion cull
+vector g_physdrop_vieworg;
+float  g_physdrop_poll_cltime;
+float  g_physdrop_polled;
 
 float() CSQC_DroppedWeapon_Predraw =
 {
+    // Refresh the per-frame globals once (first drop of the frame).
+    if (!g_physdrop_polled || g_physdrop_poll_cltime != cltime)
+    {
+        g_physdrop_polled      = 1;
+        g_physdrop_poll_cltime = cltime;
+        g_physdrop_maxlight    = cvar("r_physdrops_maxlight");
+        g_physdrop_knee        = cvar("r_maxlight_softknee");
+        g_physdrop_vieworg     = (vector)getproperty(VF_ORIGIN);
+        float md               = cvar("r_physdrops_maxdist");
+        g_physdrop_maxdist_sq  = (md > 0) ? md * md : 0;
+        g_physdrop_pvscull     = cvar("r_physdrops_pvscull");
+    }
+
     // Sleeping-item fast-path. When all of:
     //   - server's last sample had ~zero linear velocity (toss_moving=0)
     //   - no smoothing decay in flight (extrap_error_cltime==0)
@@ -728,14 +759,40 @@ float() CSQC_DroppedWeapon_Predraw =
         && self.extrap_error_cltime == 0
         && (self.avelocity * self.avelocity) <= 1)
     {
+        // Optional distance cull (r_physdrops_maxdist; 0 = off). Settled
+        // drops are PVSF_NOREMOVE, so once seen they persist map-wide and
+        // their predraw + a full engine entity-copy runs every frame with
+        // no engine-side cull. Beyond the radius, skip the submit entirely
+        // (PREDRAW_NEXT without adding) — the renderer would cull it anyway,
+        // this avoids the per-drop copy. Scoped to the settled path so a
+        // moving drop's smoothing origin is never frozen.
+        if (g_physdrop_maxdist_sq > 0)
+        {
+            vector vd = self.origin - g_physdrop_vieworg;
+            if ((vd * vd) > g_physdrop_maxdist_sq)
+                return PREDRAW_NEXT;
+        }
+
+        // Optional PVS occlusion cull (r_physdrops_pvscull). Catches drops
+        // within the distance radius but behind walls / out of the
+        // potentially-visible set. checkpvs() is fail-safe on every BSP format
+        // (CoD's NULL-deref is fixed engine-side in CODBSP_ClusterPVS) — it
+        // returns "visible" when PVS data is missing, so it never hides a drop
+        // you can actually see. The drop is a real CSQC edict with valid
+        // pvsinfo (setsize/setorigin populate it), so self can be tested
+        // directly. Settled-path only, so a moving drop never freezes.
+        if (g_physdrop_pvscull && !checkpvs(g_physdrop_vieworg, self))
+            return PREDRAW_NEXT;
+
         // r_physdrops_maxlight cap — keeps a dropped weapon under a
-        // bright sky-tile / lava-glow from blowing out. Single getlight
-        // sample + one comparison; effectively free vs the addentity
-        // GPU cost.
-        float scale = CSQC_MaxlightScale(self.origin, cvar("r_physdrops_maxlight"));
+        // bright sky-tile / lava-glow from blowing out. Cached: a settled
+        // drop reuses last frame's scalar (no getlight()). Returning
+        // PREDRAW_AUTOADD lets the engine add the entity itself (identical
+        // CopyCSQCEdictToEntity, reads colormod live) — one fewer QC->builtin
+        // call than an explicit addentity(self).
+        float scale = CSQC_MaxlightScale_Cached(g_physdrop_maxlight, g_physdrop_knee);
         self.colormod = '1 1 1' * scale;
-        addentity(self);
-        return PREDRAW_NEXT;
+        return PREDRAW_AUTOADD;
     }
 
     CSQC_TossPredraw(self);
@@ -747,15 +804,18 @@ float() CSQC_DroppedWeapon_Predraw =
         self.angles = self.angles + self.avelocity * frametime;
     {
         // Same brightness cap on the moving-drop path (in-flight,
-        // post-bounce, ODE-driven physics drops). Reuses the `scale`
-        // local from the sleeping-fast-path branch above — QC has
-        // function-scope locals regardless of `{}`, so re-declaring
-        // with `float` triggers Q207 ("duplicate definition ignored").
-        scale = CSQC_MaxlightScale(self.origin, cvar("r_physdrops_maxlight"));
+        // post-bounce, ODE-driven physics drops). A moving drop changes
+        // origin each frame, so _Cached misses and re-samples — correct.
+        // Reuses the `scale` local from the sleeping-fast-path branch
+        // above — QC has function-scope locals regardless of `{}`, so
+        // re-declaring with `float` triggers Q207 ("duplicate definition
+        // ignored").
+        scale = CSQC_MaxlightScale_Cached(g_physdrop_maxlight, g_physdrop_knee);
         self.colormod = '1 1 1' * scale;
     }
-    addentity(self);
-    return PREDRAW_NEXT;
+    // PREDRAW_AUTOADD — engine auto-adds using the origin/angles/colormod
+    // just set above (identical render to an explicit addentity(self)).
+    return PREDRAW_AUTOADD;
 };
 
 void(float isnew) CSQC_DroppedWeapon_Update =
@@ -1756,6 +1816,7 @@ void(float weapon_id) CSQC_WeaponEquip =
     else if (weapon_id == WEP_CFMSG90)      CSQC_CFMsg90Equip();
     else if (weapon_id == WEP_CFSG552)      CSQC_CFSG552Equip();
     else if (weapon_id == WEP_CFSL8)        CSQC_CFSl8Equip();
+    else if (weapon_id == WEP_GRAVITYGUN)   CSQC_GravGunEquip();
     else if (weapon_id == WEP_CFC4)         CSQC_CFC4Equip();
     else if (weapon_id == WEP_CFM9)  CSQC_CFM9Equip();
     else if (weapon_id == WEP_CFREVOLVER)     CSQC_CFRevolverEquip();

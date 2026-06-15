@@ -51,6 +51,8 @@ float  sv_confirmed_jump_lag_end;
 // reconcile-replay so the rope doesn't flicker during prediction
 // rewinds.
 float  sv_confirmed_grapple_rope_active;
+float  sv_confirmed_pm_carrying;        // HL2 carry lowered-weapon flag (mirrors grapple)
+float  sv_confirmed_pm_driving;         // func_vehicle driving flag (drives the pmove driver-lock)
 vector sv_confirmed_grapple_anchor;
 // Actively-pulling flag — gates the categorize ground-snap suppress
 // so the suppress only fires during the pull phase, not during hook
@@ -243,9 +245,8 @@ void() CL_Drift_Dump =
 	}
 };
 
-vector csqc_present_origin;
-vector csqc_present_view_ofs;
-float  csqc_present_valid;
+// csqc_present_origin / _view_ofs / _valid are declared in client/cl_customdefs.qc
+// (compiled before cl_physprop.qc, which reads them for carried-prop prediction).
 // Post-preview FL_DUCKING flag (0/1).  The preview at
 // CSQC_BuildPresentationView may complete a duck transition mid-substep —
 // origin drops 18qu, FL_DUCKING gets set, then `self.flags = saved_flags`
@@ -570,6 +571,8 @@ void(entity src) CSQC_StoreConfirmedStateFromEntity =
 	sv_confirmed_slide_friction_active = src.slide_friction_active;
 	sv_confirmed_jump_lag_end         = src.pm_jump_lag_end;
 	sv_confirmed_grapple_rope_active  = src.grapple_rope_active;
+	sv_confirmed_pm_carrying          = src.pm_carrying;
+	sv_confirmed_pm_driving           = src.pm_driving;
 	sv_confirmed_grapple_anchor       = src.grapple_anchor;
 	sv_confirmed_grapple_attached     = src.grapple_attached;
 	sv_confirmed_grapple_held_last    = src.pm_grapple_held_last;
@@ -678,6 +681,8 @@ void() CSQC_ResetToConfirmedMoveState =
 	self.slide_friction_active   = sv_confirmed_slide_friction_active;
 	self.pm_jump_lag_end         = sv_confirmed_jump_lag_end;
 	self.grapple_rope_active     = sv_confirmed_grapple_rope_active;
+	self.pm_carrying             = sv_confirmed_pm_carrying;
+	self.pm_driving              = sv_confirmed_pm_driving;
 	self.grapple_anchor          = sv_confirmed_grapple_anchor;
 	self.grapple_attached        = sv_confirmed_grapple_attached;
 	self.pm_grapple_held_last    = sv_confirmed_grapple_held_last;
@@ -823,7 +828,17 @@ void() CSQC_ResetToConfirmedState =
 	// most of the time; the gate only closes briefly during the
 	// 1× RTT window between predicted fire and server ack.
 	float ammo_sync_ok = (sv_confirmed_wep_action_id >= self.wep_action_id);
-	if (ammo_sync_ok)
+	// nettest (ammo-HUD fix, bug 1 — M3 reload): the M3 inserts shells one-by-one on the SERVER
+	// (W_M3Frame); its custom SH_M3TickState does NOT apply reload ammo client-side, so the client never
+	// predicts the per-shell mag climb and the HUD froze for the whole reload (corrected only by a
+	// drop+pickup).  Trust the server's ammo while the M3 is reloading so the count climbs live.  This is
+	// SCOPED to the M3: standard mag weapons predict their own reload ammo (SH_StandardTickState applies
+	// mag+=needed on BOTH sides), so force-syncing a possibly-stale snapshot mid-reload would corrupt their
+	// predicted apply math (off-by-one).  You can't fire mid-reload, so there is no predicted fire
+	// decrement to protect here.  (Other shell-by-shell loaders that don't predict reload ammo can be
+	// added to this condition if they show the same symptom.)
+	float trust_server_ammo = ammo_sync_ok || (self.weaponstate == WS_RELOAD && self.weapon == WEP_CSM3);
+	if (trust_server_ammo)
 	{
 		self.slot_primary_mag    = sv_confirmed_slot_primary_mag;
 		self.slot_primary_ammo   = sv_confirmed_slot_primary_ammo;
@@ -893,6 +908,25 @@ void() CSQC_ResetToConfirmedState =
 		self.altfire_finished  = 0;
 		self.csqc_fire_guard   = 0;
 		self.csqc_reload_guard = 0;
+
+		// nettest (ammo-HUD fix, bug 2 — buy / server-equip): force the new weapon's slot ammo from the
+		// snapshot even if the fire-prediction gate is closed.  A buy is `cmd buy` -> server (NOT
+		// client-predicted), so the new weapon's ammo is purely server-authoritative; without this the HUD
+		// kept showing the PREVIOUS weapon's ammo ("copied over") until a drop+pickup re-synced it.
+		// GATE on csqc_weapon_pending_ack_sequence <= 0: that is true only when the client has NO predicted
+		// weapon action in flight, i.e. this weapon change came from the SERVER (buy/pickup/force-equip),
+		// not from a local predicted switch the server hasn't acked yet — for which force-syncing the
+		// server's (lagging) ammo would briefly show the wrong gun's count.  W_SlotAmmo_LoadCurrent below
+		// then seeds the active weapon's working register from this slot.
+		if (csqc_weapon_pending_ack_sequence <= 0)
+		{
+			self.slot_primary_mag    = sv_confirmed_slot_primary_mag;
+			self.slot_primary_ammo   = sv_confirmed_slot_primary_ammo;
+			self.slot_primary_aux    = sv_confirmed_slot_primary_aux;
+			self.slot_secondary_mag  = sv_confirmed_slot_secondary_mag;
+			self.slot_secondary_ammo = sv_confirmed_slot_secondary_ammo;
+			self.slot_secondary_aux  = sv_confirmed_slot_secondary_aux;
+		}
 	}
 
 	// Per-weapon mag/ammo sync — gated on ammo_sync_ok for the same
@@ -903,7 +937,7 @@ void() CSQC_ResetToConfirmedState =
 	// refuses to start because mag looks full").  When server has
 	// caught up, sync — which is also how pickup / round-start
 	// loadout values reach the client.
-	if (ammo_sync_ok)
+	if (trust_server_ammo)
 	{
 		self.mag_deagle      = sv_confirmed_mag_deagle;
 		self.ammo_deagle     = sv_confirmed_ammo_deagle;
@@ -952,7 +986,6 @@ void() CSQC_ResetToConfirmedState =
 		self.ammo_cshegrenade = sv_confirmed_ammo_cshegrenade;
 		self.ammo_csflashbang = sv_confirmed_ammo_csflashbang;
 		self.ammo_cssmokegrenade = sv_confirmed_ammo_cssmokegrenade;
-		self.ammo_cfc4 = sv_confirmed_ammo_cfc4;
 		self.mag_hlglock     = sv_confirmed_mag_hlglock;
 		self.ammo_hlglock    = sv_confirmed_ammo_hlglock;
 		self.ammo_hlegon     = sv_confirmed_ammo_hlegon;
@@ -966,6 +999,15 @@ void() CSQC_ResetToConfirmedState =
 		self.ammo_cfmac10    = sv_confirmed_ammo_cfmac10;
 		// for this toggle, same convention as m4a1_silenced.
 	}
+
+	// C4 carry flag (ammo_cfc4) is server-authoritative and NEVER client-predicted
+	// — the only ammo_cfc4=1 grant is server-side — so reconcile it UNCONDITIONALLY,
+	// outside the trust_server_ammo gate.  That gate protects predicted mag/ammo
+	// decrements during the 1xRTT ack window; ammo_cfc4 has no predicted decrement,
+	// and gating it could strand the HUD C4 slot + plant animation at 0 whenever a
+	// predicted weapon action was in flight just after a (re)spawn.
+	self.ammo_cfc4 = sv_confirmed_ammo_cfc4;
+
 	W_SlotAmmo_LoadCurrent(self);
 
 	// Keep a single weapon action monotonic. Once local prediction is already
@@ -1945,6 +1987,11 @@ vector(vector base) CSQC_ApplyLocalSmoothOffset =
 	return base;
 };
 
+// func_vehicle camera seat-lock state (local driver only).
+vector veh_seat_local;     // driver's offset from the car, in the car's local frame (captured at mount)
+float  veh_seat_captured;  // 1 once veh_seat_local is valid for the current drive
+entity veh_seat_car;       // the vehicle we're locked to (held through flaky carry frames so the camera never falls back to the stale predicted position)
+
 void() CSQC_BuildPresentationView =
 {
 	float elapsed;
@@ -1995,6 +2042,48 @@ void() CSQC_BuildPresentationView =
 	csqc_present_origin = CSQC_ApplyLocalSmoothOffset(predicted_player.origin);
 	csqc_present_view_ofs = predicted_player.view_ofs;
 	csqc_present_ducking = (predicted_player.flags & FL_DUCKING) != 0;
+
+	// func_vehicle: PIN the driver's presentation origin to the car on EVERY
+	// frame — BEFORE the preview early-returns below.  The previous override sat
+	// AFTER those returns, so any frame that early-returned (no buffered cmd /
+	// tiny preview_time) left csqc_present_origin at the stale predicted body
+	// (the "+use mount" spot) while full frames snapped it to the car → the
+	// camera flickered between the two.  Computing it here, once, from the car's
+	// render extrapolation kills the flicker: the fragile pmove down-trace no
+	// longer affects rendering, and veh_seat_car is held across momentary carry
+	// drops so the lock never falls back.  (cl_vehicle_seatlock 0 disables.)
+	if (predicted_player.pm_driving && cvar("cl_vehicle_seatlock"))
+	{
+		entity dcar = predicted_player.platform_carry;
+		if (dcar == world || dcar.brush_type != BRUSH_TYPE_VEHICLE)
+			dcar = veh_seat_car;
+		if (dcar != world)
+		{
+			veh_seat_car = dcar;
+			// Match the car's predraw origin extrapolation (cl_brushsync.qc)
+			// EXACTLY so the camera sits where the car is RENDERED this frame.
+			float dla = cvar("cl_brushsync_lookahead"); if (dla < 0) dla = 0;
+			float delp = cltime - dcar.csqc_snap_time;
+			if (delp < 0)   delp = 0;
+			if (delp > dla) delp = dla;
+			vector dorg = dcar.csqc_snap_origin + dcar.velocity * delp;
+			if (!veh_seat_captured)
+			{
+				veh_seat_local_z = predicted_player.origin_z - dorg_z;   // eye height above the car
+				veh_seat_captured = 1;
+			}
+			csqc_present_origin_x = dorg_x;
+			csqc_present_origin_y = dorg_y;
+			csqc_present_origin_z = dorg_z + veh_seat_local_z;
+			csqc_present_view_ofs = predicted_player.view_ofs;
+			return;   // car-locked every frame; skip the preview pmove entirely
+		}
+	}
+	else
+	{
+		veh_seat_car = world;
+		veh_seat_captured = 0;
+	}
 
 	if (!pred_cmd_count)
 		return;
@@ -2061,12 +2150,15 @@ void() CSQC_BuildPresentationView =
 		input_movevalues_y = 0;
 		input_buttons = input_buttons & ~1;
 	}
-	// C4 plant prefire — predicted side mirror.  Without this the
-	// preview sim would visibly slide for one frame before the
+	// C4 plant freeze — predicted side mirror.  Freeze through BOTH the
+	// prefire hold (WS_FIRE) and the fire commit (WS_SPECIAL) so the planter
+	// can't walk during the commit anim — they're locked until fully planted.
+	// Without this the preview sim would visibly slide for one frame before the
 	// server-side freeze pulled it back.
 	else if (predicted_player
 	         && predicted_player.weapon == WEP_CFC4
-	         && predicted_player.weaponstate == WS_FIRE)
+	         && (predicted_player.weaponstate == WS_FIRE
+	             || predicted_player.weaponstate == WS_SPECIAL))
 	{
 		input_movevalues_x = 0;
 		input_movevalues_y = 0;
@@ -2074,8 +2166,29 @@ void() CSQC_BuildPresentationView =
 		input_buttons = input_buttons & ~PM_BTN_JUMP;
 	}
 
+	// func_vehicle: mirror the predicted driver-lock in the render preview so the
+	// driver doesn't visibly walk between ticks (WASD steers the car, not feet).
+	if (predicted_player && predicted_player.pm_driving)
+	{
+		input_movevalues_x = 0;
+		input_movevalues_y = 0;
+	}
+
 	float fixedstep = PM_ReadMovevar("sv_mintic", 0.01);
 	if (fixedstep < 0.001) fixedstep = 0.01;
+
+	// mp_noblock: this render-rate preview calls PM_PlayerMoveStep() directly,
+	// bypassing PM_PlayerMove() where the noblock stash lives. Without the same
+	// stash here the preview (hence the camera, via csqc_present_origin below)
+	// collides with remote players' SOLID_BBOX proxies while the REAL prediction
+	// passes through them — snapping the view to the proxy's bbox edge entering
+	// and stalling it inside (the boundary hitch + through-stutter). Mirror
+	// PM_PlayerMove: desolidify other players for the preview substeps, restore
+	// right after. Set the flag explicitly (not the value carried from the last
+	// real tick) so the first preview frame after a cvar toggle is correct.
+	pm_noblock_active = stof(serverkey("mp_noblock")) > 0;
+	if (pm_noblock_active)
+		PM_NoblockStash();
 
 	pm_suppress_sounds = TRUE;   // preview steps are speculative — no sounds
 	while (preview_time > PM_FIXEDSTEP_EPSILON)
@@ -2086,8 +2199,15 @@ void() CSQC_BuildPresentationView =
 	}
 	pm_suppress_sounds = FALSE;
 
+	if (pm_noblock_active)
+		PM_NoblockRestore();
+
 	csqc_present_origin = CSQC_ApplyLocalSmoothOffset(self.origin);
 	csqc_present_view_ofs = self.view_ofs;
+
+	// (func_vehicle driver seat-lock moved ABOVE the early-returns — the driver
+	// returns before reaching here, so this path is the normal walking case.)
+
 	// Post-preview duck flag.  See declaration comment — the saved_flags
 	// restore below this block reverts self.flags to its pre-preview value,
 	// so consumers that pair csqc_present_origin with a bbox size MUST read
@@ -2643,6 +2763,8 @@ void() CSQC_ExtrapolateRemotePlayers =
 // frame later than it otherwise would — invisible to the player).
 float csqc_jump_buffer_armed;
 float csqc_jump_was_down;
+float csqc_carry_fire_last;   // +attack rising-edge latch for the carry throw
+float csqc_carry_throw_lockout; // keep fire suppressed after a throw until +attack released
 
 void() CSQC_Input_Frame =
 {
@@ -2660,6 +2782,49 @@ void() CSQC_Input_Frame =
 	csqc_dbg_last_inputframe_time = cltime;
 	CSQC_LatchLiveInputFromCommand();
 	input_buttons = csqc_live_buttons;   // write custom bits before buffer captures them
+
+	// HL2 carry: while holding a prop, +attack THROWS it instead of firing.
+	// Suppress the fire button HERE — before the command is buffered + predicted
+	// and before it's sent to the server — so NO weapon (server or client,
+	// standard or custom-fire) shoots or emits a `cs` client-shot, and send the
+	// throw on the rising edge. pm_carrying is the server-confirmed carry flag.
+	if (predicted_player && predicted_player.pm_carrying)
+	{
+		if ((input_buttons & PM_BTN_FIRE) && !csqc_carry_fire_last)
+		{
+			localcmd("cmd throwprop\n");
+			csqc_carry_throw_lockout = 1;   // hold fire-suppress through the throw
+			// Gravity gun: predict the throw "fire2" animation client-side (the
+			// fire bit is suppressed below, so the gravgun predict command can't
+			// see it).  weaponstate is client-authoritative — drive it here.
+			if (predicted_player.weapon == WEP_GRAVITYGUN)
+			{
+				predicted_player.weaponstate     = WS_FIRE;
+				predicted_player.wep_anim_start  = cltime;
+				predicted_player.attack_finished = cltime + GRAVGUN_GRAB_COOLDOWN;
+				csqc_gravgun_fire_seq            = GRAVGUN_SEQ_FIRE2;
+			}
+		}
+		csqc_carry_fire_last = (input_buttons & PM_BTN_FIRE) ? 1 : 0;
+		input_buttons = input_buttons & ~PM_BTN_FIRE;
+	}
+	else
+	{
+		// Track the raw fire state even when not carrying so that grabbing while
+		// +attack is held doesn't read as a fresh press (instant throw on grab).
+		csqc_carry_fire_last = (input_buttons & PM_BTN_FIRE) ? 1 : 0;
+		// After a throw, keep fire suppressed until +attack is RELEASED, so the
+		// still-held button doesn't immediately shoot once carrying ends (the
+		// "you still shoot after throwing" report). pm_carrying drops ~1 RTT
+		// after the throw; this bridges that window and the held button.
+		if (csqc_carry_throw_lockout)
+		{
+			if (input_buttons & PM_BTN_FIRE)
+				input_buttons = input_buttons & ~PM_BTN_FIRE;
+			else
+				csqc_carry_throw_lockout = 0;
+		}
+	}
 
 	// Advance view-feel state (bob phase, landing spring, sway lag) on
 	// the input-frame cadence so the phase is identical across render-
@@ -2690,7 +2855,12 @@ void() CSQC_Input_Frame =
 	// the offset is filled in below by the local-prediction block.
 	if (csqc_door_yaw_offset != 0)
 	{
-		input_angles_y = input_angles_y + csqc_door_yaw_offset;
+		// Only the setproperty(VF_CL_VIEWANGLES_Y) write persists: it
+		// advances cl.playerview.viewangles, which the engine re-seeds
+		// into the NEXT frame's outgoing cmd->angles (cl_input.c:1304).
+		// A separate input_angles_y bump here re-applied the same delta
+		// to THIS frame's cmd->angles, double-counting the rotation
+		// (the "view yaw spins ~2x too fast" report). Drop it.
 		float new_yaw = (float)getproperty(VF_CL_VIEWANGLES_Y) + csqc_door_yaw_offset;
 		setproperty(VF_CL_VIEWANGLES_Y, new_yaw);
 		csqc_door_yaw_offset = 0;
@@ -2738,8 +2908,16 @@ void() CSQC_Input_Frame =
 			if (trace_fraction >= 1) continue;
 			if (trace_ent != rb) continue;
 
+			// Only the setproperty(VF_CL_VIEWANGLES_Y) write persists:
+			// it advances cl.playerview.viewangles, which the engine
+			// re-seeds into the NEXT frame's outgoing cmd->angles
+			// (cl_input.c:1304). A separate input_angles_y bump here
+			// re-applied the same delta to THIS frame's cmd->angles,
+			// double-counting the rotation (the "view yaw spins ~2x too
+			// fast while position carry stays 1x" report). Drop it; the
+			// rotation still reaches the server via the viewangles
+			// re-seed, lagged a uniform one input frame (<16ms).
 			float yaw_delta = rb.avelocity_y * input_timelength;
-			input_angles_y = input_angles_y + yaw_delta;
 			float predicted_yaw = (float)getproperty(VF_CL_VIEWANGLES_Y) + yaw_delta;
 			setproperty(VF_CL_VIEWANGLES_Y, predicted_yaw);
 			break;   // first matching brush wins; no double-rotation
@@ -2768,12 +2946,15 @@ void() CSQC_Input_Frame =
 		input_movevalues_y = 0;
 		input_buttons = input_buttons & ~1;
 	}
-	// C4 plant prefire — buffered-command mirror of the SSQC freeze.
+	// C4 plant freeze — buffered-command mirror of the SSQC freeze.  Covers
+	// BOTH the prefire hold (WS_FIRE) and the fire commit (WS_SPECIAL) so the
+	// outgoing command carries no movement until the bomb is fully planted.
 	// Keep button0 alive (the hold detection runs server-side via
 	// W_CFC4Frame) but zero WASD/jump so the predicted move matches.
 	else if (predicted_player
 	         && predicted_player.weapon == WEP_CFC4
-	         && predicted_player.weaponstate == WS_FIRE)
+	         && (predicted_player.weaponstate == WS_FIRE
+	             || predicted_player.weaponstate == WS_SPECIAL))
 	{
 		input_movevalues_x = 0;
 		input_movevalues_y = 0;
@@ -2795,8 +2976,29 @@ void() CSQC_Input_Frame =
 		input_buttons = 0;
 	}
 
+	// func_vehicle driver lock (predicted, freeze-grade).  Zero the walk for the
+	// BUFFERED command + the prediction below so predicted_player (and every
+	// reconcile replay off the buffer) stays put — then RESTORE the live WASD at
+	// the end so the engine's outgoing usercmd still carries the throttle to the
+	// server (the car is driven from it).  Without the restore the server would
+	// receive 0 and the car wouldn't move; without the zero the driver visibly
+	// walks and rubber-bands.  The render preview is locked separately in
+	// CSQC_BuildPresentationView (it reads live WASD, not this buffer).
+	vector veh_lock_saved_mv = input_movevalues;
+	float  veh_lock_active = FALSE;
+	if (predicted_player && predicted_player.pm_driving)
+		veh_lock_active = TRUE;
+	if (veh_lock_active)
+	{
+		input_movevalues_x = 0;
+		input_movevalues_y = 0;
+	}
+
 	CSQC_BufferInputCommand(clientcommandframe);
 	CSQC_PredictCurrentCommand();
+
+	if (veh_lock_active)
+		input_movevalues = veh_lock_saved_mv;   // restore real WASD for the engine's sent usercmd → car drives
 };
 
 
@@ -2808,7 +3010,7 @@ void() CSQC_Input_Frame =
 //  bonecontrol1-4 and subblendfrac only work on CSQC entities.
 // ---------------------------------------------------------------------------
 
-const string PLAYER_VISUAL_MODEL = "models/player/leet/leet.mdl";
+const string PLAYER_VISUAL_MODEL = "models/player/leet/leet.iqm";
 
 // Custom fields only (no engine equivalents to shadow).
 // vis_owner_entnum is forward-declared in client/cl_customdefs.qc so
@@ -3501,6 +3703,15 @@ float() CSQC_PlayerVisual_Predraw =
 		self.vis_spine_debug_next = cltime + 0.5;
 	}
 
+	// nettest Patch 36 (revised): the CLIENT visual proxy keeps its QC skel_build skeleton
+	// + skel_set_bone spine deform — that is what renders the proxy AND what the client's
+	// MOVE_HITMODEL bullet trace poses against (via the skeleton's bonestate), so render and
+	// trust-1 hit detection stay in lock-step.  The engine-native spine bend (r_skel_spinebend)
+	// is for entities WITHOUT a QC skeleton — i.e. the SERVER player (its skeleton is cleared
+	// each tick) — so trust-0 server hit detection leans correctly.  The engine bend explicitly
+	// SKIPS any entity that has a skeletal object (Alias_SpineBendActive in com_mesh.c), so the
+	// client proxy is never double-bent.  Applying the engine bend directly to the proxy (the
+	// earlier Part A approach) warped the pose/gun — hence this split.
 	if ((!cvar("cl_player_spine_deform") || !spine_has_work) && self.skeletonindex)
 	{
 		skel_delete(self.skeletonindex);
@@ -3590,6 +3801,25 @@ float() CSQC_PlayerVisual_Predraw =
 			}
 		}
 	}
+
+	// nettest Patch 36 fix: stash the framestate we just computed (the pose this
+	// frame renders) so the prediction-time MOVE_HITMODEL bullet trace — which runs
+	// BEFORE this predraw each frame, in CSQC_Input_Frame — can pose the proxy
+	// IDENTICALLY to how it renders (restored in W_PlayersExpandHitboxes).  Without
+	// this the trace reads last-frame / degenerate .frame+.basebone and the precise
+	// per-bone hitboxes (Patch 36 Part B) miss the live silhouette under trust 1.
+	self.vis_trace_frame         = self.frame;
+	self.vis_trace_frame1time    = self.frame1time;
+	self.vis_trace_frame2        = self.frame2;
+	self.vis_trace_lerpfrac      = self.lerpfrac;
+	self.vis_trace_baseframe     = self.baseframe;
+	self.vis_trace_baseframe1time= self.baseframe1time;
+	self.vis_trace_baseframe2    = self.baseframe2;
+	self.vis_trace_baselerpfrac  = self.baselerpfrac;
+	self.vis_trace_basebone      = self.basebone;
+	self.vis_trace_subblendfrac  = self.subblendfrac;
+	self.vis_trace_subblend2frac = self.subblend2frac;
+	self.vis_trace_pose_valid    = 1;
 
 	addentity(self);
 
@@ -3813,6 +4043,9 @@ void() CSQC_PlayerVisual_Update =
 		// Death byte — server sets when owner.is_dead. Drops proxy
 		// solidity so the corpse stops shoving live players around.
 		self.vis_is_dead = readbyte();
+		// Authoritative copy that the predicted-death code never touches —
+		// drives the bullet-trace solidity below (see vis_server_is_dead decl).
+		self.vis_server_is_dead = self.vis_is_dead;
 
 		// Client-side death-anim fallback.  With cl_predict_death 0
 		// and the server's VP_SF_ANIM section dropped or arriving in
@@ -3882,7 +4115,7 @@ void() CSQC_PlayerVisual_Update =
 		}
 		else if (team_model_byte == 254)
 		{
-			mdl_path = "models/player/chickenman.mdl";
+			mdl_path = "models/player/chickenman/chickenman.iqm";
 			// Same team-independent sentinel pattern as sini.
 		}
 		else if (team_model_byte == 253)
@@ -4077,7 +4310,11 @@ void() CSQC_PlayerVisual_Update =
 	//   • Live other players → SOLID_BBOX so the local CSQC bullet trace
 	//     (with MOVE_HITMODEL) can broad-phase against the bbox and
 	//     refine to model hitboxes.
-	if (self.vis_owner_entnum == player_localentnum || self.vis_is_dead)
+	// Gate on vis_SERVER_is_dead (authoritative), NOT vis_is_dead — the latter is
+	// flipped by client predicted-death and, since the server won't re-send
+	// IDENTITY while is_dead is unchanged, a wrong/early predict would otherwise
+	// leave the live enemy SOLID_NOT forever and un-hittable in trust mode.
+	if (self.vis_owner_entnum == player_localentnum || self.vis_server_is_dead)
 		self.solid = SOLID_NOT;
 	else
 		self.solid = SOLID_BBOX;
@@ -4152,6 +4389,7 @@ void(float old_type, float new_type) CSQC_Ent_CleanupTypeChange =
 	self.drawmask = 0;
 
 	self.vis_is_dead = 0;
+	self.vis_server_is_dead = 0;
 	self.vis_pred_dead_latch = 0;
 	self.vis_pred_dead_at_time = 0;
 	self.vis_pred_gibs_at_time = 0;
@@ -4263,6 +4501,12 @@ noref void(float isnew) CSQC_Ent_Update =
 		return;
 	}
 
+	if (ent_type == CSQC_ENT_PHYS_PROP)
+	{
+		CSQC_PhysProp_Update(isnew);
+		return;
+	}
+
 	// --- prediction proxy ---
 
 	if (ent_type != PM_CSQC_PROXY_VERSION)
@@ -4348,6 +4592,11 @@ noref void(float isnew) CSQC_Ent_Update =
 		self.codstamina              = readfloat();
 		self.codstamina_punished     = readbyte();
 		self.pm_fire_suppress_until  = time + readfloat();
+		// HL2 carry lowered-weapon flag — matches the SSQC writer tail
+		// (sv_player.qc).  Drives Weapon_LowerBlocksFire + the lower envelope.
+		self.pm_carrying             = readbyte();
+		// func_vehicle driving flag — matches the SSQC writer tail.
+		self.pm_driving              = readbyte();
 	}
 
 	if (changedflags & PM_SF_WEAPON_STATE)

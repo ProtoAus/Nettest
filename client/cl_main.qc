@@ -48,6 +48,15 @@ void() CSQC_Ent_Remove =
 	RotatingBrush_RemoveFromList(self);
 	MovingBrush_RemoveFromList(self);
 
+	// Planted-C4 light-walk count (cl_c4.qc) — decrement when a tagged C4 entity
+	// is removed so CSQC_C4_DrawLights can early-out of its per-frame walk again.
+	if (self.classname == "csqc_c4")
+	{
+		csqc_c4_count = csqc_c4_count - 1;
+		if (csqc_c4_count < 0)
+			csqc_c4_count = 0;
+	}
+
 	// Release the throwtrail slot when a tracked projectile is
 	// removed (impact, explode, timeout).  Cheap no-op for non-
 	// projectile entities.  Covers both classnames the throwtrail
@@ -200,9 +209,15 @@ noref void(float apiver, string enginename, float enginever) CSQC_Init =
 {
 	CSQC_EnsureWorldSolid();
 	drawfont = loadfont("", "Courier Prime Code", "12,16,24,32,64,72,128,256,512", -1, 0, 0);
-	hud_font = loadfont("hud", "gfx/RobotoEB", "8 12 16 18 24 32 36 48 60 72", -1, 0, 0);
+	// outline=1 bakes a 1px dark border into each glyph's atlas cell (FTE
+	// gl_font.c), so HUD text renders its legibility border in ONE drawstring
+	// instead of the old shadow-pass + main-pass double draw.  The manual black
+	// drop-shadows are removed everywhere these two fonts are used (see the HUD
+	// draws) — keeping them would double up with the baked outline.  Bump to
+	// outline=2 for a heavier border.
+	hud_font = loadfont("hud", "gfx/RobotoEB", "outline=2 8 12 16 18 24 32 36 48 60 72", -1, 0, 0);
 	hud_font_regular = loadfont("hud_regular", "gfx/Roboto", "8 12 16 18 24 32 36 48 60 72", -1, 0, 0);
-	hud_font_mono = loadfont("hud_mono", "gfx/GoogleMed", "8 12 16 18 24 32 36 48 60 72", -1, 0, 0);
+	hud_font_mono = loadfont("hud_mono", "gfx/GoogleMed", "outline=2 8 12 16 18 24 32 36 48 60 72", -1, 0, 0);
 	// NOTE: we do NOT touch r_particledesc here. The cvar's reload callback
 	// bails when the client is in ca_connected state (p_script.c:3799), so
 	// setting it from CSQC_Init has no effect on the loaded set.  Instead,
@@ -237,6 +252,8 @@ noref void(float apiver, string enginename, float enginever) CSQC_Init =
 	registercommand("sv_defaultmelee");
 	registercommand("sv_defaultutility");
 	registercommand("radio");
+	registercommand("buymenu");
+	registercommand("impactdebris");
 	// Grapple press-and-hold aliases.  Bound via `bind <key> "+grapple"`:
 	// the engine fires `+grapple` on key down and `-grapple` on key up,
 	// which our aliases translate into the engage/release impulse pair
@@ -282,6 +299,14 @@ noref void() CSQC_WorldLoaded =
 	CSQC_RegenerateSpraysShader();
 	CSQC_EnvHud_Reset();
 	CSQC_EnvSound_Reset();
+
+	// Drop any stale throw-trail particle handle across the level boundary so it
+	// re-resolves against the freshly-loaded "weapons" namespace.  (The handle can
+	// be left pointing at a particle type the connect/map particle FLUSH unloaded;
+	// ThrowTrail_Resolve detects that via a body-1 query and self-heals with a
+	// namespace re-exec, so we deliberately do NOT force a re-exec here — an
+	// unconditional reload at world-load could itself unload handles mid-session.)
+	CSQC_ThrowTrail_Clear();
 
 	// Reset live input state across the level boundary.  Two layers
 	// of input state get stuck through changelevel:
@@ -538,13 +563,13 @@ void(float in_menu_backdrop) CSQC_UpdateViewSpectator =
 	CSQC_DrawMuzzleFlash();
 	CSQC_DrawMuzzleFlashSprite();
 	CSQC_DrawMuzzleSmoke();
-	CSQC_TracersDraw();
 	CSQC_Rope_Draw();
 	CSQC_ThrowTrail_Tick();
 	CSQC_C4_DrawLights();
 	CSQC_C4_DrawPlanterFlash();
 	CSQC_DrawMuzzleDebug();
 	CSQC_DrawImpactLights();
+	CSQC_ProcessPendingImpacts();
 	CSQC_DrawDebugHitboxes();
 	CSQC_DrawDebugHitboxExpand();
 	CSQC_DrawDebugPhysProps();
@@ -776,13 +801,13 @@ void() CSQC_UpdateViewAliveScene =
 	CSQC_DrawMuzzleFlash();
 	CSQC_DrawMuzzleFlashSprite();
 	CSQC_DrawMuzzleSmoke();
-	CSQC_TracersDraw();
 	CSQC_Rope_Draw();
 	CSQC_ThrowTrail_Tick();
 	CSQC_C4_DrawLights();
 	CSQC_C4_DrawPlanterFlash();
 	CSQC_DrawMuzzleDebug();
 	CSQC_DrawImpactLights();
+	CSQC_ProcessPendingImpacts();
 	CSQC_DrawSmokeClouds();
 	CSQC_DrawScorchDecals();
 	CSQC_DrawBloodDecals();
@@ -826,6 +851,7 @@ void(float in_menu_backdrop) CSQC_UpdateViewAliveHud =
 		// composites AFTER the scope overlay (z-order requirement).
 		CSQC_DrawWeaponHUD();
 		Radio_Draw();
+		Buy_Draw();
 		HUD_DrawSpeedometer();
 		HUD_DrawNetGraph();
 		HUD_DrawKillFeed();
@@ -841,6 +867,7 @@ void(float in_menu_backdrop) CSQC_UpdateViewAliveHud =
 		CSQC_LookatName_DrawHUD();
 
 		CSQC_DrawDebugPanels();
+		CSQC_Weather_DebugDraw();   // cl_debug_weather overlay (no-op when 0)
 
 		// Update team menu cursor state every frame
 		TeamMenuUpdateCursorState();
@@ -1065,6 +1092,19 @@ float(string cmd) CSQC_ConsoleCommand =
 		case "radio":
 			Radio_Toggle();
 			return TRUE;
+		case "buymenu":
+			Buy_Toggle();
+			return TRUE;
+		case "impactdebris":
+			// Swap the chunk colour.  No arg = flip stone<->dirt;
+			// `impactdebris 0|1` sets it explicitly (0 = stone, 1 = dirt).
+			if (argv(1) != "")
+				cvar_set("cl_impact_debris_mode", argv(1));
+			else
+				cvar_set("cl_impact_debris_mode", cvar("cl_impact_debris_mode") ? "0" : "1");
+			print(sprintf("impact debris chunks: %s\n",
+			      cvar("cl_impact_debris_mode") ? "dirt" : "stone"));
+			return TRUE;
 		case "probe":
 		{
 			// Diagnostic: fire a player-hull tracebox forward from the
@@ -1207,6 +1247,14 @@ float(float evtype, float scanx, float chary, float devid) CSQC_InputEvent =
 		return TRUE;
 	}
 
+	// Buy menu — when open, swallow 1-9 + ESC + mouse-1 so they don't
+	// leak to weapon binds / +attack.  Movement etc. still passes through.
+	if (Buy_IsOpen())
+	{
+		if (Buy_InputEvent(evtype, scanx, chary, devid))
+			return TRUE;
+	}
+
 	// Radio overlay — when open, swallow 1-8 + ESC + the bound radio
 	// key so weapon binds on those scancodes don't double-fire. All
 	// other input (movement, +attack, etc.) passes through so the
@@ -1336,6 +1384,7 @@ float(float ev) _net_event_bytes =
 	if (ev == CSQC_EVENT_C4_EXPLODE)             return 14;  // 2 svc hdr + 12 origin
 	if (ev == CSQC_EVENT_DOOR_VIEWROT)           return 4;   // 2 svc hdr + 2 short delta
 	if (ev == CSQC_EVENT_BUTTON_SPARK)           return 17;  // 2 svc hdr + 12 origin + 3 normal bytes
+	if (ev == CSQC_EVENT_PHYSPROP_IMPACT)        return 18;  // 2 svc hdr + 12 pos + 3 normal bytes + 1 bucket
 	if (ev == CSQC_EVENT_ENV_EXPLOSION)          return 17;  // 2 svc hdr + 12 origin + 2 magnitude + 1 spawnflags
 	if (ev == CSQC_EVENT_SPRAY)                  return 53;  // 2 svc hdr + 2 sid + 1 owner + 12 pos + 12 normal + 12 eye + ~12 name (avg)
 	if (ev == CSQC_EVENT_SPRAY_REMOVE)           return 4;   // 2 svc hdr + 2 sid
@@ -1541,7 +1590,11 @@ void() CSQC_Parse_Event =
 			{
 				if (fp.vis_owner_entnum == flinch_slot)
 				{
-					if (!fp.vis_is_dead)
+					// nettest Patch 36: if WE predicted this flinch (vis_flinch_pred_until still
+					// open), skip the server re-stamp so it doesn't restart the flinch anim and
+					// double-play on the shooter's screen.  Witnesses never set the latch, so they
+					// still get the flinch from this multicast.
+					if (!fp.vis_is_dead && fp.vis_flinch_pred_until <= cltime)
 					{
 						fp.vis_flinch_until    = cltime + flinch_dur;
 						fp.vis_flinch_hitgroup = flinch_hg;
@@ -1769,6 +1822,36 @@ void() CSQC_Parse_Event =
 				bs_id = particleeffectnum("weapons.metal_impact");
 			if (bs_id != -1 && bs_id != 0)
 				pointparticles(bs_id, bs_pos, bs_norm * 200, 1);
+			break;
+		}
+		case CSQC_EVENT_PHYSPROP_IMPACT:
+		{
+			// Filing-cabinet contact smoke (server detects the impact/slide; the sound
+			// is server-side sound(), this event is the smoke only).  bucket: 0 slide /
+			// 1 soft / 2 hard → a harder hit pushes more smoke off the surface (2 puffs).
+			vector pp_pos;
+			pp_pos_x = readcoord();
+			pp_pos_y = readcoord();
+			pp_pos_z = readcoord();
+			vector pp_norm;
+			pp_norm_x = (readbyte() - 128) / 127;
+			pp_norm_y = (readbyte() - 128) / 127;
+			pp_norm_z = (readbyte() - 128) / 127;
+			float pp_bucket = readbyte();
+			float pp_sid = particleeffectnum("weapons.physprop_smoke");
+			if (pp_sid != -1 && pp_sid != 0)
+				pointparticles(pp_sid, pp_pos, pp_norm * (pp_bucket == 2 ? 30 : 12),
+				               pp_bucket == 2 ? 2 : 1);
+			// Slide (bucket 0): throw metal sparks off the scraped surface using
+			// the SAME effect a bullet impact spawns (weapons.metal_impact,
+			// normal * 100, count 1 — see cl_bulletimpact.qc), so dragging the
+			// cabinet along a wall/floor sparks like it's being ground down.
+			if (pp_bucket == 0)
+			{
+				float pp_spark = particleeffectnum("weapons.metal_impact");
+				if (pp_spark != -1 && pp_spark != 0)
+					pointparticles(pp_spark, pp_pos, pp_norm * 100, 1);
+			}
 			break;
 		}
 		case CSQC_EVENT_CSGRENADE_BOUNCE:

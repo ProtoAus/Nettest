@@ -274,7 +274,7 @@ float() CSQC_SolidBrush_Predraw =
     //
     // Yaw is treated similarly but with a rate differentiated from
     // two consecutive snapshots (no avelocity to use for tracktrains).
-    if (self.brush_type == BRUSH_TYPE_TRAIN)
+    if (self.brush_type == BRUSH_TYPE_TRAIN || self.brush_type == BRUSH_TYPE_VEHICLE)
     {
         float t_elapsed = cltime - self.csqc_snap_time;
         if (t_elapsed < 0) t_elapsed = 0;
@@ -290,7 +290,13 @@ float() CSQC_SolidBrush_Predraw =
         // and a non-zero gap between them.  Static / just-spawned
         // brushes leave prev at zero, which we treat as "no rate
         // yet; just hold snap_angles".
-        if (self.csqc_snap_time_prev > 0)
+        //
+        // BRUSH_TYPE_VEHICLE skips this snap-differentiated yaw entirely:
+        // a func_vehicle ships avelocity_y (live steering), so the
+        // rotating branch above (avelocity != 0) already extrapolated
+        // angles_y.  Differentiating snap-to-snap here too would
+        // double-drive the yaw (the 2x-rotation cab bug).
+        if (self.brush_type == BRUSH_TYPE_TRAIN && self.csqc_snap_time_prev > 0)
         {
             float t_snap_dt = self.csqc_snap_time - self.csqc_snap_time_prev;
             if (t_snap_dt > 0.001)
@@ -540,13 +546,26 @@ void() CSQC_SolidBrush_Update =
     // though the server didn't.  Stored on the entity so the solid
     // assignment further down can OR it in.
     self.wire_nonsolid = readbyte();
-    if (self.rendermode == 1
-        || self.rendermode == 3
-        || self.rendermode == 5)
+    if (self.rendermode == 3 || self.rendermode == 5)
     {
-        // Color / Glow / Additive — apply rendercolor as colormod
-        // when the mapper actually set one (default 0,0,0 leaves
-        // the entity at neutral white tint).
+        // Glow / Additive: the engine renders these additively (black drops out,
+        // so a light-ray-on-black texture glows) but IGNORES entity .alpha on a
+        // brush model — so renderamt can't dim them through alpha.  GoldSrc scales
+        // additive BRIGHTNESS by renderamt, so fold it into colormod instead
+        // (colormod IS honoured on additive brushes): rendercolor tints (default
+        // white), all scaled by renderamt (alpha_value).  renderamt 0 -> invisible,
+        // matching GoldSrc (mappers set renderamt explicitly for additive modes).
+        vector tint;
+        if (rcol != '0 0 0')
+            tint = rcol / 255;
+        else
+            tint = '1 1 1';
+        self.colormod = tint * alpha_value;
+    }
+    else if (self.rendermode == 1)
+    {
+        // Color (non-additive): .alpha drives the translucency, colormod just
+        // tints — apply rendercolor when the mapper set one (default neutral).
         if (rcol != '0 0 0')
             self.colormod = rcol / 255;
         else
@@ -638,10 +657,11 @@ void() CSQC_SolidBrush_Update =
         else
             MovingBrush_RemoveFromList(self);
     }
-    else if (btype == BRUSH_TYPE_TRAIN)
+    else if (btype == BRUSH_TYPE_TRAIN || btype == BRUSH_TYPE_VEHICLE)
     {
-        // No extra wire fields for trains — origin / angles / velocity
-        // / avelocity are already in the shared brushsync header above.
+        // No extra wire fields for trains / vehicles — origin / angles /
+        // velocity / avelocity are already in the shared brushsync header
+        // above (a func_vehicle's live steering rides avelocity_y).
         // Add to moving_brush_list while in transit so the train
         // branch of PM_CheckMovingPushers can run the carry +
         // geometry-push pass against the local predicted player every
@@ -794,7 +814,7 @@ void() CSQC_SolidBrush_Update =
     // didn't know about the new velocity yet — recorded here so the
     // carry block can apply it next substep.  Skipped on the very
     // first snap (no previous anchor to extrap from).
-    if (btype == BRUSH_TYPE_TRAIN && self.csqc_snap_time_prev > 0)
+    if ((btype == BRUSH_TYPE_TRAIN || btype == BRUSH_TYPE_VEHICLE) && self.csqc_snap_time_prev > 0)
     {
         self.brush_snap_origin_cumulative = self.brush_snap_origin_cumulative
                                           + (self.origin - t_pre_snap_origin);

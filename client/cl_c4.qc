@@ -46,6 +46,13 @@ void(vector pos) CSQC_C4_SpawnExplosionSprite =
 .float c4_last_pulse_time;
 .float c4_defuse_state;
 
+// Live planted-C4 CSQC-entity count, maintained on create (CSQC_C4_Update isnew)
+// and remove (CSQC_Ent_Remove in cl_main.qc).  Lets CSQC_C4_DrawLights early-out
+// of its per-frame nextent() walk over ALL entities when no C4 is planted — the
+// common case (every Bhop / non-Defuse round). cl_c4 compiles before cl_main, so
+// the global is visible in the removal hook without a forward decl.
+float csqc_c4_count;
+
 // Most recent moment a planting click fired on the local player —
 // drives the red flash on the planter's body during prefire so the
 // planting reads as visually "armed".  Set by CSQC_PredictCFC4Command
@@ -70,10 +77,12 @@ void(float isnew) CSQC_C4_Update =
     if (isnew)
     {
         setmodel(self, "models/weapons/wpn_cfc4/w_c4.mdl");
+        self.classname = "csqc_c4";   // tag for the removal hook + light-walk gate
         self.solid     = SOLID_NOT;
         self.movetype  = MOVETYPE_NONE;
         self.drawmask  = MASK_ENGINE;
         self.c4_last_beep_serial = new_serial;   // first frame — no pulse trigger
+        csqc_c4_count = csqc_c4_count + 1;
     }
 
     // Detect a beep transition (serial bumped on the server).  Capture
@@ -130,37 +139,36 @@ void() CSQC_C4_DrawPlanterFlash =
 // brightness decays after each beep.
 void() CSQC_C4_DrawLights =
 {
-    entity e = findchain(classname, "");   // chain by entity, model-based filter
-    // Faster: walk by model.  But we set model on receive, so use that.
-    e = world;
+    // No planted C4 → skip the whole-entity nextent() walk entirely (the common
+    // case — every Bhop / non-Defuse round).  Count maintained in CSQC_C4_Update
+    // (isnew) + CSQC_Ent_Remove.
+    if (csqc_c4_count <= 0)
+        return;
+
+    // Walk CSQC entities by the csqc_c4 classname (set in CSQC_C4_Update).
     entity cur = nextent(world);
     while (cur)
     {
-        if (cur.model == "models/weapons/wpn_cfc4/w_c4.mdl"
-            && cur.c4_last_pulse_time > 0)
+        if (cur.model == "models/weapons/wpn_cfc4/w_c4.mdl")
         {
-            // Pulse fades over 0.15s after each beep.  Defuse-in-progress
-            // brightens to a steady glow instead — visual cue that
-            // someone's working on it.
-            float age = cltime - cur.c4_last_pulse_time;
-            float intensity;
-            if (cur.c4_defuse_state)
+            if (cur.c4_defuse_state == 2)
             {
-                intensity = 1.0;   // steady-on while defusing
+                // DEFUSED — steady BLUE "safe" light.  Independent of the beep
+                // pulse (the bomb stopped beeping the instant it was disarmed).
+                dynamiclight_add(cur.origin + '0 0 8', 96, '0.2 0.45 1');
             }
-            else
+            else if (cur.c4_last_pulse_time > 0)
             {
-                intensity = 1.0 - (age / 0.15);
+                // ARMED — red light that flashes with each beep.  Stays red and
+                // keeps flashing even while a defuse is IN PROGRESS (state 1);
+                // it only turns blue once the bomb is actually defused (above).
+                float age = cltime - cur.c4_last_pulse_time;
+                float intensity = 1.0 - (age / 0.15);
                 if (intensity < 0) intensity = 0;
-            }
-            if (intensity > 0)
-            {
-                vector lightcolor = '1 0.1 0.1';   // red
-                if (cur.c4_defuse_state)
-                    lightcolor = '0.2 0.7 1';      // cyan while defusing
-                dynamiclight_add(cur.origin + '0 0 8',
-                                 96 * intensity,
-                                 lightcolor * intensity);
+                if (intensity > 0)
+                    dynamiclight_add(cur.origin + '0 0 8',
+                                     96 * intensity,
+                                     '1 0.1 0.1' * intensity);
             }
         }
         cur = nextent(cur);

@@ -181,7 +181,7 @@ void(float team_id) TeamMenuSelect =
     // _index.  CharacterMenuSelect reads team_menu_pending_team to
     // build the "blue"/"red" command string, so the assignment above
     // is required.
-    if (cvar("sv_playerselect") > 0)
+    if (serverkeyfloat("sv_playerselect", 0) > 0)
     {
         float idx = cvar("cl_player_model_choice");
         if (idx < 0) idx = 7;        // numberK fallback
@@ -672,7 +672,7 @@ void() DrawCharacterSelect =
     if (hover_idx == 5)
         preview_mdl = "models/player/sini.mdl";
     else if (hover_idx == 6)
-        preview_mdl = "models/player/chickenman.mdl";
+        preview_mdl = "models/player/chickenman/chickenman.iqm";
     else if (hover_idx == 7)
         preview_mdl = "models/player/numberk/numberK.iqm";
     else if (hover_idx == 8)
@@ -715,7 +715,7 @@ void() TeamMenuDraw =
     // path — it has no Phase 0, so it lands here with state==1 and
     // would normally render the character grid. Fire the auto-commit
     // here, gated on join_pending so we only do it once.
-    if (in_ffa && cvar("sv_playerselect") > 0
+    if (in_ffa && serverkeyfloat("sv_playerselect", 0) > 0
         && team_menu_join_pending == TEAM_NONE)
     {
         float auto_idx = cvar("cl_player_model_choice");

@@ -156,6 +156,7 @@ void() W_CFP228Equip;   void() W_CFP228Drop;   void() weapon_cfp228;
 void() W_CFMsg90Equip;  void() W_CFMsg90Drop;  void() weapon_cfmsg90;
 void() W_CFSG552Equip;  void() W_CFSG552Drop;  void() weapon_cfsg552;
 void() W_CFSl8Equip;    void() W_CFSl8Drop;    void() weapon_cfsl8;
+void() W_GravGunEquip;  void() W_GravGunDrop;  void() weapon_gravitygun;
 void() weapon_deagle;
 void() weapon_m4a1;
 void() weapon_ak47;
@@ -289,7 +290,30 @@ float() W_PhysDropGroundSnap =
     if (trace_fraction >= 1)
         return FALSE;
 
-    setorigin(self, trace_endpos + '0 0 1');
+    // Rest the EVENTUAL ODE collision shape on the floor — NOT the pickup bbox.
+    // The trace above rested the model's pickup bbox (feet at mins_z) on the floor,
+    // but W_PhysDropEnable's BOX geom is CENTRED on the origin (half-height bbox_z),
+    // so leaving the origin at floor+1 buried the centred box ~bbox_z units and ODE
+    // ejected the weapon violently ("map weapons fly all over on spawn").  Lift the
+    // origin by the box half-height so the centred box settles ON the floor.
+    float new_origin_z;
+    if (cvar("sv_physprop_weapon_geom") > 0.5)
+    {
+        // Trimesh collides as the mesh; the traced model bbox already rests it on
+        // the floor — a 1 u clearance is enough.
+        new_origin_z = trace_endpos_z + 1;
+    }
+    else
+    {
+        float bz = cvar("sv_physprop_weapon_bbox_z");
+        if (bz <= 0) bz = max(fabs(self.mins_z), fabs(self.maxs_z));
+        float floor_z = trace_endpos_z + self.mins_z;   // bottom of the traced bbox = floor
+        new_origin_z  = floor_z + bz + 1;                // centred box bottom 1 u above floor
+    }
+
+    vector rest = trace_endpos;
+    rest_z = new_origin_z;
+    setorigin(self, rest);
     self.velocity  = '0 0 0';
     self.avelocity = '0 0 0';
     return TRUE;
@@ -303,7 +327,13 @@ float() W_PhysDropGroundSnap =
 // solid, so this catches the cases that matter.
 float(entity ent) W_PhysDropIsEmbedded =
 {
-    return pointcontents(ent.origin) == CONTENT_SOLID;
+    // Test the bbox CENTRE, not the entity origin. Models whose origin sits at
+    // the feet (e.g. filecabinet, mins_z 0) read CONTENT_SOLID the instant they
+    // rest on the floor — pointcontents(origin) is at the floor surface — and
+    // the stuck-detector would despawn them after ~5 s. The centre is the right
+    // "is the body buried in BSP" probe; for centred props (barrel/can/weapon
+    // drops) mins_z+maxs_z ≈ 0 so this is a no-op.
+    return pointcontents(ent.origin + '0 0 1' * ((ent.mins_z + ent.maxs_z) * 0.5)) == CONTENT_SOLID;
 };
 
 // "How long has this entity been embedded for?" detector. Returns
@@ -682,9 +712,9 @@ void() W_PlayersRestoreHitboxes =
 // ODE never observes the inflated size.
 void() W_PhysDropsExpandTraceBboxes =
 {
-    float tx = cvar("sv_physdrop_trace_bbox_x");
-    float ty = cvar("sv_physdrop_trace_bbox_y");
-    float tz = cvar("sv_physdrop_trace_bbox_z");
+    float tx = cvar("sv_physprop_weapon_trace_bbox_x");
+    float ty = cvar("sv_physprop_weapon_trace_bbox_y");
+    float tz = cvar("sv_physprop_weapon_trace_bbox_z");
     if (tx <= 0 || ty <= 0 || tz <= 0) return;
 
     entity e = nextent(world);
@@ -947,6 +977,18 @@ void(float shell_type, vector origin_offset, vector base_vel, vector base_avel) 
     base_vel_y += 20;
     base_vel_z += 10;
 
+    // Per-shot randomization so each ejected case flies + tumbles differently
+    // for the OTHER players watching (the shooter's own casing is the separately
+    // jittered CSQC-predicted one in cl_shells.qc).  Applied in the gun's local
+    // frame before makevectors below; one random() draw per shot, broadcast
+    // identically to every observer so it stays consistent across clients.
+    base_vel_x  += (random() - 0.5) * 12;
+    base_vel_y  += (random() - 0.5) * 26;
+    base_vel_z  += (random() - 0.5) * 26;
+    base_avel_x += (random() - 0.5) * 240;
+    base_avel_y += (random() - 0.5) * 360;
+    base_avel_z += (random() - 0.5) * 300;
+
     makevectors(self.v_angle);
 
     vector org = self.origin + self.view_ofs
@@ -1068,6 +1110,8 @@ void(float attacker_slot, float victim_slot, float cause, float weapon, float he
 
 void(entity attacker, entity victim) PlayerKilled =
 {
+    Carry_Drop(victim);   // drop any carried prop on death so it falls free
+
     victim.deaths = victim.deaths + 1;
 
     // Kill-feed broadcast — attacker may be non-player (world / env_hurt)
@@ -1094,7 +1138,18 @@ void(entity attacker, entity victim) PlayerKilled =
         if (attacker == victim)
             attacker.frags = attacker.frags - 1;
         else
+        {
             attacker.frags = attacker.frags + 1;
+            // Cash reward for a legitimate enemy kill (kf_cause excludes
+            // suicides and team-kills).  Headshot adds mp_cashheadshot.
+            if (kf_cause == KILL_CAUSE_WEAPON)
+            {
+                float reward = cvar("mp_cashreward");
+                if (victim.death_hitgroup == HITGROUP_HEAD)
+                    reward = reward + cvar("mp_cashheadshot");
+                AddMoney(attacker, reward);
+            }
+        }
 
         PlayerRefreshScoreboardInfo(attacker);
         logfrag(attacker, victim);
@@ -1312,6 +1367,9 @@ void(entity victim, float damage, float fall_twist) SV_SendDamageViewKick =
     WriteShort(MSG_ONE, bound(-32768, rint(roll * 100), 32767));
 };
 
+// Defined in sv_func_vehicle.qc (compiles later) — a shot nudges a vehicle free.
+void(entity veh, entity attacker) Vehicle_ShotNudge;
+
 float(entity attacker, entity target, float damage) W_ApplyDamage =
 {
     entity saved;
@@ -1319,6 +1377,14 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
 
     if (!W_CanDamageTarget(target))
         return 0;
+
+    // func_vehicle: a hit doesn't damage it — it shoves the car along the shot
+    // into clear space, so players can shoot a stuck vehicle free.
+    if (target.classname == "func_vehicle")
+    {
+        Vehicle_ShotNudge(target, attacker);
+        return 0;
+    }
 
     // sv_trust_clientbreak: when ON, the client owns breakable damage
     // (sends `cmd breakclaim` per shot, server applies via
@@ -1347,6 +1413,13 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
         && attacker.player_team != TEAM_NONE
         && !cvar("mp_friendlyfire"))
         return 0;
+
+    // Kevlar absorbs part of the incoming damage before it reaches health
+    // (a helmet halves a headshot first — the 4x head multiplier is already
+    // baked into `damage`).  No-op when the player has no armor and no
+    // helmet.  Players only; world/breakables are unaffected.
+    if (target.classname == "player")
+        damage = Armor_Absorb(target, damage, target.death_hitgroup == HITGROUP_HEAD);
 
     if (damage > target.health)
         damage = target.health;
@@ -1606,17 +1679,11 @@ const float PHYSDROP_VOID_Z = -10000;
 const float PHYSDROP_COORD_CAP = 65536;
 const float PHYSDROP_SLEEP_POLL = 0.2;     // polling cadence, not a feel knob
 
-// Phys-drop tunables — float globals refreshed from cvars at each
-// W_PhysDropEnable call.  Bake-at-enable fields (mass/friction/bounce/
-// damping) read these directly; the per-tick sleep checks in
-// W_PhysDropThink also read them so a live cvar tweak takes effect on
-// the next think (~0.2 s latency, fine for tuning).
-float PHYSDROP_MASS;
-float PHYSDROP_FRICTION;
-float PHYSDROP_BOUNCE;
-float PHYSDROP_BOUNCESTOP;
-float PHYSDROP_DAMP_LINEAR;
-float PHYSDROP_DAMP_ANGULAR;
+// Phys-drop sleep thresholds — float globals refreshed from the shared
+// sv_physprop_sleep_* cvars at each W_PhysDropEnable call.  The per-tick sleep
+// checks in W_PhysDropThink read them so a live cvar tweak takes effect on the
+// next think (~0.2 s latency, fine for tuning).  (Mass / friction / bounce /
+// damping now live in PhysObj_Setup via the shared sv_physprop_* family.)
 float PHYSDROP_SLEEP_SPEED;
 float PHYSDROP_SLEEP_ANGSPEED;
 float PHYSDROP_SLEEP_DELAY;
@@ -1638,15 +1705,13 @@ float(string name, float def) W_PhysDropCvarOrDefault =
 
 void() W_PhysDropRefreshCvars =
 {
-    PHYSDROP_MASS           = W_PhysDropCvarOrDefault("sv_physdrop_mass",          1.5);
-    PHYSDROP_FRICTION       = W_PhysDropCvarOrDefault("sv_physdrop_friction",      0.18);
-    PHYSDROP_BOUNCE         = W_PhysDropCvarOrDefault("sv_physdrop_bounce",        0);
-    PHYSDROP_BOUNCESTOP     = W_PhysDropCvarOrDefault("sv_physdrop_bouncestop",    0.5);
-    PHYSDROP_DAMP_LINEAR    = W_PhysDropCvarOrDefault("sv_physdrop_damp_lin",      0.005);
-    PHYSDROP_DAMP_ANGULAR   = W_PhysDropCvarOrDefault("sv_physdrop_damp_ang",      0.005);
-    PHYSDROP_SLEEP_SPEED    = W_PhysDropCvarOrDefault("sv_physdrop_sleep_speed",   8);
-    PHYSDROP_SLEEP_ANGSPEED = W_PhysDropCvarOrDefault("sv_physdrop_sleep_angspeed",12);
-    PHYSDROP_SLEEP_DELAY    = W_PhysDropCvarOrDefault("sv_physdrop_sleep_delay",   0.2);
+    // Only the sleep thresholds for W_PhysDropThink remain here — now from the
+    // SHARED phys-object family (sv_physprop_sleep_*).  Mass / friction / bounce /
+    // erp / damping are all set in PhysObj_Setup (the unified ODE core), so they
+    // are no longer refreshed into the now-unused PHYSDROP_* globals.
+    PHYSDROP_SLEEP_SPEED    = W_PhysDropCvarOrDefault("sv_physprop_sleep_speed",    8);
+    PHYSDROP_SLEEP_ANGSPEED = W_PhysDropCvarOrDefault("sv_physprop_sleep_angspeed", 30);
+    PHYSDROP_SLEEP_DELAY    = W_PhysDropCvarOrDefault("sv_physprop_sleep_delay",    0.2);
 };
 
 float(float wep) W_PhysDropAllowed =
@@ -1699,8 +1764,8 @@ void(entity drop_ent) W_PhysDropEnable =
     // strictly an AABB, simpler, ODE-stable across model formats, and
     // sized from the model's natural $bbox (which setmodel stamps into
     // mins/maxs).  Default to BOX for that reason; flip
-    // sv_physdrop_geom to 1 to opt back into TRIMESH per-server.
-    float use_trimesh = cvar("sv_physdrop_geom") > 0.5;
+    // sv_physprop_weapon_geom to 1 to opt back into TRIMESH per-server.
+    float use_trimesh = cvar("sv_physprop_weapon_geom") > 0.5;
 
     if (use_trimesh)
     {
@@ -1721,32 +1786,32 @@ void(entity drop_ent) W_PhysDropEnable =
         // shape.  Hitscan AABB is grown separately at trace time by
         // W_PhysDropsExpandTraceBboxes (mirrors the sv_hitbox_expand
         // playermodel pattern) — keeping the ODE shape tight here.
-        // Tunable per-server via sv_physdrop_bbox_(x|y|z); 0 means
+        // Tunable per-server via sv_physprop_weapon_bbox_(x|y|z); 0 means
         // "use model's natural".
-        float bx = W_PhysDropCvarOrDefault("sv_physdrop_bbox_x", 12);
-        float by = W_PhysDropCvarOrDefault("sv_physdrop_bbox_y", 5);
-        float bz = W_PhysDropCvarOrDefault("sv_physdrop_bbox_z", 3);
+        float bx = W_PhysDropCvarOrDefault("sv_physprop_weapon_bbox_x", 12);
+        float by = W_PhysDropCvarOrDefault("sv_physprop_weapon_bbox_y", 5);
+        float bz = W_PhysDropCvarOrDefault("sv_physprop_weapon_bbox_z", 3);
         if (bx > 0 && by > 0 && bz > 0)
             setsize(drop_ent, [-bx, -by, -bz], [bx, by, bz]);
         else if (drop_ent.maxs == drop_ent.mins)
             setsize(drop_ent, '-8 -8 -2', '8 8 2');
         drop_ent.solid = SOLID_PHYSICS_BOX;
     }
-    drop_ent.movetype = MOVETYPE_PHYSICS;
-    drop_ent.dimension_solid = PHYSDROP_DIM;
-    drop_ent.dimension_hit = dimension_default | PHYSDROP_DIM;
-    drop_ent.mass = PHYSDROP_MASS;
-    drop_ent.friction = PHYSDROP_FRICTION;
-    drop_ent.bouncefactor = PHYSDROP_BOUNCE;
-    drop_ent.bouncestop = PHYSDROP_BOUNCESTOP;
-    drop_ent.erp = cvar("sv_physprop_erp");
-    drop_ent.damp_linear = PHYSDROP_DAMP_LINEAR;
-    drop_ent.damp_angular = PHYSDROP_DAMP_ANGULAR;
-    drop_ent.max_angular = 35;
-    drop_ent.weapon_physdrop_sleeping = FALSE;
+    // Unified phys-object config — weapon drops share the cabinet/barrel/can core.
+    // FX on (impact/slide/scrape/smoke/spark), sleep on (perf — many drops settle
+    // to detached ODE bodies), weapon-drop semantics (PHYSDROP_DIM passthrough so
+    // you walk over them + weapon_touch pickup), 2s BSP-embed despawn grace.
+    drop_ent.po_fx_enabled     = TRUE;
+    drop_ent.po_sleep_enabled  = TRUE;
+    drop_ent.po_is_weapon_drop = TRUE;
+    drop_ent.po_stuck_grace    = 2;
+    drop_ent.po_fx_soundset    = 1;   // weapon set: weapon_impact_* + soda_can_scrape
+
+    drop_ent.weapon_physdrop_sleeping   = FALSE;
     drop_ent.weapon_physdrop_rest_start = 0;
 
-    // Physics drops must use server angles, not CSQC's classic spin path.
+    // Physics drops must use server angles, not CSQC's classic spin path.  Set the
+    // spin BEFORE PhysObj_Setup so physics_enable snapshots it onto the ODE body.
     drop_ent.dropped_spin = 0;
     if (drop_ent.avelocity == '0 0 0' && (drop_ent.velocity * drop_ent.velocity) > 1)
         drop_ent.avelocity = [random() * 360 - 180, random() * 600 - 300, random() * 360 - 180];
@@ -1757,7 +1822,14 @@ void(entity drop_ent) W_PhysDropEnable =
     else
         drop_ent.weapon_physdrop_probe_time = 0;
 
-    physics_enable(drop_ent, TRUE);
+    // Shared ODE core (PhysObj_Setup): movetype, bounce, erp, damping, PHYSDROP_DIM
+    // dimension masks, physics_enable.  Light + grippy (mass 1.5 / friction ~0.5) so
+    // a dropped gun moves when hit/blasted but settles quickly.  max_angular bumped
+    // back to 35 after (guns tumble more freely than the heavier props at 20).
+    PhysObj_Setup(drop_ent,
+                  W_PhysDropCvarOrDefault("sv_physprop_weapon_mass",     20),
+                  W_PhysDropCvarOrDefault("sv_physprop_weapon_friction", 0.5));
+    drop_ent.max_angular = 35;
 
     if (cvar("sv_debug_physprops"))
     {
@@ -1790,7 +1862,7 @@ void(entity drop_ent) W_PhysDropSleep =
     drop_ent.movetype = MOVETYPE_NONE;
     // Keep the physics-solid shape while asleep so hitscan traces still
     // use the model bbox / mesh instead of the broad pickup bbox.
-    drop_ent.solid = (cvar("sv_physdrop_geom") > 0.5)
+    drop_ent.solid = (cvar("sv_physprop_weapon_geom") > 0.5)
                    ? SOLID_PHYSICS_TRIMESH : SOLID_PHYSICS_BOX;
     drop_ent.dimension_solid = PHYSDROP_DIM;
     drop_ent.dimension_hit = dimension_default | PHYSDROP_DIM;
@@ -1822,7 +1894,7 @@ void(entity drop_ent) W_PhysDropWake =
     drop_ent.weapon_round_toss = FALSE;
     // Mirror the W_PhysDropEnable geometry choice on wake — see that
     // function for why BOX is the default.
-    drop_ent.solid = (cvar("sv_physdrop_geom") > 0.5)
+    drop_ent.solid = (cvar("sv_physprop_weapon_geom") > 0.5)
                    ? SOLID_PHYSICS_TRIMESH : SOLID_PHYSICS_BOX;
     drop_ent.movetype = MOVETYPE_PHYSICS;
     drop_ent.dimension_solid = PHYSDROP_DIM;
@@ -2018,6 +2090,15 @@ void() W_PhysDropThink =
     }
 
     self.nextthink = time + WeaponDrop_NextThinkInterval(self);
+
+    // Contact FX — impact thud / scrape loop / smoke / metal spark, the SAME
+    // detection the cabinet/barrel/can use (PhysObj_DetectContactFX infers an
+    // impact from a one-tick speed drop, a slide from sustained surface motion).
+    // Runs every AWAKE tick (a sleeping drop is a detached body, no motion → no
+    // FX); pp_prev_velocity is latched here for the next tick's drop test.
+    if (self.po_fx_enabled)
+        PhysObj_DetectContactFX(vlen(self.velocity));
+    self.pp_prev_velocity = self.velocity;
 
     if (self.weapon_physdrop_probe_time > 0 && time >= self.weapon_physdrop_probe_time)
     {
@@ -2994,6 +3075,59 @@ void() W_DropAllWeaponsOnDeath =
     self.snowball_use_slingshot = FALSE;
 };
 
+// Drop the weapon currently in a slot as a world pickup — used by the buy
+// menu when a purchase replaces an existing slot weapon.  Mirrors the
+// per-slot drop in W_DropAllWeaponsOnDeath above, minus the death-only
+// CSQC fake-drop event (this runs while the buyer is alive).  slot_idx:
+// 0 primary / 1 secondary / 2 melee.  The caller passes the slot's CURRENT
+// weapon + its drop fn-pointer BEFORE overwriting the slot.  Operates on
+// self; the old weapon's ammo is moved onto the dropped pickup and cleared
+// from the player so the new weapon's ammo is set cleanly by W_Refresh*Slot.
+void(float slot_idx, float slot_wep, void() drop_func) W_DropSlotForBuy =
+{
+    entity drop_ent;
+    float yaw, pitch, phys_drop;
+
+    if (!slot_wep || !drop_func)
+        return;
+
+    drop_ent = spawn();
+    drop_ent.owner = self;
+    drop_ent.weapon_round_toss = FALSE;
+
+    yaw   = random() * 360;
+    pitch = -40 + random() * 20;   // upward-ish toss
+    makevectors([pitch, yaw, 0]);
+
+    setorigin(drop_ent, self.origin + self.view_ofs * 0.5 + v_forward * 8);
+    drop_ent.velocity = self.velocity + v_forward * (150 + random() * 150) + [0, 0, 100 + random() * 120];
+    drop_ent.avelocity = '0 0 0';
+
+    weapon_drop_target = drop_ent;
+    W_SlotAmmo_SaveLegacy(self, slot_wep);
+    drop_func();
+    W_SlotAmmo_CopyPlayerToDrop(drop_ent, self, slot_wep);
+    weapon_drop_target = world;
+    phys_drop = W_PhysDropAllowed(drop_ent.weapon);
+
+    drop_ent.pvsflags = PVSF_NOREMOVE;
+    drop_ent.SendEntity = dropped_weapon_SendEntity;
+    drop_ent.SendFlags = 1;
+    drop_ent.nodrawtoclient = world;
+    drop_ent.weapon_solid_time = time + WEAPON_DROP_PICKUP_DELAY;
+    if (phys_drop)
+        W_PhysDropStart(drop_ent, WEAPON_DROP_PICKUP_DELAY);
+    else
+    {
+        drop_ent.think = weapon_become_solid;
+        drop_ent.nextthink = time + 0.05;
+    }
+
+    if (slot_idx == 0)      { self.slot_primary   = WEP_NONE; self.slot_primary_equip   = __NULL__; self.slot_primary_drop   = __NULL__; W_SlotAmmo_ClearForWeapon(self, slot_wep); }
+    else if (slot_idx == 1) { self.slot_secondary = WEP_NONE; self.slot_secondary_equip = __NULL__; self.slot_secondary_drop = __NULL__; W_SlotAmmo_ClearForWeapon(self, slot_wep); }
+    else if (slot_idx == 2) { self.slot_melee     = WEP_NONE; self.slot_melee_equip     = __NULL__; self.slot_melee_drop     = __NULL__; }
+};
+
 // ============================================================
 //  Impulse dispatch  -  call from CheckImpulses in sv_player.qc
 //  Handles weapon impulses only; zeros self.impulse for those it claims.
@@ -3089,18 +3223,28 @@ void() W_WeaponFrame =
     // entry point for self.fire(); under trust=0 the existing
     // autonomous path is the sole entry point.  Exactly one source
     // of truth either way.
-    // Hand-thrown grenades (HL hand, CS HE/Flash/Smoke) use button0
-    // for pin-pull / pre-throw — those entry points DON'T go through
-    // SH_StandardTryFire, so they never emit a `cmd cs` notification.
-    // Under trust>=1 the autonomous fire path is the ONLY way they
-    // run server-side; gating them on trust would silently drop every
-    // throw (CSQC fake explosion plays for the shooter, no real
-    // projectile spawns, no damage to anyone).  Always allow these.
-    float wep_is_thrown_grenade = (self.weapon == WEP_HLGRENADE
-                                || self.weapon == WEP_CSHEGRENADE
-                                || self.weapon == WEP_CSFLASHBANG
-                                || self.weapon == WEP_CSSMOKEGRENADE);
-    if ((cvar("sv_trust_clienthits") < 1 || wep_is_thrown_grenade)
+    // Hand-thrown grenades (HL hand, CS HE/Flash/Smoke) AND the C4 plant use
+    // button0 directly (pin-pull / pre-throw / plant prefire) — those entry
+    // points DON'T go through SH_StandardTryFire, so they never emit a `cmd cs`
+    // notification.  Under trust>=1 the autonomous fire path is the ONLY way
+    // they run server-side; gating them on trust would silently drop every
+    // throw / plant (CSQC predicts it for the shooter, but no real projectile
+    // spawns and no bomb is planted — the "+attack does nothing" report).
+    // Always allow these.  W_CFC4Fire self-gates on weaponstate/ammo/location,
+    // so polling it every held-button frame is safe (re-entry returns early
+    // once WS_FIRE has started).
+    // The gravity gun's +attack is a server-side prop GRAB (Carry_TryGrab), not
+    // hitscan — it never emits a `cmd cs`, so like the grenades/C4 it must run
+    // self.fire() autonomously or it does nothing under sv_trust_clienthits>=1.
+    // W_GravGunFire self-gates (cooldown / already-carrying / spinning), so
+    // polling it every held-button frame is safe.
+    float wep_bypasses_cs_notify = (self.weapon == WEP_HLGRENADE
+                                 || self.weapon == WEP_CSHEGRENADE
+                                 || self.weapon == WEP_CSFLASHBANG
+                                 || self.weapon == WEP_CSSMOKEGRENADE
+                                 || self.weapon == WEP_CFC4
+                                 || self.weapon == WEP_GRAVITYGUN);
+    if ((cvar("sv_trust_clienthits") < 1 || wep_bypasses_cs_notify)
         && self.button0 && time >= self.attack_finished)
     {
         if (self.fire)

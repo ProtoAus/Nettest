@@ -213,6 +213,11 @@ float() Weapon_LowerBlocksFire =
         return 0;
     if (self.grapple_rope_active)
         return 1;
+    // HL2 carry — both hands on the prop, weapon lowered + firing blocked
+    // (+attack is repurposed as the throw in Carry_Tick).
+    if (self.pm_carrying)
+        return 1;
+    // (Driving a func_vehicle does NOT block fire — drive-by shooting is allowed.)
 #ifdef CSQC
     if (self.pm_on_ladder_cached
         && PM_ReadMovevar("sv_codladders", 0))
@@ -288,7 +293,7 @@ float() PM_TryEngageSlide;
 
 // Footstep sound catalogue — a flat byte enum so CSQC_EVENT_FOOTSTEP_SOUND
 // can carry a 1-byte index instead of the full ~24-byte sound path.
-// Layout: step1..step4, waterstep1..waterstep10, ladder1..ladder4.
+// Layout: step1..step4, waterstep1..waterstep10, ladder1..ladder4, metal_box_footstep1..4.
 // Keep FS_SoundName() below in lock-step with this layout.
 const float FS_SOUND_STEP_BASE    = 0;
 const float FS_SOUND_STEP_COUNT   = 4;
@@ -296,7 +301,9 @@ const float FS_SOUND_WATER_BASE   = 4;
 const float FS_SOUND_WATER_COUNT  = 10;
 const float FS_SOUND_LADDER_BASE  = 14;
 const float FS_SOUND_LADDER_COUNT = 4;
-const float FS_SOUND_COUNT        = 18;
+const float FS_SOUND_METAL_BASE   = 18;   // walking on the phys_files cabinet
+const float FS_SOUND_METAL_COUNT  = 4;
+const float FS_SOUND_COUNT        = 22;
 
 string(float idx) FS_SoundName =
 {
@@ -306,6 +313,8 @@ string(float idx) FS_SoundName =
         return strcat("sounds/player/waterstep", itos(idx - FS_SOUND_WATER_BASE + 1), ".wav");
     if (idx >= FS_SOUND_LADDER_BASE && idx < FS_SOUND_LADDER_BASE + FS_SOUND_LADDER_COUNT)
         return strcat("sounds/player/ladder", itos(idx - FS_SOUND_LADDER_BASE + 1), ".wav");
+    if (idx >= FS_SOUND_METAL_BASE && idx < FS_SOUND_METAL_BASE + FS_SOUND_METAL_COUNT)
+        return strcat("sounds/impacts/metal_box_footstep", itos(idx - FS_SOUND_METAL_BASE + 1), ".wav");
     return "sounds/player/step1.wav";   // safe fallback on out-of-range idx
 };
 
@@ -392,8 +401,20 @@ float PM_IsLivePlayerCollider(entity e)
 // pop out along the axis with the smallest penetration. Position-only —
 // no velocity impulse, so there's no "push" feel. Pure AABB response,
 // matches BSP-wall slide behavior exactly.
+// noblock gate, set once per cmd in PM_PlayerMove (SSQC cvar / CSQC serverkey).
+// Declared file-scope HERE — ahead of its first users (PM_DisentangleFromPlayer
+// below + PM_SoftDepenetrate) — because fteqcc resolves globals top-down; it was
+// declared ~4750 lines lower, which fteqcc rejects as a forward reference.
+float pm_noblock_active;
+
 void PM_DisentangleFromPlayer()
 {
+    // noblock: skip the player pop-out entirely. The stash should already
+    // have desolidified other players (so the tracebox below wouldn't hit
+    // them), but this closes any stash-coverage gap — a proxy that hadn't
+    // materialised at stash time, or one kept solid by the pre-death-snapshot
+    // robustness in PM_IsLivePlayerCollider.
+    if (pm_noblock_active) return;
     tracebox(pm_origin, PM_CurrentMins(), PM_CurrentMaxs(), pm_origin, MOVE_NORMAL, self);
     if (!trace_startsolid) return;
     if (!PM_IsLivePlayerCollider(trace_ent)) return;
@@ -471,6 +492,16 @@ float PM_TestPositionExt(vector pos, vector mins, vector maxs)
     return !trace_startsolid;
 }
 
+// MOVE_NORMAL variant — also tests against non-BSP solids: physics props (the
+// filing cabinet), breakables, other players.  MOVE_NOMONSTERS (above) skips ALL
+// non-BSP entities, so an un-duck headroom check using it can't see a phys prop
+// overhead and lets the player stand up straight INTO it and get stuck.
+float PM_TestPositionExtFull(vector pos, vector mins, vector maxs)
+{
+    tracebox(pos, mins, maxs, pos, MOVE_NORMAL, self);
+    return !trace_startsolid && !trace_allsolid;
+}
+
 float PM_TestPosition(vector pos)
 {
     return PM_TestPositionExt(pos, PM_CurrentMins(), PM_CurrentMaxs());
@@ -524,7 +555,10 @@ void PM_UnDuck()
     if (pm_onground)
         new_origin_z += PM_DUCK_MINS_z - PM_MINS_z;
 
-    if (!PM_TestPositionExt(new_origin, PM_MINS, PM_MAXS))
+    // MOVE_NORMAL (Full) so a physics prop overhead — the filing cabinet — blocks
+    // standing up instead of being ignored, which let the player un-duck up into it
+    // and get stuck.  (Also blocks standing up directly under another player.)
+    if (!PM_TestPositionExtFull(new_origin, PM_MINS, PM_MAXS))
         return;
 
     pm_origin = new_origin;
@@ -1571,6 +1605,11 @@ void PM_CategorizePosition()
     // ground detection, reducing ground-state flicker on uneven surfaces)
     PM_Trace(pm_origin, pm_origin - '0 0 2');
 
+    // Capture the entity directly below the player NOW, before the groundsnap
+    // quadrant traces below clobber trace_ent — PM_UpdateStepSound reads it to
+    // play metal footsteps when standing on the phys_files cabinet.
+    self.pm_ground_ent = trace_ent;
+
     // Ground-snap suppress — force airborne under three conditions:
     //   - briefly after PM_CheckJump fires (pm_jump_groundstick_off_until),
     //     so the impulse can clear the floor before the 180 u/s
@@ -2032,6 +2071,12 @@ void PM_SoftDepenetrate()
             continue;
         if (e.solid == SOLID_NOT || e.solid == SOLID_TRIGGER)
             continue;
+        // noblock: never push off another player (still depenetrates walls,
+        // breakables and props). Belt-and-suspenders for a stash-coverage gap
+        // — a stashed player is already SOLID_NOT and skipped above.
+        if (pm_noblock_active
+            && (e.classname == "player" || e.classname == "player_visual_proxy"))
+            continue;
 
         delta   = e.origin - pm_origin;
         delta_z = 0;
@@ -2292,6 +2337,33 @@ float pm_mv_cache_autohop;
 float pm_mv_cache_jumpstyle;
 float pm_mv_cache_mintic;
 
+// CoD / sliding / stamina gate movevars.  These were read once-per-pmove-step
+// through PM_ReadMovevar but were NOT in the cache, so each fell through to a
+// serverkeyfloat() — the PM_ReadMovevarUncached hot path (~0.13s self, the #6
+// cost in profiling).  Cached RAW (fallback 0 = no substitution) because some
+// names are read with DIFFERENT fallbacks at different call sites
+// (e.g. sv_sliding_start_speed uses 100 in three places, 250 in one); the
+// call-site's own fallback is applied at the ladder return below, keeping every
+// read bit-identical to the old uncached path.  Refreshed on the SAME
+// serverprevtime stamp as the core vars, so predicted/authoritative parity holds.
+float pm_mv_cache_codstamina;
+float pm_mv_cache_sliding;
+float pm_mv_cache_slidingcrouch;
+float pm_mv_cache_codladders;
+float pm_mv_cache_codscopes;
+float pm_mv_cache_jumplag;
+float pm_mv_cache_sliding_start_speed;
+float pm_mv_cache_sliding_friction_mult;
+float pm_mv_cache_sliding_boost;
+float pm_mv_cache_sliding_end_speed;
+float pm_mv_cache_codstamina_jump_cost;
+float pm_mv_cache_codstamina_punish_jump_scale;
+float pm_mv_cache_codstamina_land_cost;
+float pm_mv_cache_codstamina_ground_grace;
+float pm_mv_cache_codstamina_fire_suppress_time;
+float pm_mv_cache_groundstick_suppress_jump;
+float pm_mv_cache_ads_spread_mult;
+
 float(string name, float fallback) PM_ReadMovevarUncached =
 {
     float val;
@@ -2330,6 +2402,26 @@ void() PM_RefreshMovevarCache =
     pm_mv_cache_autohop             = PM_ReadMovevarUncached("sv_autohop", 0);
     pm_mv_cache_jumpstyle           = PM_ReadMovevarUncached("sv_jumpstyle", 1);
     pm_mv_cache_mintic              = PM_ReadMovevarUncached("sv_mintic", 0.01);
+
+    // Gate movevars — cached RAW (fallback 0 => no substitution); the read site
+    // applies its own fallback so differing per-site fallbacks stay correct.
+    pm_mv_cache_codstamina                    = PM_ReadMovevarUncached("sv_codstamina", 0);
+    pm_mv_cache_sliding                       = PM_ReadMovevarUncached("sv_sliding", 0);
+    pm_mv_cache_slidingcrouch                 = PM_ReadMovevarUncached("sv_slidingcrouch", 0);
+    pm_mv_cache_codladders                    = PM_ReadMovevarUncached("sv_codladders", 0);
+    pm_mv_cache_codscopes                     = PM_ReadMovevarUncached("sv_codscopes", 0);
+    pm_mv_cache_jumplag                       = PM_ReadMovevarUncached("sv_jumplag", 0);
+    pm_mv_cache_sliding_start_speed           = PM_ReadMovevarUncached("sv_sliding_start_speed", 0);
+    pm_mv_cache_sliding_friction_mult         = PM_ReadMovevarUncached("sv_sliding_friction_mult", 0);
+    pm_mv_cache_sliding_boost                 = PM_ReadMovevarUncached("sv_sliding_boost", 0);
+    pm_mv_cache_sliding_end_speed             = PM_ReadMovevarUncached("sv_sliding_end_speed", 0);
+    pm_mv_cache_codstamina_jump_cost          = PM_ReadMovevarUncached("sv_codstamina_jump_cost", 0);
+    pm_mv_cache_codstamina_punish_jump_scale  = PM_ReadMovevarUncached("sv_codstamina_punish_jump_scale", 0);
+    pm_mv_cache_codstamina_land_cost          = PM_ReadMovevarUncached("sv_codstamina_land_cost", 0);
+    pm_mv_cache_codstamina_ground_grace       = PM_ReadMovevarUncached("sv_codstamina_ground_grace", 0);
+    pm_mv_cache_codstamina_fire_suppress_time = PM_ReadMovevarUncached("sv_codstamina_fire_suppress_time", 0);
+    pm_mv_cache_groundstick_suppress_jump     = PM_ReadMovevarUncached("pm_groundstick_suppress_jump", 0);
+    pm_mv_cache_ads_spread_mult               = PM_ReadMovevarUncached("sv_ads_spread_mult", 0);
 };
 #endif
 
@@ -2338,6 +2430,10 @@ float(string name, float fallback) PM_ReadMovevar =
     float val;
 #ifdef CSQC
     PM_RefreshMovevarCache();
+    // Hottest gate vars first — read every pmove step in friction/categorize.
+    // RAW cache + call-site fallback (see the pm_mv_cache_codstamina decl above).
+    if (name == "sv_codstamina")               { val = pm_mv_cache_codstamina; if (!val) val = fallback; return val; }
+    if (name == "sv_sliding")                  { val = pm_mv_cache_sliding;    if (!val) val = fallback; return val; }
     if (name == "sv_hull_height")              return pm_mv_cache_hull_height;
     if (name == "sv_eye_height")               return pm_mv_cache_eye_height;
     if (name == "sv_gravity")                  return pm_mv_cache_gravity;
@@ -2355,6 +2451,22 @@ float(string name, float fallback) PM_ReadMovevar =
     if (name == "sv_autohop")                  return pm_mv_cache_autohop;
     if (name == "sv_jumpstyle")                return pm_mv_cache_jumpstyle;
     if (name == "sv_mintic")                   return pm_mv_cache_mintic;
+    // Remaining gate vars (read on transitions: jump/land/slide-engage/scope).
+    if (name == "sv_slidingcrouch")                 { val = pm_mv_cache_slidingcrouch;                 if (!val) val = fallback; return val; }
+    if (name == "sv_codladders")                    { val = pm_mv_cache_codladders;                    if (!val) val = fallback; return val; }
+    if (name == "sv_codscopes")                     { val = pm_mv_cache_codscopes;                     if (!val) val = fallback; return val; }
+    if (name == "sv_jumplag")                       { val = pm_mv_cache_jumplag;                       if (!val) val = fallback; return val; }
+    if (name == "sv_sliding_start_speed")           { val = pm_mv_cache_sliding_start_speed;           if (!val) val = fallback; return val; }
+    if (name == "sv_sliding_friction_mult")         { val = pm_mv_cache_sliding_friction_mult;         if (!val) val = fallback; return val; }
+    if (name == "sv_sliding_boost")                 { val = pm_mv_cache_sliding_boost;                 if (!val) val = fallback; return val; }
+    if (name == "sv_sliding_end_speed")             { val = pm_mv_cache_sliding_end_speed;             if (!val) val = fallback; return val; }
+    if (name == "sv_codstamina_jump_cost")          { val = pm_mv_cache_codstamina_jump_cost;          if (!val) val = fallback; return val; }
+    if (name == "sv_codstamina_punish_jump_scale")  { val = pm_mv_cache_codstamina_punish_jump_scale;  if (!val) val = fallback; return val; }
+    if (name == "sv_codstamina_land_cost")          { val = pm_mv_cache_codstamina_land_cost;          if (!val) val = fallback; return val; }
+    if (name == "sv_codstamina_ground_grace")       { val = pm_mv_cache_codstamina_ground_grace;       if (!val) val = fallback; return val; }
+    if (name == "sv_codstamina_fire_suppress_time") { val = pm_mv_cache_codstamina_fire_suppress_time; if (!val) val = fallback; return val; }
+    if (name == "pm_groundstick_suppress_jump")     { val = pm_mv_cache_groundstick_suppress_jump;     if (!val) val = fallback; return val; }
+    if (name == "sv_ads_spread_mult")               { val = pm_mv_cache_ads_spread_mult;               if (!val) val = fallback; return val; }
     val = PM_ReadMovevarUncached(name, fallback);
 #else
     val = cvar(name);
@@ -3213,8 +3325,13 @@ void() PM_CheckMovingPushers =
         // which produced the lurch-on-jump and drift-on-landing the
         // user reported.  This pass keeps pm_origin / pm_velocity in
         // lockstep with the train each pmove substep.
-        if (rb.brush_type == BRUSH_TYPE_TRAIN)
+        if (rb.brush_type == BRUSH_TYPE_TRAIN || rb.brush_type == BRUSH_TYPE_VEHICLE)
         {
+            // func_vehicle rides this exact branch: it's a velocity-driven
+            // brush with avelocity_y yaw, so the carry (rb.velocity*pm_frametime
+            // + angles_y delta + snap-jump) glues the driver AND passengers to
+            // the deck and turns them with it — no vehicle-specific carry code.
+            //
             // Skip carry/push entirely for noclip / spectator / non-
             // pmove states (matches the server-side gate).
             if (self.pm_movetype == PM_MOVETYPE_NOCLIP
@@ -3238,8 +3355,58 @@ void() PM_CheckMovingPushers =
                      pm_origin - '0 0 4', MOVE_NORMAL, self);
             float on_this_brush = (trace_fraction < 1 && trace_ent == rb);
 
-            if ((self.flags & FL_ONGROUND) && on_this_brush)
+            // func_vehicle: the active DRIVER is carried whenever they're on the
+            // vehicle they drive — NOT gated on FL_ONGROUND (which flickers when
+            // the car climbs/launches, dropping the prediction carry so the
+            // predicted player stays at the mount spot and reconciles → jitter).
+            // on_this_brush engages it the first frame; platform_carry keeps it
+            // through airborne arcs.  rb.velocity already includes the gravity Z,
+            // so the driver rides the whole arc.  Passengers still need FL_ONGROUND.
+            float driver_airlock = (self.pm_driving
+                                 && rb.brush_type == BRUSH_TYPE_VEHICLE
+                                 && (on_this_brush || self.platform_carry == rb));
+
+            if ((((self.flags & FL_ONGROUND) && on_this_brush)) || driver_airlock)
             {
+                // === RIGID SEAT-BOLT (func_vehicle DRIVER only) ===
+                // The locked driver has no walk input to mask the velocity-carry's
+                // per-tick reconcile drift, so the predicted body lags/holds at the
+                // mount spot and reconciles every snapshot → jitter.  Worse, once it
+                // drifts off the deck the carry stops engaging, so platform_carry
+                // (the camera seat-lock's reference) drops and the view flickers
+                // back to the held spot.  Fix: PIN the driver into the car's frame.
+                // Capture the mount offset once (rotated into the car's local yaw
+                // frame), then re-derive pm_origin = car + rotate(seat) EVERY pmove
+                // substep.  Server pmove + CSQC prediction + preview all run this, so
+                // the body tracks the car exactly (no reconcile) and on_this_brush
+                // stays true → platform_carry stays latched → seat-lock stays solid.
+                if (driver_airlock)
+                {
+                    if (!self.veh_seat_ofs_set && on_this_brush)
+                    {
+                        self.veh_seat_ofs = PM_RotateAroundPivot(pm_origin, rb.origin,
+                                                                 -rb.angles_y, 1) - rb.origin;
+                        self.veh_seat_ofs_set = 1;
+                    }
+                    if (self.veh_seat_ofs_set)
+                    {
+                        pm_origin   = PM_RotateAroundPivot(rb.origin + self.veh_seat_ofs,
+                                                           rb.origin, rb.angles_y, 1);
+                        pm_velocity = rb.velocity;   // ride the car's velocity (inc. gravity Z); dismount inherits it
+
+                        self.platform_carry          = rb;
+                        self.platform_carry_velocity = rb.velocity;
+                        self.platform_carry_prev_yaw = rb.angles_y;
+#ifdef CSQC
+                        self.platform_carry_jump_origin_consumed = rb.brush_snap_origin_cumulative;
+                        self.platform_carry_jump_yaw_consumed    = rb.brush_snap_yaw_cumulative;
+#endif
+                        continue;   // bolted — skip the velocity-based carry below
+                    }
+                    // not captured yet: fall through to the velocity carry until the
+                    // driver is genuinely standing on the deck (on_this_brush).
+                }
+
                 // === CARRY: apply translation + yaw delta ===
                 // First tick of a new carry has zero delta — just seed.
                 float just_started_carry = (self.platform_carry != rb);
@@ -3361,7 +3528,13 @@ void() PM_CheckMovingPushers =
                 // Server-side: send view-yaw event to this player so
                 // their CSQC accumulates input_angles and the camera
                 // rotates with the cab.
-                if (yaw_delta != 0 && self.classname == "player")
+                //
+                // NOT for the func_vehicle DRIVER: they don't walk (WASD steers),
+                // so the cab-relative-forward reason doesn't apply, and auto-turning
+                // the driver's view with a fast-yawing car felt like a double/over
+                // rotation.  The driver looks freely with the mouse; passengers
+                // still get the view-rot.
+                if (yaw_delta != 0 && self.classname == "player" && !self.pm_driving)
                 {
                     msg_entity = self;
                     WriteByte(MSG_ONE, SVC_CGAMEPACKET);
@@ -3586,6 +3759,31 @@ void() PM_CheckMovingPushers =
             float d_g_solid    = rb.solid;
             float d_g_dimsolid = rb.dimension_solid;
             float d_g_dimhit   = self.dimension_hit;
+            // LOOK-AHEAD: probe the brush at its NEXT-substep footprint, not its
+            // current one.  The server pushes the player a tick AHEAD (it advances
+            // the brush before probing), so its leading face never enters the
+            // player.  The client (this CSQC-only branch) was probing the brush at
+            // its CURRENT origin, so overlap was only detected AFTER the door had
+            // already integrated into the player — the predicted origin sat inside
+            // the brush until a later substep slid free ("phase into the door, then
+            // correct a moment later").  Advance rb by one substep's motion for the
+            // detection trace only, then restore — same temporary-mutate-and-restore
+            // pattern as the solid/dimension bits here.  The push-slide trace below
+            // intentionally stays at the restored (current) origin.
+            vector d_g_saved_origin = rb.origin;
+            // Lead by ONE SERVER TICK of door motion, not one pmove substep: at high
+            // client fps a substep (pm_frametime) is far smaller than the door's
+            // per-tick advance, so a substep-sized lead still detects the overlap
+            // late and the player phases in.  The door's authoritative position moves
+            // in server-tick steps, so a one-tick lead matches when the server
+            // actually shoves the player.
+            // STAT_FUNC_TICKRATE, NOT cvar() — sv_func_tickrate is CVAR_SIDE_SV
+            // so cvar() returns 0 on CSQC and the 40-floor below would mis-clamp
+            // the lead.  The stat carries the server's (auto-tied) real rate.
+            float d_g_hz = getstatf(STAT_FUNC_TICKRATE);
+            if (d_g_hz < 40)  d_g_hz = 40;
+            if (d_g_hz > 200) d_g_hz = 200;
+            setorigin(rb, d_g_saved_origin + push_dir * (push_speed / d_g_hz));
             rb.solid             = SOLID_BSP;
             rb.dimension_solid  |= PM_TRIGGER_PROBE_DIM;
             self.dimension_hit   = PM_TRIGGER_PROBE_DIM;
@@ -3596,6 +3794,7 @@ void() PM_CheckMovingPushers =
             rb.solid            = d_g_solid;
             rb.dimension_solid  = d_g_dimsolid;
             self.dimension_hit  = d_g_dimhit;
+            setorigin(rb, d_g_saved_origin);
 
             if (!(trace_startsolid && trace_ent == rb))
                 continue;        // no geometry intersection → no push
@@ -4327,6 +4526,14 @@ void() PM_UpdateStepSound =
             vol      = 0.50;
         }
         snd_idx = FS_SOUND_STEP_BASE + floor(random() * FS_SOUND_STEP_COUNT);
+        // Standing on a metal phys prop → metal footsteps instead.  pm_ground_ent was
+        // captured in PM_CategorizePosition; the cabinet/barrel/can keep their classname
+        // both server-side (sv_physprop.qc) and as the CSQC mirror, so SSQC + CSQC agree.
+        // (Dropped weapons are intentionally excluded — too small to stand on.)
+        if (self.pm_ground_ent.classname == "phys_files"
+            || self.pm_ground_ent.classname == "phys_barrel"
+            || self.pm_ground_ent.classname == "phys_can")
+            snd_idx = FS_SOUND_METAL_BASE + floor(random() * FS_SOUND_METAL_COUNT);
     }
     else
     {
@@ -4956,6 +5163,8 @@ entity pm_noblock_stash_ent  [PM_PMOVE_NOBLOCK_STASH_MAX];
 float  pm_noblock_stash_solid[PM_PMOVE_NOBLOCK_STASH_MAX];
 float  pm_noblock_stash_count;
 float  pm_noblock_dbg_last;     // rate-limit for [noblock] dprints
+// (pm_noblock_active is declared file-scope up near PM_DisentangleFromPlayer —
+//  moved there so its earlier users resolve it; fteqcc is top-down on globals.)
 
 
 // Make every OTHER live player non-solid so PM_PlayerMoveStep's traces
@@ -5037,6 +5246,36 @@ void PM_PlayerMove()
     float saved_timelength;
     float noblock_active;
 
+    // ---- func_vehicle driver lock (SERVER-SIDE ONLY) ----
+    // While driving, the WASD axes steer the vehicle, NOT the driver's feet.
+    // The throttle/steer intent is captured in SV_RunClientCommand (before this
+    // runs); here we zero the walk so the driver can't stroll off the deck.
+    //
+    // CRITICAL: this MUST be server-only.  If the CLIENT also zeroed
+    // input_movevalues, its *sent* usercmd would carry 0 movement, so the server
+    // would never receive the throttle and the car would never drive (the
+    // fwd=0-every-tick freeze).  The client keeps sending real WASD; on a listen
+    // host the authoritative lock corrects the predicted walk with ~no latency.
+    // (Phase 2 predicts the lock properly for remote drivers.)
+#ifdef SSQC
+    if (self.pm_driving)
+    {
+        // Self-heal: never lock a player who has no live .driving link, or this
+        // input-zero would freeze them forever.  The cleared flag replicates
+        // back via the proxy, recovering from any desync without a reconnect.
+        if (self.driving == world)
+            self.pm_driving = FALSE;
+        else
+            input_movevalues = '0 0 0';
+    }
+#endif
+
+    // Rigid seat-bolt bookkeeping (shared): clear the captured seat offset the
+    // moment we stop driving, so the next mount re-captures fresh.  Without this
+    // a stale seat from a previous vehicle would teleport the body on remount.
+    if (!self.pm_driving)
+        self.veh_seat_ofs_set = 0;
+
     // Use sv_mintic as the physics step size so one cvar controls both
     // FTE's server tick rate and our internal simulation rate.
     // 0.015 = 66.67 Hz (standard CS 1.6), 0.01 = 100 Hz (competitive CS 1.6).
@@ -5076,6 +5315,7 @@ void PM_PlayerMove()
 #else
     noblock_active = stof(serverkey("mp_noblock")) > 0;
 #endif
+    pm_noblock_active = noblock_active;
     if (noblock_active)
         PM_NoblockStash();
 

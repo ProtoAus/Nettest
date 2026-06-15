@@ -121,6 +121,11 @@ const float WEP_CFP228           = 66;   // CF P228 (semi-auto pistol, secondary
 const float WEP_CFMSG90          = 67;   // CF MSG90 (semi-auto sniper, primary, CoD-scope)
 const float WEP_CFSG552          = 68;   // CF SG552 (full-auto scoped assault rifle, primary, CoD-scope like CFAUG)
 const float WEP_CFSL8            = 69;   // CF SL8 (semi-auto marksman rifle, primary)
+// Half-Life 2 gravity gun — sequence-driven GoldSrc viewmodel, primary slot,
+// infinite energy (no ammo/reload).  +attack grabs/throws one ODE phys prop at
+// range (reuses the +use carry system); +attack2 held spins up a black-hole pull
+// of all phys props in a radius, release blasts them outward.
+const float WEP_GRAVITYGUN       = 70;   // Gravity Gun (primary, physics manipulator)
 
 // --- Slot IDs ---
 const float SLOT_NONE      = 0;
@@ -259,6 +264,7 @@ const float CSQC_EVENT_ENV_FADE          = 38;       // env_fade HUD overlay. Pa
 const float CSQC_EVENT_ENV_MESSAGE       = 39;       // env_message title text. Payload: message/title key string; client resolves titles.txt.
 const float CSQC_EVENT_DAMAGE_VIEWKICK   = 40;       // private victim camera punch. Payload: signed short pitch*100, signed short roll*100.
 const float CSQC_EVENT_RADIO_CALL        = 41;       // radio quick-chat playback. Payload: resolved voice-line path string. CSQC plays beep1 → voice → beep2 in sequence using soundlength() to time each stage.
+const float CSQC_EVENT_PHYSPROP_IMPACT   = 42;       // phys_files contact smoke. Payload: pos 3×coord, normal 3 bytes (0..255 = -1..1), bucket byte (0 slide / 1 soft / 2 hard). Server multicasts to PVS; CSQC fires "weapons.physprop_smoke" via pointparticles. The impact/slide SOUND is server-side sound(), NOT routed through this event.
 
 // --- Kill-feed causes (byte payload of CSQC_EVENT_KILLFEED) ---
 const float KILL_CAUSE_WEAPON       = 0;
@@ -455,6 +461,7 @@ const float BRUSH_TYPE_DOOR   = 1;
 const float BRUSH_TYPE_BUTTON = 2;
 const float BRUSH_TYPE_CONVEYOR = 4;   // ships movedir + speed in brushsync wire
 const float BRUSH_TYPE_TRAIN    = 5;   // func_train / func_tracktrain — CSQC predicts platform carry + geometry push via PM_CheckMovingPushers train branch
+const float BRUSH_TYPE_VEHICLE  = 6;   // func_vehicle — player-driven free-steer brush; rides the TRAIN carry branch, ships avelocity_z (yaw rate) so live steering extrapolates via the avelocity path (not snap-differentiation)
 
 // --- Door/button state (shared between server and client) ---
 const float MOVER_STATE_BOTTOM = 0;
@@ -697,6 +704,119 @@ float(float dist, float close_dmg, float min_dmg, float range) W_LinearDamageFal
     return close_dmg + (min_dmg - close_dmg) * t;
 };
 
+// --- Per-bone hitbox table (SHARED) ---
+// The 20 oriented boxes that cl_debug_hitboxes / sv_debug_hitboxes draw AND
+// that hit detection / hitgroup classification use.  Moved here (from
+// cl_debuginfo.qc) so the SERVER can classify a hit point by which box it lands
+// in (W_HitgroupClassify SSQC path) — accurate head/chest/limb instead of a
+// Z-height guess.  Each box is axis-aligned in its bone's local frame
+// (mins/maxs along the bone's forward/right/up from gettaginfo).
+const float HITBOX_COUNT = 20;
+
+string hitbox_bonename[] = {
+    "Bip01 Pelvis",       // group 3 stomach
+    "Bip01 L Thigh",      // group 6 left leg
+    "Bip01 L Calf",       // group 6
+    "Bip01 L Foot",       // group 6
+    "Bip01 R Thigh",      // group 7 right leg
+    "Bip01 R Calf",       // group 7
+    "Bip01 R Foot",       // group 7
+    "Bip01 Spine",        // group 3 stomach
+    "Bip01 Spine1",       // group 2 chest
+    "Bip01 Spine2",       // group 2
+    "Bip01 Neck",         // group 2
+    "Bip01 Head",         // group 1 head
+    "Bip01 L Clavicle",   // group 4 left arm
+    "Bip01 L UpperArm",   // group 4
+    "Bip01 L Forearm",    // group 4
+    "Bip01 L Hand",       // group 4
+    "Bip01 R Clavicle",   // group 5 right arm
+    "Bip01 R UpperArm",   // group 5
+    "Bip01 R Forearm",    // group 5
+    "Bip01 R Hand"        // group 5
+};
+
+float hitbox_group[] = {
+    3, 6, 6, 6, 7, 7, 7, 3, 2, 2, 2, 1, 4, 4, 4, 4, 5, 5, 5, 5
+};
+
+vector hitbox_mins[] = {
+    '-4.69 -4.44 -6.75',
+    '2.66 -3.69 -3.09',
+    '0.38 -3.97 -2.84',
+    '0.85 -3.24 -2.64',
+    '2.47 -3.69 -3.16',
+    '0.31 -3.97 -2.84',
+    '0.85 -3.24 -2.64',
+    '-3.25 -5.5 -5.5',
+    '-0.06 -5.53 -7.59',
+    '-2.25 -6.81 -6.31',
+    '-3.11 -1.5 -3',
+    '-0.33 -4.5 -2.5',
+    '0.94 -2.88 -4.13',
+    '-2.16 -2.34 -2.56',
+    '0.59 -1.81 -2.19',
+    '-0.13 -1.9 -2.24',
+    '1.38 -2.84 -3.56',
+    '-1.88 -2.47 -2.16',
+    '0.44 -1.97 -2.34',
+    '-0.13 -1.9 -2.24'
+};
+
+vector hitbox_maxs[] = {
+    '4 5.56 6.75',
+    '18.16 4.88 3.31',
+    '17.6 4 2.94',
+    '5.73 8.53 3.17',
+    '18.13 4.88 3.38',
+    '17.6 3.94 2.97',
+    '5.73 8.53 3.17',
+    '4.83 5.5 5.5',
+    '8 7 7.59',
+    '6.5 5.09 6.31',
+    '2.05 3.5 3',
+    '8 4.5 2.5',
+    '5.44 4.28 3.5',
+    '11.56 3.41 2.38',
+    '10.75 2.84 2.41',
+    '4.86 2.08 2.37',
+    '5.69 4.31 4.31',
+    '11.81 3.28 2.81',
+    '10.59 2.72 2.22',
+    '4.86 2.08 2.37'
+};
+
+// nettest Patch 36 Part B: register the 20 boxes above on a player model so the engine
+// traces them (native per-bone hit detection) instead of the mesh, and returns the struck
+// box's hitgroup.  Called once per player model from precache_everything (sh_customdefs.qc)
+// in BOTH the SSQC and CSQC progs (each side has its own model_t), so trust 0 (server trace)
+// and trust 1 (client trace) both classify off the same boxes.  Boxes ride the Part A
+// view-pitch bend automatically (Alias_GetBoneInformation), so they lean with the player.
+// addmodelhitbox no-ops on non-alias models (e.g. the sini .mdl, which has native hitboxes)
+// and on unknown bones, so passing every player model is safe.
+void(string modelname) Hitbox_RegisterModel =
+{
+    if (modelname == "")
+        return;
+    if (!checkbuiltin(addmodelhitbox))
+        return;	// unpatched engine → fall back to mesh + Z-height classify
+    float modelindex = getmodelindex(modelname);
+    if (!modelindex)
+    {
+        if (cvar("developer"))
+            print("[hitbox] no modelindex for ", modelname, "\n");
+        return;
+    }
+    float i, ok = 0;
+    for (i = 0; i < HITBOX_COUNT; i = i + 1)
+        ok = ok + addmodelhitbox(modelindex, hitbox_bonename[i], hitbox_group[i], hitbox_mins[i], hitbox_maxs[i]);
+    // Under developer 1 this confirms registration: IQM players report 20/20; the sini .mdl
+    // (HL native hitboxes) reports 0/20 (no-op, expected).  0/20 on an IQM model means the
+    // head galiasinfo carries no bones — the boxes won't trace and detection stays Z-based.
+    if (cvar("developer"))
+        print(sprintf("[hitbox] %s idx=%g registered %g/%g boxes\n", modelname, modelindex, ok, HITBOX_COUNT));
+};
+
 // --- sv_hitbox_expand bookends ---
 //
 // Inflate every alive (CSQC: remote) player's bbox by sv_hitbox_expand
@@ -717,18 +837,42 @@ void() W_PlayersExpandHitboxes =
 {
     float expand = serverkeyfloat("sv_hitbox_expand");
     if (expand <= 0) expand = cvar("sv_hitbox_expand");
-    if (expand <= 0) return;
+    // NOTE: do NOT early-out on expand<=0 — we still need to pose each proxy for the
+    // trace below (Patch 36 fix), independent of bbox expansion.
 
     entity p = findchain(classname, "player_visual_proxy");
     while (p)
     {
         if (!p.vis_is_dead && p.solid == SOLID_BBOX)
         {
-            vector mn = p.mins;
-            vector mx = p.maxs;
-            mn_x -= expand; mn_y -= expand; mn_z -= expand;
-            mx_x += expand; mx_y += expand; mx_z += expand;
-            setsize(p, mn, mx);
+            // nettest Patch 36 fix: pose the proxy at its rendered framestate (stashed by
+            // CSQC_PlayerVisual_Predraw) so the engine MOVE_HITMODEL trace hits the same
+            // silhouette the shooter sees.  The trace runs at prediction time, BEFORE this
+            // frame's predraw, so the live .frame/.basebone would otherwise be a frame stale
+            // or degenerate (bad basebone -> the whole model collapses to one frame group).
+            if (p.vis_trace_pose_valid)
+            {
+                p.frame          = p.vis_trace_frame;
+                p.frame1time     = p.vis_trace_frame1time;
+                p.frame2         = p.vis_trace_frame2;
+                p.lerpfrac       = p.vis_trace_lerpfrac;
+                p.baseframe      = p.vis_trace_baseframe;
+                p.baseframe1time = p.vis_trace_baseframe1time;
+                p.baseframe2     = p.vis_trace_baseframe2;
+                p.baselerpfrac   = p.vis_trace_baselerpfrac;
+                p.basebone       = p.vis_trace_basebone;
+                p.subblendfrac   = p.vis_trace_subblendfrac;
+                p.subblend2frac  = p.vis_trace_subblend2frac;
+            }
+
+            if (expand > 0)
+            {
+                vector mn = p.mins;
+                vector mx = p.maxs;
+                mn_x -= expand; mn_y -= expand; mn_z -= expand;
+                mx_x += expand; mx_y += expand; mx_z += expand;
+                setsize(p, mn, mx);
+            }
         }
         p = p.chain;
     }

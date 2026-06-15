@@ -71,6 +71,16 @@ const string VOIP_PIC_OVERHEAD_MUTED = "gfx/mic/overhead_muted.png";
 // brief mid-speech pauses don't reshuffle entries.
 float voip_last_speak_time [VOIP_HUD_MAX_PLAYERS];
 float voip_first_speak_time[VOIP_HUD_MAX_PLAYERS];
+// Throttle stamp for HUD_VoIP_Tick's per-slot voipspeaking scan (the 32
+// getplayerkeyvalue() lookups were running every render frame).
+float voip_tick_next;
+// Most recent moment ANY slot was stamped speaking (== max of
+// voip_last_speak_time[], since both are set to the same cltime in
+// HUD_VoIP_Tick).  Lets DrawSpeakerList / DrawWorldOverheads early-out their
+// full scans when nobody has spoken within the (hold+fade) window — the common
+// solo/idle case (DrawSpeakerList ran a 32-slot scan, DrawWorldOverheads a
+// makevectors basis + findchain walk, every frame with no talkers).
+float voip_last_any_speak;
 
 // Authoritative local mute state.  Set / cleared via
 // HUD_VoIP_ToggleMute; mirrored to the engine via the
@@ -216,11 +226,26 @@ void() HUD_VoIP_Tick =
     HUD_VoIP_SyncMuteFromEngine();
     if (!cvar("hud_voip_show")) return;
 
+    // Throttle the per-slot voipspeaking scan — 32 getplayerkeyvalue() info-key
+    // lookups every render frame (250+ Hz) was the cost.  A "who's talking" overlay
+    // at ~cl_hud_fps (30 Hz default) is imperceptible, and the fade/hold logic is
+    // cltime-delta based so a coarser sample is fine.
+    if (cltime < voip_tick_next)
+        return;
+    float hz = cvar("cl_hud_fps");
+    if (hz <= 0) hz = 30;
+    voip_tick_next = cltime + 1.0 / hz;
+
     float fade_dur = cvar("cl_voip_fadeduration");
     if (fade_dur <= 0) fade_dur = 2.0;
 
+    // Only scan real player slots — slots past maxclients are never connected, so
+    // getplayerkeyvalue() there is wasted (16 vs 32 with this server's maxclients).
+    float maxp = serverkeyfloat("maxclients");
+    if (maxp <= 0 || maxp > VOIP_HUD_MAX_PLAYERS) maxp = VOIP_HUD_MAX_PLAYERS;
+
     float i;
-    for (i = 0; i < VOIP_HUD_MAX_PLAYERS; i = i + 1)
+    for (i = 0; i < maxp; i = i + 1)
     {
         float speaking = stof(getplayerkeyvalue(i, INFOKEY_P_VOIPSPEAKING));
         if (speaking)
@@ -233,6 +258,7 @@ void() HUD_VoIP_Tick =
                 || since_last > VOIP_HUD_HOLD_TIME + fade_dur)
                 voip_first_speak_time[i] = cltime;
             voip_last_speak_time[i] = cltime;
+            voip_last_any_speak     = cltime;   // drives the draw-side early-outs
         }
     }
 };
@@ -284,6 +310,11 @@ void() HUD_VoIP_DrawSpeakerList =
 
     float fade_dur = cvar("cl_voip_fadeduration");
     if (fade_dur <= 0) fade_dur = 2.0;
+
+    // Nobody stamped speaking within the (hold+fade) window → every slot is aged
+    // out, so candidate_count would be 0.  Skip the 32-slot scan + sort.
+    if (cltime - voip_last_any_speak > VOIP_HUD_HOLD_TIME + fade_dur)
+        return;
 
     float prev_font = drawfont;
     drawfont = hud_font_mono;
@@ -374,7 +405,6 @@ void() HUD_VoIP_DrawSpeakerList =
         // Icon (left), drop-shadow + white name (right).
         drawpic([x_icon, baseline_y, 0], icon, icon_sz, '1 1 1', alpha, 0);
         float text_y = baseline_y + (VOIP_HUD_ICON_SIZE - VOIP_HUD_LINE_SIZE) * 0.5;
-        drawstring([x_text + 1, text_y + 1], name, text_sz, '0 0 0', alpha * 0.6, 0);
         drawstring([x_text,     text_y],     name, text_sz, '1 1 1', alpha, 0);
         baseline_y = baseline_y - row_h;
     }
@@ -406,6 +436,13 @@ void() HUD_VoIP_DrawWorldOverheads =
 {
     if (!cvar("hud_voip_show")) return;
     if (!cvar("cl_voip_overhead")) return;
+
+    // No speech within the (hold+fade) window → nobody can be IsSpeakingNow, and
+    // nothing draws here unless speaking.  Skip the billboard basis + findchain.
+    float fade_dur = cvar("cl_voip_fadeduration");
+    if (fade_dur <= 0) fade_dur = 2.0;
+    if (cltime - voip_last_any_speak > VOIP_HUD_HOLD_TIME + fade_dur)
+        return;
 
     float half = cvar("cl_voip_overhead_size");
     if (half <= 0) half = 12;

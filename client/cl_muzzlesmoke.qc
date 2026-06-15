@@ -64,6 +64,19 @@ var float ms_has_offsets = 0;     // set on first shot so we know if offsets are
 // actually matches how real powder smoke behaves (stays where fired).
 var vector ms_chain_world_muzzle = '0 0 0';
 
+// Lazy-resolved handle for the weapons.muzzlesmoke engine effect (same pattern as
+// the tracer / rain splash — weapons.cfg can finish loading after CSQC init).
+float pe_weapons_muzzlesmoke;
+float() MS_Resolve =
+{
+    if (pe_weapons_muzzlesmoke != 0)
+        return pe_weapons_muzzlesmoke;
+    pe_weapons_muzzlesmoke = particleeffectnum("weapons.muzzlesmoke");
+    if (pe_weapons_muzzlesmoke != 0 && particleeffectquery(pe_weapons_muzzlesmoke, 0) == "")
+        pe_weapons_muzzlesmoke = 0;   // not loaded YET — retry next call
+    return pe_weapons_muzzlesmoke;
+};
+
 // Per-puff appearance defaults (cvar overrides via cl_muzzlesmoke_* below).
 const float MUZZLESMOKE_DEFAULT_LIFE = 0.5;
 const float MUZZLESMOKE_DEFAULT_SIZE = 4;
@@ -140,57 +153,19 @@ void(vector muzzle, vector vfwd, vector vup, float scale,
      float life, float base_size, float grow,
      float drift_u, float drift_f) MS_SpawnOnePuff =
 {
-    if (muzzlesmoke_count >= MUZZLESMOKE_MAX_PUFFS)
-    {
-        // Walk to the tail and unlink it.  List is short by construction
-        // (≤MAX), so this is O(MAX) once per excess-shot, not per-frame.
-        entity prev = muzzlesmoke_list;
-        if (!prev || !prev.ms_next)
-        {
-            // 0 or 1 entries — shouldn't hit the cap but be defensive:
-            // remove the single head if it exists.
-            if (prev)
-            {
-                muzzlesmoke_list = __NULL__;
-                remove(prev);
-                muzzlesmoke_count = 0;
-            }
-        }
-        else
-        {
-            while (prev.ms_next.ms_next)
-                prev = prev.ms_next;
-            entity tail = prev.ms_next;
-            prev.ms_next = __NULL__;
-            remove(tail);
-            muzzlesmoke_count = muzzlesmoke_count - 1;
-        }
-    }
+    float fx = MS_Resolve();
+    if (fx == 0)
+        return;
 
-    entity p = spawn();
-    p.classname = "muzzlesmoke";
-    setorigin(p, muzzle);
-    p.ms_spawn_time = cltime;
-    p.ms_life       = life * (0.85 + random() * 0.3);
-    p.ms_start_size = base_size * scale * (0.8 + random() * 0.4);
-    p.ms_end_size   = p.ms_start_size * grow;
-    p.ms_phase      = random() * 6.28;
-    p.ms_drift      = vup * drift_u + vfwd * drift_f
-                    + [(random() - 0.5) * 2,
-                       (random() - 0.5) * 2,
-                       random() * 1];
-    // Bake current wind into the spawn velocity so each puff inherits
-    // a slightly different bias — gives the plume the per-puff scatter
-    // CoF-style smoke has even before the per-frame integrator kicks in.
-    if (cvar("cl_muzzlesmoke_wind_inherit"))
-        p.ms_drift = p.ms_drift + MS_Wind() * 0.25;
-    p.ms_colour     = '0.55 0.55 0.55'
-                    + '1 1 1' * (random() * 0.15);
-    p.ms_wind_accum = '0 0 0';
-    p.ms_wind_last  = cltime;
-    p.ms_next       = muzzlesmoke_list;
-    muzzlesmoke_list = p;
-    muzzlesmoke_count = muzzlesmoke_count + 1;
+    // Emit ONE smoke puff as an engine particle (weapons.muzzlesmoke).  The
+    // up+fwd drift becomes the spawn velocity (veladd 1 in the recipe); the
+    // engine carries grow + fade + friction + life C-side, so there's no per-puff
+    // entity and no per-frame billboard quad.  The old entity sim's per-puff
+    // size/life/wind variation is now the recipe's job (scalerand/alpharand/
+    // randomvel) — tune with `reloaddebris`.  (scale/life/base_size/grow stay on
+    // the signature for the existing call sites; the recipe owns those now.)
+    vector drift = vup * drift_u + vfwd * drift_f;
+    pointparticles(fx, muzzle, drift, 1);
 };
 
 // Soft-saturation map: heat → 0..1.  Used by both the emit rate
@@ -426,106 +401,13 @@ void() CSQC_TickMuzzleSmokeProducer =
     }
 };
 
-// Per-puff draw — only called from the puff walk below after
-// `self` has been set to the puff entity.
-void() CSQC_DrawMuzzleSmokePuff =
-{
-    float age = cltime - self.ms_spawn_time;
-    float t   = age / self.ms_life;
-
-    float opacity = cvar("cl_muzzlesmoke_opacity");
-    if (opacity <= 0) opacity = MUZZLESMOKE_DEFAULT_OPAC;
-    float alpha = opacity * MS_FadeCurve(t);
-    if (alpha <= 0)
-        return;
-
-    float size = self.ms_start_size
-               + (self.ms_end_size - self.ms_start_size) * MS_Smoothstep(t);
-
-    // Wobble ramps in over the first ~30% of life so it doesn't
-    // scatter the puff at spawn.
-    float wobble = t * 3.33;
-    if (wobble > 1) wobble = 1;
-
-    // Per-frame wind integration — accumulates a world-space offset on
-    // top of the linear ms_drift trajectory.  Re-sampling each draw is
-    // intentional (not dt-correct momentum, just visual drift) so the
-    // plume responds to live cvar tuning and the oscillator phase.
-    if (cvar("cl_muzzlesmoke_wind_continuous"))
-    {
-        float wdt = cltime - self.ms_wind_last;
-        if (wdt > 0)
-        {
-            // Ramp wind in over puff lifetime so freshly-spawned puffs
-            // sit near the muzzle and older puffs drift the most.
-            self.ms_wind_accum = self.ms_wind_accum + MS_Wind() * wdt * t;
-        }
-        self.ms_wind_last = cltime;
-    }
-
-    vector pos = self.origin + self.ms_drift * age + self.ms_wind_accum;
-    pos_x = pos_x + sin(cltime * 0.9 + self.ms_phase) * 1.5 * wobble;
-    pos_y = pos_y + cos(cltime * 0.8 + self.ms_phase) * 1.5 * wobble;
-
-    vector right = v_right * size;
-    vector up    = v_up    * size;
-
-    string tex = cvar_string("cl_muzzlesmoke_texture");
-    if (tex == "")
-        tex = "gfx/smoke";
-
-    R_BeginPolygon(tex, 0, 0);
-    R_PolygonVertex(pos - right - up, '0 1 0', self.ms_colour, alpha);
-    R_PolygonVertex(pos + right - up, '1 1 0', self.ms_colour, alpha);
-    R_PolygonVertex(pos + right + up, '1 0 0', self.ms_colour, alpha);
-    R_PolygonVertex(pos - right + up, '0 0 0', self.ms_colour, alpha);
-    R_EndPolygon();
-};
-
-// Per-frame entry point — called from CSQC_UpdateView before
-// renderscene, next to CSQC_DrawMuzzleFlashSprite + CSQC_DrawSmokeClouds.
+// Per-frame entry point — called from CSQC_UpdateView before renderscene.
+// Now just ticks the heat producer (which emits engine particles); the old
+// per-puff entity billboard-quad walk is gone — the engine carries the smoke
+// particles C-side, so there is no QC draw loop here anymore.
 void() CSQC_DrawMuzzleSmoke =
 {
-    entity puff;
-    entity prev;
-    entity next_puff;
-    entity old_self;
-
-    // Decay heat + emit new puffs BEFORE the draw walk so they
-    // appear in the same frame (no one-frame lag).
     CSQC_TickMuzzleSmokeProducer();
-
-    if (!muzzlesmoke_list)
-        return;
-
-    old_self = self;
-    makevectors(view_angles);
-
-    puff = muzzlesmoke_list;
-    prev = world;
-    while (puff)
-    {
-        next_puff = puff.ms_next;
-        if (cltime - puff.ms_spawn_time > puff.ms_life)
-        {
-            if (prev)
-                prev.ms_next = next_puff;
-            else
-                muzzlesmoke_list = next_puff;
-            remove(puff);
-            muzzlesmoke_count = muzzlesmoke_count - 1;
-            puff = next_puff;
-            continue;
-        }
-
-        self = puff;
-        CSQC_DrawMuzzleSmokePuff();
-
-        prev = puff;
-        puff = next_puff;
-    }
-
-    self = old_self;
 };
 
 // Stop the producer.  Called when the smoke source disconnects

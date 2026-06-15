@@ -45,7 +45,7 @@ const float PLAYERMODEL_PANEL_GAP    = 12;   // space between this panel and Spr
 const float PLAYERMODEL_COUNT = 3;
 float  g_playermodel_indices[PLAYERMODEL_COUNT] = { 6, 7, 8 };
 string g_playermodel_paths  [PLAYERMODEL_COUNT] = {
-    "models/player/chickenman.mdl",
+    "models/player/chickenman/chickenman.iqm",
     "models/player/numberk/numberK.iqm",
     "models/player/kilmer/kilmer.iqm"
 };

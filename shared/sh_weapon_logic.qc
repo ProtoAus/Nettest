@@ -131,7 +131,13 @@ void(float kick_pitch, float kick_variance, optional float weapon_strength) SH_A
         self.view_kick_pitch_vel += pitch_impulse;
         self.view_kick_yaw_vel   += yaw_impulse;
     }
-    self.view_kick_burst_idx += 1;
+    // Cap at 255: this counter is networked as a BYTE (sv_player.qc:1544
+    // PM_PredictionProxy_SendEntity).  A sustained belt spray held across
+    // reloads (e.g. the cfm249) would otherwise climb past 255 and WriteByte
+    // would truncate it + spam "value N outside 0..255" warnings.  Per-weapon
+    // recoil patterns plateau long before 255 shots, so the cap is invisible.
+    if (self.view_kick_burst_idx < 255)
+        self.view_kick_burst_idx += 1;
     self.view_kick_release_ticks = 0;
 };
 
@@ -305,10 +311,12 @@ float() Weapon_IsADSActive =
         && (self.flags & FL_ONGROUND)
         && input_movevalues_x > 0)
         return 0;
-    // Grapple / codladder cancel — the gun has been dropped
+    // Grapple / carry / codladder cancel — the gun has been dropped
     // off-screen by the lower envelope, ADS spread tightening
     // shouldn't apply either.
     if (self.grapple_rope_active)
+        return 0;
+    if (self.pm_carrying)
         return 0;
     if (PM_ReadMovevar("sv_codladders", 0)
         && self.pm_on_ladder_cached)
@@ -465,6 +473,36 @@ float(float bone_id) W_BoneToHitgroup =
     return HITGROUP_GENERIC;
 };
 
+// Classify a world hit point into a hitgroup by which per-bone OBB box (the
+// boxes cl_debug_hitboxes / sv_debug_hitboxes draw) contains it — accurate
+// head/chest/limb vs the Z-height guess.  Returns the box's hitgroup, or -1 if
+// the point is in no box (caller falls back).  gettaginfo gives each bone's
+// origin + orthonormal axes; the box is axis-aligned in that frame.  SHARED:
+// works on the SERVER player (lag-comp-rewound pose) AND the CLIENT proxy (both
+// carry the skeleton), so EVERY hit path — penetrating / shotgun / melee /
+// standard, trust 0 or 1 — classifies identically (this is the fix for "head
+// reads as chest" and "both legs read as left leg" on the penetrating guns).
+float(entity target, vector hit_pos) HitgroupAtPoint =
+{
+    float i;
+    for (i = 0; i < HITBOX_COUNT; i++)
+    {
+        float bone = gettagindex(target, hitbox_bonename[i]);
+        if (bone <= 0)
+            continue;
+        vector bpos = gettaginfo(target, bone);
+        vector vf = v_forward, vr = v_right, vu = v_up;
+        vector bmn = hitbox_mins[i], bmx = hitbox_maxs[i];
+        vector rel = hit_pos - bpos;
+        float lx = rel * vf, ly = rel * vr, lz = rel * vu;
+        if (lx >= bmn_x && lx <= bmx_x
+         && ly >= bmn_y && ly <= bmx_y
+         && lz >= bmn_z && lz <= bmx_z)
+            return hitbox_group[i];
+    }
+    return -1;
+};
+
 // Damage multiplier per hitgroup (CS 1.6 style).
 // Classify a hit into a hitgroup using bone names first, falling
 // back to a vertical Z-height bin when bone-name lookup returns
@@ -505,6 +543,28 @@ float(entity target, vector hit_pos, float bone_id) W_HitgroupClassify =
         && target.classname != "player_visual_proxy")
         return HITGROUP_GENERIC;
 
+    // nettest Patch 36 Part B: native per-bone hitbox collision.  When the engine traced the
+    // player's registered hitboxes (MOVE_HITMODEL on a model with addmodelhitbox boxes — see
+    // Hitbox_RegisterModel), it reports the EXACT struck box's hitgroup in trace_surface_id
+    // (1=head..7=Rleg).  This is the box you hit on the leaned/twisted Part A pose — no
+    // Z-height guess, no mesh-vs-render mismatch, and identical on the server (trust 0) and
+    // client (trust 1) traces.  bone_id>0 confirms a hitmodel/box hit (brush traces leave it 0).
+    // Falls through to the legacy Z-height classifier below for models without registered boxes
+    // (e.g. the sini .mdl) or on an unpatched engine.
+    if (bone_id > 0 && trace_surface_id >= HITGROUP_HEAD && trace_surface_id <= HITGROUP_RIGHTLEG)
+        return trace_surface_id;
+
+    // NOTE: a per-bone OBB box classifier (HitgroupAtPoint) was tried here this
+    // session and REMOVED.  The boxes come from gettaginfo on the SERVER pose,
+    // where the IQM player's view-pitch LEAN does not exist — it is a CLIENT-
+    // render-only skel_set_bone spine deform (cl_player.qc PlayerVis_PitchBone),
+    // and the server clears its own skeleton every tick (SH_PlayerAnim_Clear-
+    // IQMSpine).  So a shot at a LEANED target landed outside the upright server
+    // boxes -> -1 or a wrong box -> poisoned the result in both trust modes.
+    // Classify off the mesh trace's bone_id + a Z-height fallback (below) which
+    // is independent of box accuracy.  A box pass can only return once the
+    // server carries the same spine-pitch skeleton the proxy does.
+
     // Z-fraction first.  On the IQM rig the bone-weight engine refine
     // can route a clean headshot to a neck/upper-spine bone because
     // the head triangle has higher weight on Bip01 Spine3 than on
@@ -540,10 +600,22 @@ float(entity target, vector hit_pos, float bone_id) W_HitgroupClassify =
     // GENERIC (bone_id == 0 or unknown bone name).
     if (total_h <= 0)
         return HITGROUP_GENERIC;
+    // L/R leg split: only the SPINE pitches with view-aim (client render only),
+    // the LEGS never pitch, so the L/R thigh bones are accurate on both sides.
+    // Pick whichever thigh the hit is closer to (robust, no axis-sign guess) —
+    // the fix for "both legs read as left leg" when trace_bone_id was 0.
     float hg_z;
+    float lthigh = gettagindex(target, "Bip01 L Thigh");
+    float rthigh = gettagindex(target, "Bip01 R Thigh");
+    vector lpos = gettaginfo(target, lthigh);
+    vector rpos = gettaginfo(target, rthigh);
+    float legside = HITGROUP_LEFTLEG;
+    if (lthigh > 0 && rthigh > 0 && vlen(hit_pos - rpos) < vlen(hit_pos - lpos))
+        legside = HITGROUP_RIGHTLEG;
+
     if      (frac >= 0.55) hg_z = HITGROUP_CHEST;
     else if (frac >= 0.35) hg_z = HITGROUP_STOMACH;
-    else                   hg_z = HITGROUP_LEFTLEG;
+    else                   hg_z = legside;
 
     // Optional verbose trace.  Spam-heavy by design — flip
     // `cl_debug_hitgroup 1` for a shot or two when verifying that
@@ -657,7 +729,12 @@ void() CSQC_TryPlayPredictedHitmarker =
 //   - vis_health unknown (0 — no sample arrived yet; we don't predict
 //     because we'd over-fire on every hit)
 //   - final damage < vis_health (non-lethal)
-void(entity target, float body_dmg, float bone_id) CSQC_TryPredictDeath =
+// in_hitgroup (optional): the hitgroup the caller classified at the moment of the hit, while
+// the trace globals were still fresh.  CRITICAL — the lethality threshold below uses the
+// hitgroup damage multiplier, so re-deriving it here would read FX-clobbered trace_endpos and
+// (when the hand is raised to head height) Z-classify an ARM hit as a HEADSHOT -> 4x -> predict
+// a kill the server never makes (victim "dies" on the shooter's screen but is alive with hp).
+void(entity target, float body_dmg, float bone_id, optional float in_hitgroup) CSQC_TryPredictDeath =
 {
     if (!target || target == world) return;
     if (target.classname != "player_visual_proxy") return;
@@ -693,7 +770,13 @@ void(entity target, float body_dmg, float bone_id) CSQC_TryPredictDeath =
     // Resolve hitgroup once.  In paintgun mode the multiplier doesn't
     // matter (every hit is a fixed-damage kill), but we still need
     // the hitgroup later to pick the matching death animation.
-    float hitgroup = W_HitgroupClassify(target, trace_endpos, bone_id);
+    // Patch 36: prefer the hitgroup the caller captured while the trace globals were fresh;
+    // re-deriving here would read FX-clobbered trace_endpos and mis-classify (arm->headshot).
+    float hitgroup;
+    if (in_hitgroup >= HITGROUP_HEAD && in_hitgroup <= HITGROUP_RIGHTLEG)
+        hitgroup = in_hitgroup;
+    else
+        hitgroup = W_HitgroupClassify(target, trace_endpos, bone_id);
 
     float is_paintgun_kill = (getstatf(STAT_GAMEMODE) == GAMEMODE_PAINTGUN);
     float final_dmg;
@@ -801,7 +884,13 @@ void(entity target, float body_dmg, float bone_id) CSQC_TryPredictDeath =
 //
 // Also runs CSQC_TryPredictDeath on the target so lethal hits flip the
 // proxy's vis_is_dead instantly (only when sv_trust_clienthits is on).
-void(entity target, float damage, float bone_id) CSQC_SendHitclaim =
+// in_hitgroup (optional): the hitgroup classified by the CALLER at the moment of the hit,
+// while the trace globals were still fresh.  REQUIRED for the engine per-bone hitbox path
+// (Patch 36 Part B): the FX calls between the trace and this function (CSQC_BulletImpactSilent
+// re-traces for the impact decal) clobber trace_bone_id/trace_surface_id to 0, so re-deriving
+// the hitgroup HERE would lose the box and fall back to a Z-height guess (arms -> chest/stomach).
+// If omitted/0, falls back to the (possibly stale) re-derivation for legacy callers (melee).
+void(entity target, float damage, float bone_id, optional float in_hitgroup) CSQC_SendHitclaim =
 {
     // Diagnostics gated on cl_debug_hitclaim — uses print() so output
     // is visible without `developer 1`. Cheap to leave the cvar at 0
@@ -833,22 +922,15 @@ void(entity target, float damage, float bone_id) CSQC_SendHitclaim =
         return;
     }
 
-    // Ghost-corpse damage gate.  At low listen-server FPS the CSQC can
-    // hold a stale visual proxy in alive pose at the death location
-    // even after the player has respawned elsewhere — vis_is_dead got
-    // flipped by the server's IDENTITY snapshot, but the POSE / origin
-    // update hasn't caught up so the body looks alive and stationary.
-    // Shooting that "ghost" would otherwise forward a hitclaim with
-    // the player's slot to the server, which then damages the live
-    // respawned player at the spawn point.  Refuse to send the claim
-    // when the local proxy reports dead — the server's authoritative
-    // damage trace still works for non-stale paths.
-    if (target.classname == "player_visual_proxy" && target.vis_is_dead)
-    {
-        if (dbg) print(sprintf("[hitclaim-cl] skip: target proxy slot=%g is vis_is_dead (ghost?)\n",
-                               target_slot));
-        return;
-    }
+    // (Removed the client-side vis_is_dead "ghost-corpse" gate that used to
+    // bail here.  It was meant to avoid damaging a freshly-respawned player by
+    // shooting their stale alive-pose proxy, but it FALSE-NEGATIVED legitimate
+    // LIVE hits whenever a proxy's vis_is_dead was momentarily stale — the
+    // "blood splatter but no damage with sv_trust_clienthits 1" bug.  Stale
+    // claims are now rejected authoritatively SERVER-side via the life-serial
+    // check in SV_HandleHitclaim, so the client always forwards the claim and
+    // lets the server decide.  The life_serial sent below carries the proxy's
+    // life so the server can tell a live hit from an old-life ghost.)
 
     // Compute the hitgroup right here on the client.  The client has
     // the player model loaded for rendering so gettagindex works
@@ -857,7 +939,11 @@ void(entity target, float damage, float bone_id) CSQC_SendHitclaim =
     // hitgroup means the server doesn't need to repeat the work in
     // a context (post-cmd-parse) where its own model state may not be
     // ready for tag queries.
-    float claim_hg = W_HitgroupClassify(target, trace_endpos, bone_id);
+    float claim_hg;
+    if (in_hitgroup >= HITGROUP_HEAD && in_hitgroup <= HITGROUP_RIGHTLEG)
+        claim_hg = in_hitgroup;                                  // caller captured it fresh (Patch 36)
+    else
+        claim_hg = W_HitgroupClassify(target, trace_endpos, bone_id);   // legacy/melee fallback
 
     // Wire format:
     //   hitclaim <slot> <body_damage> <bone_id> <hitgroup> <life_serial>
@@ -884,7 +970,7 @@ void(entity target, float damage, float bone_id) CSQC_SendHitclaim =
     // Runs BEFORE the flinch predict below so the flinch can check
     // vis_is_dead to skip itself on lethal hits.
     if (cvar("cl_predict_death"))
-        CSQC_TryPredictDeath(target, damage, bone_id);
+        CSQC_TryPredictDeath(target, damage, bone_id, claim_hg);
 
     // Predicted flinch — set vis_flinch_until on the target proxy
     // so the shooter sees the recoil instantly (without waiting for
@@ -913,6 +999,12 @@ void(entity target, float damage, float bone_id) CSQC_SendHitclaim =
         float fdur = cvar("cl_player_flinch_time");
         target.vis_flinch_until    = cltime + fdur;
         target.vis_flinch_hitgroup = HITGROUP_GENERIC;
+        // nettest Patch 36: we just predicted this flinch locally.  The server ALSO multicasts
+        // CSQC_EVENT_PLAYER_FLINCH to everyone (incl. us) ~RTT later, and its handler re-stamps
+        // vis_flinch_until — RESTARTING the flinch anim, so the shooter sees it twice.  Latch a
+        // short window so the handler skips OUR own shot's server flinch (witnesses, who never
+        // set this latch, still see it once).  Only set on the proxy we predicted.
+        target.vis_flinch_pred_until = cltime + 0.5;
     }
 };
 
@@ -1023,14 +1115,17 @@ void(float spread_base, float spread_move, float spread_fullspeed,
     // forgiveness the server-auth hitscan path already applies on its
     // side (server/sv_weapons.qc).  Without it, sv_trust_clienthits 1
     // shooters were missing limbs the server would have hit.
+    // Detection is the engine MOVE_HITMODEL mesh trace (matches the server's
+    // own hit path).  The OBB-ray detector tried this session was reverted: its
+    // boxes are upright on the client-vs-server pose split (see W_HitgroupClassify
+    // note) and it depended on the same un-tracking boxes.
     W_PlayersExpandHitboxes();
     CSQC_WeaponTraceLine(src, end, MOVE_NORMAL | MOVE_HITMODEL, self);
     W_PlayersRestoreHitboxes();
 
-    // Phys props (barrel/can) are CSQC-replicated SOLID_NOT (so pmove
-    // ignores them — server uses a tighter trimesh).  This pass does
-    // a manual ray-vs-AABB against each prop and overrides the trace
-    // globals if any prop sits closer than the current hit.
+    // Phys props (barrel/can) are CSQC-replicated SOLID_NOT (so pmove ignores
+    // them — server uses a tighter trimesh).  Manual ray-vs-AABB; overrides the
+    // trace globals if any prop sits closer than the current hit.
     CSQC_PhysProp_OverrideTrace(src, end);
     CSQC_DroppedWeapon_OverrideTrace(src, end);
 
@@ -1067,6 +1162,12 @@ void(float spread_base, float spread_move, float spread_fullspeed,
 
         if (is_player_hit)
         {
+            // Patch 36: classify the hitgroup NOW, while the trace globals are fresh.  The FX
+            // below (CSQC_BulletImpactSilent re-traces for the impact decal) clobber
+            // trace_bone_id/trace_surface_id to 0, so deferring this to CSQC_SendHitclaim would
+            // lose the engine per-bone box and fall back to a Z-height guess (arms -> chest).
+            float hit_hg  = W_HitgroupClassify(trace_ent, trace_endpos, trace_bone_id);
+            float hit_bid = trace_bone_id;
             CSQC_TryPlayPredictedHitmarker();
             // Local flesh splash + impact light. Impact_ClassifyLocal
             // classifies player_visual_proxy as flesh → particle matches
@@ -1074,7 +1175,7 @@ void(float spread_base, float spread_move, float spread_fullspeed,
             // ricochet sound, no decal (Impact_ShouldSpawnHole excludes
             // flesh).
             CSQC_BulletImpactSilent(trace_endpos, trace_plane_normal);
-            CSQC_SendHitclaim(trace_ent, damage, trace_bone_id);
+            CSQC_SendHitclaim(trace_ent, damage, hit_bid, hit_hg);
         }
         else
         {
@@ -1091,7 +1192,7 @@ void(float spread_base, float spread_move, float spread_fullspeed,
             // the simple green dot (no hitgroup, no damage).
             if (is_player_hit)
             {
-                float pred_hg  = W_HitgroupClassify(trace_ent, trace_endpos, trace_bone_id);
+                float pred_hg  = hit_hg;   // Patch 36: use the fresh-captured hitgroup, not a clobbered re-trace
                 float pred_dmg = damage * W_HitgroupDamageMultiplier(pred_hg);
                 CSQC_AddDebugImpact(trace_endpos, src, '1 1 0',
                                     pred_dmg, pred_hg);
@@ -1252,15 +1353,18 @@ void(float spread_base, float spread_move, float spread_fullspeed,
 
         if (is_player_hit)
         {
+            // Patch 36: classify NOW (fresh globals) — FX below clobber trace_bone_id/surface_id.
+            float hit_hg  = W_HitgroupClassify(trace_ent, trace_endpos, trace_bone_id);
+            float hit_bid = trace_bone_id;
             CSQC_TryPlayPredictedHitmarker();
             CSQC_BulletImpactSilent(trace_endpos, trace_plane_normal);
-            CSQC_SendHitclaim(trace_ent, damage, trace_bone_id);
+            CSQC_SendHitclaim(trace_ent, damage, hit_bid, hit_hg);
             if (cvar("cl_debug_impacts"))
             {
                 // Player hit in the penetration path — use the same
                 // yellow + hitgroup-damage report the non-penetration
                 // impact uses, so the user reads the actual landed damage.
-                float pen_hg  = W_HitgroupClassify(trace_ent, trace_endpos, trace_bone_id);
+                float pen_hg  = hit_hg;   // Patch 36: use the fresh-captured hitgroup, not a clobbered re-trace
                 float pen_dmg = damage * W_HitgroupDamageMultiplier(pen_hg);
                 CSQC_AddDebugImpact(trace_endpos, src, '1 1 0', pen_dmg, pen_hg);
             }
@@ -1413,10 +1517,13 @@ void(float pellets, float spread_val,
 
             if (is_player_hit)
             {
+                // Patch 36: classify NOW (fresh globals) — FX below clobber trace_bone_id/surface_id.
+                float hit_hg  = W_HitgroupClassify(trace_ent, trace_endpos, trace_bone_id);
+                float hit_bid = trace_bone_id;
                 CSQC_TryPlayPredictedHitmarker();
                 // Per-pellet flesh splash (shotgun can spray multiple).
                 CSQC_BulletImpactSilent(trace_endpos, trace_plane_normal);
-                CSQC_SendHitclaim(trace_ent, damage, trace_bone_id);
+                CSQC_SendHitclaim(trace_ent, damage, hit_bid, hit_hg);
             }
             else
             {

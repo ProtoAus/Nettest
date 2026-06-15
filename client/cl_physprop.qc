@@ -30,6 +30,7 @@
 // the server's network-shared one.
 float pp_idx_phys_barrel;
 float pp_idx_phys_can;
+float pp_idx_phys_files;
 float pp_idx_resolved;
 
 void() CSQC_PhysProp_ResolveIndexes =
@@ -37,6 +38,12 @@ void() CSQC_PhysProp_ResolveIndexes =
     if (pp_idx_resolved) return;
     pp_idx_phys_barrel = (float)getmodelindex("models/props/barrel.iqm");
     pp_idx_phys_can    = (float)getmodelindex("models/props/can.mdl");
+    // Filecabinet uses the IQM when present (else the .mdl box) — resolve both
+    // and keep whichever the server precached. The bullet hit-test is a rotated
+    // oriented-box (see CSQC_PhysProp_RayBox), accurate even when it tips.
+    pp_idx_phys_files  = (float)getmodelindex("models/props/filecabinet/filecabinet.iqm");
+    if (pp_idx_phys_files == 0)
+        pp_idx_phys_files = (float)getmodelindex("models/props/filecabinet.mdl");
     pp_idx_resolved = 1;
 };
 
@@ -46,6 +53,7 @@ void() CSQC_PhysProp_ResolveIndexes =
 // gates work without any changes.  Reused across shots.
 entity pp_fake_barrel;
 entity pp_fake_can;
+entity pp_fake_files;
 
 void() CSQC_PhysProp_EnsureFakeEnts =
 {
@@ -62,6 +70,13 @@ void() CSQC_PhysProp_EnsureFakeEnts =
         pp_fake_can.classname = "phys_can";
         pp_fake_can.solid = SOLID_NOT;
         pp_fake_can.drawmask = 0;
+    }
+    if (!pp_fake_files)
+    {
+        pp_fake_files = spawn();
+        pp_fake_files.classname = "phys_files";
+        pp_fake_files.solid = SOLID_NOT;
+        pp_fake_files.drawmask = 0;
     }
 };
 
@@ -205,6 +220,92 @@ float(vector ro_world, vector dir_unit, float dirlen,
     return tnear;
 };
 
+// Ray vs ORIENTED BOX, in the local frame vf/vr/vu (getentity basis — tracks
+// the prop's ODE angles, so a tipped/rotated cabinet is hit on its real rotated
+// faces, not the axis-aligned engine AABB).  The box spans [lmins, lmaxs] in
+// local space anchored at `center` (the entity origin; for the filecabinet that
+// is the feet, lmins_z 0).  Standard 3-slab test.  Writes pp_hit_t/normal +
+// pp_exit_t/normal like RayCylinder.  Returns tnear in [0,dirlen] on hit, -1 on
+// miss / origin-inside / behind-the-ray.
+float(vector ro_world, vector dir_unit, float dirlen,
+      vector center, vector vf, vector vr, vector vu,
+      vector lmins, vector lmaxs) CSQC_PhysProp_RayBox =
+{
+    vector delta = ro_world - center;
+    vector ro_loc, dir_loc;
+    ro_loc_x  = delta * vf;     ro_loc_y  = delta * vr;     ro_loc_z  = delta * vu;
+    dir_loc_x = dir_unit * vf;  dir_loc_y = dir_unit * vr;  dir_loc_z = dir_unit * vu;
+
+    float tnear = -999999999, tfar = 999999999;
+    float near_axis = 0, near_sign = 0;
+    float far_axis  = 0, far_sign  = 0;
+    float t1, t2, s, tt;
+
+    // --- X slab ---
+    if (fabs(dir_loc_x) < 0.000001)
+    {
+        if (ro_loc_x < lmins_x || ro_loc_x > lmaxs_x) return -1;
+    }
+    else
+    {
+        t1 = (lmins_x - ro_loc_x) / dir_loc_x;
+        t2 = (lmaxs_x - ro_loc_x) / dir_loc_x;
+        s = -1;                                   // entry through -X face
+        if (t1 > t2) { tt = t1; t1 = t2; t2 = tt; s = 1; }
+        if (t1 > tnear) { tnear = t1; near_axis = 0; near_sign = s; }
+        if (t2 < tfar)  { tfar  = t2; far_axis  = 0; far_sign  = 0 - s; }
+    }
+    // --- Y slab ---
+    if (fabs(dir_loc_y) < 0.000001)
+    {
+        if (ro_loc_y < lmins_y || ro_loc_y > lmaxs_y) return -1;
+    }
+    else
+    {
+        t1 = (lmins_y - ro_loc_y) / dir_loc_y;
+        t2 = (lmaxs_y - ro_loc_y) / dir_loc_y;
+        s = -1;
+        if (t1 > t2) { tt = t1; t1 = t2; t2 = tt; s = 1; }
+        if (t1 > tnear) { tnear = t1; near_axis = 1; near_sign = s; }
+        if (t2 < tfar)  { tfar  = t2; far_axis  = 1; far_sign  = 0 - s; }
+    }
+    // --- Z slab ---
+    if (fabs(dir_loc_z) < 0.000001)
+    {
+        if (ro_loc_z < lmins_z || ro_loc_z > lmaxs_z) return -1;
+    }
+    else
+    {
+        t1 = (lmins_z - ro_loc_z) / dir_loc_z;
+        t2 = (lmaxs_z - ro_loc_z) / dir_loc_z;
+        s = -1;
+        if (t1 > t2) { tt = t1; t1 = t2; t2 = tt; s = 1; }
+        if (t1 > tnear) { tnear = t1; near_axis = 2; near_sign = s; }
+        if (t2 < tfar)  { tfar  = t2; far_axis  = 2; far_sign  = 0 - s; }
+    }
+
+    if (tnear > tfar)   return -1;
+    if (tfar  < 0)      return -1;
+    if (tnear < 0)      return -1;   // origin inside the box — skip
+    if (tnear > dirlen) return -1;
+
+    vector n_loc = '0 0 0';
+    if      (near_axis == 0) n_loc_x = near_sign;
+    else if (near_axis == 1) n_loc_y = near_sign;
+    else                     n_loc_z = near_sign;
+    pp_hit_t = tnear;
+    pp_hit_normal = n_loc_x * vf + n_loc_y * vr + n_loc_z * vu;
+
+    vector ne_loc = '0 0 0';
+    if      (far_axis == 0) ne_loc_x = far_sign;
+    else if (far_axis == 1) ne_loc_y = far_sign;
+    else                    ne_loc_z = far_sign;
+    pp_exit_t = tfar;
+    pp_exit_normal = ne_loc_x * vf + ne_loc_y * vr + ne_loc_z * vu;
+
+    return tnear;
+};
+
 // Per-type cylinder dimensions.  Returns (radius, half_height, 0).
 // Centralised so forward and back-trace agree.
 // Cylinder half-extents per prop type — (radius, half_height, 0).
@@ -223,13 +324,14 @@ entity(float midx) CSQC_PhysProp_FakeForType =
 {
     if (pp_idx_phys_barrel != 0 && midx == pp_idx_phys_barrel) return pp_fake_barrel;
     if (pp_idx_phys_can    != 0 && midx == pp_idx_phys_can)    return pp_fake_can;
+    if (pp_idx_phys_files  != 0 && midx == pp_idx_phys_files)  return pp_fake_files;
     return world;
 };
 
 void(vector trace_src, vector trace_end) CSQC_PhysProp_OverrideTrace =
 {
     CSQC_PhysProp_ResolveIndexes();
-    if (pp_idx_phys_barrel == 0 && pp_idx_phys_can == 0) return;
+    if (pp_idx_phys_barrel == 0 && pp_idx_phys_can == 0 && pp_idx_phys_files == 0) return;
     CSQC_PhysProp_EnsureFakeEnts();
 
     vector dir = trace_end - trace_src;
@@ -259,15 +361,24 @@ void(vector trace_src, vector trace_end) CSQC_PhysProp_OverrideTrace =
         entity fake_ent = CSQC_PhysProp_FakeForType(midx);
         if (fake_ent == world) continue;
 
-        vector cyl = CSQC_PhysProp_CylForType(midx);
         vector org = (vector)getentity(i, GE_ORIGIN);
         vector vf  = (vector)getentity(i, GE_FORWARD);
         vector vr  = (vector)getentity(i, GE_RIGHT);
         vector vu  = (vector)getentity(i, GE_UP);
 
-        float tnear = CSQC_PhysProp_RayCylinder(trace_src, dir_unit, dirlen,
-                                                org, vf, vr, vu,
-                                                cyl_x, cyl_y);
+        // Cabinet is a box → oriented-box test; barrel/can are cylinders.
+        float tnear;
+        if (pp_idx_phys_files != 0 && midx == pp_idx_phys_files)
+            tnear = CSQC_PhysProp_RayBox(trace_src, dir_unit, dirlen,
+                                         org, vf, vr, vu,
+                                         '-11.31 -14.37 0', '11.29 14.39 62.79');
+        else
+        {
+            vector cyl = CSQC_PhysProp_CylForType(midx);
+            tnear = CSQC_PhysProp_RayCylinder(trace_src, dir_unit, dirlen,
+                                              org, vf, vr, vu,
+                                              cyl_x, cyl_y);
+        }
         if (tnear < 0) continue;
         if (tnear >= best_t) continue;
 
@@ -275,6 +386,41 @@ void(vector trace_src, vector trace_end) CSQC_PhysProp_OverrideTrace =
         best_ent = fake_ent;
         best_normal = pp_hit_normal;
     }
+
+    // The filing cabinet is a CSQC SendEntity MIRROR — NOT in the engine entity slots
+    // getentity() reads (those are the engine-replicated barrel/can), so the loop above
+    // never sees it.  Ray-test it here via findchain, regardless of solid state, so a
+    // MOVING cabinet (SOLID_NOT while carried / just-thrown, before it re-solidifies)
+    // still registers a bullet hit → metal spark.  At rest the normal traceline already
+    // hits its SOLID_PHYSICS_BOX; this just takes the closer of the two (no double).
+    // makevectors below clobbers v_forward/right/up — save the caller's set (e.g. the
+    // shot direction) and restore it after, so penetration / later pellets are unaffected.
+    vector pp_save_vf = v_forward, pp_save_vr = v_right, pp_save_vu = v_up;
+    entity cab = findchain(classname, "phys_files");
+    while (cab)
+    {
+        // A SOLID mirror (free SOLID_PHYSICS_BOX) is ALREADY hit by the engine traceline
+        // above, so the RayBox here would be redundant.  It's only needed for a MOVING
+        // mirror (SOLID_NOT while carried / just-thrown).  Skip solid ones so a prop-dense
+        // Source map doesn't pay an O(props-in-PVS) RayBox scan on every pellet.
+        if (cab.solid != SOLID_NOT)
+        {
+            cab = cab.chain;
+            continue;
+        }
+        makevectors(cab.angles);   // raw-angle OBB axes (−v_right), matching World_OBBTrace + the debug box
+        float ct = CSQC_PhysProp_RayBox(trace_src, dir_unit, dirlen,
+                                        cab.origin, v_forward, v_right * -1, v_up,
+                                        cab.mins, cab.maxs);
+        if (ct >= 0 && ct < best_t)
+        {
+            best_t      = ct;
+            best_ent    = pp_fake_files;
+            best_normal = pp_hit_normal;
+        }
+        cab = cab.chain;
+    }
+    v_forward = pp_save_vf; v_right = pp_save_vr; v_up = pp_save_vu;
 
     if (best_ent != world)
     {
@@ -310,9 +456,65 @@ void(vector trace_src, vector trace_end) CSQC_PhysProp_OverrideBackTrace =
 const float PP_CYL_SEGMENTS = 16;
 void(vector p1, vector p2, vector col, float alpha) dbg_hitbox_line;
 
+// Draw a CSQC phys-prop's ORIENTED collision box (OBB) — the rotated box the engine
+// patch (World_OBBTrace) actually collides against.  Uses the SAME alias mesh-pitch/
+// roll + right-hand flip the patch uses, so the wireframe lines up exactly with the
+// real hull.  Green, to stand apart from the orange barrel/can cylinders.
+void(entity e, vector col) CSQC_DrawPhysOBB =
+{
+    makevectors(e.angles);   // raw angles — matches World_OBBTrace (no mesh-pitch flip)
+    vector ax0 = v_forward;
+    vector ax1 = v_right * -1;   // right-hand flip, matching World_OBBTrace
+    vector ax2 = v_up;
+
+    vector lo = e.mins, hi = e.maxs;
+    vector c0 = e.origin + lo_x*ax0 + lo_y*ax1 + lo_z*ax2;
+    vector c1 = e.origin + hi_x*ax0 + lo_y*ax1 + lo_z*ax2;
+    vector c2 = e.origin + hi_x*ax0 + hi_y*ax1 + lo_z*ax2;
+    vector c3 = e.origin + lo_x*ax0 + hi_y*ax1 + lo_z*ax2;
+    vector c4 = e.origin + lo_x*ax0 + lo_y*ax1 + hi_z*ax2;
+    vector c5 = e.origin + hi_x*ax0 + lo_y*ax1 + hi_z*ax2;
+    vector c6 = e.origin + hi_x*ax0 + hi_y*ax1 + hi_z*ax2;
+    vector c7 = e.origin + lo_x*ax0 + hi_y*ax1 + hi_z*ax2;
+
+    float  al  = 0.7;
+    dbg_hitbox_line(c0, c1, col, al);  dbg_hitbox_line(c1, c2, col, al);   // bottom ring
+    dbg_hitbox_line(c2, c3, col, al);  dbg_hitbox_line(c3, c0, col, al);
+    dbg_hitbox_line(c4, c5, col, al);  dbg_hitbox_line(c5, c6, col, al);   // top ring
+    dbg_hitbox_line(c6, c7, col, al);  dbg_hitbox_line(c7, c4, col, al);
+    dbg_hitbox_line(c0, c4, col, al);  dbg_hitbox_line(c1, c5, col, al);   // verticals
+    dbg_hitbox_line(c2, c6, col, al);  dbg_hitbox_line(c3, c7, col, al);
+};
+
 void() CSQC_DrawDebugPhysProps =
 {
     if (!cvar("cl_debug_physprops")) return;
+
+    // Cabinet (and any phys_files) OBBs — the CSQC mirrors are real csqc edicts, so
+    // findchain sees them.  Colour = state:
+    //   YELLOW = carried / just-dropped passthrough (non-solid to players)
+    //   CYAN   = free + settled (velocity ~0) — i.e. likely ODE-autodisabled/asleep
+    //   GREEN  = free + moving (active)
+    // (The exact ODE dBodyIsEnabled flag isn't exposed to QC, so "asleep" is inferred
+    //  from the streamed velocity being ~0; with physics_ode_autodisable 1 a settled
+    //  prop does sleep, which is when it goes cyan.)
+    entity e = findchain(classname, "phys_files");
+    while (e)
+    {
+        if (e.drawmask)
+        {
+            vector ocol;
+            if (e.solid == SOLID_NOT)
+                ocol = '1 0.85 0';
+            else if (vlen(e.velocity) < 0.5 && vlen(e.avelocity) < 0.5)
+                ocol = '0 0.6 1';
+            else
+                ocol = '0 1 0';
+            CSQC_DrawPhysOBB(e, ocol);
+        }
+        e = e.chain;
+    }
+
     CSQC_PhysProp_ResolveIndexes();
     if (pp_idx_phys_barrel == 0 && pp_idx_phys_can == 0) return;
 
@@ -377,4 +579,210 @@ void() CSQC_DrawDebugPhysProps =
         dbg_hitbox_line(prev_top, first_top, col, alpha);
         dbg_hitbox_line(prev_bot, first_bot, col, alpha);
     }
+};
+
+// ============================================================
+//  CSQC-networked filing cabinet  (CSQC_ENT_PHYS_PROP)
+//  ----------------------------------------------------------
+//  The SERVER runs the real ODE body; THIS mirror is what the client's custom
+//  QC pmove and the CSQC bullet traces actually collide with.  Without it the
+//  client is blind to the engine-replicated prop (the QC pmove only sees CSQC
+//  entities), so players fall through / driftlock on top of it and shots that
+//  the engine trace would catch miss locally.  A SOLID_BBOX matching the
+//  cabinet's hbox closes that gap; the model is still drawn at the streamed
+//  tumble angles so it looks right while it rolls.  This also makes the carried
+//  cabinet render smoothly (origin is streamed + extrapolated, not engine-
+//  interpolated).  Wire layout MUST match phys_files_Send (sv_physprop.qc).
+// ============================================================
+
+// Own snapshot anchors (NOT the brushsync csqc_snap_* — cl_brushsync.qc is
+// compiled AFTER this file, and keeping them separate avoids any cross-talk if
+// a CSQC entity slot is recycled between a brush and this prop).
+.vector pp_snap_origin;
+.vector pp_snap_angles;
+.float  pp_snap_time;
+
+// Carry state (from the wire) + client-prediction bookkeeping.
+.float  pp_phase;          // PP_PHASE_* (was the csolid byte)
+.float  pp_carrier;        // carrier edict (0 = free); == player_localentnum ⇒ predict locally
+.float  pp_hold_dist;      // networked sv_carry_hold_dist (remote clients have no server cvar)
+.float  pp_hold_z;         // networked sv_carry_hold_z
+.float  pp_was_predicting; // 1 if last frame drove this prop from the local view (drives the drop fade)
+.vector pp_pred_origin;    // last client-predicted feet origin (the "predicted hand" pose)
+.vector pp_err_offset;     // predicted − authoritative at the handoff edge; decays to 0
+.float  pp_err_cltime;     // cltime the error offset was seeded (0 = none pending)
+
+// Replay of Carry_Tick's hold-point resolve (sv_physprop.qc), run CLIENT-SIDE against
+// the local predicted eye + view so the held prop tracks the crosshair with ZERO ping
+// lag.  Returns the slid hold CENTRE (box centre; the model origin is at the feet).
+// Mirrors the server's 4-bump clip-and-slide exactly (same MOVE_NOMONSTERS world/brush
+// trace, same drop-the-into-plane-component slide) so the predicted pose matches the
+// authoritative one → minimal handoff error on drop.
+vector(entity prop) PhysProp_PredictedHoldCenter =
+{
+    vector eye;
+    if (csqc_present_valid)
+        eye = csqc_present_origin + csqc_present_view_ofs;   // freshest previewed local eye
+    else
+        eye = predicted_player.origin + predicted_player.view_ofs;   // camera's own fallback
+
+    makevectors(view_angles);   // raw view_angles — matches the server's v_angle (NOT VF_ANGLES, which adds sway/kick)
+    vector hold = eye + v_forward * prop.pp_hold_dist + '0 0 1' * prop.pp_hold_z;
+
+    vector boxhalf = (prop.maxs - prop.mins) * 0.5;
+    vector cur = prop.origin + '0 0 1' * ((prop.maxs_z + prop.mins_z) * 0.5);
+    vector tgt = hold;
+    float  bump;
+    for (bump = 0; bump < 4; bump = bump + 1)
+    {
+        tracebox(cur, '0 0 0' - boxhalf, boxhalf, tgt, MOVE_NOMONSTERS, prop);
+        if (trace_startsolid)
+        {
+            cur = tgt;   // embedded (resting-on-floor penetration) — aim at the raw hold so it lifts out (mirror of Carry_Tick)
+            break;
+        }
+        cur = trace_endpos;
+        if (trace_fraction >= 1)
+            break;
+        vector rem = tgt - cur;
+        tgt = cur + rem - trace_plane_normal * (rem * trace_plane_normal);
+    }
+    return cur;   // slid hold centre
+};
+
+float() CSQC_PhysProp_Predraw =
+{
+    // CLIENT-SIDE PREDICTION: if the LOCAL player is the carrier and we're in steady
+    // carry (NOT the server grab pull-in), drive the prop's pose from the local view
+    // every render frame — zero ping lag, no 64-vs-fps beat, because nothing here waits
+    // on the server.  The streamed snapshot is still ingested (anchored) but not drawn.
+    if (predicted_player && predicted_player.pm_carrying
+        && self.pp_carrier == player_localentnum
+        && self.pp_phase  == PP_PHASE_STEADY)
+    {
+        vector center = PhysProp_PredictedHoldCenter(self);
+        vector org    = center - '0 0 1' * ((self.maxs_z + self.mins_z) * 0.5);  // centre → feet
+        self.angles_x = 0;
+        self.angles_z = 0;
+        self.angles_y = view_angles_y + 180;   // upright, facing the carrier — matches Carry_Tick
+        setorigin(self, org);
+        addentity(self);
+        self.pp_pred_origin    = org;          // remember the predicted hand pose for the drop fade
+        self.pp_was_predicting = TRUE;
+        return PREDRAW_NEXT;
+    }
+
+    // Just stopped predicting (dropped / thrown / handed to another player): seed an
+    // error offset = where the predicted hand had it − the authoritative pose, so the
+    // render STARTS exactly in the hand (no pop) and eases onto the server pose below.
+    if (self.pp_was_predicting)
+    {
+        self.pp_was_predicting = FALSE;
+        self.pp_err_offset = self.pp_pred_origin - self.pp_snap_origin;
+        if (vlen(self.pp_err_offset) > 128)        // teleport-sized → don't smear it
+            self.pp_err_offset = '0 0 0';
+        self.pp_err_cltime = cltime;
+    }
+
+    // Decaying handoff offset (eases predicted→authoritative; 0 once expired / none pending).
+    vector err = '0 0 0';
+    if (self.pp_err_cltime > 0)
+    {
+        float st    = cvar("cl_carry_smooth_time");
+        float decay = (st > 0) ? (1 - (cltime - self.pp_err_cltime) / st) : 0;
+        if (decay > 0)
+            err = self.pp_err_offset * decay;
+        else
+            self.pp_err_cltime = 0;
+    }
+
+    // `cl_physprop_noextrap 1` disables the smoothing so you can SEE the raw snapshot
+    // cadence (a debug toggle — default off = extrapolation ON).  With it off you'll
+    // see the prop step at exactly the server send rate; with it on those steps are
+    // filled by extrapolating along the streamed velocity/avelocity.
+    if (cvar("cl_physprop_noextrap"))
+    {
+        setorigin(self, self.pp_snap_origin + err);
+        self.angles = self.pp_snap_angles;
+        addentity(self);
+        return PREDRAW_NEXT;
+    }
+
+    // Extrapolate from the last snapshot at the streamed velocity/avelocity so
+    // motion is smooth between updates.  Capped tight so a body that slams to a
+    // stop (wall / landing) doesn't visibly overshoot before the next snap.
+    float elapsed = cltime - self.pp_snap_time;
+    if (elapsed < 0)   elapsed = 0;
+    if (elapsed > 0.1) elapsed = 0.1;
+
+    setorigin(self, self.pp_snap_origin + self.velocity * elapsed + err);
+    if (self.avelocity != '0 0 0')
+        self.angles = self.pp_snap_angles + self.avelocity * elapsed;
+
+    addentity(self);
+    return PREDRAW_NEXT;
+};
+
+void(float isnew) CSQC_PhysProp_Update =
+{
+    float  mdlindex = readshort();
+    vector org      = readvector();
+    vector ang      = readvector();
+    vector emins    = readvector();
+    vector emaxs    = readvector();
+    vector vel      = readvector();
+    vector avel     = readvector();
+    // Per-channel colormod (R,G,B) — sequential reads to guarantee wire order matches the
+    // 3 WriteBytes in phys_files_Send (a single grayscale byte black-out colored props).
+    vector cmod;
+    cmod_x           = readbyte() * (1.0 / 255.0);
+    cmod_y           = readbyte() * (1.0 / 255.0);
+    cmod_z           = readbyte() * (1.0 / 255.0);
+    float  phase     = readbyte();   // PP_PHASE_* (was the csolid 0/1 byte)
+    float  carrier   = readbyte();   // carrier edict (0 = free)
+    float  hold_dist = readcoord();  // networked hold params (remote clients lack the server cvars)
+    float  hold_z    = readcoord();
+
+    // classname drives Impact_ClassifyLocal → metal spark + no bullet decal.
+    self.classname = "phys_files";
+    setmodelindex(self, mdlindex);
+    setsize(self, emins, emaxs);     // broadphase AABB (the cube when free); narrowphase = mesh
+    setorigin(self, org);
+    self.angles    = ang;
+    self.velocity  = vel;
+    self.avelocity = avel;
+    self.colormod  = cmod;
+    self.movetype  = MOVETYPE_NONE;  // origin is wire-authoritative (no engine integrate)
+    self.drawmask  = MASK_ENGINE;    // engine renders the CSQC entity
+
+    self.pp_phase     = phase;
+    self.pp_carrier   = carrier;
+    self.pp_hold_dist = hold_dist;
+    self.pp_hold_z    = hold_z;
+
+    // SOLID_PHYSICS_BOX ONLY for PP_PHASE_FREE_SOLID → the local QC pmove + CSQC bullet
+    // traces collide with the box, which the engine OBB patch (world.c World_OBBTrace)
+    // rotates by the streamed angles, so you walk on / shoot the real ORIENTED shape
+    // smoothly at any tilt.  SOLID_NOT while carried (GRABBING/STEADY) or in the just-
+    // dropped passthrough phase (NONSOLID, server non-solid via PHYSDROP_DIM) so
+    // client+server agree and the carrier doesn't shove it.
+    self.solid = (phase == PP_PHASE_FREE_SOLID) ? SOLID_PHYSICS_BOX : SOLID_NOT;
+
+    // Anchor the extrapolator at this authoritative snapshot.
+    self.pp_snap_origin = org;
+    self.pp_snap_angles = ang;
+    self.pp_snap_time   = cltime;
+
+    // Hook the predraw while genuinely moving (extrapolation) OR while I'm the local
+    // carrier in steady carry (so client-prediction runs every render frame even when
+    // the prop is momentarily stationary at the hold point) OR while a handoff fade is
+    // still decaying.  A deadband keeps a settled, un-owned prop's origin stable +
+    // un-extrapolated so a standing player collides with the true resting surface.
+    if (vlen(vel) > 0.5 || vlen(avel) > 0.5
+        || (phase == PP_PHASE_STEADY && carrier == player_localentnum)
+        || self.pp_was_predicting
+        || self.pp_err_cltime > 0)
+        self.predraw = CSQC_PhysProp_Predraw;
+    else
+        self.predraw = __NULL__;
 };

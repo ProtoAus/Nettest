@@ -182,8 +182,7 @@ void() CSQC_LookatName_DrawHUD =
     vector sz = [LOOKAT_HUD_FONT_SIZE, LOOKAT_HUD_FONT_SIZE, 0];
     float prev = drawfont;
     drawfont = hud_font_mono;       // GoogleMed
-    // Drop shadow + main text for readability over busy backgrounds.
-    drawstring([x + 1, y + 1], lookat_target_name, sz, '0 0 0', 0.6, 0);
+    // Single draw — readability border is the font's baked outline (outline=1).
     drawstring([x, y],         lookat_target_name, sz, '1 1 1', 1.0, 0);
     drawfont = prev;
 };
@@ -255,7 +254,6 @@ void() CSQC_LookatName_DrawWorld =
 
         float prev = drawfont;
         drawfont = hud_font;
-        drawstring([tx + 1, ty + 1], lookat_target_name, sz, '0 0 0', alpha * 0.55, 0);
         drawstring([tx, ty],         lookat_target_name, sz, '1 1 1', alpha,        0);
         drawfont = prev;
         return;

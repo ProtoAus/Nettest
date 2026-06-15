@@ -14,6 +14,13 @@ Available options:
 */
 #pragma noref 1
 //#pragma flag enable logicops
+// Enable fteqcc's `auto` storage class for the big sv_lagcomp.qc ring buffers
+// (memalloc-at-load) so they do not reserve ~106k compile-time globals — keeps
+// qwprogs numpr_globals under 65530 (16-bit codegen, smaller .dat).  The
+// server auto-init prepends to worldspawn (sv_main.qc), which runs at map load
+// before any lagcomp access.  Requires fteqcc 2025+ (the 2022 binary lacks it).
+// Do NOT add `omitinternals` here — it hard-crashes the engine; see cl_defs.qc.
+#pragma flag enable auto
 #pragma warning error Q101 /*too many parms*/
 #pragma warning error Q105 /*too few parms*/
 #pragma warning error Q106 /*assignment to constant/lvalue*/

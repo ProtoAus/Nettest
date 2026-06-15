@@ -193,32 +193,60 @@ void() CSQC_DrawMuzzleFlash =
 void(float fwd, float right_qu, float down, float action_id) CSQC_MuzzleFlashAtMuzzle;
 void(float fwd, float right_qu, float down, float action_id) CSQC_MuzzleFlashAtMuzzleAnimated;
 
+// Lazy-resolved weapons.muzzleflash handle (mirrors the tracer/smoke pattern).
+float pe_weapons_muzzleflash;
+float() MuzzleFlash_Resolve =
+{
+    if (pe_weapons_muzzleflash != 0)
+        return pe_weapons_muzzleflash;
+    pe_weapons_muzzleflash = particleeffectnum("weapons.muzzleflash");
+    if (pe_weapons_muzzleflash != 0 && particleeffectquery(pe_weapons_muzzleflash, 0) == "")
+        pe_weapons_muzzleflash = 0;   // not loaded YET — retry next call
+    return pe_weapons_muzzleflash;
+};
+
 void(vector local_offset, float action_id) CSQC_SpawnMuzzleFlashSprite =
 {
     // Default-on fallback so a fresh install / unregistered-cvar case
-    // still works without the user having to type the command. cvar()
-    // returns 0 for unknown names; cvar_string() returns "" only if
-    // the cvar truly isn't registered. Explicit `cl_muzzleflash_sprite 0`
-    // disables it.
+    // still works without the user having to type the command.
     float gate = cvar("cl_muzzleflash_sprite");
     if (gate == 0 && cvar_string("cl_muzzleflash_sprite") == "")
         gate = 1;
     if (gate == 0)
         return;
-    // Action-ID dedup against reconcile replays. Allow refire to
-    // restart the animation immediately even if the previous flash
-    // is mid-grow — the new shot picks a fresh variant.
+
+    // Single-frame flash → ONE engine particle (weapons.muzzleflash) at the muzzle
+    // instead of a per-frame billboard quad.  (The ANIMATED variant still uses the
+    // quad — a particle can't play a frame sequence.)  Falls back to the quad path
+    // if the recipe isn't registered (stock engine / cfg not loaded yet).
+    float fx = MuzzleFlash_Resolve();
+    if (fx != 0)
+    {
+        // Dedup: one particle per shot (block reconcile replays of the same id).
+        if (action_id == csqc_muzfx_action_id)
+            return;
+        csqc_muzfx_action_id = action_id;
+        csqc_muzfx_active    = 0;   // particle path — the per-frame quad draw stays off
+
+        vector view_pos = (vector)getproperty(VF_ORIGIN);
+        makevectors((vector)getproperty(VF_ANGLES));
+        vector muzzle = view_pos + v_forward * local_offset_x
+                                 + v_right   * local_offset_y
+                                 + v_up      * local_offset_z;
+        pointparticles(fx, muzzle, '0 0 0', 1);
+        return;
+    }
+
+    // --- Fallback: original per-frame billboard-quad path ---
+    // Action-ID dedup against reconcile replays.  Refire (new id) restarts even if
+    // the previous flash is mid-grow — the new shot picks a fresh variant.
     if (action_id == csqc_muzfx_action_id && csqc_muzfx_active != 0)
         return;
-
     csqc_muzfx_action_id  = action_id;
     csqc_muzfx_offset     = local_offset;
     csqc_muzfx_start_time = cltime;
     csqc_muzfx_active     = 1;
-    csqc_muzfx_animated   = 0;   // static-variant path
-    // Variant 1..4 — SH_SpreadHash gives a deterministic 0..1 from
-    // the action_id, scaled to [0, 4) and floored. +31.7 just
-    // de-correlates from the spread/yaw uses of the same hash.
+    csqc_muzfx_animated   = 0;
     csqc_muzfx_variant    = 1 + floor(SH_SpreadHash(action_id + 31.7) * 4);
     if (csqc_muzfx_variant > 4) csqc_muzfx_variant = 4;
 };
@@ -254,6 +282,11 @@ void(vector local_offset, float action_id) CSQC_SpawnMuzzleFlashSpriteAnimated =
 // "calibrate" the marker, then can live-tune the per-weapon
 // _MUZZLE_FORWARD/RIGHT/DOWN constants and reload to see the move.
 vector csqc_muzzle_debug_offset;
+// Current weapon's muzzle attachment (stamped by CSQC_ViewmodelAttachmentWorldPos
+// for AtWorld weapons; "" for AtMuzzle weapons → CSQC_MuzzleFlashWorldPos uses the
+// cached offset instead).  Lets the tracer re-pose the muzzle fresh (ADS-correct).
+string csqc_muzzle_attach_bone;
+vector csqc_muzzle_attach_offset;
 
 // Helper definition (forward-declared above). Per-weapon callers
 // pass scalars; we build the camera-local vector and apply
@@ -263,6 +296,7 @@ void(float fwd, float right_qu, float down, float action_id) CSQC_MuzzleFlashAtM
     float side = cvar("cl_lefthand") ? -1 : 1;
     vector local = [fwd, right_qu * side, 0 - down];
     csqc_muzzle_debug_offset = local;   // save for CSQC_DrawMuzzleDebug
+    csqc_muzzle_attach_bone = "";       // camera-offset path → no fresh re-pose
     CSQC_SpawnMuzzleFlashSprite(local, action_id);
 };
 
@@ -275,6 +309,7 @@ void(float fwd, float right_qu, float down, float action_id) CSQC_MuzzleFlashAtM
     float side = cvar("cl_lefthand") ? -1 : 1;
     vector local = [fwd, right_qu * side, 0 - down];
     csqc_muzzle_debug_offset = local;
+    csqc_muzzle_attach_bone = "";
     CSQC_SpawnMuzzleFlashSpriteAnimated(local, action_id);
 };
 
@@ -286,8 +321,18 @@ void(float fwd, float right_qu, float down, float action_id) CSQC_MuzzleFlashAtM
 // camera origin if no muzzle flash has fired this session, which
 // keeps the cl_tracers fallback path (camera-collinear detection)
 // in charge of providing a usable start point.
+vector(string bonename, vector bone_offset) CSQC_ViewmodelAttachmentWorldPos;   // fwd decl
+
 vector() CSQC_MuzzleFlashWorldPos =
 {
+    // FRESH re-pose (current pose, ADS-aware).  The bone/offset are the current
+    // weapon's (constant across shots), so re-posing last shot's values at THIS
+    // frame's pose tracks ADS with no lag.  CSQC_ViewmodelAttachmentWorldPos falls
+    // back to the eye on a bad/missing bone, which the tracer's near-camera hack
+    // then turns into a usable muzzle.
+    if (csqc_muzzle_attach_bone != "")
+        return CSQC_ViewmodelAttachmentWorldPos(csqc_muzzle_attach_bone, csqc_muzzle_attach_offset);
+
     if (csqc_muzzle_debug_offset == '0 0 0')
         return (vector)getproperty(VF_ORIGIN);
 
@@ -317,6 +362,11 @@ vector() CSQC_MuzzleFlashWorldPos =
 // restoring keeps the entity in a predictable state for other code.
 vector(string bonename, vector bone_offset) CSQC_ViewmodelAttachmentWorldPos =
 {
+    // Remember this weapon's muzzle attachment so CSQC_MuzzleFlashWorldPos can
+    // re-pose it FRESH for the tracer (which spawns before the flash stamps it).
+    csqc_muzzle_attach_bone   = bonename;
+    csqc_muzzle_attach_offset = bone_offset;
+
     vector view_pos = (vector)getproperty(VF_ORIGIN);
     vector view_ang = (vector)getproperty(VF_ANGLES);
 

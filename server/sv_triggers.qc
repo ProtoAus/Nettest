@@ -221,6 +221,7 @@ float(entity player, entity trig) Trigger_PlayerInBSPBrush =
 void(entity volume, vector inflate) Trigger_FireOnOverlap =
 {
     if (!volume.touch) return;
+    if (!player_chain_head) return;   // no live players → nothing to overlap-test
 
     vector cmin = volume.absmin - inflate;
     vector cmax = volume.absmax + inflate;
@@ -228,9 +229,14 @@ void(entity volume, vector inflate) Trigger_FireOnOverlap =
     entity oldself  = self;
     entity oldother = other;
 
-    entity p = find(world, classname, "player");
+    // Walk the player chain (<=32) instead of find()ing the whole edict list every
+    // 0.1s tick — identical set (all connected players), far cheaper on prop-dense
+    // maps.  Capture .player_chain_next BEFORE volume.touch() so a touch target that
+    // ever removes an entity can't strand the iterator.
+    entity p = player_chain_head;
     while (p)
     {
+        entity nxt = p.player_chain_next;
         if (p.health > 0)
         {
             vector pmin = p.origin + p.mins;
@@ -244,7 +250,7 @@ void(entity volume, vector inflate) Trigger_FireOnOverlap =
                 volume.touch();
             }
         }
-        p = find(p, classname, "player");
+        p = nxt;
     }
 
     self  = oldself;
@@ -264,7 +270,26 @@ void() info_null =
 
 void() func_illusionary =
 {
-    setmodel(self, self.model);
-    self.solid = SOLID_NOT;
+    // Only route through the replicated-brush (CSQC) pipeline when the mapper set
+    // a GoldSrc rendermode that NEEDS translating (additive light rays etc., modes
+    // 1-5).  A PLAIN func_illusionary — just `alpha` or pure defaults — renders
+    // correctly via the simple direct path; pushing it through the CSQC brush path
+    // (built for solid brushes) regressed TRANSLUCENT GoldSrc textures (palette /
+    // fullbright artifacts), so keep the proven path for the common case.
+    if (self.rendermode > 0)
+    {
+        // SV_InitReplicatedSolidBrush sets SOLID_BSP + MOVETYPE_PUSH and registers
+        // the CSQC SendEntity; override to non-solid AFTER it (the send ships
+        // wire_nonsolid from .solid, so CSQC keeps it pass-through) and static.
+        SV_InitReplicatedSolidBrush();
+        self.solid      = SOLID_NOT;       // illusionary = decorative, no collision
+        self.movetype   = MOVETYPE_NONE;   // static (init set MOVETYPE_PUSH)
+        self.brush_type = BRUSH_TYPE_STATIC;
+    }
+    else
+    {
+        setmodel(self, self.model);
+        self.solid = SOLID_NOT;            // proven path: engine honours the .alpha key directly
+    }
 };
 

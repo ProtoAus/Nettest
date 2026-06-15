@@ -106,6 +106,12 @@ const string CFC4_SND_EXPLODE = "sounds/weapons/wpn_cfc4/explode.wav";
 // team — if the planter swaps teams via the menu, the gate would
 // follow them and the bomb thinks the new team planted it.
 .float c4_planter_team;
+// Set TRUE the instant a defuse completes.  Flips the networked defuse_state
+// byte to 2 so CSQC switches the bomb light from red-flashing to steady BLUE,
+// and makes the bomb inert (the think stops — no more beep / detonation).  The
+// defused bomb lingers as a blue prop through the round-end screen and is swept
+// by RoundRestart.
+.float c4_defused;
 
 // Forward decls — these are defined later in compile order
 // (sv_player.qc / sh_pmove.qc come after weapons).  Re-declaring is
@@ -353,8 +359,23 @@ void() W_CFC4Frame =
     }
     else if (self.weaponstate == WS_SPECIAL)
     {
-        // FIRE phase — non-cancellable.  When elapsed >= fire duration,
-        // commit the plant and exit.
+        // FIRE phase — the commit anim.  Movement is frozen through here now
+        // (cl_player.qc freezes WS_FIRE *and* WS_SPECIAL), so the only way to
+        // leave the bomb zone mid-commit is a push / explosion knockback.  If
+        // that happens, abort the plant — same leave-area gate as the prefire
+        // cancel above.  Release of +attack does NOT cancel here (this is the
+        // "let go of the bomb" anim).
+        if (!cvar("mp_plantanywhere") && C4_MapHasBombTargets()
+            && !C4_PosInBombTarget(self.origin))
+        {
+            self.weaponframe   = CFC4_SEQ_IDLE;
+            self.weaponstate   = WS_IDLE;
+            self.wep_anim_start = 0;
+            self.cfc4_snd_stage = 0;
+            return;
+        }
+
+        // When elapsed >= fire duration, commit the plant and exit.
         if (elapsed >= CFC4_FIRE_DURATION)
             W_CFC4PlantCommit();
     }
@@ -389,6 +410,25 @@ float() C4_MapHasBombTargets =
     return (find(world, classname, "func_bomb_target") != world);
 };
 
+// TRUE if a C4 plant is allowed at `p`'s current position.  Three cases:
+//   1. mp_plantanywhere 1            → allow anywhere (testing).
+//   2. mp_plantanywhere 0 + targets  → must stand inside a func_bomb_target.
+//   3. mp_plantanywhere 0 + none     → allow anywhere (don't silently deny on
+//                                       maps without bombsites).
+// Single source of truth used by W_CFC4Fire (authoritative gate) AND mirrored
+// to the carrier via STAT_CAN_PLANT (sv_main.qc) so the client gates the plant
+// PREFIRE animation — mp_plantanywhere + the bomb-target volumes are server-only,
+// so the client can't decide locally and would otherwise play the plant anim
+// where the server denies the plant.
+float(entity p) C4_CanPlantHere =
+{
+    if (cvar("mp_plantanywhere"))
+        return TRUE;
+    if (!C4_MapHasBombTargets())
+        return TRUE;
+    return C4_PosInBombTarget(p.origin);
+};
+
 void() W_CFC4Fire =
 {
     if (Weapon_SprintBlocksFire()) return;
@@ -401,20 +441,11 @@ void() W_CFC4Fire =
     if (self.ammo_cfc4 <= 0)
         return;
 
-    // Plant-location gate.  Three cases:
-    //   1. mp_plantanywhere 1 → allow plant anywhere (testing).
-    //   2. mp_plantanywhere 0 + map has func_bomb_target → must be
-    //      standing inside one.
-    //   3. mp_plantanywhere 0 + map has none → allow anywhere
-    //      (avoids silently-denying plant on maps without bombsites).
-    if (!cvar("mp_plantanywhere"))
-    {
-        if (C4_MapHasBombTargets() && !C4_PosInBombTarget(self.origin))
-        {
-            // Could pop a HUD warning here; keep silent for now.
-            return;
-        }
-    }
+    // Plant-location gate (see C4_CanPlantHere).  The client also gates the
+    // prefire animation on this via STAT_CAN_PLANT, so the anim no longer plays
+    // where the plant would be denied.
+    if (!C4_CanPlantHere(self))
+        return;
 
     self.weaponstate    = WS_FIRE;
     self.wep_action_id += 1;
@@ -501,7 +532,7 @@ void() func_bomb_target =
 //   coord ×3 origin
 //   angle ×3 angles            (ground-align: pitch/yaw/roll match the surface)
 //   byte  beep_serial          (CSQC pulses dlight on serial change)
-//   byte  defuse_state         (0 = no defuse, 1 = defuse in progress)
+//   byte  defuse_state         (0 = armed, 1 = defuse in progress, 2 = defused)
 float(entity playerent, float changedflags) c4_planted_SendEntity =
 {
     WriteByte(MSG_ENTITY, CSQC_ENT_C4);
@@ -512,7 +543,12 @@ float(entity playerent, float changedflags) c4_planted_SendEntity =
     WriteAngle(MSG_ENTITY, self.angles_y);
     WriteAngle(MSG_ENTITY, self.angles_z);
     WriteByte(MSG_ENTITY, self.c4_beep_serial & 255);
-    WriteByte(MSG_ENTITY, (self.enemy != world) ? 1 : 0);
+    // defuse_state: 2 = defused (steady blue), 1 = defuse in progress, 0 = armed.
+    // Note 1 still renders as red-flashing on the client now — only 2 turns blue.
+    float dstate = 0;
+    if (self.c4_defused)        dstate = 2;
+    else if (self.enemy != world) dstate = 1;
+    WriteByte(MSG_ENTITY, dstate);
     return TRUE;
 };
 
@@ -585,13 +621,23 @@ void(entity defuser) C4_PlantedDefuseComplete =
 
     if (cvar("sv_gamemode") == GAMEMODE_DEFUSE)
     {
-        // BLUE wins — set the round_winning_team via the helper.
-        // Actual team assignment happens inside Defuse_TriggerRoundEnd
-        // looking at WHO defused us (defuser's team wins).
+        // Go inert and turn the light steady BLUE (defuse_state -> 2).  Do NOT
+        // remove here: the bomb stays red-flashing right up until this moment,
+        // then lingers as a blue "defused" prop through the round-end screen and
+        // is swept by RoundRestart.  Clearing enemy + not rescheduling nextthink
+        // (this runs from C4_PlantedThink, which returns right after) stops the
+        // beep / detonation — the bomb is safe.
+        self.c4_defused = TRUE;
+        self.enemy      = world;
+        self.SendFlags  = -1;   // re-replicate the full payload with defuse_state = 2
+
+        // BLUE wins — Defuse_TriggerRoundEnd reads the defuser's team.
         round_winning_team = defuser.player_team;   // captures real winner
         Defuse_TriggerRoundEnd();
+        return;
     }
 
+    // Non-defuse (debug / casual plant) — no round to end, just remove.
     remove(self);
 };
 
@@ -686,7 +732,8 @@ void() C4_PlantedThink =
 
     if (defuser_valid)
     {
-        self.c4_defuse_progress += 0.05;   // tick interval below
+        // A defuse kit doubles the rate (~2.5s vs ~5s) — CS-style.
+        self.c4_defuse_progress += (defuser.has_defusekit ? 0.10 : 0.05);
         if (dbg)
             dprint(sprintf("[c4-bomb] tick progress=%.3f / %.1f\n",
                 self.c4_defuse_progress, CFC4_DEFUSE_TIME));
@@ -781,6 +828,11 @@ void(entity player) C4_TickDefuseInteraction =
     if (bomb == world)
         return;
 
+    // Already defused — it's an inert blue prop waiting for the RoundRestart
+    // sweep.  Don't re-claim it (would leave the HUD defuse bar stuck full).
+    if (bomb.c4_defused)
+        return;
+
     // Planter team can't defuse own bomb.  Uses the team snapshot
     // taken at plant time, not bomb.owner.player_team — the latter
     // would follow the planter's team if they swap teams via the menu.
@@ -847,6 +899,19 @@ void() Defuse_AssignBombAtRoundStart =
         return;
 
     sv_defuse_pending_red_pickup = 0;   // clear stale flag
+
+    // Clear any stale C4 carry from a prior round before re-assigning.  Death
+    // (W_DropAllWeaponsOnDeath) only clears the per-slot weapon fields, and the
+    // bomb lives in ammo_cfc4 OUTSIDE any slot — so a carrier who died or
+    // survived the round without planting keeps ammo_cfc4=1 latent across the
+    // respawn.  Without this sweep the assigner picks a fresh carrier each round
+    // without zeroing the old one, accumulating bombs on multiple terrorists.
+    entity sweep = player_chain_head;
+    while (sweep)
+    {
+        sweep.ammo_cfc4 = 0;
+        sweep = sweep.player_chain_next;
+    }
 
     // First pass — count alive red players.
     float n = 0;
@@ -928,11 +993,50 @@ void() CSQC_PredictCFC4Command =
         csqc_cfc4_snd_stage  = 0;
     }
 
-    // Initial press → enter prefire.
+    // Advance the deploy (SELECT) animation to idle CLIENT-SIDE.  Standard
+    // weapons get this for free from SH_StandardTickState at the tail of their
+    // predict; the C4 predict has none.  Under the client-authoritative fire
+    // architecture reconcile deliberately does NOT write server weaponstate back
+    // into predicted_player (cl_player.qc), so without this the predicted
+    // weaponstate is stuck at WS_DRAW after select forever — the prefire gate
+    // (weaponstate == WS_IDLE, below) never fires, WS_FIRE/WS_SPECIAL are never
+    // entered, and the viewmodel shows only SELECT (clamped) → no prefire/fire
+    // animation.  Mirror the SSQC W_CFC4Frame draw window (same SELECT-sequence
+    // duration) so client + server land in idle at the same elapsed.  Keep the
+    // csqc_pred_time clock (matches every working sequence weapon + replay).
+    if (self.weaponstate == WS_DRAW)
+    {
+        float draw_elapsed = (self.wep_anim_start > 0)
+                           ? (csqc_pred_time - self.wep_anim_start) : 0;
+        if (draw_elapsed >= SH_SeqDuration(CFC4_VIEWMODEL, CFC4_SEQ_SELECT, 1.0))
+        {
+            self.weaponstate    = WS_IDLE;
+            self.wep_anim_start  = 0;
+        }
+    }
+
+    // Leave-zone cancel — if the planter is shoved out of the bomb zone mid-
+    // plant (prefire OR commit), abort to idle.  Mirrors the SSQC W_CFC4Frame
+    // leave-area cancels so the predicted viewmodel doesn't desync.  CSQC can't
+    // see func_bomb_target volumes (SOLID_NOT, not networked), so it gates on
+    // the server-decided STAT_CAN_PLANT — the same value the prefire entry uses.
+    if ((self.weaponstate == WS_FIRE || self.weaponstate == WS_SPECIAL)
+        && !getstatf(STAT_CAN_PLANT))
+    {
+        self.weaponstate    = WS_IDLE;
+        self.wep_anim_start  = 0;
+        self.weaponframe     = CFC4_SEQ_IDLE;
+        csqc_cfc4_snd_stage  = 0;
+    }
+
+    // Initial press → enter prefire.  Gate on STAT_CAN_PLANT (server-decided:
+    // mp_plantanywhere / inside a func_bomb_target) so the prefire ANIMATION
+    // doesn't even start where the server would refuse the plant.
     if ((input_buttons & 1)
         && self.weaponstate == WS_IDLE
         && csqc_pred_time >= self.attack_finished
-        && self.ammo_cfc4 > 0)
+        && self.ammo_cfc4 > 0
+        && getstatf(STAT_CAN_PLANT))
     {
         self.weaponstate    = WS_FIRE;
         self.wep_action_id += 1;

@@ -50,6 +50,58 @@ void()             W_GrapplePullTick;
 void()             W_GrappleHeldTick;
 void(entity player) W_GrappleRelease;
 
+// HL2-style prop carry (phys_files filing cabinet) — server-only state.
+// Functions live in sv_physprop.qc, but callers compile in varying order
+// (sv_weapons PlayerKilled before sv_physprop, sv_use/sv_player after), so
+// declare them up-front here.  The CSQC-visible half is .pm_carrying
+// (shared/sh_customdefs.qc) replicated through the prediction proxy so the
+// viewmodel lowers like a ladder while carrying.
+.entity carried_prop;        // on player: prop being carried (world = none)
+.entity carried_by;          // on prop:   carrier (world = free); two-grabber guard
+.float  pm_carry_fire_last;  // +attack rising-edge latch (throw, not refire)
+.float  carry_stuck_since;   // on prop: time the prop went over drop_dist (0 = not stuck)
+.float  carry_resolidify_until; // on prop: timeout for the post-drop re-solidify watchdog
+.float  pp_was_streaming;     // on prop: 1 if the last think dirtied the CSQC snapshot — drives the
+                             //   moving→rest edge that sends one final velocity=0 snapshot
+.float  carry_grab_time;     // on prop: time the grab started (drives the pull-in lerp window)
+.vector carry_grab_origin;   // on prop: prop.origin at grab time (lerp start position)
+.vector carry_grab_angles;   // on prop: prop.angles at grab time (lerp start orientation)
+// Contact-FX state (impact sounds + smoke).
+.vector pp_prev_velocity;    // on prop: velocity last think — a sharp speed drop = a free-fall/tumble impact; its direction locates the contact surface
+.vector pp_prev_origin;      // on prop: origin last Carry_Tick — origin-delta gives the carry-bang approach speed
+.float  pp_impact_cooldown;  // on prop: no new impact sound/smoke before this time (anti machine-gun)
+.float  pp_slide_next;       // on prop: next allowed slide-puff time
+.float  pp_scrape_active;    // on prop: 1 while the looping scrape sound is playing
+.float  pp_slide_active_until; // on prop: scrape loop cuts when time passes this (slide-stop grace)
+.float  pp_was_touching;     // on prop (carried): 1 if the clip-slide hit a surface last Carry_Tick — distinguishes a fresh BANG from a sustained DRAG
+.float  pp_scrape_vol;       // on prop: current scrape loop volume (speed-scaled)
+.float  pp_scrape_revol_next; // on prop: next time the scrape volume may be re-issued (throttle)
+
+// Unified phys-object config (po_*) — set per object BEFORE PhysObj_Setup so the
+// shared ODE core + the shared think branch to the right per-object behavior.
+// Barrel / can / cabinet / weapon-drop all route through one setup + one FX path.
+.float  po_is_phys;        // 1 on any unified phys object (helper / wake gate)
+.float  po_fx_enabled;     // run contact-FX detection (impact/slide/scrape/smoke/spark)
+.float  po_fx_soundset;    // FX sound set id (0 = metal_box_*)
+.float  po_carry_enabled;  // cabinet only: +use carriable
+.float  po_sleep_enabled;  // free props (barrel/can/weapons): QC sleep/wake at rest
+.float  po_stuck_grace;    // seconds embedded in BSP before despawn (5 props / 2 drops)
+.float  po_is_weapon_drop; // weapon drop: keep weapon_touch + dropped-weapon net path
+
+// Gravity gun widens Carry_IsCarriable to ANY ODE body for the duration of one
+// grab (the +use cabinet path leaves this 0).  See sh_wpn_gravitygun.qc.
+float   carry_allow_any;
+
+float(entity e)                   Carry_IsCarriable;
+float(entity player, entity prop) Carry_TryGrab;
+void(entity player)               Carry_Drop;
+void(entity player)               Carry_Throw;
+void(entity player)               Carry_Tick;
+// Unified phys-object core — defined in sv_physprop.qc, which compiles AFTER
+// sv_weapons.qc, so forward-declare here for the weapon-drop callers.
+void(entity b, float obj_mass, float obj_friction) PhysObj_Setup;
+void(float lin)                            PhysObj_DetectContactFX;  // weapon drops share the FX
+
 // BSP entity-lump fields that map compilers (e.g. light, worldspawn) stamp
 // onto entities but we don't consume. Declared as no-op stubs so the engine
 // stops printing "'X' is not a field" warnings on map load. Do not reference.
@@ -277,6 +329,30 @@ float red_team_score;       // rounds won by red team
 .float sv_blue_score;       // clientstat: blue team round wins
 .float sv_red_score;        // clientstat: red team round wins
 .float pending_round_join;  // TRUE between mid-round Elimination join and next RoundRestart
+
+// CS-style economy + armor + defuse kit (buy menu).  money/armor are
+// server-authoritative and mirrored to the owning client via clientstat
+// (STAT_MONEY / STAT_ARMOR) each frame.  money persists across deaths and
+// rounds (reset to mp_cashstart only at match start); armor/helmet/kit
+// clear on respawn (PlayerSpawn).
+.float money;          // current cash
+.float sv_money;       // clientstat mirror (STAT_MONEY)
+.float armor;          // current Kevlar value 0..100
+.float sv_armor;       // clientstat mirror (STAT_ARMOR)
+.float has_helmet;     // Kevlar+Helmet — cuts headshot damage
+.float has_defusekit;  // doubles bomb-defuse speed (defusing team only)
+.float money_started;  // 1 once mp_cashstart granted (so first team-join inits once)
+.float buyzone_time;   // last server time the player overlapped an allowed func_buyzone
+.float sv_in_buyzone;  // clientstat mirror (STAT_IN_BUYZONE) — 1 when the player may buy
+.float sv_can_plant_c4; // clientstat mirror (STAT_CAN_PLANT) — 1 when the C4 carrier may plant here
+.float sv_bomb_planted; // clientstat mirror (STAT_BOMB_PLANTED) — 1 while a planted_c4 is live in Defuse
+
+// Count of func_buyzone brushes on the current map (0 = buy anywhere fallback).
+// Reset in worldspawn before entities spawn; incremented by each func_buyzone.
+float buyzone_count;
+// Latches round_phase so the round-end cash award fires exactly once on the
+// edge into ROUND_PHASE_ROUND_END (covers timer/elimination/C4 paths).
+float money_last_round_phase;
 
 // Fall damage tracking
 .float fall_velocity;       // current downward speed while airborne

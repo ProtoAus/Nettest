@@ -2,6 +2,15 @@
 #pragma target fte_5768
 #define printf(x, ...) print(sprintf(x, __VA_ARGS__))
 
+// nettest Patch 36 Part B: engine builtin (com_mesh.c Mod_AddHitbox) that registers a
+// per-bone hitbox on an alias/IQM player model.  Once a model has any hitbox, MOVE_HITMODEL
+// traces the boxes instead of the mesh triangles and reports the struck box's hitgroup via
+// trace_surface_id.  Registered from the shared $hbox table (sh_weapons.qc) at precache.
+// Returns 1 if the bone exists on that model, else 0.  Name-bound (#0) so it no-ops cleanly
+// on an unpatched engine (the function simply isn't found → addmodelhitbox unavailable).
+float(float modelindex, string bonename, float hitgroup, vector boxmins, vector boxmaxs) addmodelhitbox = #0:addmodelhitbox;
+void(string modelname) Hitbox_RegisterModel;	// defined in sh_weapons.qc (where the $hbox table lives); takes the precache name (precache_model returns a string)
+
 const float FL_DUCKING = 8192;
 const float PM_CSQC_PROXY_VERSION = 19;  // bump on wire-layout change.  MUST NOT collide with any CSQC_ENT_* id below (CSQC_Ent_Update dispatches by equality before falling through to the pm_proxy parse — v13 collided with CSQC_ENT_CAMERA and silently routed proxy updates into the camera parser).  v14: ammo bitmask + movement byte/short re-encoding.  v15: origin/velocity now WriteFloat (full 32-bit) instead of WriteCoord (1/8 qu) — eliminates snapshot-rounding as a source of reconcile drift.  v16: weapon-state section now also carries pm_weapon_blend_progress + pm_weapon_prev_factor so the speed-factor blend is input-tick-driven instead of wall-clock-driven.  v17: utility proxy includes CS HE/flash/smoke ammo.  v18: primary/secondary ammo is slot-based.  v19: weapon-state section adds 4 floats + 1 byte for the sv_gunkick view-kick state (pitch/yaw offsets + spring velocities + per-burst shot index).
 const string PM_CSQC_PROXY_CLASSNAME = "pm_csqc_proxy";
@@ -25,6 +34,20 @@ const float CSQC_ENT_C4             = 14; // planted_c4 — fixed-position bomb 
 const float CSQC_ENT_ENV_BEAM       = 15; // env_beam — sprite-strip beam between two named entities
 const float CSQC_ENT_FUNC_RAIN      = 16; // func_rain — brush volume constraining cl_rain drops
 const float CSQC_ENT_ENV_SOUND      = 17; // env_sound — GoldSrc room/reverb trigger points
+const float CSQC_ENT_PHYS_PROP      = 18; // ODE filing cabinet — CSQC-networked solid box so the
+                                          // CLIENT pmove + bullet traces collide with a matching
+                                          // shape (engine-replicated props are invisible to the
+                                          // custom QC pmove → fall-through/driftlock without this).
+                                          // 18 is permanently safe: PM_CSQC_PROXY_VERSION (19) only
+                                          // ever bumps UPWARD, never down onto 18.
+
+// phys_files carry phase — the (formerly csolid 0/1) phase byte of phys_files_Send.
+// 0/1 keep their old csolid meaning so an in-flight snapshot during a hot-reload still
+// decodes solidity right; 2/3 distinguish the carry sub-states for client prediction.
+const float PP_PHASE_NONSOLID   = 0;  // carried/flying mid-air, non-solid to players (old csolid 0)
+const float PP_PHASE_FREE_SOLID = 1;  // free + re-solidified to players               (old csolid 1)
+const float PP_PHASE_GRABBING   = 2;  // server grab pull-in active — client renders the STREAM (no predict)
+const float PP_PHASE_STEADY     = 3;  // steady carry — the local carrier may client-predict the hold pose
 
 // trigger_push spawnflags
 const float PUSH_ONCE     = 1;  // remove after first touch
@@ -105,6 +128,21 @@ const float PUSH_SOURCE   = 16; // boost along movedir up to speed, don't overwr
 // mechanism is invisible.  Only matters at velocity transitions.
 .vector platform_carry_jump_origin_consumed;
 .float  platform_carry_jump_yaw_consumed;
+
+// --- func_vehicle driver state (SHARED: pmove reads these, the prediction
+//     proxy round-trips them owner->client so Phase-2 prediction replays the
+//     drive deterministically).  Kept on the PLAYER (driver), not the brush,
+//     because the proxy replicates player state and reconcile replays it.
+//     The drive model's OUTPUT (velocity + avelocity_z) lives on the brush
+//     and is replicated to everyone via brushsync for visual + carry. ---
+.entity driving;        // on PLAYER: the func_vehicle we're driving (world if none)
+.float  veh_steer;      // on PLAYER: steering-wheel accumulator [-1..1], self-centers when released
+.float  veh_throttle;   // on PLAYER: current forward speed scalar (ease-out accel integrator)
+.float  veh_in_fwd;     // on PLAYER: WASD forward intent stashed by pmove while driving (walk input is zeroed there so the driver can't stroll off the deck)
+.float  veh_in_side;    // on PLAYER: WASD steer intent stashed by pmove while driving
+.float  pm_driving;     // on PLAYER: replicated 0/1 "am I driving" flag (prediction proxy, pm_carrying-style) — gates the pmove driver-lock + weapon-fire block on both sides
+.vector veh_seat_ofs;   // on PLAYER: rigid seat-bolt — the driver's mount offset in the car's LOCAL (yaw) frame; pm_origin is re-pinned to car+rotate(this) every pmove substep (server + CSQC) so the body tracks the car with no carry drift
+.float  veh_seat_ofs_set; // on PLAYER: 1 once veh_seat_ofs is captured for the current drive (cleared on dismount)
 
 // Set on MOVER (func_train / func_tracktrain):
 .vector platform_prev_origin;    // brush origin at the previous carry tick
@@ -317,6 +355,26 @@ void(entity player) PM_SyncPredictionProxy;
 // shared/sh_pmove.qc — which compiles earlier — can reference it from
 // PM_IsLivePlayerCollider.
 .float vis_is_dead;
+// Server-authoritative dead flag — set ONLY from the proxy snapshot (never by
+// the client predicted-death), so the proxy's bullet-trace SOLIDITY follows the
+// real server state.  vis_is_dead itself gets flipped to 1 by CSQC_TryPredictDeath
+// for the death ANIMATION; gating solidity on that made a wrong/early predicted
+// death turn the enemy proxy SOLID_NOT *permanently* (the server never re-sends
+// IDENTITY while is_dead is unchanged), so the trace passed through it and no
+// hitclaim was ever sent again — the "blood splatter then it stops / no damage
+// with sv_trust_clienthits 1" bug.  The solidity gate now uses THIS flag.
+.float vis_server_is_dead;
+// nettest Patch 36 fix: snapshot of the proxy's predraw-computed framestate.  The
+// client MOVE_HITMODEL bullet trace runs at PREDICTION/input time, which is BEFORE
+// the proxy's predraw poses it that frame, so the live engine .frame/.basebone are a
+// frame stale (or degenerate on a recycled entity slot) and the trace misses the
+// rendered silhouette.  Predraw stashes the rendered pose into these; W_PlayersExpand-
+// Hitboxes restores them onto the proxy just before the trace so trust-1 hits exactly
+// what the shooter sees.  Declared here (before sh_weapons.qc) so the restore compiles.
+.float vis_trace_frame, vis_trace_frame1time, vis_trace_frame2, vis_trace_lerpfrac;
+.float vis_trace_baseframe, vis_trace_baseframe1time, vis_trace_baseframe2, vis_trace_baselerpfrac;
+.float vis_trace_basebone, vis_trace_subblendfrac, vis_trace_subblend2frac;
+.float vis_trace_pose_valid;
 // Server-pushed remote-player health (0..255 byte). Used by CSQC predicted-
 // death to decide whether a hit is lethal. Updated in CSQC_PlayerVisual_
 // Update each VP_SF_IDENTITY snapshot. Set to 0 by the local predicted
@@ -600,10 +658,12 @@ const float TELEPORT_KEEPANGLE        = 8;  // spawnflag: keep current view angl
 .float  pm_last_onground_time;  // sv_codstamina: absolute world-time of the most recent on-ground tick — drives the sv_codstamina_ground_grace hysteresis in the sprint drain so single-frame FL_ONGROUND drops on clip-brush stairs don't pause the drain.  Uses `time` (pmove clock) so CSQC and SSQC agree across reconcile-replay.
 .float  pm_fire_suppress_until; // sv_codstamina + cl_codscope: absolute `time` at which the post-fire scope-suppression window ends.  Set by SH_StandardTryFire on a successful shot; while time < this value, (a) the pmove stamina drain treats st_scope as 0 even with +attack2 held (fixes "drain continues after auto-unscope"), (b) cl_viewfx ADS target is forced to 0 (gun drops out of ADS), (c) the CoD scope state machine's OFF→RAISING re-entry is blocked.  When the window expires with +attack2 still held, the scope auto-re-engages (the user-requested "return to ADS scoping in after the shot is complete" behaviour).
 .float  pm_on_ladder_cached;    // pm_on_ladder latched at end of PM_PlayerMoveStep so CSQC view-fx (cl_viewfx.qc) and the Weapon_LowerBlocksFire helper can read it without re-running PM_CheckLadder.  Recomputed every pmove tick; NOT replicated through the prediction proxy (the trigger list and BSP contents are already replicated, so PM_CheckLadder reproduces the value deterministically on reconcile-replay).
+.float  pm_carrying;            // 1 while the player is carrying a phys_files prop (HL2 carry — sv_physprop.qc Carry_*).  Drives the lowered/deactivated viewmodel + fire-block exactly like grapple_rope_active: SSQC sets it authoritatively, REPLICATED through the prediction proxy (sv_player.qc writer ↔ cl_player.qc reader) so CSQC's Weapon_LowerBlocksFire / lower envelope agree and firing doesn't mispredict.
 .float  pm_fuser2;              // CS 1.6 stamina: msec of landing fatigue remaining (0 = none)
 .float  pm_step_time;           // seconds until next footstep sound fires
 .float  sv_last_step_time;      // SSQC-only: time of last PM_EmitStepSound fire, used by sv_debug_footsteps to print cadence delta between server step events
 .vector pm_anim_prev_origin;    // previous-frame origin for distance-based leg cycle timing
+.entity pm_ground_ent;          // entity the player is standing on (captured after the ground trace in PM_CategorizePosition); used to play metal footsteps when it's the phys_files cabinet
 
 
 // Custom player stats — sent from server to client via clientstat()
@@ -710,6 +770,27 @@ const float STAT_DEFUSE_PROGRESS  = 54;
 // and matches the server's authoritative rate within one tick.
 const float STAT_FUNC_TICKRATE    = 55;
 
+// CS-style economy.  STAT_MONEY = the owning player's current cash (drives
+// the HUD money line + buy-menu greyout).  STAT_ARMOR = current Kevlar value
+// (0..100).  Both published per-snapshot via clientstat in sv_main.qc.
+const float STAT_MONEY            = 56;
+const float STAT_ARMOR            = 57;
+// 1 when the owning player may currently buy (inside an allowed func_buyzone,
+// or mp_buyanywhere, or the map has no buy zones).  Drives the HUD money
+// colour (yellow = can buy).
+const float STAT_IN_BUYZONE       = 58;
+// 1 when the owning C4 carrier may plant at their current spot (mp_plantanywhere,
+// or the map has no func_bomb_target, or standing inside one).  The client reads
+// this to gate the plant PREFIRE animation — mp_plantanywhere / the bomb-target
+// volumes are server-only, so without it the client predicts the plant anim where
+// the server would deny it (anim plays, no bomb).  Set by C4_CanPlantHere.
+const float STAT_CAN_PLANT        = 59;
+// 1 while a planted_c4 is live in Defuse mode (between plant and explode/
+// defuse/round-restart).  Suspends the round clock (the bomb fuse owns the
+// round now) and hides the round timer from the HUD until the next round.
+// Set server-side from find(world,"planted_c4"); 0 in every other gamemode.
+const float STAT_BOMB_PLANTED     = 60;
+
 // Gamemode constants
 const float GAMEMODE_TDM         = 0;
 const float GAMEMODE_ELIMINATION = 1;
@@ -754,6 +835,7 @@ const float ROUND_PHASE_MAP_END   = 4;
 #ifdef SSQC
 void(entity owner) phys_barrel_spawn_infront;
 void(entity owner) phys_can_spawn_infront;
+void(entity owner) phys_files_spawn_infront;
 void() phys_barrel_precache;
 
 // Per-frame cvar cache — refreshed once per StartFrame (sv_main.qc) so
@@ -776,19 +858,23 @@ void() precache_everything =
 
 
     // Player Models
-    precache_model("models/testplayer.iqm");
-    precache_model("models/player/arctic/arctic.iqm");
-    precache_model("models/player/gign/gign.iqm");
-    precache_model("models/player/gsg9/gsg9.iqm");
-    precache_model("models/player/sas/sas.iqm");
-    precache_model("models/player/guerilla/guerilla.iqm");
-    precache_model("models/player/leet/leet.iqm");
-    precache_model("models/player/terror/terror.iqm");
-    precache_model("models/player/urban/urban.iqm");
-    precache_model("models/player/sini.mdl");
-    precache_model("models/player/chickenman.mdl");
-    precache_model("models/player/numberk/numberK.iqm");
-    precache_model("models/player/kilmer/kilmer.iqm");
+    // nettest Patch 36 Part B: register the per-bone hitbox table (sh_weapons.qc) on each
+    // player model right after precache, in BOTH progs, so MOVE_HITMODEL traces the boxes
+    // (native per-bone hit detection) and returns the struck box's hitgroup.  Hitbox_Register-
+    // Model no-ops on the sini .mdl (HL native hitboxes) and on any unpatched engine.
+    Hitbox_RegisterModel(precache_model("models/testplayer.iqm"));
+    Hitbox_RegisterModel(precache_model("models/player/arctic/arctic.iqm"));
+    Hitbox_RegisterModel(precache_model("models/player/gign/gign.iqm"));
+    Hitbox_RegisterModel(precache_model("models/player/gsg9/gsg9.iqm"));
+    Hitbox_RegisterModel(precache_model("models/player/sas/sas.iqm"));
+    Hitbox_RegisterModel(precache_model("models/player/guerilla/guerilla.iqm"));
+    Hitbox_RegisterModel(precache_model("models/player/leet/leet.iqm"));
+    Hitbox_RegisterModel(precache_model("models/player/terror/terror.iqm"));
+    Hitbox_RegisterModel(precache_model("models/player/urban/urban.iqm"));
+    Hitbox_RegisterModel(precache_model("models/player/sini.mdl"));
+    Hitbox_RegisterModel(precache_model("models/player/chickenman/chickenman.iqm"));
+    Hitbox_RegisterModel(precache_model("models/player/numberk/numberK.iqm"));
+    Hitbox_RegisterModel(precache_model("models/player/kilmer/kilmer.iqm"));
 
 	// Player Models / Sounds
 	precache_sound("sounds/player/use.wav");
@@ -798,6 +884,17 @@ void() precache_everything =
 	precache_sound("sounds/player/step2.wav");
 	precache_sound("sounds/player/step3.wav");
 	precache_sound("sounds/player/step4.wav");
+	// Metal footsteps for walking ON the filing-cabinet prop (phys_files) and the
+	// cabinet's OBB bullet-impact ricochets — both VMs precache (footstep multicast +
+	// CSQC pointsound).  See PM_UpdateStepSound (sh_pmove.qc) + CSQC_BulletImpact.
+	precache_sound("sounds/impacts/metal_box_footstep1.wav");
+	precache_sound("sounds/impacts/metal_box_footstep2.wav");
+	precache_sound("sounds/impacts/metal_box_footstep3.wav");
+	precache_sound("sounds/impacts/metal_box_footstep4.wav");
+	precache_sound("sounds/impacts/metal_solid_impact_bullet1.wav");
+	precache_sound("sounds/impacts/metal_solid_impact_bullet2.wav");
+	precache_sound("sounds/impacts/metal_solid_impact_bullet3.wav");
+	precache_sound("sounds/impacts/metal_solid_impact_bullet4.wav");
 	precache_sound("sounds/player/ladder1.wav");
 	precache_sound("sounds/player/ladder2.wav");
 	precache_sound("sounds/player/ladder3.wav");
@@ -1594,6 +1691,10 @@ void() precache_everything =
 	precache_sound("sounds/weapons/wpn_cfsl8/reload.WAV");
 	precache_sound("sounds/weapons/wpn_cfsl8/clipin.WAV");
 	precache_sound("sounds/weapons/wpn_cfsl8/clipout.WAV");
+
+	// Gravity Gun — viewmodel + world model only (no p-model, no sounds yet).
+	precache_model("models/weapons/wpn_gravitygun/v_gravitygun.mdl");
+	precache_model("models/weapons/wpn_gravitygun/w_gravitygun.mdl");
 
 	// CF C4
 	precache_model("models/weapons/wpn_cfc4/v_c4.mdl");

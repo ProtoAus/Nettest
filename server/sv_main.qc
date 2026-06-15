@@ -309,6 +309,33 @@ void() RoundStart =
 		round_phase = ROUND_PHASE_ACTIVE;
 		round_end_time = time + cvar("mp_roundtime") * 60;
 	}
+
+	// Defuse: hand the C4 to one random alive terrorist (RED) this round.
+	// Self-gates on sv_gamemode==GAMEMODE_DEFUSE (no-op otherwise).  Runs AFTER
+	// RoundRestart has respawned all teamed players (it calls us last), so the
+	// alive-RED pass sees fresh spawns; if no RED is alive yet it defers via
+	// sv_defuse_pending_red_pickup and the first RED to spawn picks it up
+	// (see PlayerSpawn).
+	Defuse_AssignBombAtRoundStart();
+};
+
+// Retire a visual-proxy corpse so it disappears on ALL clients.  The corpse
+// carries PVSF_NOREMOVE (kept during the round so it doesn't blink when a
+// viewer briefly looks away), and the proxy's MODEL is rebuilt CSQC-side from
+// networked identity fields — there is NO networked modelindex to zero (unlike
+// the gib path, whose body-suppression actually rides a separate multicast).
+// So the ONLY way to make a corpse vanish is a real CSQC_Ent_Remove, which
+// PVSF_NOREMOVE suppresses: a bare remove() leaves the model cached on clients
+// until the entnum slot is reused — the "player models left standing around the
+// map until the next update" symptom.  Fix: clear pvsflags (drop NOREMOVE) so an
+// out-of-PVS viewer culls it immediately, and an in-PVS viewer gets a proper
+// remove when SUB_Remove frees it next frame (deferred one tick so the
+// flag-clear is in effect before the edict is freed).
+void(entity corpse) VisProxy_RetireCorpse =
+{
+	corpse.pvsflags  = 0;          // drop PVSF_NOREMOVE so the remove networks
+	corpse.think     = SUB_Remove; // free next frame -> CSQC_Ent_Remove reaches clients
+	corpse.nextthink = time + 0.1;
 };
 
 void() RoundRestart =
@@ -323,6 +350,9 @@ void() RoundRestart =
 
 	// Restore all broken breakables
 	BreakableResetAll();
+
+	// Return func_vehicles to spawn, eject drivers, clear momentum
+	Vehicle_RoundReset();
 
 	// Tell all clients to wipe bullet holes, shells, mags
 	WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
@@ -345,7 +375,65 @@ void() RoundRestart =
 		}
 		float i;
 		for (i = 0; i < ccount; i = i + 1)
-			remove(corpses[i]);
+			VisProxy_RetireCorpse(corpses[i]);   // networked remove, NOT a silent bare remove()
+	}
+
+	// Sweep any planted C4 (Defuse).  The bomb persists from plant until it
+	// explodes or is defused — a defused bomb is deliberately left as a blue
+	// prop for the round-end screen, and a still-ticking bomb can reach here if
+	// the round ended another way.  Either would carry into the next round
+	// (stale planted_c4 -> bomb_planted stays TRUE -> the round clock stays
+	// suspended and the new round can't start cleanly), so remove them all.
+	// Collect-then-remove (remove() during a find() walk is unsafe in QC).
+	{
+		entity bombs[8];
+		float bcount = 0;
+		entity be = find(world, classname, "planted_c4");
+		while (be && bcount < 8)
+		{
+			bombs[bcount++] = be;
+			be = find(be, classname, "planted_c4");
+		}
+		float bi;
+		for (bi = 0; bi < bcount; bi = bi + 1)
+			remove(bombs[bi]);
+	}
+
+	// Sweep cheat-spawned filing cabinets (phys_files, via `cmd spawnfiles`).
+	// They are ODE rigid bodies + an always-on PVSF_NOREMOVE CSQC mirror, so
+	// they persist across rounds unless removed.  Proper teardown (mirrors the
+	// void-cull in sv_physprop.qc): if one is being carried, drop it so the
+	// carrier's pm_carrying / carried_prop linkage is cleared (otherwise a
+	// respawned carrier keeps a lowered weapon + a dangling predicted carry);
+	// stop any looping scrape sound; detach the ODE body (physics_enable FALSE)
+	// before remove() — a bare remove() orphans the rigid body.  The cabinet is a
+	// box geom (not trimesh), so no dGeomTriMeshDataDestroy is needed.
+	// Collect-then-remove (remove() during a find() walk is unsafe in QC).
+	{
+		entity cabs[32];
+		float cabcount = 0;
+		entity ce2 = find(world, classname, "phys_files");
+		while (ce2 && cabcount < 32)
+		{
+			cabs[cabcount++] = ce2;
+			ce2 = find(ce2, classname, "phys_files");
+		}
+		float ci;
+		for (ci = 0; ci < cabcount; ci = ci + 1)
+		{
+			entity cab = cabs[ci];
+			if (cab.carried_by != world)
+				Carry_Drop(cab.carried_by);   // clears carried_prop + pm_carrying
+			PhysFiles_StopScrape(cab);
+			physics_enable(cab, FALSE);       // detach ODE box body now
+			// The cabinet's CSQC mirror is PVSF_NOREMOVE too (sv_physprop.qc:818),
+			// so a bare remove() is silent on clients — drop the flag and free it
+			// next frame so the CSQC_Ent_Remove actually reaches them (exactly the
+			// corpse case; see VisProxy_RetireCorpse).
+			cab.pvsflags  = 0;
+			cab.think     = SUB_Remove;
+			cab.nextthink = time + 0.1;
+		}
 	}
 
 	// Respawn all players who have a playing team (not spectators)
@@ -419,6 +507,77 @@ float() CheckTeamEliminated =
 	return 0;  // both teams still have alive players
 };
 
+// Defuse win-condition check.  Returns the winning team (TEAM_RED / TEAM_BLUE),
+// -1 for a mutual draw, or 0 to keep the round going.  Mirrors
+// CheckTeamEliminated's pending_round_join skip + is_dead counting, but the
+// planted bomb changes the rules:
+//   - Bomb DOWN: a living defuser (BLUE) can still disarm and a living
+//     terrorist (RED) is just guarding the tick, so let the fuse / defuse path
+//     resolve those.  Only short-circuit when NOBODY is alive — otherwise the
+//     bomb would burn down in an empty arena.  RED wins (uncontested detonation).
+//   - Bomb NOT down: one-life elimination.  A side that fielded players and is
+//     now fully dead loses; the other side wins even if it fielded nobody, so a
+//     lone player's death still ends the round and awards the empty other team.
+float(float bomb_is_down) Defuse_CheckWinCondition =
+{
+	entity e;
+	float blue_total, red_total, blue_alive, red_alive;
+
+	blue_total = 0; red_total = 0;
+	blue_alive = 0; red_alive = 0;
+
+	e = player_chain_head;
+	while (e)
+	{
+		// Skip mid-round joiners (queued for the next RoundRestart) — same as
+		// CheckTeamEliminated, so a fresh join can't flip an instant win.
+		if (!e.pending_round_join)
+		{
+			if (e.player_team == TEAM_BLUE)
+			{
+				blue_total = blue_total + 1;
+				if (!e.is_dead)
+					blue_alive = blue_alive + 1;
+			}
+			else if (e.player_team == TEAM_RED)
+			{
+				red_total = red_total + 1;
+				if (!e.is_dead)
+					red_alive = red_alive + 1;
+			}
+		}
+		e = e.player_chain_next;
+	}
+
+	// Nobody teamed yet (warmup / nobody spawned) — nothing to decide.
+	if (blue_total == 0 && red_total == 0)
+		return 0;
+
+	if (bomb_is_down)
+	{
+		// Bomb ticking — only end early if the arena is empty of life (the fuse
+		// can't be raced and nobody is left to watch it).  RED wins.  If anyone
+		// is alive, let the bomb explode / be defused naturally.
+		if (blue_alive == 0 && red_alive == 0)
+			return TEAM_RED;
+		return 0;
+	}
+
+	// Bomb not planted — one-life elimination.  A side is "out" only if it
+	// fielded players this round and they're all dead (an empty enemy team is
+	// not "eliminated", but the death of the last fielded player still ends it).
+	float red_out  = (red_total  > 0 && red_alive  == 0);
+	float blue_out = (blue_total > 0 && blue_alive == 0);
+
+	if (red_out && blue_out)
+		return -1;          // both fielded sides wiped on the same tick -> draw
+	if (red_out)
+		return TEAM_BLUE;   // terrorists wiped before the plant -> CTs win
+	if (blue_out)
+		return TEAM_RED;    // defenders wiped, no plant -> terrorists win
+	return 0;
+};
+
 float() MapTimeExpired =
 {
 	float map_remaining;
@@ -456,6 +615,7 @@ string sv_info_last_stamina;
 string sv_info_last_snipersway;
 string sv_info_last_mp_cheats;
 string sv_info_last_mp_noblock;
+string sv_info_last_playerselect;
 string sv_info_last_mintic;
 string sv_info_last_wepswap_speed_transition;
 string sv_info_last_weaponweight;
@@ -524,6 +684,9 @@ string sv_info_last_codstamina_land_cost;
 float sv_info_push_phase;
 float sv_phys_mapweapon_sync_done;
 
+// Change-tracker for the sv_func_tickrate auto-tie (only cvar_set on change).
+string sv_info_last_func_tickrate;
+
 void(string key, __inout string last) sv_info_push_if_changed =
 {
 	string cur = cvar_string(key);
@@ -566,6 +729,10 @@ void() SV_UpdateMovementServerInfo =
 	// value also prevents clients from forcing noblock prediction
 	// against a server that has it disabled.
 	sv_info_push_if_changed("mp_noblock",       sv_info_last_mp_noblock);
+	// Server-authoritative model-pick mode: publish so the client team-select
+	// menu reads the SERVER's sv_playerselect (via serverkeyfloat) instead of
+	// each client's local cvar() — otherwise the setting acts per-client.
+	sv_info_push_if_changed("sv_playerselect",  sv_info_last_playerselect);
 	// Publish the server's authoritative tick interval (seconds per
 	// server frame) so CSQC debug panels can read the exact configured
 	// value rather than measuring it empirically from snapshot-arrival
@@ -573,6 +740,32 @@ void() SV_UpdateMovementServerInfo =
 	// sv_mintic always, and in a properly configured server both are
 	// identical.  Pushes only on change, so zero overhead steady-state.
 	sv_info_push_if_changed("sv_mintic",        sv_info_last_mintic);
+
+	// Auto-tie sv_func_tickrate to the REAL server tick rate (1/sv_mintic).
+	// Func movers (func_rotating/door/pendulum/train/vehicle) integrate their
+	// carry/push physics at sv_func_tickrate Hz; when that disagrees with the
+	// server's actual tick (e.g. a 66-tick server left at the 64 default) the
+	// mover cadence drifts against pmove → visible double-rotation + jitter.
+	// Round 1/sv_mintic and overwrite the cvar only on change — the same
+	// always-auto model as the client stuffing cl_netfps from sv_mintic
+	// (Sync_NetFPS_To_Tickrate).  Every SSQC mover read of cvar("sv_func_tickrate")
+	// is then correct by construction; CSQC gets it via STAT_FUNC_TICKRATE below.
+	// Bounded 40..200 to match the consumer clamps.
+	{
+		float ftr_mintic = cvar("sv_mintic");
+		if (ftr_mintic > 0.0001)
+		{
+			float ftr_hz = floor(1.0 / ftr_mintic + 0.5);
+			if (ftr_hz < 40)  ftr_hz = 40;
+			if (ftr_hz > 200) ftr_hz = 200;
+			string ftr_hzs = ftos(ftr_hz);
+			if (ftr_hzs != sv_info_last_func_tickrate)
+			{
+				cvar_set("sv_func_tickrate", ftr_hzs);
+				sv_info_last_func_tickrate = ftr_hzs;
+			}
+		}
+	}
 	// Weapon-switch speed transition window — read by Weapon_SpeedFactor_Smooth
 	// on both client and server. Pushed via serverinfo so the client always
 	// uses the server's authoritative value (no local drift).
@@ -678,7 +871,7 @@ void() SV_DoCleanModels =
 	}
 	float i;
 	for (i = 0; i < ccount; i = i + 1)
-		remove(corpses[i]);
+		VisProxy_RetireCorpse(corpses[i]);   // networked remove (PVSF_NOREMOVE makes bare remove() silent)
 
 	// Tell every client to wipe their CSQC casings + mags.
 	WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
@@ -807,6 +1000,14 @@ void() StartFrame =
 			// anyway since all four slots are pinned by the gamemode).
 			cvar_set("mp_nomapweapons", "1");
 		}
+		else if (gamemode == GAMEMODE_DEFUSE)
+		{
+			// One life per round (same round flow as Elimination).  Required
+			// for the defuse win conditions below — a team wipe / empty arena
+			// only ends the round if dead players STAY dead this round.
+			cvar_set("mp_respawn",      "0");
+			cvar_set("mp_disabledoors", "0");
+		}
 		else  // TDM
 		{
 			cvar_set("mp_respawn",      "1");
@@ -906,6 +1107,12 @@ void() StartFrame =
 		CVar_WriteAllCommandsCfg();
 	}
 
+	// Is a planted bomb live this frame?  Used to suspend the round clock in
+	// Defuse (the bomb fuse owns the round once it's down) and to hide the
+	// HUD round timer.  The planted_c4 exists from plant until explode/defuse/
+	// round-restart sweep, so its presence is the authoritative "bomb is down".
+	float bomb_planted = (find(world, classname, "planted_c4") != world);
+
 	// --- Phase transitions ---
 	if (round_phase == ROUND_PHASE_FREEZE)
 	{
@@ -918,8 +1125,13 @@ void() StartFrame =
 	}
 	else if (round_phase == ROUND_PHASE_ACTIVE)
 	{
-		// Check round timer expiry
-		if (time >= round_end_time)
+		// Check round timer expiry.  In Defuse, once the bomb is planted the
+		// round clock is suspended — the bomb fuse decides the round (explode =
+		// RED win via Defuse_TriggerRoundEnd, defuse = BLUE win).  Without this
+		// the clock would end the round mid-fuse and the bomb detonated into the
+		// next round.
+		if (time >= round_end_time
+			&& !(gamemode == GAMEMODE_DEFUSE && bomb_planted))
 		{
 			round_winning_team = 0;
 			round_phase = ROUND_PHASE_ROUND_END;
@@ -965,6 +1177,32 @@ void() StartFrame =
 					round_winning_team = 0;
 					round_phase = ROUND_PHASE_ROUND_END;
 					round_restart_time = time + cvar("mp_roundrestartdelay");
+				}
+			}
+		}
+		else if (gamemode == GAMEMODE_DEFUSE)
+		{
+			// Defuse one-life + bomb win conditions (see Defuse_CheckWinCondition).
+			// Chained off the timer-expiry `if` above, so this runs whenever the
+			// round clock hasn't ended things — including the suspended-clock
+			// window while the bomb is planted, where condition A can still fire.
+			winner = Defuse_CheckWinCondition(bomb_planted);
+			if (winner != 0)
+			{
+				if (winner == -1)
+				{
+					// Mutual elimination — draw, no score awarded.
+					round_winning_team = 0;
+					round_phase = ROUND_PHASE_ROUND_END;
+					round_restart_time = time + cvar("mp_roundrestartdelay");
+				}
+				else
+				{
+					// Funnel through the canonical defuse award so the bomb-explode,
+					// defuse-complete, and elimination paths all end the round the
+					// same way (score++ + phase flip + double-trigger guard).
+					round_winning_team = winner;
+					Defuse_TriggerRoundEnd();
 				}
 			}
 		}
@@ -1039,9 +1277,11 @@ void() StartFrame =
 					PlayerSpawn();
 					self = saved;
 				}
-				else if (gamemode == GAMEMODE_ELIMINATION || gamemode == GAMEMODE_PAINTGUN)
+				else if (gamemode == GAMEMODE_ELIMINATION || gamemode == GAMEMODE_PAINTGUN
+				         || gamemode == GAMEMODE_DEFUSE)
 				{
-					// Elimination / Paintgun: hide body, enter spectator phase
+					// Elimination / Paintgun / Defuse: one life per round — hide
+					// body, enter spectator phase (no mid-round respawn).
 					e.modelindex = 0;
 					e.death_time = -1;  // prevent re-triggering
 				}
@@ -1063,10 +1303,26 @@ void() StartFrame =
 		e.sv_freeze_timeleft = (round_phase == ROUND_PHASE_FREEZE) ? max(0, freeze_end_time - time) : 0;
 		e.sv_gamemode = gamemode;
 		e.sv_winning_team = round_winning_team;
+		// Mirror the (auto-tied) sv_func_tickrate so CSQC prediction reads the
+		// server's real mover tick rate via getstatf(STAT_FUNC_TICKRATE).
+		e.sv_func_tickrate_value = cvar("sv_func_tickrate");
 		e.sv_blue_score = blue_team_score;
 		e.sv_red_score = red_team_score;
+		e.sv_money = e.money;
+		e.sv_armor = e.armor;
+		e.sv_in_buyzone = Player_CanBuy(e);
+		// C4 carrier only: whether a plant is allowed at their spot right now,
+		// so the client can gate the plant prefire animation (STAT_CAN_PLANT).
+		e.sv_can_plant_c4 = (e.ammo_cfc4 > 0 && C4_CanPlantHere(e)) ? 1 : 0;
+		// Defuse-only: 1 while the bomb is down, so the HUD hides the round
+		// timer (the round clock is suspended — see the timer-expiry guard).
+		e.sv_bomb_planted = (gamemode == GAMEMODE_DEFUSE && bomb_planted) ? 1 : 0;
 		e = e.player_chain_next;
 	}
+
+	// Pay round-end cash once, on the edge into ROUND_END (covers timer /
+	// elimination / C4 win paths uniformly without touching each site).
+	Money_CheckRoundAward();
 
 	// Append the current pose of every alive player to the lag-comp ring.
 	// Runs once per tick, immediately after the per-player loop above — the
@@ -1119,6 +1375,18 @@ void() worldspawn =
 	// accumulates across a map (camera linked-list head, one-shot
 	// flags, cycling RNG state) needs an explicit clear here.
 	Camera_ResetState();
+
+	// Backdrop latch — the menu backdrop launchers (m_main / m_menu) set
+	// sv_backdrop_pending 1 immediately before `map <menumap>`. Consume it
+	// into the live sv_backdrop here, so the menu backdrop keeps its HUD +
+	// team-select suppression while ANY other map load (console `map X`,
+	// the map cycle, create-server) comes up as a real game with
+	// sv_backdrop 0 instead of inheriting the sticky backdrop flag. CSQC
+	// gates the spectator/team-select view + HUD on
+	// serverkeyfloat("sv_backdrop") (cl_main.qc). cvar() returns 0 for the
+	// never-set case (dedicated server, direct +map) — the correct default.
+	cvar_set("sv_backdrop", cvar("sv_backdrop_pending") ? "1" : "0");
+	cvar_set("sv_backdrop_pending", "0");
 
 	// Mod-identity beacon for clients.  Our CSQC drives spawn flow
 	// through STAT_PLAYERTEAM + the team-select menu — vanilla QW
@@ -1185,11 +1453,21 @@ void() worldspawn =
 	clientstat(STAT_FREEZE_TIMELEFT, EV_FLOAT, sv_freeze_timeleft);
 	clientstat(STAT_GAMEMODE, EV_FLOAT, sv_gamemode);
 	clientstat(STAT_WINNING_TEAM, EV_FLOAT, sv_winning_team);
+	clientstat(STAT_FUNC_TICKRATE, EV_FLOAT, sv_func_tickrate_value);
 	clientstat(STAT_DEATH_DELAY_LEFT, EV_FLOAT, sv_death_delay_left);
 	clientstat(STAT_IS_DEAD, EV_FLOAT, sv_is_dead);
 	clientstat(STAT_ZOOMSTAGE, EV_FLOAT, sv_zoomstage);
 	clientstat(STAT_BLUE_SCORE, EV_FLOAT, sv_blue_score);
 	clientstat(STAT_RED_SCORE, EV_FLOAT, sv_red_score);
+	clientstat(STAT_MONEY, EV_FLOAT, sv_money);
+	clientstat(STAT_ARMOR, EV_FLOAT, sv_armor);
+	clientstat(STAT_IN_BUYZONE, EV_FLOAT, sv_in_buyzone);
+	clientstat(STAT_CAN_PLANT, EV_FLOAT, sv_can_plant_c4);
+	clientstat(STAT_BOMB_PLANTED, EV_FLOAT, sv_bomb_planted);
+	// Defuse progress (0..CFC4_DEFUSE_TIME), set per-tick by
+	// C4_TickDefuseInteraction on the active defuser — drives HUD_DrawDefuseBar.
+	// Without this registration the field never networks and the bar never shows.
+	clientstat(STAT_DEFUSE_PROGRESS, EV_FLOAT, defuse_progress_stat);
 
 	// All custom cvars are registered from a single shared table —
 	// edit shared/sh_cvar_table.qc CVar_Init() to change defaults or
@@ -1248,6 +1526,16 @@ void() worldspawn =
 	// before the initial `map` command to apply immediately.
 	SV_ApplyServerConfigFile();
 
+	// Backdrop server must NEVER occupy 27500 — it blocks a real local/dedicated
+	// server from binding it.  server.cfg just set sv_port (to 27500), which is
+	// why the menu-launcher's earlier `sv_port 0` had no effect (the boot log
+	// showed "Unable to bind to port 27500, bound to 27501").  Override it back
+	// to 0 HERE — AFTER server.cfg has run — so the engine binds an OS-assigned
+	// ephemeral port instead.  Real servers (sv_backdrop 0) keep their port.
+	// sv_backdrop was consumed from sv_backdrop_pending earlier in this spawn.
+	if (cvar("sv_backdrop"))
+		cvar_set("sv_port", "0");
+
 	// Bhop gamemode — force bhop-specific settings before entities spawn.
 	// Door/button inertness is read directly from sv_gamemode in
 	// sv_doors.qc func_button / func_door, so no separate flag cvar needed.
@@ -1273,6 +1561,9 @@ void() worldspawn =
 	round_phase = ROUND_PHASE_NONE;
 	blue_team_score = 0;
 	red_team_score = 0;
+	money_last_round_phase = ROUND_PHASE_NONE;
+	Money_ResetMatch();   // reset cash to mp_cashstart at match/map start
+	buyzone_count = 0;    // func_buyzone entities re-count themselves on spawn
 };
 
 void() SpectatorConnect =

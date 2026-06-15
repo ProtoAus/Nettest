@@ -140,6 +140,17 @@ void(string section, string name, string def, float side,
     g_cvar_ui_max  [i] = ui_max;
 };
 
+// CVar_AddSaved — like CVar_Add, but ALSO persisted to data/server.cfg by
+// CVar_WriteServerCfg (no menu UI).  Use for server-side cvars that should be
+// admin-saveable but aren't worth a Create-Server menu entry (e.g. sv_carry_*).
+void(string section, string name, string def, float side) CVar_AddSaved =
+{
+    float i = g_cvar_count;
+    CVar_Add(section, name, def, side);
+    if (i < g_cvar_count)
+        g_cvar_ui_flags[i] = g_cvar_ui_flags[i] | CVAR_FLAG_SAVE_TO_SERVER_CFG;
+};
+
 // Find the manifest index for a cvar name.  Returns -1 if not in the
 // table.  Linear scan — table size is bounded (151 entries today,
 // CVAR_TABLE_MAX of 256 ceiling) so this is fine for menu init paths.
@@ -545,6 +556,7 @@ void() CVar_Init =
     // killing the lightmap-rebuild storm under sustained fire).
     CVar_Add("Client", "cl_impact_light",         "1",     CVAR_SIDE_CL);
     CVar_Add("Client", "cl_impact_light_scale",   "1.0",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_impact_light_offset",  "8",     CVAR_SIDE_CL); // units the impact dlight stands off the wall along its normal (0 = flush; pull back so the wall face lights up)
     // Shell-ejection visual gate.  Server still sends the multicast and
     // local prediction still spawns nothing — both paths short-circuit
     // inside the CSQC SpawnCasing helpers, no gameplay effect.
@@ -608,6 +620,7 @@ void() CVar_Init =
     // spawn so static and travel tracers can coexist mid-flight.
     CVar_Add("Client", "cl_tracer_travel",        "0",         CVAR_SIDE_CL);
     CVar_Add("Client", "cl_tracer_travel_speed",  "8000",      CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_tracer_impact_delay",  "1",         CVAR_SIDE_CL); // 1 = delay the bullet-impact FX until the tracer streak reaches the wall; 0 = instant impact
     CVar_Add("Client", "cl_tracer_alpha",         "0.9",       CVAR_SIDE_CL);
     CVar_Add("Client", "cl_tracer_travel_size",   "1.5",       CVAR_SIDE_CL);
     // Stretched-quad length (qu) — both modes use this:
@@ -642,6 +655,21 @@ void() CVar_Init =
     // can stack 4+ exit smokes from a single shot; cap thins them.
     // 0 = unlimited (old behaviour); default 2 mirrors the dlight cap.
     CVar_Add("Client", "cl_impact_effects_per_shot", "2",  CVAR_SIDE_CL);
+    // Bullet-impact DEBRIS — rock chunks / brown squares thrown off the first
+    // impact (CSQC_SpawnImpactDebris, cl_bulletimpact.qc; effects in
+    // particles/weapons.cfg).  Needs r_bouncysparks 1 (engine default) for the
+    // chunks to bounce off the floor instead of falling through it.
+    //   cl_impact_debris          master on/off
+    //   cl_impact_debris_mode     0 = textured rock chunks, 1 = brown squares
+    //                             (toggle with the `impactdebris` command)
+    //   cl_impact_debris_count    chunks per impact
+    //   cl_impact_debris_force    launch speed along the surface normal
+    //   cl_impact_debris_per_shot bursts per shot (caps shotgun/penetration)
+    CVar_Add("Client", "cl_impact_debris",          "1",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_impact_debris_mode",     "0",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_impact_debris_count",    "4",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_impact_debris_force",    "110", CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_impact_debris_per_shot", "1",   CVAR_SIDE_CL);
     // Bullet-hole renderer path (read by cl_bulletholes.qc):
     //   1 = polygon-quad (default, fast — ~5-8x cheaper than adddecal,
     //       no decal corner-wrap on convex surfaces).
@@ -831,6 +859,10 @@ void() CVar_Init =
     // 0 = no splash effect drawn on raindrop impact, 1 = splash quad
     // animates through cl_rain_splash_texture frames at cl_rain_splash_fps.
     CVar_Add("Client", "cl_rain_splash",              "1",   CVAR_SIDE_CL);
+    // CSQC-pool (cl_weather_engine 0) LAND impacts now throw the engine
+    // weather.splash droplet spray instead of the animated sprite; this is the
+    // droplet count per land impact.  (Water impacts still use the ring.)
+    CVar_Add("Client", "cl_rain_splash_droplets",     "5",   CVAR_SIDE_CL);
     CVar_Add("Client", "cl_rain_reseed_per_frame",    "64",  CVAR_SIDE_CL);
     CVar_Add("Client", "cl_rain_stagger",             "1",   CVAR_SIDE_CL);
     CVar_Add("Client", "cl_rain_draw_distance",       "0",   CVAR_SIDE_CL);
@@ -906,10 +938,33 @@ void() CVar_Init =
     //       weather.snow / weather.rain effects defined in
     //       particles/weather.cfg.  Engine handles particle motion
     //       in C — substantially faster per particle at high
-    //       intensity, but loses the CSQC-side features (no bullet-
-    //       water splash hijack, no water ring, no CSQC cull cvars).
+    //       intensity.  Bullet-water splashes still work in engine mode;
+    //       the legacy CSQC-pool look (per-flake streaks, cull cvars)
+    //       needs cl_weather_engine 0.  DEFAULT: 1 (engine).
     //       Tune visuals by editing particles/weather.cfg.
-    CVar_Add("Client", "cl_weather_engine",           "0",                CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_weather_engine",           "1",                CVAR_SIDE_CL);
+    // Engine-mode spawn FOOTPRINT lead: centre the spawn volume this many
+    // seconds of player velocity AHEAD so fast movement stays filled (snow,
+    // which lingers, uses half).  0 = no lead.  Density is driven by
+    // cl_rain_intensity / cl_snow_intensity now (the old
+    // cl_weather_engine_density cvar was removed; radius = cl_rain_radius).
+    CVar_Add("Client", "cl_weather_lead",             "0.5",              CVAR_SIDE_CL);
+    // Engine weather spawn-grid: 1 = skip spawn cells with no sky above the
+    // player (no rain/snow under roofs / indoors), via one up-trace per cell.
+    // 0 = solid-cell skip only (still no drops inside walls, but rain falls on
+    // roofs above you).  Turn off if a map's sky brushes confuse the up-trace.
+    CVar_Add("Client", "cl_weather_skycheck",         "1",                CVAR_SIDE_CL);
+    // Water-surface rings: pop expanding weather.ringsplash quads where rain
+    // lands on water (the engine can't detect water hits per-drop, so a QC
+    // emitter traces for water near the camera).  _rate = rings/sec per unit
+    // cl_rain_intensity (capped 8/frame).
+    CVar_Add("Client", "cl_weather_waterring",        "1",                CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_weather_waterring_rate",   "40",               CVAR_SIDE_CL);
+    // Live top-left overlay: active weather backend (engine vs CSQC pool),
+    // selected effect, spawn rate / target population, pool cap, resolved
+    // handles, and the engine's own dump of the effect (type/blend/texture/
+    // alpha/rgb/scale).  See CSQC_Weather_DebugDraw in client/cl_rain.qc.
+    CVar_Add("Client", "cl_debug_weather",            "0",                CVAR_SIDE_CL);
 
     // Projectile trail (cl_throwtrail).  Fading polygonal ribbon that
     // follows thrown projectiles (grenades + snowballs).  Same shape
@@ -1023,6 +1078,30 @@ void() CVar_Init =
     //                   with predraw, not engine-replicated phys barrels).
     CVar_Add("Client", "r_playermodels_maxlight", "180",   CVAR_SIDE_CL);
     CVar_Add("Client", "r_physdrops_maxlight",    "180",   CVAR_SIDE_CL);
+    // Soft-knee rolloff for the two _maxlight caps above (player models +
+    // dropped weapons). Fraction of the cap where brightness starts to
+    // roll off smoothly toward the ceiling instead of hard-clamping flat:
+    //   1.0 = original hard clamp (a tile above the cap renders exactly at
+    //         the cap, losing highlight detail)
+    //   0.8 = gentle rolloff near the top (default — softens the blow-out
+    //         without dimming midtones much)
+    //   lower = softer / dimmer (the rolloff reaches further into midtones)
+    CVar_Add("Client", "r_maxlight_softknee",     "0.8",   CVAR_SIDE_CL);
+    // Optional distance cull for dropped-weapon rendering. Dropped weapons
+    // persist map-wide (PVSF_NOREMOVE) and each re-submits a full engine
+    // entity-copy every frame with no built-in cull, so a busy map with
+    // hundreds of accumulated drops pays for all of them every frame.
+    // Beyond this radius (Quake units) a settled drop is skipped at predraw.
+    // 0 = disabled (no cull, default — avoids any pop-in); set e.g. 3000 on
+    // drop-heavy maps. Keep it past real engagement sightlines.
+    CVar_Add("Client", "r_physdrops_maxdist",     "0",     CVAR_SIDE_CL);
+    // Optional PVS occlusion cull for dropped weapons (complements the
+    // distance cull above): skip drops that are within range but behind walls
+    // / out of the potentially-visible set. 0 = off (default). Safe on all map
+    // formats (the engine CoD checkpvs NULL-deref is fixed). Cheap on Quake
+    // maps; on Source/CoD maps each test decompresses vis, so it costs a little
+    // more per nearby drop — enable where a map accumulates many occluded drops.
+    CVar_Add("Client", "r_physdrops_pvscull",     "0",     CVAR_SIDE_CL);
     // Mirror the viewmodel horizontally for left-handed weapon view.
     // XOR'd against the per-weapon `weapon_viewmodel_flip` default so a
     // model that is already left-handed in its source data flips back
@@ -1227,6 +1306,7 @@ void() CVar_Init =
     CVar_Add("Client debug", "cl_debug_footsteps",   "0", CVAR_SIDE_CL);
     CVar_Add("Client debug", "cl_debug_extrap",      "0", CVAR_SIDE_CL);
     CVar_Add("Client debug", "cl_debug_noblock",     "0", CVAR_SIDE_CL);
+    CVar_Add("Client debug", "cl_debug_spray",       "0", CVAR_SIDE_CL);
     CVar_Add("Client debug", "cl_debug_panelinput",  "0", CVAR_SIDE_CL);
     // Per-reconcile prediction-error trace.  dprints `elen pre post` so
     // you can see whether `cl_driftlock` even has anything to smooth
@@ -1379,6 +1459,33 @@ void() CVar_Init =
     // sv_main.qc StartFrame; admins can also enable in any other mode.
     CVar_AddUI("Multiplayer", "mp_disabledoors",      "0",  CVAR_SIDE_SV,
         CVAR_UI_TOGGLE, CVAR_TAB_MULTI, "",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
+
+    // ---------- Economy / buy menu (mp_cash*) ----------
+    // CS-style cash.  Server-authoritative — the client greys out
+    // unaffordable buy-menu items from the synced money stat, never these.
+    CVar_AddUI("Multiplayer", "mp_cashstart",         "800",   CVAR_SIDE_SV,
+        CVAR_UI_SCALAR, CVAR_TAB_MULTI | CVAR_TAB_CREATE_GAME, "Starting Cash",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 16000);
+    CVar_AddUI("Multiplayer", "mp_cashreward",        "300",   CVAR_SIDE_SV,
+        CVAR_UI_SCALAR, CVAR_TAB_MULTI | CVAR_TAB_CREATE_GAME, "Cash Per Kill",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 16000);
+    CVar_AddUI("Multiplayer", "mp_cashwin",           "3250",  CVAR_SIDE_SV,
+        CVAR_UI_SCALAR, CVAR_TAB_MULTI | CVAR_TAB_CREATE_GAME, "Cash Round Win",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 16000);
+    CVar_AddUI("Multiplayer", "mp_cashlose",          "1400",  CVAR_SIDE_SV,
+        CVAR_UI_SCALAR, CVAR_TAB_MULTI | CVAR_TAB_CREATE_GAME, "Cash Round Loss",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 16000);
+    CVar_AddUI("Multiplayer", "mp_cashheadshot",      "0",     CVAR_SIDE_SV,
+        CVAR_UI_SCALAR, CVAR_TAB_MULTI | CVAR_TAB_CREATE_GAME, "Headshot Bonus Cash",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 16000);
+    CVar_AddUI("Multiplayer", "mp_cashmax",           "16000", CVAR_SIDE_SV,
+        CVAR_UI_SCALAR, CVAR_TAB_MULTI | CVAR_TAB_CREATE_GAME, "Max Cash",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 999999);
+    // 1 = buy anywhere (ignore func_buyzone brushes).  0 = must stand in an
+    // allowed buy zone; maps with NO func_buyzone fall back to buy-anywhere.
+    CVar_AddUI("Multiplayer", "mp_buyanywhere",       "0",     CVAR_SIDE_SV,
+        CVAR_UI_TOGGLE, CVAR_TAB_MULTI | CVAR_TAB_CREATE_GAME, "Buy Anywhere",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
 
     // ---------- Server ----------
@@ -1638,6 +1745,25 @@ void() CVar_Init =
     // server console while a player walks into the closing door.
     CVar_Add("Server", "sv_debug_doors",           "0",             CVAR_SIDE_SV);
 
+    // ---------- func_vehicle drive feel ----------
+    // Weighty/semi-sim driving for func_vehicle.  All live-tunable.  The drive
+    // model runs at sv_func_tickrate (above).  See server/sv_func_vehicle.qc.
+    CVar_Add("Server", "sv_vehicle_accel",         "700",           CVAR_SIDE_SV | CVAR_FLAG_SAVE_TO_SERVER_CFG); // ease-out accel (u/s^2 at standstill)
+    CVar_Add("Server", "sv_vehicle_brake",         "1400",          CVAR_SIDE_SV | CVAR_FLAG_SAVE_TO_SERVER_CFG); // active brake decel (u/s^2)
+    CVar_Add("Server", "sv_vehicle_decel",         "220",           CVAR_SIDE_SV | CVAR_FLAG_SAVE_TO_SERVER_CFG); // engine-brake when no throttle (~CS 200u/s/s)
+    CVar_Add("Server", "sv_vehicle_reverse_frac",  "0.35",          CVAR_SIDE_SV | CVAR_FLAG_SAVE_TO_SERVER_CFG); // reverse cap as fraction of max speed
+    CVar_Add("Server", "sv_vehicle_steer_rate",    "3.0",           CVAR_SIDE_SV | CVAR_FLAG_SAVE_TO_SERVER_CFG); // how fast the wheel turns toward target (per s)
+    CVar_Add("Server", "sv_vehicle_steer_return",  "4.0",           CVAR_SIDE_SV | CVAR_FLAG_SAVE_TO_SERVER_CFG); // wheel self-center rate when released (per s)
+    CVar_Add("Server", "sv_vehicle_max_yaw",       "180",           CVAR_SIDE_SV | CVAR_FLAG_SAVE_TO_SERVER_CFG); // max yaw rate (deg/s) at ideal speed
+    CVar_Add("Server", "sv_vehicle_ground_follow", "1",             CVAR_SIDE_SV | CVAR_FLAG_SAVE_TO_SERVER_CFG); // 1 = terrain physics (ramps + pitch + gravity/air); 0 = flat drive
+    CVar_Add("Server", "sv_vehicle_pitch",         "1",             CVAR_SIDE_SV | CVAR_FLAG_SAVE_TO_SERVER_CFG); // deck pitch on ramps (deg per deg of slope); flip sign if nose tilts wrong; 0 = no pitch
+    CVar_Add("Server", "sv_vehicle_shotnudge",     "12",            CVAR_SIDE_SV | CVAR_FLAG_SAVE_TO_SERVER_CFG); // units a func_vehicle is shoved per shot (along the shot, into clear space) — shoot a stuck car free
+    CVar_Add("Server", "sv_vehicle_step",          "18",            CVAR_SIDE_SV | CVAR_FLAG_SAVE_TO_SERVER_CFG); // max step/curb height (units) a vehicle drives up without it counting as a wall (stairs)
+    CVar_Add("Server", "sv_vehicle_suspension",    "28",            CVAR_SIDE_SV | CVAR_FLAG_SAVE_TO_SERVER_CFG); // suspension travel (units): beyond this above the ground the car free-falls under gravity
+    CVar_Add("Server", "sv_vehicle_wallcollide",   "1",             CVAR_SIDE_SV | CVAR_FLAG_SAVE_TO_SERVER_CFG); // 1 = oriented corner wall collision (stop/slide at walls); 0 = drive through walls
+    CVar_Add("Client", "cl_vehicle_seatlock",      "1",             CVAR_SIDE_CL); // 1 = lock the driver's camera to the car's smooth visual position (kills carry jitter); 0 = off
+    CVar_Add("Server", "sv_debug_func_vehicle",    "0",             CVAR_SIDE_SV | CVAR_FLAG_SAVE_TO_SERVER_CFG); // mount/dismount + drive prints
+
     // Player spray system.
     //   cl_spray           — basename of the player's chosen PNG in gfx/sprays/.
     //                        Picked via the main-menu Sprays panel; also pushed
@@ -1763,6 +1889,10 @@ void() CVar_Init =
     CVar_AddUI("Server", "sv_hitbox_expand",             "32",      CVAR_SIDE_SV,
         CVAR_UI_SCALAR, CVAR_TAB_SERVER, "",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
+    // Pose-refresh keepalive interval in server ticks (1 = every tick).
+    // Read by sv_main.qc / sv_player.qc. Registered here so it exists at
+    // table-init time instead of being auto-created on first cvar() read.
+    CVar_Add("Server", "sv_pose_keepalive_ticks",        "1",      CVAR_SIDE_SV);
     CVar_AddUI("Server", "sv_anim_qu_per_sec",           "240",    CVAR_SIDE_SV,
         CVAR_UI_SCALAR, CVAR_TAB_SERVER, "",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
@@ -1930,12 +2060,20 @@ void() CVar_Init =
     CVar_AddUI("ODE physics", "physics_ode_autodisable",        "1",    CVAR_SIDE_SV,
         CVAR_UI_TOGGLE, CVAR_TAB_ODE | CVAR_TAB_CREATE_PHYS, "ODE AutoDisable",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
-    CVar_AddUI("ODE physics", "physics_ode_iterationsperframe", "2",   CVAR_SIDE_SV,
+    // Source-like smoothness: more substeps/frame (was 2), a small contact-overlap
+    // layer (the big anti-jitter knob), and a stiffer QuickStep solve.
+    CVar_AddUI("ODE physics", "physics_ode_iterationsperframe", "8",   CVAR_SIDE_SV,
         CVAR_UI_SCALAR, CVAR_TAB_ODE | CVAR_TAB_CREATE_PHYS, "ODE Iter",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 1, 60);
-    CVar_AddUI("ODE physics", "physics_ode_worldquickstep",     "0",    CVAR_SIDE_SV,
+    CVar_AddUI("ODE physics", "physics_ode_contactsurfacelayer", "0.15", CVAR_SIDE_SV,
+        CVAR_UI_SCALAR, CVAR_TAB_ODE | CVAR_TAB_CREATE_PHYS, "ODE Contact Layer",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
+    CVar_AddUI("ODE physics", "physics_ode_worldquickstep",     "1",    CVAR_SIDE_SV,
         CVAR_UI_TOGGLE, CVAR_TAB_ODE | CVAR_TAB_CREATE_PHYS, "ODE QuickStep",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
+    CVar_AddUI("ODE physics", "physics_ode_worldquickstep_iterations", "40", CVAR_SIDE_SV,
+        CVAR_UI_SCALAR, CVAR_TAB_ODE | CVAR_TAB_CREATE_PHYS, "ODE QuickStep Iter",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 1, 200);
     CVar_AddUI("ODE physics", "sv_phys_drops",                  "1",    CVAR_SIDE_SV,
         CVAR_UI_TOGGLE, CVAR_TAB_ODE, "",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
@@ -1958,17 +2096,23 @@ void() CVar_Init =
     CVar_AddUI("ODE physics", "sv_phys_unstick",                "1",    CVAR_SIDE_SV,
         CVAR_UI_TOGGLE, CVAR_TAB_ODE, "Phys Unstick",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
-    CVar_AddUI("ODE physics", "sv_physprop_hit_force",          "1600", CVAR_SIDE_SV,
+    // NOTE: the force code multiplies these by 100 now, so values are ~100x smaller
+    // than before (128 here ≈ the old 12800).  See PhysProp_TryPushFromTrace.
+    CVar_AddUI("ODE physics", "sv_physprop_hit_force",          "128", CVAR_SIDE_SV,
         CVAR_UI_SCALAR, CVAR_TAB_ODE | CVAR_TAB_CREATE_PHYS, "Hit Force",
-        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 100000);
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 2000);
     // Per-(damage × falloff) impulse magnitude applied by
     // PhysProp_TryRadiusPush when any explosion detonates near a phys
     // drop or prop.  Tuned in playtest — defaults that look reasonable
     // on paper (matching sv_physprop_hit_force scale) end up launching
     // props through the skybox because the radial spread compounds
-    // with ODE's mass/damping.  800 keeps the blasts visceral but
-    // controllable; bump higher for more chaos.
-    CVar_Add("ODE physics", "sv_physprop_explosion_force",    "1600",   CVAR_SIDE_SV);
+    // with ODE's mass/damping.  512 keeps the blasts visceral but
+    // controllable; bump higher for more chaos.  CVar_AddUI (not plain
+    // CVar_Add) so it auto-saves to data/server.cfg and sits in the
+    // physics tab next to Hit Force, its bullet-knockback sibling.
+    CVar_AddUI("ODE physics", "sv_physprop_explosion_force",   "512", CVAR_SIDE_SV,
+        CVAR_UI_SCALAR, CVAR_TAB_ODE | CVAR_TAB_CREATE_PHYS, "Explosion Force",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 2000);  // ×100 in code (512 = old ~51200)
     CVar_AddUI("ODE physics", "sv_physprop_use_force",          "800", CVAR_SIDE_SV,
         CVAR_UI_SCALAR, CVAR_TAB_ODE | CVAR_TAB_CREATE_PHYS, "Use Force",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 100000);
@@ -1990,64 +2134,117 @@ void() CVar_Init =
     CVar_AddUI("ODE physics", "sv_physprop_friction",           "1.0", CVAR_SIDE_SV,
         CVAR_UI_SCALAR, CVAR_TAB_ODE | CVAR_TAB_CREATE_PHYS, "Friction",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
+    // Unified phys-object core (PhysObj_Setup / PhysObj_Think): per-object mass
+    // overrides + shared bounce + shared sleep/wake thresholds. The barrel uses
+    // sv_physprop_mass (20); the can + weapons get their own mass; sleep_* gate the
+    // QC sleep/wake-at-rest for ALL free props (barrel/can/weapon drops).
+    CVar_Add("ODE physics", "sv_physprop_can_mass",       "2",    CVAR_SIDE_SV);
+    CVar_Add("ODE physics", "sv_physprop_bounce",         "0",    CVAR_SIDE_SV);
+    CVar_Add("ODE physics", "sv_physprop_bouncestop",     "0.5",  CVAR_SIDE_SV);
+    CVar_Add("ODE physics", "sv_physprop_sleep_speed",    "8",    CVAR_SIDE_SV);
+    CVar_Add("ODE physics", "sv_physprop_sleep_angspeed", "30",   CVAR_SIDE_SV);
+    CVar_Add("ODE physics", "sv_physprop_sleep_delay",    "0.2",  CVAR_SIDE_SV);
+    // Dropped weapons: a bit of heft + grippy (move when hit/blasted, settle quickly).
+    CVar_Add("ODE physics", "sv_physprop_weapon_mass",     "5",    CVAR_SIDE_SV);
+    CVar_Add("ODE physics", "sv_physprop_weapon_friction", "0.5",  CVAR_SIDE_SV);
 
-    // Phys-drop weapon tunables — separate family from sv_physprop_*
-    // (which targets breakables / func_physprops) so weapons can be
-    // tuned independently.  Values mirror the prior hardcoded
-    // PHYSDROP_* constants; readers in sv_weapons.qc refresh from
-    // these once per W_PhysDropEnable.
-    // CVAR_SIDE_BOTH so the F2 panel (CSQC) sees the defaults via the
-    // local cvar() fallback when the server hasn't pushed serverinfo
-    // for these knobs (they're not in SV_UpdateMovementServerInfo's
-    // push list).  Without this, the panel showed 0 across the row
-    // because the cvars were server-only and cvar() in CSQC returned
-    // 0 for unregistered names.
-    CVar_AddUI("Drop Physics", "sv_physdrop_mass",               "1.5",   CVAR_SIDE_BOTH,
-        CVAR_UI_SCALAR, CVAR_TAB_ODE, "", CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
-    // 0 = SOLID_PHYSICS_BOX  (uses the model's natural $bbox — stable
-    //                         for GoldSrc .mdl files, default).
-    // 1 = SOLID_PHYSICS_TRIMESH (visually accurate rest on the actual
-    //                         mesh — works well for IQM, can flicker /
-    //                         get stuck on GoldSrc meshes that have
-    //                         gaps or duplicate verts).
-    CVar_AddUI("Drop Physics", "sv_physdrop_geom",               "0",     CVAR_SIDE_BOTH,
+    // HL2-style carry (phys_files filing cabinet — see sv_physprop.qc Carry_*).
+    // The carried prop is driven by a per-tick velocity servo toward a hold
+    // point in front of the player; ODE resolves world collisions so it
+    // slides on walls.  drop_dist + stuck_time together force a drop only when
+    // the prop is genuinely wall-blocked (distance stays large), not on a fast
+    // turn where it briefly lags then catches up.
+    // Mass: a filing cabinet is heavy, but at 80 a bullet's impulse (force/mass)
+    // was imperceptible — 40 keeps it heavier than a barrel (sv_physprop_mass 20)
+    // while still visibly reacting to shots/explosions.  Raise sv_physprop_hit_force
+    // too if you want even more kick.
+    CVar_AddSaved("ODE physics", "sv_carry_mass",        "40",   CVAR_SIDE_SV);
+    // Speed (qu/s) the prop is shoved horizontally OUT of a player it was dropped
+    // overlapping, so it comes to rest in the clear (HL2 push-apart) before it
+    // becomes solid to you.  See phys_files_think.
+    CVar_AddSaved("ODE physics", "sv_carry_separate_speed", "140", CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "sv_carry_hold_dist",   "96",   CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "sv_carry_hold_z",      "4",    CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "sv_carry_max_speed",   "1000", CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "sv_carry_drop_dist",   "80",   CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "sv_carry_stuck_time",  "0.35", CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "sv_carry_grab_dist",   "96",   CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "sv_carry_grab_time",   "0.25", CVAR_SIDE_SV);  // pull-in animation duration on grab (0 = instant/snap)
+    CVar_AddSaved("ODE physics", "sv_carry_throw_force", "300",  CVAR_SIDE_SV);  // throw speed (qu/s), velocity-set (+ player velocity)
+    // Client: when the LOCAL player carries a prop, the client PREDICTS its hold pose
+    // from the local view (zero ping lag).  On drop/throw the predicted→authoritative
+    // handoff eases over this time so it doesn't pop (0 = instant snap).
+    CVar_Add("ODE physics", "cl_carry_smooth_time", "0.06", CVAR_SIDE_CL);
+    // Static brightness multiplier on the carried prop (colormod). 1 = none;
+    // ~0.7 ≈ the r_physdrops_maxlight 180/255 feel (uniform, not adaptive).
+    CVar_AddSaved("ODE physics", "sv_carry_lightscale",  "0.7",  CVAR_SIDE_SV);
+    // Gravity gun (shared/weapons/sh_wpn_gravitygun.qc).  grab_range = how far the
+    // primary reaches to grab a prop (held at the normal sv_carry_hold_dist).
+    // pull_dist = how far in front the black-hole gather point sits; radius = its
+    // reach.  pull_accel = black-hole ACCELERATION (qu/s²) toward the point — the
+    // force is scaled by each prop's mass so all weights accelerate the same
+    // (uniform-gravity feel) while still arcing in naturally through ODE.
+    // blast_speed = release fling VELOCITY outward; throw_speed = the +attack
+    // throw velocity (more aggressive than the bare-hands +use heave).
+    CVar_AddSaved("ODE physics", "sv_gravgun_grab_range", "600",  CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "sv_gravgun_pull_dist",  "200",  CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "sv_gravgun_radius",     "512",  CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "sv_gravgun_pull_accel", "2500", CVAR_SIDE_SV);  // qu/s² toward the point (mass-scaled force)
+    CVar_AddSaved("ODE physics", "sv_gravgun_blast_speed","700",  CVAR_SIDE_SV);  // release fling velocity outward
+    CVar_AddSaved("ODE physics", "sv_gravgun_throw_speed","1200", CVAR_SIDE_SV);  // +attack throw velocity (aggressive)
+    // Source/HL2 entity-lump props (server/sv_props.qc). enable = master switch for
+    // every prop_* classname; physics = ODE rigid bodies + +use carry (set 0 for
+    // NON-COLLIDABLE visual-only props — lighter/stabler on prop-dense Source maps,
+    // where every prop_physics is otherwise a live ODE body); default_halfsize = the
+    // fallback collision half-extent when a GoldSrc/Source .mdl ships no usable bbox.
+    CVar_Add("ODE physics", "sv_props_enable",           "1",  CVAR_SIDE_SV);
+    CVar_Add("ODE physics", "sv_props_physics",          "1",  CVAR_SIDE_SV);
+    CVar_Add("ODE physics", "sv_props_default_halfsize", "16", CVAR_SIDE_SV);
+    // Phys-prop contact FX (impact sounds + smoke).  Impact speed (qu/s) drives
+    // soft-vs-hard sound + smoke size; below _min_speed nothing fires (gentle taps).
+    // _cooldown stops a tumbling/bouncing prop machine-gunning sounds.  _slide_* drive
+    // the periodic dust puffs while a prop scrapes along a surface.
+    CVar_Add("ODE physics", "sv_physprop_impact_min_speed",  "70",   CVAR_SIDE_SV);
+    CVar_Add("ODE physics", "sv_physprop_impact_hard_speed", "260",  CVAR_SIDE_SV);
+    CVar_Add("ODE physics", "sv_physprop_impact_cooldown",   "0.11", CVAR_SIDE_SV);
+    CVar_Add("ODE physics", "sv_physprop_slide_min_speed",   "60",   CVAR_SIDE_SV);
+    CVar_Add("ODE physics", "sv_physprop_slide_interval",    "0.18", CVAR_SIDE_SV);
+    // 1 = scrape-loop volume TRACKS slide speed (re-issues the loop on a notable speed
+    // change — restarts the sample, ~inaudible for a rough scrape; throttled+deadbanded).
+    // 0 = volume fixed at the speed it had when the scrape started.
+    CVar_Add("ODE physics", "sv_physprop_scrape_track",      "1",    CVAR_SIDE_SV);
+
+    // Weapon-drop SHAPE tunables (sv_physprop_weapon_*) — the ODE collision box +
+    // hitscan trace-AABB for dropped guns.  Mass / friction / bounce / damping /
+    // sleep are now the SHARED phys-object family (sv_physprop_*), applied in
+    // PhysObj_Setup — only the weapon-specific COLLISION SHAPE lives here.
+    // CVAR_SIDE_BOTH so the F2 panel (CSQC) sees the defaults via the local cvar()
+    // fallback when the server hasn't pushed serverinfo for these knobs.
+    // 0 = SOLID_PHYSICS_BOX (model $bbox — stable for GoldSrc .mdl, default).
+    // 1 = SOLID_PHYSICS_TRIMESH (accurate rest on the mesh — good for IQM, can
+    //     flicker / stick on GoldSrc meshes with gaps or duplicate verts).
+    CVar_AddUI("Drop Physics", "sv_physprop_weapon_geom",         "0",     CVAR_SIDE_BOTH,
         CVAR_UI_TOGGLE, CVAR_TAB_ODE, "", CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
-    // Tight gun-shaped half-extents used as the ODE collision shape (so
-    // dropped guns rest on their silhouette, not on AABB corners).  Set
-    // any axis to 0 to fall back to the model's natural mins/maxs.
-    CVar_AddUI("Drop Physics", "sv_physdrop_bbox_x",             "16",    CVAR_SIDE_BOTH,
+    // Tight gun-shaped half-extents used as the ODE collision shape (so dropped
+    // guns rest on their silhouette, not on AABB corners).  Set any axis to 0 to
+    // fall back to the model's natural mins/maxs.
+    // Gun-shaped (long X, thin Y, low Z) so a sliding gun stops at its silhouette,
+    // not at a fat square box's edge ("phantom wall").  ODE rotates the box with the
+    // tumbling body, so these are the gun's rest-pose half-extents.
+    CVar_AddUI("Drop Physics", "sv_physprop_weapon_bbox_x",       "12",    CVAR_SIDE_BOTH,
         CVAR_UI_SCALAR, CVAR_TAB_ODE, "", CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
-    CVar_AddUI("Drop Physics", "sv_physdrop_bbox_y",             "16",     CVAR_SIDE_BOTH,
+    CVar_AddUI("Drop Physics", "sv_physprop_weapon_bbox_y",       "5",     CVAR_SIDE_BOTH,
         CVAR_UI_SCALAR, CVAR_TAB_ODE, "", CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
-    CVar_AddUI("Drop Physics", "sv_physdrop_bbox_z",             "4",     CVAR_SIDE_BOTH,
+    CVar_AddUI("Drop Physics", "sv_physprop_weapon_bbox_z",       "3",     CVAR_SIDE_BOTH,
         CVAR_UI_SCALAR, CVAR_TAB_ODE, "", CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
-    // Inflated traceline-AABB half-extents wrapped around hitscan traces
-    // by W_PhysDrops{Expand,Restore}TraceBboxes (mirrors the playermodel
-    // sv_hitbox_expand pattern).  Must enclose the tight ODE box at any
-    // rotation — sphere radius of vlen(12,5,3) ~13, so 16 on every axis
-    // covers an upended gun.  Restored each tick before ODE's next step
-    // so the cached geom size never differs.
-    CVar_AddUI("Drop Physics", "sv_physdrop_trace_bbox_x",       "32",    CVAR_SIDE_BOTH,
+    // Inflated traceline-AABB half-extents wrapped around hitscan traces by
+    // W_PhysDrops{Expand,Restore}TraceBboxes (mirrors the sv_hitbox_expand
+    // playermodel pattern).  Must enclose the tight ODE box at any rotation.
+    CVar_AddUI("Drop Physics", "sv_physprop_weapon_trace_bbox_x", "32",    CVAR_SIDE_BOTH,
         CVAR_UI_SCALAR, CVAR_TAB_ODE, "", CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
-    CVar_AddUI("Drop Physics", "sv_physdrop_trace_bbox_y",       "32",    CVAR_SIDE_BOTH,
+    CVar_AddUI("Drop Physics", "sv_physprop_weapon_trace_bbox_y", "32",    CVAR_SIDE_BOTH,
         CVAR_UI_SCALAR, CVAR_TAB_ODE, "", CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
-    CVar_AddUI("Drop Physics", "sv_physdrop_trace_bbox_z",       "32",    CVAR_SIDE_BOTH,
-        CVAR_UI_SCALAR, CVAR_TAB_ODE, "", CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
-    CVar_AddUI("Drop Physics", "sv_physdrop_friction",           "0.18",  CVAR_SIDE_BOTH,
-        CVAR_UI_SCALAR, CVAR_TAB_ODE, "", CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
-    CVar_AddUI("Drop Physics", "sv_physdrop_bounce",             "0",     CVAR_SIDE_BOTH,
-        CVAR_UI_SCALAR, CVAR_TAB_ODE, "", CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
-    CVar_AddUI("Drop Physics", "sv_physdrop_bouncestop",         "0.5",   CVAR_SIDE_BOTH,
-        CVAR_UI_SCALAR, CVAR_TAB_ODE, "", CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
-    CVar_AddUI("Drop Physics", "sv_physdrop_damp_lin",           "0.005", CVAR_SIDE_BOTH,
-        CVAR_UI_SCALAR, CVAR_TAB_ODE, "", CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
-    CVar_AddUI("Drop Physics", "sv_physdrop_damp_ang",           "0.005", CVAR_SIDE_BOTH,
-        CVAR_UI_SCALAR, CVAR_TAB_ODE, "", CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
-    CVar_AddUI("Drop Physics", "sv_physdrop_sleep_speed",        "8",     CVAR_SIDE_BOTH,
-        CVAR_UI_SCALAR, CVAR_TAB_ODE, "", CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
-    CVar_AddUI("Drop Physics", "sv_physdrop_sleep_angspeed",     "30",    CVAR_SIDE_BOTH,
-        CVAR_UI_SCALAR, CVAR_TAB_ODE, "", CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
-    CVar_AddUI("Drop Physics", "sv_physdrop_sleep_delay",        "0.2",   CVAR_SIDE_BOTH,
+    CVar_AddUI("Drop Physics", "sv_physprop_weapon_trace_bbox_z", "32",    CVAR_SIDE_BOTH,
         CVAR_UI_SCALAR, CVAR_TAB_ODE, "", CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
 
     // ---------- Player movement ----------
@@ -2142,9 +2339,13 @@ void(string path) CVar_WriteServerCfg =
     // Engine-only cvars not managed by the table.  Kept at the top
     // so the engine still sees them on `exec server.cfg`.  Mirrors
     // the original 2-line server.cfg the project shipped with.
+    // nettest: use `set` (not bare `cvar value`).  A DEDICATED server execs server.cfg at STARTUP, before the
+    // SSQC/ODE-plugin register their cvars — so bare `physics_ode_* / sv_physprop_* / sv_carry_*` lines hit
+    // "Unknown command" and are dropped (the admin's tuning is lost).  `set` CREATES the cvar with the value,
+    // and FTE preserves that value when the cvar is later registered, so the setting survives.
     fputs(f, "\n// ---------- Engine ----------\n");
-    fputs(f, "sv_maxrate 0\n");
-    fputs(f, "sv_maxdrate 0\n");
+    fputs(f, "set sv_maxrate 0\n");
+    fputs(f, "set sv_maxdrate 0\n");
 
     string current = "";
     float i;
@@ -2160,7 +2361,7 @@ void(string path) CVar_WriteServerCfg =
         }
         // Persist the LIVE value, not the default — admins want their
         // current settings saved, not a wipe-back to manifest defaults.
-        fputs(f, sprintf("%s \"%s\"\n", g_cvar_name[i], cvar_string(g_cvar_name[i])));
+        fputs(f, sprintf("set %s \"%s\"\n", g_cvar_name[i], cvar_string(g_cvar_name[i])));
     }
 
     fclose(f);

@@ -1,3 +1,7 @@
+// Not in the menu's stock defs — declare the named builtin so we can tell which
+// mounted game/package each map came from (used to bucket the map list by game).
+string(searchhandle handle, float num) search_getpackagename = #0:search_getpackagename;
+
 strbuf create_server_maps;
 float create_server_maps_loaded;
 float create_server_selected_map;
@@ -53,6 +57,13 @@ float create_server_voip_echo;
 float create_server_seeded;
 float create_server_tab;    // 0 = server, 1 = game, 2 = movement
 float create_server_tickrate_index;
+float create_server_game_filter;	// map-list filter: 0=All 1=Nettest 2=CS 3=HL 4=CoD1 5=CoD2 6=Source
+string create_server_game_labels[7] = { "Net", "CS", "HL", "CoD1", "CoD2", "HL2", "CSS" };
+// Which game categories actually have maps in the offline index (data/maps_index.txt),
+// keyed by game id (1..7).  Built once by create_server_scan_avail(); the filter row only
+// draws tabs for games that are present, so e.g. the CoD tabs vanish without CoD content.
+float  create_server_game_has_maps[8];
+float  create_server_avail_scanned;
 
 float tickrates[] = { 64, 66, 72, 85, 100, 128, 200, 300 };
 string tickrate_labels[] = { "64 (CS:GO)", "66 (CS:S)", "72 (Quake)", "85 (CS:GO)", "100 (CS:S)", "128 (CS:GO)", "200 (FTE)", "300 (FTE)" };
@@ -165,8 +176,12 @@ void() create_server_load_loadout_options =
     for (i = 0; i < WeaponManifest_LoadoutCount(WMF_SLOT_MELEE); i++)
         bufstr_add(cs_default_melee_options, WeaponManifest_LoadoutLabel(WMF_SLOT_MELEE, i), FALSE);
 
+    // Grenades are a multi-select tickbox list, so the "None" entry (loadout
+    // index 0) is meaningless here — untick everything == no grenades.  Start
+    // at index 1 to drop it; this shifts the tickbox-bit <-> weapon mapping by
+    // one, handled in the mask<->cvar conversions below.
     cs_default_utility_options = buf_create();
-    for (i = 0; i < WeaponManifest_LoadoutCount(WMF_SLOT_UTILITY); i++)
+    for (i = 1; i < WeaponManifest_LoadoutCount(WMF_SLOT_UTILITY); i++)
         bufstr_add(cs_default_utility_options, WeaponManifest_LoadoutLabel(WMF_SLOT_UTILITY, i), FALSE);
 
     cs_default_options_loaded = TRUE;
@@ -187,9 +202,11 @@ float(string list) create_server_utility_mask_from_cvar =
     {
         float id  = create_server_weapon_id_from_string_or_default(argv(i), 0);
         float idx = WeaponManifest_LoadoutFindIndex(WMF_SLOT_UTILITY, id);
-        if (idx < 0 || idx >= WeaponManifest_LoadoutCount(WMF_SLOT_UTILITY))
+        // Options start at loadout index 1 (None dropped), so the tickbox bit
+        // is idx-1.  Skip None / unknown ids.
+        if (idx < 1 || idx >= WeaponManifest_LoadoutCount(WMF_SLOT_UTILITY))
             continue;
-        mask = mask | pow(2, idx);
+        mask = mask | pow(2, idx - 1);
     }
     return mask;
 };
@@ -199,13 +216,14 @@ float(string list) create_server_utility_mask_from_cvar =
 string(float mask) create_server_utility_mask_to_cvar =
 {
     string out = "";
-    float count = WeaponManifest_LoadoutCount(WMF_SLOT_UTILITY);
+    // Tickbox bit i maps to loadout index i+1 (None at index 0 is not shown).
+    float grenades = WeaponManifest_LoadoutCount(WMF_SLOT_UTILITY) - 1;
     float i, n_set = 0;
-    for (i = 0; i < count; i++)
+    for (i = 0; i < grenades; i++)
     {
         if (!(mask & pow(2, i)))
             continue;
-        float id = WeaponManifest_LoadoutWeapon(WMF_SLOT_UTILITY, i);
+        float id = WeaponManifest_LoadoutWeapon(WMF_SLOT_UTILITY, i + 1);
         if (n_set == 0)
             out = ftos(id);
         else
@@ -624,10 +642,168 @@ float(string id, vector pos, vector size, strbuf options, __inout float selected
 	return changed;
 };
 
+// Bucket a map by its SOURCE GAME spec (the fs_addons.txt dir it came from, as written into
+// data/maps_index.txt by the engine's `fs_indexmaps`).  This is the reliable signal — the spec is
+// the real game dir, so CS:S ("...Counter-Strike Source/cstrike") and CS1.6 ("...Half-Life/cstrike")
+// are distinguished even though both end in "cstrike" and share map names (de_dust2).
+// Returns the game id used by create_server_game_filter (1..7).
+float(string spec) create_server_map_game =
+{
+	string p = strtolower(spec);
+	if (strstrofs(p, "call of duty 2") >= 0) return 5;	// CoD2
+	if (strstrofs(p, "call of duty") >= 0)   return 4;	// CoD1
+	if (strstrofs(p, "counter-strike source") >= 0) return 7;	// CS:Source (own category, checked before cstrike)
+	if (strstrofs(p, "half-life 2") >= 0)    return 6;	// HL2 (Source)
+	if (strstrofs(p, "cstrike") >= 0)        return 2;	// CS 1.6 (GoldSrc cstrike gamedir)
+	if (strstrofs(p, "valve") >= 0)          return 3;	// Half-Life
+	if (strstrofs(p, "nettest") >= 0)        return 1;	// this mod
+	return 6;	// HL2 / other Source
+};
+
+// Read the engine-built OFFLINE map index (data/maps_index.txt — one "<sourcespec>\t<mapname>"
+// line per map, written by `fs_indexmaps`; no game is mounted to build it).  Add the maps whose
+// source game matches the active filter (0 = All).  Replaces the old search_begin scan, which
+// only saw MOUNTED games and shadowed same-named maps (the missing-CS:S-maps bug).
+void(float filter) create_server_read_index =
+{
+	float fh = fopen("data/maps_index.txt", FILE_READ);
+	if (fh < 0)
+		return;
+	string line = fgets(fh);
+	while (line)
+	{
+		float n = strlen(line);
+		if (n > 0 && substring(line, n - 1, 1) == "\r")
+		{
+			line = substring(line, 0, n - 1);
+			n -= 1;
+		}
+		float tab = strstrofs(line, "\t");
+		if (tab > 0)
+		{
+			string spec = substring(line, 0, tab);
+			string mapname = substring(line, tab + 1, n - tab - 1);
+			if (mapname != "" &&
+			    (filter == 0 || create_server_map_game(spec) == filter) &&
+			    !menu_buf_contains(create_server_maps, mapname))
+				bufstr_add(create_server_maps, mapname, FALSE);
+		}
+		line = fgets(fh);
+	}
+	fclose(fh);
+};
+
+// One-time scan of the offline index: mark which game categories (1..7) actually have maps,
+// so the filter row can hide tabs for games you don't have loaded (no CoD content -> no CoD
+// tab).  Net (1) is the base mod and is always shown.  Cheap (single file read), gated by
+// create_server_avail_scanned so it runs once per session, not per menu frame.
+void() create_server_scan_avail =
+{
+	float gid;
+	for (gid = 0; gid <= 7; gid += 1)
+		create_server_game_has_maps[gid] = 0;
+	create_server_game_has_maps[1] = 1;	// Net = the running mod, always available
+
+	float fh = fopen("data/maps_index.txt", FILE_READ);
+	if (fh >= 0)
+	{
+		string line = fgets(fh);
+		while (line)
+		{
+			float n = strlen(line);
+			if (n > 0 && substring(line, n - 1, 1) == "\r")
+			{
+				line = substring(line, 0, n - 1);
+				n -= 1;
+			}
+			float tab = strstrofs(line, "\t");
+			if (tab > 0)
+			{
+				string spec = substring(line, 0, tab);
+				string mapname = substring(line, tab + 1, n - tab - 1);
+				if (mapname != "")
+					create_server_game_has_maps[create_server_map_game(spec)] = 1;
+			}
+			line = fgets(fh);
+		}
+		fclose(fh);
+	}
+	create_server_avail_scanned = 1;
+};
+
+// Find a map's source-game spec in the index.  Filter-aware: when a game tab is active, match THAT
+// game so de_dust2 resolves to the right one (CS:S vs CS1.6).  Returns "" if not found.
+string(string mapname, float filter) create_server_index_spec_for =
+{
+	float fh = fopen("data/maps_index.txt", FILE_READ);
+	if (fh < 0)
+		return "";
+	string result = "";
+	string line = fgets(fh);
+	while (line)
+	{
+		float n = strlen(line);
+		if (n > 0 && substring(line, n - 1, 1) == "\r")
+		{
+			line = substring(line, 0, n - 1);
+			n -= 1;
+		}
+		float tab = strstrofs(line, "\t");
+		if (tab > 0)
+		{
+			string spec = substring(line, 0, tab);
+			string mn = substring(line, tab + 1, n - tab - 1);
+			if (mn == mapname && (filter == 0 || create_server_map_game(spec) == filter))
+			{
+				result = spec;
+				break;
+			}
+		}
+		line = fgets(fh);
+	}
+	fclose(fh);
+	return result;
+};
+
+// fs_useaddons argument string for a map's source game: BASE game(s) first, then the source dir,
+// each quoted (specs contain spaces).  "" => clear all addons (a nettest/base map needs none).
+// CS:Source maps need the HL2 base content; CS 1.6 maps need the Half-Life (valve) base.
+// The mod CURRENTLY borrows gameplay/map assets from Half-Life (valve) + CS 1.6 (cstrike), so those
+// are the always-mounted BASE that EVERY map needs (nettest's own maps included) — the selected map's
+// own game is ADDED on top, never swapped in.  A per-game EXCLUSIVE mount broke things: dropping
+// valve/cstrike for a CS:S/HL2/CoD map strips the mod itself (missing player models/textures -> crash;
+// "maps that worked before stop working").  When nettest is fully self-contained, empty `base` below
+// to make it truly lazy (only each game's own content mounts for its own maps).
+string(string spec) create_server_deps_for_spec =
+{
+	string base = "\"steam:Half-Life/valve\" \"steam:Half-Life/cstrike\"";
+	float gid = create_server_map_game(spec);
+	if (gid == 7)               // CS:Source -> base + HL2 content + the CS:S cstrike dir
+		return strcat(base, " \"steam:Half-Life 2/hl2\" \"steam:Counter-Strike Source/cstrike\"");
+	if (gid == 6)               // HL2 -> base + hl2
+		return strcat(base, " \"steam:Half-Life 2/hl2\"");
+	if (gid == 4 || gid == 5)   // CoD1/CoD2 -> base + that CoD dir (its content lives in .iwd/.pk3)
+		return strcat(base, " \"", spec, "\"");
+	return base;                // nettest / CS 1.6 / HL -> just the always-mounted base
+};
+
+// Lazy-mount exactly the given map's game (+ base deps) on demand.  Must run right before the
+// `map` command (same command buffer, FIFO) so the load sees the content mounted.  An empty deps
+// string (nettest/base map) clears all addons so a previously-selected game's content can't shadow.
+void(string mapname, float filter) create_server_mount_for_map =
+{
+	string spec = create_server_index_spec_for(mapname, filter);
+	if (spec == "")
+		return;	// not indexed (e.g. true first boot before fs_indexmaps) -> leave the addon set as-is
+	// deps is the always-mounted base (valve+cstrike) + this map's own game.  Setting it drops any
+	// game from a PREVIOUS selection that this map doesn't use (the engine no-ops when unchanged, so
+	// re-selecting the same game / a base-only map at boot costs nothing).
+	string deps = create_server_deps_for_spec(spec);
+	localcmd(strcat("fs_useaddons ", deps, "\n"));
+};
+
 void() create_server_load_maps =
 {
-	searchhandle handle = -1;
-	float count = 0;
 	float map_count = 0;
 	string previous_map = "";
 
@@ -649,21 +825,9 @@ void() create_server_load_maps =
 	create_server_map_dropdown_open = FALSE;
 	create_server_map_scroll = '0 0 0';
 
-	handle = search_begin("maps/*.bsp", TRUE, TRUE);
-	if (handle < 0)
-		return;
-
-	count = search_getsize(handle);
-	for (float index = 0; index < count; index += 1)
-	{
-		string mapname = menu_map_name_from_filename(search_getfilename(handle, index));
-
-		if (mapname == "" || menu_buf_contains(create_server_maps, mapname))
-			continue;
-
-		bufstr_add(create_server_maps, mapname, FALSE);
-	}
-	search_end(handle);
+	// Read the offline index (both .bsp and .d3dbsp were indexed by the engine), bucketed by
+	// source game via create_server_game_filter (0 = All).
+	create_server_read_index(create_server_game_filter);
 
 	map_count = buf_getsize(create_server_maps);
 	if (map_count > 1)
@@ -780,6 +944,11 @@ void() create_server_launch =
 		cvar_set("mp_falldamage",   "0");
 		cvar_set("mp_nomapweapons", "1");
 	}
+	else if (create_server_gamemode == 5)    // DEFUSE — one life per round
+	{
+		cvar_set("mp_respawn",      "0");
+		cvar_set("mp_disabledoors", "0");
+	}
 	else                                      // TDM (0) — fallback
 	{
 		cvar_set("mp_respawn",      "1");
@@ -837,7 +1006,58 @@ void() create_server_launch =
 	// move sv_port into 27501..27600 to avoid blocking 27500 for another
 	// local server — this restores the form's value).
 	localcmd(sprintf("sv_port %s\n", create_server_port_text));
-	localcmd(sprintf("map %s\n", mapname));
+	// Lazy-mount: bring up exactly this map's game (+ base deps) BEFORE the map load.  Same command
+	// buffer (FIFO) so `map` sees the content mounted; clears any previously-active game so a
+	// same-named map (CS:S vs CS1.6 de_dust2) can't load the wrong content.
+	create_server_mount_for_map(mapname, create_server_game_filter);
+	// nettest (P26 Part 2): on a specific game tab, load THAT game's copy of a same-named map by qualifying
+	// the map name with its source spec ("map @<spec>/<mapname>").  The engine biases ONLY the worldmodel
+	// locate to that game's dir, so e.g. CS:S cs_assault loads instead of the higher-priority CS1.6 one.
+	// The All tab (filter 0) keeps plain highest-priority behaviour.  The spec contains spaces and a ':' /
+	// '/', so the whole arg MUST be quoted to stay one token (the engine splits the tag on the LAST '/').
+	string spec = "";
+	if (create_server_game_filter != 0)
+		spec = create_server_index_spec_for(mapname, create_server_game_filter);
+	if (spec != "")
+		localcmd(sprintf("map \"@%s/%s\"\n", spec, mapname));
+	else
+		localcmd(sprintf("map %s\n", mapname));
+};
+
+// Game-filter tab row for the map list — click a game to show only its maps.
+void(vector at, float w) create_server_draw_game_filter =
+{
+	float gid;
+	// Count only the games that actually have maps — the tab row sizes/positions
+	// itself to just those, so absent games (e.g. no CoD content) leave no gap.
+	float n = 0;
+	for (gid = 1; gid <= 7; gid += 1)
+		if (create_server_game_has_maps[gid])
+			n += 1;
+	if (n < 1) n = 1;
+
+	float g = 2;
+	float bw = (w - g * (n - 1)) / n;
+	vector on_col = MENU_BUTTON_RETURN,  on_brd = MENU_BUTTON_RETURN_BORDER;
+	vector off_col = MENU_BG_DARK,       off_brd = MENU_BORDER;
+
+	float slot = 0;
+	for (gid = 1; gid <= 7; gid += 1)
+	{
+		if (!create_server_game_has_maps[gid])
+			continue;
+		float sel = (create_server_game_filter == gid);
+		if (my_button_colored(strcat("gamefilter_", ftos(gid)), [at_x + slot * (bw + g), at_y], [bw, 18],
+			create_server_game_labels[gid - 1], sel ? on_col : off_col, sel ? on_brd : off_brd))
+		{
+			if (create_server_game_filter != gid)
+			{
+				create_server_game_filter = gid;
+				create_server_load_maps();
+			}
+		}
+		slot += 1;
+	}
 };
 
 void() create_server_menu =
@@ -852,7 +1072,7 @@ void() create_server_menu =
 	float right_width = size_x - right_x - pad;
 	float property_x = right_x + 10;
 	float property_width = max(180, size_x - property_x - pad);
-	float map_panel_height = size_y - 64 - footer_height;
+	float map_panel_height = size_y - 64 - footer_height - 22;	// -22 for the game-filter tab row
 	float xpos = 0;
 	float ypos = 0;
 	float has_maps = FALSE;
@@ -861,6 +1081,16 @@ void() create_server_menu =
 	string selected_map = "";
 
 	create_server_seed_fields();
+	if (!create_server_avail_scanned)
+		create_server_scan_avail();
+	// Default to the Net tab — never "All" (0).  Also fall back to Net if the
+	// remembered tab is a game you no longer have maps for, so you can't get stuck
+	// on a tab that isn't drawn anymore; reload the list when the tab changes.
+	if (create_server_game_filter < 1 || !create_server_game_has_maps[create_server_game_filter])
+	{
+		create_server_game_filter = 1;
+		create_server_maps_loaded = FALSE;
+	}
 	if (!create_server_maps_loaded)
 		create_server_load_maps();
 
@@ -884,6 +1114,8 @@ void() create_server_menu =
 	ypos = 36;
 	sui_text([xpos, ypos], MENU_TEXT_SMALL, "Map Selection", MENU_TEXT_1, 1, 0);
 	ypos += 16;
+	create_server_draw_game_filter([xpos, ypos], left_width);
+	ypos += 22;
 	menu_dropdown("create_map", [xpos, ypos], [left_width, map_panel_height], create_server_maps, create_server_selected_map, create_server_map_dropdown_open, create_server_map_scroll, TRUE);
 	ypos += 24 + dropdown_height + 8;
 

@@ -116,6 +116,17 @@ void() env_sprite =
         return;
     }
 
+    // nettest: a Source sprite is a .vmt MATERIAL, not a model. Feeding it to
+    // precache_model/setmodel loads it as a model (mod_dummy) and the sprite
+    // render path then crashes on the dummy. FTE can't render a Source .vmt
+    // sprite, so drop the entity (the glow is simply absent) rather than crash.
+    if (substring(self.model, strlen(self.model) - 4, 4) == ".vmt")
+    {
+        dprint(sprintf("env_sprite: refusing Source .vmt sprite '%s'\n", self.model));
+        remove(self);
+        return;
+    }
+
     precache_model(self.model);
     setmodel(self, self.model);
 

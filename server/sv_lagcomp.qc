@@ -48,32 +48,37 @@ float lagcomp_head[LAGCOMP_MAX_PLAYERS];
 float lagcomp_head_time[LAGCOMP_MAX_PLAYERS];
 float lagcomp_valid[LAGCOMP_MAX_PLAYERS];  // number of filled slots, capped at RING_SIZE
 
-float lc_time              [LAGCOMP_RING_TOTAL];
-float lc_frame             [LAGCOMP_RING_TOTAL];
-float lc_frame1time        [LAGCOMP_RING_TOTAL];
-float lc_frame2            [LAGCOMP_RING_TOTAL];
-float lc_frame2time        [LAGCOMP_RING_TOTAL];
-float lc_lerpfrac          [LAGCOMP_RING_TOTAL];
-float lc_baseframe         [LAGCOMP_RING_TOTAL];
-float lc_baseframe1time    [LAGCOMP_RING_TOTAL];
-float lc_baseframe2        [LAGCOMP_RING_TOTAL];
-float lc_baseframe2time    [LAGCOMP_RING_TOTAL];
-float lc_baselerpfrac      [LAGCOMP_RING_TOTAL];
-float lc_subblendfrac      [LAGCOMP_RING_TOTAL];
-float lc_subblend2frac     [LAGCOMP_RING_TOTAL];
-float lc_basesubblendfrac  [LAGCOMP_RING_TOTAL];
-float lc_basesubblend2frac [LAGCOMP_RING_TOTAL];
-float lc_bonecontrol1      [LAGCOMP_RING_TOTAL];
-float lc_bonecontrol2      [LAGCOMP_RING_TOTAL];
-float lc_bonecontrol3      [LAGCOMP_RING_TOTAL];
-float lc_bonecontrol4      [LAGCOMP_RING_TOTAL];
-float lc_basebone          [LAGCOMP_RING_TOTAL];
+// These 22 ring buffers (20 float + 2 vector below) are `auto` (memalloc at
+// load) so they don't reserve ~106k compile-time globals — that's what keeps
+// qwprogs under the 65530 16-bit threshold.  memalloc zero-inits, matching the
+// old static-BSS behaviour.  Accessed only during gameplay traces (well after
+// worldspawn allocates them).  See sv_defs.qc + [[fteqcc-compiler-hang]].
+auto float lc_time              [LAGCOMP_RING_TOTAL];
+auto float lc_frame             [LAGCOMP_RING_TOTAL];
+auto float lc_frame1time        [LAGCOMP_RING_TOTAL];
+auto float lc_frame2            [LAGCOMP_RING_TOTAL];
+auto float lc_frame2time        [LAGCOMP_RING_TOTAL];
+auto float lc_lerpfrac          [LAGCOMP_RING_TOTAL];
+auto float lc_baseframe         [LAGCOMP_RING_TOTAL];
+auto float lc_baseframe1time    [LAGCOMP_RING_TOTAL];
+auto float lc_baseframe2        [LAGCOMP_RING_TOTAL];
+auto float lc_baseframe2time    [LAGCOMP_RING_TOTAL];
+auto float lc_baselerpfrac      [LAGCOMP_RING_TOTAL];
+auto float lc_subblendfrac      [LAGCOMP_RING_TOTAL];
+auto float lc_subblend2frac     [LAGCOMP_RING_TOTAL];
+auto float lc_basesubblendfrac  [LAGCOMP_RING_TOTAL];
+auto float lc_basesubblend2frac [LAGCOMP_RING_TOTAL];
+auto float lc_bonecontrol1      [LAGCOMP_RING_TOTAL];
+auto float lc_bonecontrol2      [LAGCOMP_RING_TOTAL];
+auto float lc_bonecontrol3      [LAGCOMP_RING_TOTAL];
+auto float lc_bonecontrol4      [LAGCOMP_RING_TOTAL];
+auto float lc_basebone          [LAGCOMP_RING_TOTAL];
 
 // Origin + angles tracked alongside pose so the rewound trace runs
 // against the position the shooter saw, not the current server-time
 // position.  Without this, hitscan would still need a per-ping lead.
-vector lc_origin           [LAGCOMP_RING_TOTAL];
-vector lc_angles           [LAGCOMP_RING_TOTAL];
+auto vector lc_origin           [LAGCOMP_RING_TOTAL];
+auto vector lc_angles           [LAGCOMP_RING_TOTAL];
 
 // Bracket outputs (set by Lagcomp_FindBracket, consumed by Lagcomp_RewindPlayer)
 float lc_bracket_newer_idx;

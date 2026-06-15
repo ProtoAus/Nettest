@@ -123,7 +123,10 @@ void() CSQC_ViewFX_UpdateState =
     float speed_ref = cvar("cl_camerabob_speed_ref");
     if (speed_ref < 1) speed_ref = 250;
     float target = 0;
-    if (grace_grounded && hspeed > 25)
+    // func_vehicle: the seat-bolt gives the driver the car's velocity (so a
+    // dismount inherits its momentum), but they're pinned to the seat — don't let
+    // that velocity drive the run head-bob.  Gate the bob off while driving.
+    if (grace_grounded && hspeed > 25 && !predicted_player.pm_driving)
         target = bound(0, hspeed / speed_ref, 1.2);
     float fade_t = cvar("cl_camerabob_fade_time");
     if (fade_t < 0.001) fade_t = 0.001;
@@ -283,6 +286,7 @@ void() CSQC_ViewFX_UpdateState =
             && PM_ReadMovevar("sv_codscopes", 0)
             && predicted_player.weaponstate != WS_RELOAD
             && !predicted_player.grapple_rope_active
+            && !predicted_player.pm_carrying
             && !(PM_ReadMovevar("sv_codladders", 0)
                  && predicted_player.pm_on_ladder_cached)
             && !csqc_codscope_fire_blocks_ads)
@@ -311,6 +315,8 @@ void() CSQC_ViewFX_UpdateState =
     float lower_target = 0;
     if (predicted_player.grapple_rope_active)
         lower_target = 1;
+    else if (predicted_player.pm_carrying && predicted_player.weapon != WEP_GRAVITYGUN)
+        lower_target = 1;   // HL2 +use carry drops the gun off-screen; the gravity gun stays up
     else if (PM_ReadMovevar("sv_codladders", 0)
              && predicted_player.pm_on_ladder_cached)
         lower_target = 1;
@@ -404,13 +410,80 @@ vector csqc_viewfx_pose_ang;
 //  the inner sway-pivot bone lookup which save/restores cleanly).
 //  Writes the result to csqc_viewfx_pose_pos / _ang.
 // ----------------------------------------------------------------
+// ----------------------------------------------------------------
+//  Throttled cache of the STATIC viewmodel tuning cvars.  ComputeOffsets ran
+//  ~24 cvar() lookups + 6 cvar(strcat()) for the ADS pose EVERY render frame;
+//  these only change when the player edits a setting.  Refresh them at
+//  cl_hud_fps (30 Hz default) into globals — the live motion still comes from
+//  the per-tick csqc_viewfx_* envelopes, so the gun stays smooth.  Live tuning
+//  applies within ~1/hz s.
+// ----------------------------------------------------------------
+float vfx_c_next;
+float vfx_c_bob, vfx_c_bob_sprint_mult, vfx_c_bob_pos_scale, vfx_c_bob_ang_scale;
+float vfx_c_weight, vfx_c_weight_gun_scale;
+float vfx_c_sway, vfx_c_sway_pivot, vfx_c_sway_pos_scale;
+float vfx_c_lowering, vfx_c_lowering_amount;
+float vfx_c_sprint, vfx_c_sprint_pitch, vfx_c_sprint_yaw, vfx_c_sprint_roll;
+float vfx_c_sprint_forward, vfx_c_sprint_right, vfx_c_sprint_down;
+float vfx_c_lefthand;
+float vfx_c_ads_pitch, vfx_c_ads_yaw, vfx_c_ads_roll, vfx_c_ads_forward, vfx_c_ads_right, vfx_c_ads_down;
+float vfx_c_lower_pitch, vfx_c_lower_yaw, vfx_c_lower_roll, vfx_c_lower_forward, vfx_c_lower_right, vfx_c_lower_down;
+
+void() CSQC_ViewFX_RefreshCvarCache =
+{
+    if (cltime < vfx_c_next)
+        return;
+    float hz = cvar("cl_hud_fps");
+    if (hz <= 0) hz = 30;
+    vfx_c_next = cltime + 1.0 / hz;
+
+    vfx_c_bob              = cvar("cl_viewmodelbob");
+    vfx_c_bob_sprint_mult  = cvar("cl_viewmodelbob_sprint_mult");
+    vfx_c_bob_pos_scale    = cvar("cl_viewmodelbob_pos_scale");
+    vfx_c_bob_ang_scale    = cvar("cl_viewmodelbob_ang_scale");
+    vfx_c_weight           = cvar("cl_viewmodelweight");
+    vfx_c_weight_gun_scale = cvar("cl_viewmodelweight_gun_scale");
+    vfx_c_sway             = cvar("cl_viewmodelsway");
+    vfx_c_sway_pivot       = cvar("cl_viewmodelsway_pivot");
+    vfx_c_sway_pos_scale   = cvar("cl_viewmodelsway_pos_scale");
+    vfx_c_lowering         = cvar("cl_viewmodellowering");
+    vfx_c_lowering_amount  = cvar("cl_viewmodellowering_amount");
+    vfx_c_sprint           = cvar("cl_viewmodellowering_sprint");
+    vfx_c_sprint_pitch     = cvar("cl_viewmodellowering_sprint_pitch");
+    vfx_c_sprint_yaw       = cvar("cl_viewmodellowering_sprint_yaw");
+    vfx_c_sprint_roll      = cvar("cl_viewmodellowering_sprint_roll");
+    vfx_c_sprint_forward   = cvar("cl_viewmodellowering_sprint_forward");
+    vfx_c_sprint_right     = cvar("cl_viewmodellowering_sprint_right");
+    vfx_c_sprint_down      = cvar("cl_viewmodellowering_sprint_down");
+    vfx_c_lefthand         = cvar("cl_lefthand");
+    vfx_c_lower_pitch      = cvar("cl_viewmodel_lower_pitch");
+    vfx_c_lower_yaw        = cvar("cl_viewmodel_lower_yaw");
+    vfx_c_lower_roll       = cvar("cl_viewmodel_lower_roll");
+    vfx_c_lower_forward    = cvar("cl_viewmodel_lower_forward");
+    vfx_c_lower_right      = cvar("cl_viewmodel_lower_right");
+    vfx_c_lower_down       = cvar("cl_viewmodel_lower_down");
+
+    // ADS pose resolved from the current weapon's prefix (changes on equip).
+    string ads_pfx = "cl_ads";
+    if (predicted_player && predicted_player.weapon_ads_prefix != "")
+        ads_pfx = predicted_player.weapon_ads_prefix;
+    vfx_c_ads_pitch   = cvar(strcat(ads_pfx, "_pitch"));
+    vfx_c_ads_yaw     = cvar(strcat(ads_pfx, "_yaw"));
+    vfx_c_ads_roll    = cvar(strcat(ads_pfx, "_roll"));
+    vfx_c_ads_forward = cvar(strcat(ads_pfx, "_forward"));
+    vfx_c_ads_right   = cvar(strcat(ads_pfx, "_right"));
+    vfx_c_ads_down    = cvar(strcat(ads_pfx, "_down"));
+};
+
 void(entity gun) CSQC_ViewFX_ComputeOffsets =
 {
+    CSQC_ViewFX_RefreshCvarCache();
+
     vector pos = '0 0 0';
     vector ang = '0 0 0';
 
     // ---- Bob: synchronised phase with the camera, more visible ----
-    if (cvar("cl_viewmodelbob") && csqc_viewfx_bob_envelope > 0.001)
+    if (vfx_c_bob && csqc_viewfx_bob_envelope > 0.001)
     {
         float env = csqc_viewfx_bob_envelope;
         if (predicted_player && (predicted_player.flags & FL_DUCKING))
@@ -419,13 +492,13 @@ void(entity gun) CSQC_ViewFX_ComputeOffsets =
         // surfaces grow their footstep step together.  Same eased
         // envelope so the multiplier transitions match the pose.
         float bob_sprint_mult = 1.0
-            + (cvar("cl_viewmodelbob_sprint_mult") - 1.0)
+            + (vfx_c_bob_sprint_mult - 1.0)
             * csqc_viewfx_sprint_env;
         env *= bob_sprint_mult;
         float two_pi = 6.2831853;
         float phase = csqc_viewfx_bob_phase * two_pi;
-        float ps = cvar("cl_viewmodelbob_pos_scale");
-        float as = cvar("cl_viewmodelbob_ang_scale");
+        float ps = vfx_c_bob_pos_scale;
+        float as = vfx_c_bob_ang_scale;
         pos_x += sin(phase * 2) *  0.4 * env * ps;
         pos_y += sin(phase)     *  1.2 * env * ps;
         pos_z += sin(phase * 2) * -0.6 * env * ps;
@@ -434,11 +507,11 @@ void(entity gun) CSQC_ViewFX_ComputeOffsets =
     }
 
     // ---- Weight: gun follows the camera dip, scaled independently ----
-    if (cvar("cl_viewmodelweight"))
-        pos_z += csqc_viewfx_weight_pos * cvar("cl_viewmodelweight_gun_scale");
+    if (vfx_c_weight)
+        pos_z += csqc_viewfx_weight_pos * vfx_c_weight_gun_scale;
 
     // ---- Sway: gun trails behind camera angular changes ----
-    if (cvar("cl_viewmodelsway"))
+    if (vfx_c_sway)
     {
         // Negative sign: the gun lags, so it pitches opposite to the
         // mouse motion briefly, then returns to neutral.
@@ -451,7 +524,7 @@ void(entity gun) CSQC_ViewFX_ComputeOffsets =
         // stays roughly fixed).  Models without a tag fall through to
         // the translation parallax below.
         float pivot_done = 0;
-        if (cvar("cl_viewmodelsway_pivot")
+        if (vfx_c_sway_pivot
             && predicted_player.weapon_muzzle_bone != ""
             && gun.modelindex)
         {
@@ -521,21 +594,21 @@ void(entity gun) CSQC_ViewFX_ComputeOffsets =
             // Fallback: translation parallax for bone-less models (or
             // when pivot mode is off).  This is the original sway
             // behaviour — a small translate in the lag direction.
-            float lps = cvar("cl_viewmodelsway_pos_scale");
+            float lps = vfx_c_sway_pos_scale;
             pos_y -= csqc_viewfx_sway_ang_y * lps * 0.1;
             pos_z -= csqc_viewfx_sway_ang_x * lps * 0.1;
         }
     }
 
     // ---- Speed-driven lowering: gun dips with the walk/run envelope ----
-    if (cvar("cl_viewmodellowering") && csqc_viewfx_bob_envelope > 0.001)
+    if (vfx_c_lowering && csqc_viewfx_bob_envelope > 0.001)
     {
-        float lower = cvar("cl_viewmodellowering_amount");
+        float lower = vfx_c_lowering_amount;
         pos_z -= csqc_viewfx_bob_envelope * lower;
     }
 
     // ---- Sprint pose: across-the-chest gun rotation while sprinting ----
-    if (cvar("cl_viewmodellowering_sprint")
+    if (vfx_c_sprint
         && csqc_viewfx_sprint_env > 0.001)
     {
         float se = csqc_viewfx_sprint_env;
@@ -549,15 +622,15 @@ void(entity gun) CSQC_ViewFX_ComputeOffsets =
         // flag (some authored meshes are left-handed and use
         // weapon_viewmodel_flip = TRUE to read as right-handed).
         float vm_flip = predicted_player.weapon_viewmodel_flip;
-        if (cvar("cl_lefthand"))
+        if (vfx_c_lefthand)
             vm_flip = !vm_flip;
         float side = vm_flip ? -1 : 1;
-        ang_x += cvar("cl_viewmodellowering_sprint_pitch")   * se;
-        ang_y += cvar("cl_viewmodellowering_sprint_yaw")     * se * side;
-        ang_z += cvar("cl_viewmodellowering_sprint_roll")    * se * side;
-        pos_x -= cvar("cl_viewmodellowering_sprint_forward") * se;
-        pos_y += cvar("cl_viewmodellowering_sprint_right")   * se * side;
-        pos_z -= cvar("cl_viewmodellowering_sprint_down")    * se;
+        ang_x += vfx_c_sprint_pitch   * se;
+        ang_y += vfx_c_sprint_yaw     * se * side;
+        ang_z += vfx_c_sprint_roll    * se * side;
+        pos_x -= vfx_c_sprint_forward * se;
+        pos_y += vfx_c_sprint_right   * se * side;
+        pos_z -= vfx_c_sprint_down    * se;
     }
 
     // ---- ADS pose: hold +attack2 to bring the gun up to the face ----
@@ -570,25 +643,19 @@ void(entity gun) CSQC_ViewFX_ComputeOffsets =
     {
         float ae = csqc_viewfx_ads_env;
         float ads_vm_flip = predicted_player.weapon_viewmodel_flip;
-        if (cvar("cl_lefthand"))
+        if (vfx_c_lefthand)
             ads_vm_flip = !ads_vm_flip;
         float ads_side = ads_vm_flip ? -1 : 1;
 
-        // Per-weapon ADS pose.  The weapon's Equip sets weapon_ads_prefix
-        // to its own cl_ads_<weapon>_* set (pitch/yaw/roll/forward/right/
-        // down); an empty prefix falls back to the shared cl_ads_* pose.
-        // The per-weapon cvars default to the shared values, so a weapon's
-        // ADS is identical to the shared one until its cvars are tuned.
-        string ads_pfx = "cl_ads";
-        if (predicted_player.weapon_ads_prefix != "")
-            ads_pfx = predicted_player.weapon_ads_prefix;
-
-        ang_x += cvar(strcat(ads_pfx, "_pitch"))   * ae;
-        ang_y += cvar(strcat(ads_pfx, "_yaw"))     * ae * ads_side;
-        ang_z += cvar(strcat(ads_pfx, "_roll"))    * ae * ads_side;
-        pos_x += cvar(strcat(ads_pfx, "_forward")) * ae;
-        pos_y += cvar(strcat(ads_pfx, "_right"))   * ae * ads_side;
-        pos_z += cvar(strcat(ads_pfx, "_down"))    * ae;
+        // Per-weapon ADS pose — resolved from the weapon's prefix
+        // (weapon_ads_prefix, or the shared cl_ads_* set) once per cache refresh
+        // above, instead of 6 cvar(strcat(...)) every render frame.
+        ang_x += vfx_c_ads_pitch   * ae;
+        ang_y += vfx_c_ads_yaw     * ae * ads_side;
+        ang_z += vfx_c_ads_roll    * ae * ads_side;
+        pos_x += vfx_c_ads_forward * ae;
+        pos_y += vfx_c_ads_right   * ae * ads_side;
+        pos_z += vfx_c_ads_down    * ae;
     }
 
     // ---- Weapon-lower pose: shove the gun off-screen ----
@@ -607,15 +674,15 @@ void(entity gun) CSQC_ViewFX_ComputeOffsets =
     {
         float le = csqc_viewfx_lower_env;
         float lower_vm_flip = predicted_player.weapon_viewmodel_flip;
-        if (cvar("cl_lefthand"))
+        if (vfx_c_lefthand)
             lower_vm_flip = !lower_vm_flip;
         float lower_side = lower_vm_flip ? -1 : 1;
-        ang_x += cvar("cl_viewmodel_lower_pitch")   * le;
-        ang_y += cvar("cl_viewmodel_lower_yaw")     * le * lower_side;
-        ang_z += cvar("cl_viewmodel_lower_roll")    * le * lower_side;
-        pos_x += cvar("cl_viewmodel_lower_forward") * le;
-        pos_y += cvar("cl_viewmodel_lower_right")   * le * lower_side;
-        pos_z += cvar("cl_viewmodel_lower_down")    * le;
+        ang_x += vfx_c_lower_pitch   * le;
+        ang_y += vfx_c_lower_yaw     * le * lower_side;
+        ang_z += vfx_c_lower_roll    * le * lower_side;
+        pos_x += vfx_c_lower_forward * le;
+        pos_y += vfx_c_lower_right   * le * lower_side;
+        pos_z += vfx_c_lower_down    * le;
     }
 
     csqc_viewfx_pose_pos = pos;
@@ -627,11 +694,20 @@ void(entity gun) CSQC_ViewFX_ComputeOffsets =
 //  per-frame render path in cl_weapons.qc.  Thin wrapper over
 //  ComputeOffsets.
 // ----------------------------------------------------------------
+// Frame stamp for the render pose, so the fire-time bone lookup can reuse it.
+float  csqc_viewfx_pose_render_stamp;
+entity csqc_viewfx_pose_render_ent;
+
 void(entity gun) CSQC_ApplyViewmodelOffsets =
 {
     CSQC_ViewFX_ComputeOffsets(gun);
     gun.origin = csqc_viewfx_pose_pos;
     gun.angles = csqc_viewfx_pose_ang;
+    // Mark this frame's render pose so PoseViewmodelForBoneLookup can reuse it
+    // instead of recomputing the whole offset stack (incl. the gettaginfo
+    // sway-pivot) on every shot of sustained automatic fire.
+    csqc_viewfx_pose_render_stamp = cltime;
+    csqc_viewfx_pose_render_ent   = gun;
 };
 
 // ----------------------------------------------------------------
@@ -654,7 +730,15 @@ void(entity gun) CSQC_ApplyViewmodelOffsets =
 // ----------------------------------------------------------------
 void(vector view_pos, vector view_ang) CSQC_ViewFX_PoseViewmodelForBoneLookup =
 {
-    CSQC_ViewFX_ComputeOffsets(csqc_viewmodel_ent);
+    // Reuse the render pose when CSQC_ApplyViewmodelOffsets already produced it
+    // THIS frame for THIS entity: it was computed after the per-frame envelope
+    // update with the same (non-snapped) gun frame the bone lookup uses, so the
+    // result is identical — skipping the gettaginfo sway-pivot recompute on every
+    // shot.  Otherwise (fire sampled before the render this frame) compute fresh,
+    // exactly as before.
+    if (!(csqc_viewfx_pose_render_stamp == cltime
+          && csqc_viewfx_pose_render_ent == csqc_viewmodel_ent))
+        CSQC_ViewFX_ComputeOffsets(csqc_viewmodel_ent);
     makevectors(view_ang);
     vector off = csqc_viewfx_pose_pos;
     vector world_off = v_forward * off_x

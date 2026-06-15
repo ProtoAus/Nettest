@@ -178,7 +178,6 @@ void() Radio_Draw =
     title_pos_x = pos_x + padding_x;
     title_pos_y = pos_y + padding_y;
     title_pos_z = 0;
-    drawstring(title_pos + '1 1 0', "RADIO", [12, 12], '0 0 0', 0.6, 0);
     drawstring(title_pos, "RADIO", [12, 12], '0.9 0.9 0.4', 1.0, 0);
 
     vector text_pos;
@@ -189,7 +188,6 @@ void() Radio_Draw =
     float i;
     for (i = 0; i < RADIO_COMMAND_COUNT; i = i + 1)
     {
-        drawstring(text_pos + '1 1 0', radio_labels[i], [12, 12], '0 0 0', 0.6, 0);
         drawstring(text_pos, radio_labels[i], [12, 12], '1 1 1', 0.95, 0);
         text_pos_y = text_pos_y + line_h;
     }

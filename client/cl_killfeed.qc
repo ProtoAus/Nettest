@@ -170,7 +170,7 @@ void KillFeed_Parse()
 float KillFeed_DrawSegment(vector pos, string text, vector col, float alpha)
 {
     vector sz = [KILLFEED_LINE_SIZE, KILLFEED_LINE_SIZE, 0];
-    drawstring(pos + '1 1 0', text, sz, '0 0 0', alpha * 0.5, 0);
+    // Border comes from hud_font's baked outline (loadfont outline=1) — no shadow pass.
     drawstring(pos, text, sz, col, alpha, 0);
     return stringwidth(text, 1, sz);
 }

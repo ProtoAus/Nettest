@@ -220,6 +220,12 @@ void(string mdl, vector ofs, vector vel, vector vel_jitter, vector avel, vector 
     ofs_z += 1;
     vel_y += 20;
     vel_z += 10;
+    // Extra per-shot randomization so no two casings eject identically — widen
+    // the velocity + spin jitter the weapon passed (CSQC_SpawnAccessory applies
+    // base +/- jitter via random()).  Bumps the toss speed/direction spread and
+    // the tumble so each ejected case flies and spins a little differently.
+    vel_jitter  += '6 12 12';
+    avel_jitter += '220 260 220';
     CSQC_SpawnAccessory(mdl, ofs, vel, vel_jitter, avel, avel_jitter, MOVETYPE_BOUNCE, 20, 2);
 };
 

@@ -980,79 +980,190 @@ float(float x, float y) CSQC_DrawDebugPlayerModel =
 
 // Hitbox definitions: bone name, hitgroup, mins, maxs.
 // Bone names looked up via gettagindex at runtime — works with any model.
-const float HITBOX_COUNT = 20;
+// The per-bone hitbox table (HITBOX_COUNT / hitbox_bonename / hitbox_group /
+// hitbox_mins / hitbox_maxs) moved to shared/sh_weapons.qc so the SERVER can
+// classify hitgroups by box too (W_HitgroupClassify SSQC path).  Still used
+// here for the debug draws + the client OBB trace below.
 
-string hitbox_bonename[] = {
-    "Bip01 Pelvis",       // group 3 stomach
-    "Bip01 L Thigh",      // group 6 left leg
-    "Bip01 L Calf",       // group 6
-    "Bip01 L Foot",       // group 6
-    "Bip01 R Thigh",      // group 7 right leg
-    "Bip01 R Calf",       // group 7
-    "Bip01 R Foot",       // group 7
-    "Bip01 Spine",        // group 3 stomach
-    "Bip01 Spine1",       // group 2 chest
-    "Bip01 Spine2",       // group 2
-    "Bip01 Neck",         // group 2
-    "Bip01 Head",         // group 1 head
-    "Bip01 L Clavicle",   // group 4 left arm
-    "Bip01 L UpperArm",   // group 4
-    "Bip01 L Forearm",    // group 4
-    "Bip01 L Hand",       // group 4
-    "Bip01 R Clavicle",   // group 5 right arm
-    "Bip01 R UpperArm",   // group 5
-    "Bip01 R Forearm",    // group 5
-    "Bip01 R Hand"        // group 5
+// ============================================================
+//  Full OBB hitbox DETECTION (player hit trace)
+//  The bullet ray is tested against the same 20 per-bone oriented boxes drawn
+//  above, so what you shoot matches what you see, and the hitgroup is the box
+//  you hit — not a Z-height guess.  Drives CSQC_PredictedImpact under
+//  sv_trust_clienthits.  Results go to the csqc_obb_* globals (cl_customdefs.qc).
+// ============================================================
+
+// Make every remote-player proxy non-solid (so the world traceline reports the
+// WALL behind a player, letting the OBB pass own player detection).
+void() CSQC_PlayersUnsolid =
+{
+    entity p = findchain(classname, "player_visual_proxy");
+    while (p)
+    {
+        p.solid = SOLID_NOT;
+        p = p.chain;
+    }
 };
 
-float hitbox_group[] = {
-    3, 6, 6, 6, 7, 7, 7, 3, 2, 2, 2, 1, 4, 4, 4, 4, 5, 5, 5, 5
+// Restore the normal solidity policy (mirrors cl_player.qc: live remote players
+// SOLID_BBOX, own + dead SOLID_NOT) after the world trace.
+void() CSQC_PlayersResolid =
+{
+    entity p = findchain(classname, "player_visual_proxy");
+    while (p)
+    {
+        if (p.modelindex
+            && p.vis_owner_entnum != player_localentnum
+            && !p.vis_server_is_dead)
+            p.solid = SOLID_BBOX;
+        p = p.chain;
+    }
 };
 
-vector hitbox_mins[] = {
-    '-4.69 -4.44 -6.75',
-    '2.66 -3.69 -3.09',
-    '0.38 -3.97 -2.84',
-    '0.85 -3.24 -2.64',
-    '2.47 -3.69 -3.16',
-    '0.31 -3.97 -2.84',
-    '0.85 -3.24 -2.64',
-    '-3.25 -5.5 -5.5',
-    '-0.06 -5.53 -7.59',
-    '-2.25 -6.81 -6.31',
-    '-3.11 -1.5 -3',
-    '-0.33 -4.5 -2.5',
-    '0.94 -2.88 -4.13',
-    '-2.16 -2.34 -2.56',
-    '0.59 -1.81 -2.19',
-    '-0.13 -1.9 -2.24',
-    '1.38 -2.84 -3.56',
-    '-1.88 -2.47 -2.16',
-    '0.44 -1.97 -2.34',
-    '-0.13 -1.9 -2.24'
-};
+// Ray (src..end) vs every live remote proxy's per-bone OBBs.  Keeps the CLOSEST
+// box hit strictly nearer than limit_frac (the world/wall fraction).  Writes the
+// csqc_obb_* result globals.  Standard slab ray-vs-AABB done in each bone's local
+// frame (gettaginfo gives the bone origin + orthonormal axes v_forward/right/up;
+// the boxes are axis-aligned in that frame, exactly as the debug draw builds them).
+void(vector src, vector end, float limit_frac) CSQC_TraceHitboxes =
+{
+    csqc_obb_hit  = FALSE;
+    csqc_obb_ent  = world;
+    csqc_obb_frac = limit_frac;
+    vector dir = end - src;
 
-vector hitbox_maxs[] = {
-    '4 5.56 6.75',
-    '18.16 4.88 3.31',
-    '17.6 4 2.94',
-    '5.73 8.53 3.17',
-    '18.13 4.88 3.38',
-    '17.6 3.94 2.97',
-    '5.73 8.53 3.17',
-    '4.83 5.5 5.5',
-    '8 7 7.59',
-    '6.5 5.09 6.31',
-    '2.05 3.5 3',
-    '8 4.5 2.5',
-    '5.44 4.28 3.5',
-    '11.56 3.41 2.38',
-    '10.75 2.84 2.41',
-    '4.86 2.08 2.37',
-    '5.69 4.31 4.31',
-    '11.81 3.28 2.81',
-    '10.59 2.72 2.22',
-    '4.86 2.08 2.37'
+    entity proxy = findchain(classname, "player_visual_proxy");
+    while (proxy)
+    {
+        // Live remote players only (own + dead proxies aren't shootable).
+        if (proxy.modelindex
+            && proxy.vis_owner_entnum != player_localentnum
+            && !proxy.vis_server_is_dead)
+        {
+            // Broad phase: skip the 20-box loop unless the ray passes within a
+            // generous radius of the player's center (covers any pose + limbs).
+            float tproj = ((proxy.origin - src) * dir) / (dir * dir);
+            tproj = bound(0, tproj, 1);
+            if (vlen((src + dir * tproj) - proxy.origin) > 80)
+            {
+                proxy = proxy.chain;
+                continue;
+            }
+
+            float i;
+            float matched = 0;
+            for (i = 0; i < HITBOX_COUNT; i++)
+            {
+                float bone = gettagindex(proxy, hitbox_bonename[i]);
+                if (bone <= 0)
+                    continue;
+                matched = matched + 1;
+                vector bpos = gettaginfo(proxy, bone);
+                vector vf = v_forward, vr = v_right, vu = v_up;
+                vector bmn = hitbox_mins[i], bmx = hitbox_maxs[i];
+
+                // Ray into the bone's local frame.
+                vector rel = src - bpos;
+                float lsx = rel * vf, lsy = rel * vr, lsz = rel * vu;
+                float ldx = dir * vf, ldy = dir * vr, ldz = dir * vu;
+
+                float tmin = 0, tmax = csqc_obb_frac;
+                float ok = TRUE;
+                float t1, t2, tt;
+
+                // X slab
+                if (ldx != 0)
+                {
+                    t1 = (bmn_x - lsx) / ldx; t2 = (bmx_x - lsx) / ldx;
+                    if (t1 > t2) { tt = t1; t1 = t2; t2 = tt; }
+                    if (t1 > tmin) tmin = t1;
+                    if (t2 < tmax) tmax = t2;
+                }
+                else if (lsx < bmn_x || lsx > bmx_x) ok = FALSE;
+                // Y slab
+                if (ok && ldy != 0)
+                {
+                    t1 = (bmn_y - lsy) / ldy; t2 = (bmx_y - lsy) / ldy;
+                    if (t1 > t2) { tt = t1; t1 = t2; t2 = tt; }
+                    if (t1 > tmin) tmin = t1;
+                    if (t2 < tmax) tmax = t2;
+                }
+                else if (ok && ldy == 0 && (lsy < bmn_y || lsy > bmx_y)) ok = FALSE;
+                // Z slab
+                if (ok && ldz != 0)
+                {
+                    t1 = (bmn_z - lsz) / ldz; t2 = (bmx_z - lsz) / ldz;
+                    if (t1 > t2) { tt = t1; t1 = t2; t2 = tt; }
+                    if (t1 > tmin) tmin = t1;
+                    if (t2 < tmax) tmax = t2;
+                }
+                else if (ok && ldz == 0 && (lsz < bmn_z || lsz > bmx_z)) ok = FALSE;
+
+                if (ok && tmin <= tmax && tmax >= 0)
+                {
+                    float ht = (tmin < 0) ? 0 : tmin;   // src inside box -> hit at entry
+                    if (ht < csqc_obb_frac)
+                    {
+                        csqc_obb_hit   = TRUE;
+                        csqc_obb_frac  = ht;
+                        csqc_obb_group = hitbox_group[i];
+                        csqc_obb_ent   = proxy;
+                        csqc_obb_pos   = src + dir * ht;
+                    }
+                }
+            }
+
+            // Fallback: a model with NONE of the Bip01 bones (a custom rig such
+            // as the chicken / number-key player models) would otherwise be
+            // un-shootable.  Trace its hull AABB so it still registers — GENERIC
+            // hitgroup (no per-zone boxes available for it).
+            if (matched == 0)
+            {
+                vector amn = proxy.origin + proxy.mins;
+                vector amx = proxy.origin + proxy.maxs;
+                float tmin = 0, tmax = csqc_obb_frac, ok = TRUE;
+                float t1, t2, tt;
+                if (dir_x != 0)
+                {
+                    t1 = (amn_x - src_x) / dir_x; t2 = (amx_x - src_x) / dir_x;
+                    if (t1 > t2) { tt = t1; t1 = t2; t2 = tt; }
+                    if (t1 > tmin) tmin = t1;
+                    if (t2 < tmax) tmax = t2;
+                }
+                else if (src_x < amn_x || src_x > amx_x) ok = FALSE;
+                if (ok && dir_y != 0)
+                {
+                    t1 = (amn_y - src_y) / dir_y; t2 = (amx_y - src_y) / dir_y;
+                    if (t1 > t2) { tt = t1; t1 = t2; t2 = tt; }
+                    if (t1 > tmin) tmin = t1;
+                    if (t2 < tmax) tmax = t2;
+                }
+                else if (ok && dir_y == 0 && (src_y < amn_y || src_y > amx_y)) ok = FALSE;
+                if (ok && dir_z != 0)
+                {
+                    t1 = (amn_z - src_z) / dir_z; t2 = (amx_z - src_z) / dir_z;
+                    if (t1 > t2) { tt = t1; t1 = t2; t2 = tt; }
+                    if (t1 > tmin) tmin = t1;
+                    if (t2 < tmax) tmax = t2;
+                }
+                else if (ok && dir_z == 0 && (src_z < amn_z || src_z > amx_z)) ok = FALSE;
+
+                if (ok && tmin <= tmax && tmax >= 0)
+                {
+                    float ht = (tmin < 0) ? 0 : tmin;
+                    if (ht < csqc_obb_frac)
+                    {
+                        csqc_obb_hit   = TRUE;
+                        csqc_obb_frac  = ht;
+                        csqc_obb_group = HITGROUP_GENERIC;
+                        csqc_obb_ent   = proxy;
+                        csqc_obb_pos   = src + dir * ht;
+                    }
+                }
+            }
+        }
+        proxy = proxy.chain;
+    }
 };
 
 // Color per hitgroup for visualization
@@ -1255,12 +1366,12 @@ void() CSQC_DrawDebugPhysDropBboxes =
     float mode = cvar("cl_debug_physdrop_bbox");
     if (mode <= 0) return;
 
-    float bx = cvar("sv_physdrop_bbox_x");
-    float by = cvar("sv_physdrop_bbox_y");
-    float bz = cvar("sv_physdrop_bbox_z");
-    float tx = cvar("sv_physdrop_trace_bbox_x");
-    float ty = cvar("sv_physdrop_trace_bbox_y");
-    float tz = cvar("sv_physdrop_trace_bbox_z");
+    float bx = cvar("sv_physprop_weapon_bbox_x");
+    float by = cvar("sv_physprop_weapon_bbox_y");
+    float bz = cvar("sv_physprop_weapon_bbox_z");
+    float tx = cvar("sv_physprop_weapon_trace_bbox_x");
+    float ty = cvar("sv_physprop_weapon_trace_bbox_y");
+    float tz = cvar("sv_physprop_weapon_trace_bbox_z");
 
     entity w = findchain(classname, "csqc_dropped_weapon");
     while (w)

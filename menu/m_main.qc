@@ -121,6 +121,34 @@ string() Menu_PickMapFromFile =
     return Menu_PickMapFromListedFile("data/maps.txt");
 };
 
+// Boot the menu-backdrop listen server on `menumap`.  m_init calls this UNLESS the engine flagged
+// cl_launchintogame (a command-line +connect / +map / demo), in which case the backdrop is skipped so the
+// launch command lands where intended instead of being clobbered by the backdrop's own `map`.
+void(string menumap) Menu_StartBackdrop =
+{
+	// Force >=2 maxclients + deathmatch so FTE's PAUSE_AUTO logic doesn't freeze the single-slot listen
+	// server (and halt the backdrop camera cycling) while a menu/console is up.  Make it invisible +
+	// unjoinable (sv_public -1 + random password) so LAN/master browsers can't join the backdrop.
+	localcmd("sv_public -1\n");
+	localcmd(sprintf("password backdrop_%g_%g\n", random() * 1000000, gettime(0)));
+	localcmd("hostname \"menu backdrop (private)\"\n");
+	localcmd("set cl_menu_backdrop_active 1\n");
+	// sv_backdrop_pending latch — worldspawn consumes it into sv_backdrop; a bare console `map X` never
+	// sets it, so it comes up as a real game.
+	localcmd("set sv_backdrop_pending 1\n");
+	// Bind the backdrop socket to port 0 — the OS assigns a free ephemeral port
+	// (engine net_wins.c treats 0 as ephemeral), so the backdrop NEVER occupies
+	// 27500, leaving it free for a real local/dedicated server.  The local
+	// backdrop client still connects over the internal loopback socket.
+	localcmd("sv_port 0\n");
+	localcmd("deathmatch 1\n");
+	localcmd("maxclients 2\n");
+	// nettest (P26): on-demand mount the backdrop map's game if it's an external (fs_load) one.
+	create_server_mount_for_map(menumap, 0);
+	localcmd(sprintf("map %s\n", menumap));
+	localcmd("togglemenu\n");
+};
+
 void() m_init =
 {
 	splash_time = 0;
@@ -144,6 +172,11 @@ void() m_init =
 	localcmd("bind f10 quit\n");
 
 	Menu_LoadConfig();
+
+	// nettest (P26): build data/maps_index.txt now (offline, cheap — no game is mounted) so the
+	// create-server menu has its per-game map list ready. With fs_lazyaddons 1 the external games
+	// aren't mounted at boot, so the menu reads this index instead of scanning mounted searchpaths.
+	localcmd("fs_indexmaps\n");
 
 	// Background map — start a local listen server on this map so the main
 	// menu renders over a live world instead of a black void.  The map's
@@ -172,43 +205,13 @@ void() m_init =
 	string menumap = Menu_PickMapFromFile();
 	if (menumap == "")
 		menumap = cvar_string("cl_menumap");
-	if (menumap != "" && menumap != "none")
-	{
-		// Force >=2 maxclients + deathmatch so FTE's PAUSE_AUTO logic doesn't
-		// engage.  The engine freezes single-slot listen servers whenever a
-		// menu or console is up (sv_main.c PAUSE_AUTO check), which halts the
-		// backdrop camera cycling.  Two slots bypasses that; data/server.cfg
-		// can still raise it further.
-		//
-		// The `map` command always boots a listen server.  Make THIS one
-		// invisible + unjoinable so random players browsing LAN / master
-		// lists can't connect to the menu backdrop by mistake:
-		//   sv_public -1       — don't advertise to the master browser.
-		//   password <random>  — any would-be direct-connect fails.
-		//   hostname           — cosmetic flag so we can tell it apart in logs.
-		// The user's "Create Server" flow (create_server_launch in
-		// m_createserver.qc) writes its own sv_public + password values,
-		// so these locks are overwritten cleanly on the first real launch.
-		localcmd("sv_public -1\n");
-		localcmd(sprintf("password backdrop_%g_%g\n", random() * 1000000, gettime(0)));
-		localcmd("hostname \"menu backdrop (private)\"\n");
-		localcmd("set cl_menu_backdrop_active 1\n");
-		// Server-side backdrop flag (pushed to serverinfo by sv_main.qc).
-		// CSQC reads serverkeyfloat("sv_backdrop") to suppress HUD — set
-		// here so the listen server boots with it already true.
-		localcmd("set sv_backdrop 1\n");
-		// Move the backdrop's listen socket off the default 27500 port so
-		// another local server (another nettest instance, or a dedicated
-		// QW server) can grab 27500 cleanly. Random pick in 27501..27600
-		// keeps two backdrops from colliding if you launch two clients.
-		// Real-game launchers (Connect / Create Server) reset sv_port to
-		// 27500 below.
-		localcmd(sprintf("sv_port %g\n", 27501 + floor(random() * 100)));
-		localcmd("deathmatch 1\n");
-		localcmd("maxclients 2\n");
-		localcmd(sprintf("map %s\n", menumap));
-		localcmd("togglemenu\n");
-	}
+	// nettest: SKIP the backdrop when the user launched straight into a game.  The engine sets
+	// cl_launchintogame=1 from a command-line +connect / +map / demo (in Host_Init, right before M_Init, with
+	// CVAR_NORESET so the gamedir-change reset doesn't wipe it).  Without this, the backdrop's own `map` would
+	// clobber the launch command and dump the user back on the menu world.  Reliable because the engine sets
+	// the cvar before m_init runs — unlike watching constate, where the launch command runs LATER (boot cbuf).
+	if (menumap != "" && menumap != "none" && cvar("cl_launchintogame") == 0)
+		Menu_StartBackdrop(menumap);
 };
 
 vector() randomofs = { return [random() - 0.5, random() - 0.5] * 2; };

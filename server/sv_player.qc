@@ -470,6 +470,7 @@ void(vector org, float weapon_id) SV_DebugSpawnWeaponId =
 	else if (weapon_id == WEP_CFMSG90)        SV_DebugSpawnWeapon(org, weapon_cfmsg90);
 	else if (weapon_id == WEP_CFSG552)        SV_DebugSpawnWeapon(org, weapon_cfsg552);
 	else if (weapon_id == WEP_CFSL8)          SV_DebugSpawnWeapon(org, weapon_cfsl8);
+	else if (weapon_id == WEP_GRAVITYGUN)     SV_DebugSpawnWeapon(org, weapon_gravitygun);
 	else if (weapon_id == WEP_CFM9)    SV_DebugSpawnWeapon(org, weapon_cfm9);
 	else if (weapon_id == WEP_CFREVOLVER)       SV_DebugSpawnWeapon(org, weapon_cfrevolver);
 	else if (weapon_id == WEP_CFDDEAGLE)        SV_DebugSpawnWeapon(org, weapon_cfddeagle);
@@ -486,6 +487,12 @@ void() PlayerApplyModel =
 
     if (self.player_model_index == 5)
         mdl = "models/player/sini.mdl";
+    else if (self.player_model_index == 6)
+        mdl = "models/player/chickenman/chickenman.iqm";
+    else if (self.player_model_index == 7)
+        mdl = "models/player/numberk/numberK.iqm";
+    else if (self.player_model_index == 8)
+        mdl = "models/player/kilmer/kilmer.iqm";
     else
     {
         float idx = bound(0, self.player_model_index, TEAM_MODEL_COUNT - 1);
@@ -494,7 +501,7 @@ void() PlayerApplyModel =
         else if (self.player_team == TEAM_RED)
             mdl = team_red_models[idx];
         else
-            mdl = "models/player/leet/leet.mdl";
+            mdl = "models/player/leet/leet.iqm";
     }
 
     entity vis = self.player_visual_proxy;
@@ -522,7 +529,7 @@ void(float new_team, float model_idx) PlayerJoinTeam =
     if (new_team != TEAM_BLUE && new_team != TEAM_RED)
         return;
 
-    model_idx = bound(0, model_idx, 5); // 0-3 = team models, 5 = sini
+    model_idx = bound(0, model_idx, 8); // 0-3 = team models; 5 = sini, 6 = chickenman, 7 = numberK, 8 = kilmer
 
     // Defensive: leaving spec ALWAYS needs a full PlayerSpawn pass.
     // PlayerJoinSpectate sets is_dead=TRUE, modelindex=0, solid=NOT,
@@ -549,6 +556,11 @@ void(float new_team, float model_idx) PlayerJoinTeam =
     self.player_model_index = model_idx;
     PlayerApplyTeamColours();
     PlayerRefreshScoreboardInfo(self);
+
+    // CS economy: grant starting cash on first real team join (once —
+    // Money_EnsureStart guards via money_started, so model swaps / rejoins
+    // don't refill).  Cash then persists across deaths/rounds.
+    Money_EnsureStart(self);
 
     // Auto-restart trigger when the player count goes from 1 to 2 —
     // checked BEFORE the elim/paintgun deferred-spawn return below so
@@ -926,6 +938,12 @@ void() PlayerPreThink =
 		self.button0 = 0;
 
 	CheckImpulses();
+	// While carrying a prop, +attack THROWS it instead of firing.  The client
+	// suppresses the fire button and sends `cmd throwprop` (see CSQC_Input_Frame
+	// + the throwprop handler).  Defensively clear button0 here too so no weapon
+	// auto-fires even if a client leaves the bit set.
+	if (self.carried_prop != world)
+		self.button0 = 0;
 	W_WeaponFrame();
 	// Grapple press-and-hold edge detect — rising edge of PM_BTN_GRAPPLE
 	// (+grapple / +button9) spawns the hook, falling edge releases it.
@@ -936,6 +954,15 @@ void() PlayerPreThink =
 	// rope is attached; gravity still applies through MOVETYPE_WALK so the
 	// player swings under it.  No-op when no hook is out.
 	W_GrapplePullTick();
+	// HL2 prop carry — velocity-servo the held cabinet toward the hold point
+	// (slides on walls, auto-drops when jammed; +attack throws). No-op when
+	// carried_prop is world.
+	Carry_Tick(self);
+	// Gravity gun — +attack2 (held) rising/falling edge spins up / blasts the
+	// black-hole; PullTick yanks all phys props toward the gather point each
+	// frame while spinning.  No-op unless WEP_GRAVITYGUN is equipped + spinning.
+	W_GravGun_HeldTick();
+	W_GravGun_PullTick();
 	// Defuse poll — runs every server frame on every alive player; cheap
 	// single bit-test early-out when +use isn't held (see sh_wpn_cfc4.qc).
 	C4_TickDefuseInteraction(self);
@@ -1198,17 +1225,19 @@ void(entity player) Player_VisualProxy_Ensure =
 		vis.movetype = MOVETYPE_NONE;
 		vis.solid = SOLID_NOT;
 		// PVSF_USEPHS: send the proxy update over the broader PHS region
-		// instead of strict PVS — fixes the "ghost proxy" bug at round
-		// restart, where a teleport to a spawn point outside the viewer's
-		// PVS would never deliver the new origin (engine skips the snap
-		// for out-of-PVS entities, and PVSF_NOREMOVE keeps the client's
-		// last-cached state visible at the old position indefinitely).
-		// PHS typically covers the whole map on CS-style maps, so cross-
-		// map teleports propagate to every viewer in the next snapshot.
-		// PVSF_NOREMOVE retained so out-of-PHS edge cases still don't
-		// cause the proxy to disappear mid-fight.
-		vis.pvsflags = PVSF_USEPHS | PVSF_NOREMOVE;
-		setmodel(vis, "models/player/leet/leet.mdl"); // default until model applied
+		// instead of strict PVS so a cross-map teleport (a round-restart
+		// spawn outside the viewer's PVS) still delivers the new origin.
+		// NOREMOVE is deliberately NOT set on LIVE proxies: with it, an enemy
+		// who leaves the viewer's PHS stays CACHED frozen at their last-seen
+		// position — the "enemy standing at their spawn the whole round until
+		// they move into view" bug — because the engine then sends neither
+		// further updates nor a remove.  Plain PHS-culling (no NOREMOVE)
+		// removes the proxy when the player is genuinely out of range and
+		// re-adds it at the correct CURRENT position when they return.
+		// (Corpses DO keep NOREMOVE — set separately in DetachAsCorpse — and
+		// are explicitly retired at round end via VisProxy_RetireCorpse.)
+		vis.pvsflags = PVSF_USEPHS;
+		setmodel(vis, "models/player/leet/leet.iqm"); // default until model applied
 		vis.SendEntity = Player_Visual_SendEntity;
 		player.player_visual_proxy = vis;
 	}
@@ -1301,9 +1330,16 @@ void(entity player) Player_VisualProxy_Sync =
 
 	float next_tmbyte;
 	if (player.player_model_index == 5)
-		next_tmbyte = 255;
+		next_tmbyte = 255;          // sentinel: sini (team-independent)
+	else if (player.player_model_index == 6)
+		next_tmbyte = 254;          // sentinel: chickenman (team-independent)
+	else if (player.player_model_index == 7)
+		next_tmbyte = 253;          // sentinel: numberK (team-independent)
+	else if (player.player_model_index == 8)
+		next_tmbyte = 252;          // sentinel: kilmer (team-independent)
 	else
-		next_tmbyte = (player.player_team - 1) * 4 + player.player_model_index;
+		next_tmbyte = (player.player_team - 1) * 4
+		            + bound(0, player.player_model_index, TEAM_MODEL_COUNT - 1);
 
 	float next_is_dead = player.is_dead ? 1 : 0;
 
@@ -1474,6 +1510,11 @@ float(entity playerent, float changedflags) PM_PredictionProxy_SendEntity =
 		WriteFloat(MSG_ENTITY, self.codstamina);
 		WriteByte (MSG_ENTITY, self.codstamina_punished);
 		WriteFloat(MSG_ENTITY, max(0, self.pm_fire_suppress_until - time));
+		// HL2 carry: lowered-weapon flag, replicated so CSQC's fire-gate /
+		// lower envelope match the server (mirrors grapple_rope_active).
+		WriteByte (MSG_ENTITY, self.pm_carrying);
+		// func_vehicle: replicated driving flag (drives the pmove driver-lock + fire-block)
+		WriteByte (MSG_ENTITY, self.pm_driving);
 	}
 
 	if (changedflags & PM_SF_WEAPON_STATE)
@@ -1646,7 +1687,9 @@ void(entity player) PM_SyncPredictionProxy =
 	    proxy.pm_grapple_held_last != player.pm_grapple_held_last ||
 	    proxy.codstamina          != player.codstamina ||
 	    proxy.codstamina_punished != player.codstamina_punished ||
-	    proxy.pm_fire_suppress_until != player.pm_fire_suppress_until)
+	    proxy.pm_fire_suppress_until != player.pm_fire_suppress_until ||
+	    proxy.pm_carrying != player.pm_carrying ||
+	    proxy.pm_driving != player.pm_driving)
 		bits |= PM_SF_MOVEMENT;
 
 	// Detect weapon-state changes
@@ -1737,6 +1780,8 @@ void(entity player) PM_SyncPredictionProxy =
 	proxy.codstamina              = player.codstamina;
 	proxy.codstamina_punished     = player.codstamina_punished;
 	proxy.pm_fire_suppress_until  = player.pm_fire_suppress_until;
+	proxy.pm_carrying             = player.pm_carrying;
+	proxy.pm_driving              = player.pm_driving;
 
 	proxy.slot_primary     = player.slot_primary;
 	proxy.slot_secondary   = player.slot_secondary;
@@ -1851,7 +1896,7 @@ void(entity player) PM_EnsurePredictionProxy =
 	{
 		proxy.SendFlags = proxy.SendFlags | PM_SF_MOVEMENT | PM_SF_WEAPON_STATE | PM_SF_AMMO;
 		proxy.pm_ammo_mb0 = 255;
-		proxy.pm_ammo_mb1 = 7;
+		proxy.pm_ammo_mb1 = 15;   // bits 1/2/4 = he/flash/smoke, bit 8 = ammo_cfc4 (C4 carry)
 		proxy.pm_ammo_mb2 = 0;
 		proxy.pm_ammo_mb3 = 0;
 		proxy.pm_ammo_mb4 = 0;
@@ -1868,6 +1913,15 @@ void(entity player) PM_EnsurePredictionProxy =
 //    ammo for the chosen weapon in each slot.  All known mag/ammo fields are
 //    zeroed first so nothing bleeds over from a previous inventory.
 // ------------------------------------------------------------
+// Per-slot equip refreshers — extracted from W_GiveStartingAmmo so the buy
+// path (W_GiveWeaponToSlot) can re-equip ONE slot without the global ammo
+// wipe (which would reset the player's other guns).  Defined below; forward-
+// declared here because W_GiveStartingAmmo calls them.
+void() W_RefreshPrimarySlot;
+void() W_RefreshSecondarySlot;
+void() W_RefreshMeleeSlot;
+void() W_RefreshUtilitySlot;
+
 void() W_GiveStartingAmmo =
 {
 	// Zero every mag + reserve field so switching away from a weapon
@@ -1905,7 +1959,51 @@ void() W_GiveStartingAmmo =
 	self.snowball_use_slingshot = FALSE;
 	W_SlotAmmo_ClearSlots(self);
 
-	// Primary slot
+	W_RefreshPrimarySlot();
+	W_RefreshSecondarySlot();
+	W_RefreshMeleeSlot();
+	W_RefreshUtilitySlot();
+
+	// Multi-utility post-pass: sv_default_utility is a comma-separated
+	// weapon-id list (e.g. "33,34" for HE+Flash).  The switch above
+	// already gave ammo for the FIRST entry (the active slot_utility);
+	// here we give ammo for any additional utility ids so the player
+	// spawns carrying every selected grenade.  Any unknown / duplicate
+	// / non-utility id is skipped; the inventory model already supports
+	// holding multiple utilities (W_UtilityNextCarried iterates them).
+	// NOTE: this stays in W_GiveStartingAmmo (the spawn path) ONLY — a
+	// single-weapon buy must NOT re-grant the default grenade set.
+	{
+		string util_list = cvar_string("sv_default_utility");
+		float util_n = Weapon_TokenizeIdList(util_list);
+		float util_i;
+		for (util_i = 0; util_i < util_n; util_i++)
+		{
+			float util_wep = Weapon_IdFromStringOrDefault(argv(util_i), WEP_NONE);
+			if (util_wep == WEP_NONE || util_wep == self.slot_utility)
+				continue;
+			if      (util_wep == WEP_HLGRENADE)       self.ammo_hlgrenade      = MAX_AMMO_HLGRENADE;
+			else if (util_wep == WEP_SNOWBALL)        self.ammo_snowball       = MAX_AMMO_SNOWBALL;
+			else if (util_wep == WEP_CSHEGRENADE)     self.ammo_cshegrenade    = MAX_AMMO_CSHEGRENADE;
+			else if (util_wep == WEP_CSFLASHBANG)     self.ammo_csflashbang    = MAX_AMMO_CSFLASHBANG;
+			else if (util_wep == WEP_CSSMOKEGRENADE)  self.ammo_cssmokegrenade = MAX_AMMO_CSSMOKEGRENADE;
+			else if (util_wep == WEP_SLINGSHOT)
+			{
+				self.snowball_has_slingshot = TRUE;
+				self.snowball_use_slingshot = TRUE;
+				if (self.ammo_snowball <= 0)
+					self.ammo_snowball = MAX_AMMO_SNOWBALL;
+			}
+		}
+	}
+};
+
+// Re-equip the PRIMARY slot from self.slot_primary (equip/drop fn-pointers +
+// that weapon's mag/ammo).  The global ammo wipe lives in W_GiveStartingAmmo,
+// NOT here, so W_GiveWeaponToSlot can refresh one slot without resetting the
+// player's other guns.
+void() W_RefreshPrimarySlot =
+{
 	self.slot_primary_equip = __NULL__;
 	self.slot_primary_drop  = __NULL__;
 	switch (self.slot_primary)
@@ -2127,14 +2225,22 @@ void() W_GiveStartingAmmo =
 		self.slot_primary_drop  = W_CFSl8Drop;
 		self.mag_cfsl8 = MAX_MAG_CFSL8;         self.ammo_cfsl8 = MAX_AMMO_CFSL8;
 		break;
+	case WEP_GRAVITYGUN:
+		self.slot_primary_equip = W_GravGunEquip;
+		self.slot_primary_drop  = W_GravGunDrop;
+		// infinite energy — no mag/ammo
+		break;
 	default:
 		self.slot_primary = WEP_NONE;
 		break;
 	}
 	if (self.slot_primary != WEP_NONE)
 		W_SlotAmmo_SaveLegacy(self, self.slot_primary);
+};
 
-	// Secondary slot
+// Re-equip the SECONDARY slot from self.slot_secondary.
+void() W_RefreshSecondarySlot =
+{
 	self.slot_secondary_equip = __NULL__;
 	self.slot_secondary_drop  = __NULL__;
 	switch (self.slot_secondary)
@@ -2212,8 +2318,11 @@ void() W_GiveStartingAmmo =
 	}
 	if (self.slot_secondary != WEP_NONE)
 		W_SlotAmmo_SaveLegacy(self, self.slot_secondary);
+};
 
-	// Melee slot
+// Re-equip the MELEE slot from self.slot_melee.
+void() W_RefreshMeleeSlot =
+{
 	self.slot_melee_equip = __NULL__;
 	self.slot_melee_drop  = __NULL__;
 	switch (self.slot_melee)
@@ -2238,12 +2347,21 @@ void() W_GiveStartingAmmo =
 		self.slot_melee_equip = W_KatanaEquip;
 		self.slot_melee_drop  = W_KatanaDrop;
 		break;
+	case WEP_MELEE:
+		// Bare fists — the fallback melee when the loadout's melee is "None".
+		self.slot_melee_equip = W_MeleeEquip;
+		self.slot_melee_drop  = W_MeleeDrop;
+		break;
 	default:
 		self.slot_melee = WEP_NONE;
 		break;
 	}
+};
 
-	// Utility slot
+// Re-equip the UTILITY slot from self.slot_utility (single grenade; the
+// multi-grenade default fill stays in W_GiveStartingAmmo's post-pass).
+void() W_RefreshUtilitySlot =
+{
 	self.slot_utility_equip = __NULL__;
 	self.slot_utility_drop  = __NULL__;
 	switch (self.slot_utility)
@@ -2290,37 +2408,53 @@ void() W_GiveStartingAmmo =
 		self.slot_utility = WEP_NONE;
 		break;
 	}
+};
 
-	// Multi-utility post-pass: sv_default_utility is a comma-separated
-	// weapon-id list (e.g. "33,34" for HE+Flash).  The switch above
-	// already gave ammo for the FIRST entry (the active slot_utility);
-	// here we give ammo for any additional utility ids so the player
-	// spawns carrying every selected grenade.  Any unknown / duplicate
-	// / non-utility id is skipped; the inventory model already supports
-	// holding multiple utilities (W_UtilityNextCarried iterates them).
+// Grant a single bought weapon into its slot WITHOUT the global ammo wipe
+// (so the player's other slots/guns are preserved).  Operates on self (the
+// buyer).  Slot is resolved from the shared manifest.  PRIMARY/SECONDARY/
+// MELEE replace the slot; UTILITY is additive (the refresh only sets that
+// grenade's ammo + makes it active).
+void(float wep) W_GiveWeaponToSlot =
+{
+	float slot = WeaponManifest_Slot(wep);
+	if (slot == WMF_SLOT_PRIMARY)
 	{
-		string util_list = cvar_string("sv_default_utility");
-		float util_n = Weapon_TokenizeIdList(util_list);
-		float util_i;
-		for (util_i = 0; util_i < util_n; util_i++)
-		{
-			float util_wep = Weapon_IdFromStringOrDefault(argv(util_i), WEP_NONE);
-			if (util_wep == WEP_NONE || util_wep == self.slot_utility)
-				continue;
-			if      (util_wep == WEP_HLGRENADE)       self.ammo_hlgrenade      = MAX_AMMO_HLGRENADE;
-			else if (util_wep == WEP_SNOWBALL)        self.ammo_snowball       = MAX_AMMO_SNOWBALL;
-			else if (util_wep == WEP_CSHEGRENADE)     self.ammo_cshegrenade    = MAX_AMMO_CSHEGRENADE;
-			else if (util_wep == WEP_CSFLASHBANG)     self.ammo_csflashbang    = MAX_AMMO_CSFLASHBANG;
-			else if (util_wep == WEP_CSSMOKEGRENADE)  self.ammo_cssmokegrenade = MAX_AMMO_CSSMOKEGRENADE;
-			else if (util_wep == WEP_SLINGSHOT)
-			{
-				self.snowball_has_slingshot = TRUE;
-				self.snowball_use_slingshot = TRUE;
-				if (self.ammo_snowball <= 0)
-					self.ammo_snowball = MAX_AMMO_SNOWBALL;
-			}
-		}
+		// Drop the gun already in this slot (if any) as a pickup, carrying
+		// its ammo, before installing the new one.  Skip when re-buying the
+		// same weapon (that just refills via the refresh below).
+		if (self.slot_primary != WEP_NONE && self.slot_primary != wep)
+			W_DropSlotForBuy(0, self.slot_primary, self.slot_primary_drop);
+		self.slot_primary = wep;
+		W_RefreshPrimarySlot();
 	}
+	else if (slot == WMF_SLOT_SECONDARY)
+	{
+		if (self.slot_secondary != WEP_NONE && self.slot_secondary != wep)
+			W_DropSlotForBuy(1, self.slot_secondary, self.slot_secondary_drop);
+		self.slot_secondary = wep;
+		W_RefreshSecondarySlot();
+	}
+	else if (slot == WMF_SLOT_MELEE)
+	{
+		if (self.slot_melee != WEP_NONE && self.slot_melee != wep)
+			W_DropSlotForBuy(2, self.slot_melee, self.slot_melee_drop);
+		self.slot_melee = wep;
+		W_RefreshMeleeSlot();
+	}
+	else if (slot == WMF_SLOT_UTILITY)
+	{
+		// Grenades stack (additive) — no drop, and don't yank the player
+		// off their gun to a thrown item.  Equipment buys end here.
+		self.slot_utility = wep;
+		W_RefreshUtilitySlot();
+		return;
+	}
+	else
+		return;
+
+	// Switch to the just-bought weapon so the viewmodel flushes to it.
+	W_SelectWeapon(wep);
 };
 
 void() PlayerSpawn =
@@ -2395,6 +2529,12 @@ void() PlayerSpawn =
 	self.frame = CSANIM_IDLE;
 	self.movetype = MOVETYPE_NONE;  // engine physics off; we run our own
 	self.health = 100;
+	// CS economy: Kevlar / helmet / defuse kit are lost on death — clear
+	// them every (re)spawn so they must be re-bought each life.  money is
+	// NOT reset here (it persists across lives/rounds; see Money_EnsureStart).
+	self.armor = 0;
+	self.has_helmet = 0;
+	self.has_defusekit = 0;
 	self.velocity = '0 0 0';
 	PlayerPlaceAtSpawnPoint();
 	// PlayerPlaceAtSpawnPoint puts origin at the spawn point (typically the
@@ -2426,6 +2566,7 @@ void() PlayerSpawn =
 	self.grapple_rope_active  = 0;
 	self.grapple_anchor       = '0 0 0';
 	self.pm_grapple_held_last = 0;
+	Carry_Drop(self);   // drop any prop carried from the previous life
 	self.flags           = self.flags & ~FL_DUCKING;
 	self.wep_action_id   = 0;
 	self.gauss_charge_state = 0;
@@ -2464,6 +2605,10 @@ void() PlayerSpawn =
 		self.slot_primary   = Weapon_IdFromStringOrDefault(cvar_string("sv_default_primary"),   WEP_NONE);
 		self.slot_secondary = Weapon_IdFromStringOrDefault(cvar_string("sv_default_secondary"), WEP_NONE);
 		self.slot_melee     = Weapon_IdFromStringOrDefault(cvar_string("sv_default_melee"),     WEP_NONE);
+		// "None" melee in the create-server loadout means bare fists, not an
+		// empty hand — back-fill WEP_MELEE so every player spawns with a melee.
+		if (self.slot_melee == WEP_NONE)
+			self.slot_melee = WEP_MELEE;
 		// Utility loadout is a comma-separated weapon-id list ("33,34" =
 		// HE+Flash) so a single round-start can grant multiple grenades.
 		// The active utility (slot_utility) is the first valid id; any
@@ -2473,6 +2618,17 @@ void() PlayerSpawn =
 		W_GiveStartingAmmo();
 	}
 	self.survived_round = 0;  // consume the flag so it doesn't leak to future spawns
+
+	// Defuse: if no terrorist was alive when the round's bomb assignment ran,
+	// it deferred (sv_defuse_pending_red_pickup) — the first RED to spawn here
+	// picks the bomb up.  Clears the flag so only one carrier is granted.
+	if (cvar("sv_gamemode") == GAMEMODE_DEFUSE
+	 && sv_defuse_pending_red_pickup
+	 && self.player_team == TEAM_RED)
+	{
+		self.ammo_cfc4 = 1;
+		sv_defuse_pending_red_pickup = 0;
+	}
 
 	// Wipe last life's damage report row + column so the next death-screen
 	// panel only shows damage dealt/taken THIS life. (See sv_weapons.qc
@@ -2493,6 +2649,32 @@ void() PlayerSpawn =
 
 	PM_EnsurePredictionProxy(self);
 	PM_SyncPredictionProxy(self);
+
+	// nettest: force a FULL ammo resync on EVERY spawn.  A respawn reuses the existing prediction proxy, so the
+	// was_new full-send inside PM_EnsurePredictionProxy is skipped, and PM_SyncPredictionProxy only sends ammo
+	// bytes that CHANGED vs the cached send — so respawning into a loadout that matches the cache sends NO ammo,
+	// leaving the client's working registers stale (HUD reads 0/0) until a real change (drop+pickup) re-seeds
+	// them.  Re-arm the AMMO section + every used mask bit (mirrors the was_new block ~line 1889) so the next
+	// SendEntity writes all slot/utility ammo values.
+	//
+	// CRITICAL: mb1 MUST include bit 8 (ammo_cfc4 / C4 carry).  It was previously 7 (bits 1/2/4 only), so the
+	// one ammo field never force-resent on respawn was the bomb-carry flag.  In Defuse, the round-start bomb
+	// re-assignment can leave a SURVIVING re-picked carrier's ammo_cfc4 netting 1->0->1 in a single frame, which
+	// the proxy change-detect (proxy.ammo_cfc4 != player.ammo_cfc4) sees as UNCHANGED -> no delta -> the client's
+	// predicted_player.ammo_cfc4 stays stale at 0 -> the HUD C4 slot vanishes AND the plant animation never starts
+	// (both gate on predicted_player.ammo_cfc4 > 0), even though the bomb plants server-side.  Forcing bit 8 here
+	// (and in the was_new baseline) re-sends the carry flag on every (re)spawn regardless of the cache match.
+	if (self.pm_prediction_proxy)
+	{
+		self.pm_prediction_proxy.SendFlags = self.pm_prediction_proxy.SendFlags | PM_SF_AMMO;
+		self.pm_prediction_proxy.pm_ammo_mb0 = 255;
+		self.pm_prediction_proxy.pm_ammo_mb1 = 15;   // bits 1/2/4 = he/flash/smoke, bit 8 = ammo_cfc4 (C4 carry)
+		self.pm_prediction_proxy.pm_ammo_mb2 = 0;
+		self.pm_prediction_proxy.pm_ammo_mb3 = 0;
+		self.pm_prediction_proxy.pm_ammo_mb4 = 0;
+		self.pm_prediction_proxy.pm_ammo_mb5 = 0;
+		self.pm_prediction_proxy.pm_ammo_mb6 = 0;
+	}
 
 	// Push the new origin + cleared vis_is_dead to the visual proxy right
 	// now so round-restart respawns don't leave the old corpse rendered at
@@ -2549,6 +2731,8 @@ void() PutClientInServer =
 
 void() ClientDisconnect =
 {
+	Carry_Drop(self);   // release any carried prop so it falls and the link clears
+
 	if (self.pm_prediction_proxy)
 	{
 		remove(self.pm_prediction_proxy);
@@ -2661,6 +2845,9 @@ float(string command_string) SV_HandleHitclaim =
 	float target_slot = stof(argv(1));
 	float body_damage = stof(argv(2));
 	float bone_id     = stof(argv(3));
+	// argv(4) = client-classified hitgroup (the server recomputes from bone
+	// below); argv(5) = the proxy's life serial, used to reject stale claims.
+	float claim_life_serial = stof(argv(5));
 
 	if (target_slot <= 0 || target_slot > 32) {
 		if (dbg) print(sprintf("[hitclaim] reject: target_slot %g out of 1..32\n", target_slot));
@@ -2688,17 +2875,50 @@ float(string command_string) SV_HandleHitclaim =
 		if (dbg) print("[hitclaim] reject: self-hit\n");
 		return 0;
 	}
+	// Stale-claim rejection (mirrors SV_HandleProjhitClaim).  The client sends
+	// the proxy's life serial; if it no longer matches the target's CURRENT
+	// life, the client shot an old-life ghost/corpse proxy (a stale visual
+	// still rendered after the player respawned), so it must NOT damage the
+	// freshly-respawned player.  Doing this rejection SERVER-side is what lets
+	// us drop the brittle CLIENT-side vis_is_dead gate in CSQC_SendHitclaim that
+	// was false-negating legitimate LIVE hits — the "blood but no damage under
+	// sv_trust_clienthits 1" bug.
+	if (claim_life_serial > 0
+	    && target.player_life_serial > 0
+	    && claim_life_serial != target.player_life_serial) {
+		if (dbg) print(sprintf("[hitclaim] reject: stale life serial claim=%g live=%g target=%s\n",
+		                       claim_life_serial, target.player_life_serial, target.netname));
+		return 0;
+	}
 
-	// Look up hitgroup from the bone_id. W_BoneToHitgroup reads the
-	// global `trace_ent` to resolve bone names; we haven't done a trace
-	// in this handler, so point it at the target entity around the call.
-	float hitgroup = HITGROUP_GENERIC;
-	if (bone_id > 0)
+	// Hitgroup: TRUST the client's classification in argv(4).  The client ran
+	// W_HitgroupClassify with the player model loaded for rendering, which is
+	// far more reliable than re-deriving it here: W_BoneToHitgroup needs a ready
+	// trace_ent + model tag state we don't have in the post-cmd-parse context,
+	// and was silently returning GENERIC — so HEADSHOTS dealt only body damage
+	// and the server didn't kill, while the shooter's client (which DID apply
+	// the head multiplier) predicted the kill.  That mismatch is exactly the
+	// "victim dead on the floor for the shooter, but alive with full-minus-body-
+	// damage hp and walking around on their own screen" desync.  The projhit
+	// handler already trusts the client hitgroup; do the same here.  argv(4) is
+	// empty on a legacy 3-arg claim → fall back to the old bone lookup.
+	float hitgroup;
+	if (argv(4) != "")
 	{
-		entity saved_te = trace_ent;
-		trace_ent = target;
-		hitgroup = W_BoneToHitgroup(bone_id);
-		trace_ent = saved_te;
+		hitgroup = stof(argv(4));
+		if (hitgroup < 0 || hitgroup > 7)
+			hitgroup = HITGROUP_GENERIC;
+	}
+	else
+	{
+		hitgroup = HITGROUP_GENERIC;
+		if (bone_id > 0)
+		{
+			entity saved_te = trace_ent;
+			trace_ent = target;
+			hitgroup = W_BoneToHitgroup(bone_id);
+			trace_ent = saved_te;
+		}
 	}
 	float damage = body_damage * W_HitgroupDamageMultiplier(hitgroup);
 
@@ -2738,11 +2958,16 @@ float(string command_string) SV_HandleHitclaim =
 			return 0;
 		}
 
-		if (!checkpvs(self.origin + self.view_ofs, target))
-		{
-			if (dbg) print(sprintf("[hitclaim] reject: target %s not in PVS of attacker\n", target.netname));
-			return 0;
-		}
+		// The checkpvs(attacker_eye -> target) LOS gate was REMOVED here.  It
+		// existed ONLY on the trust path (the trust=0 server-auth trace has no
+		// such gate) and silently dropped visually-valid client hitclaims:
+		// checkpvs is leaf/cluster-granular (false negatives across portals,
+		// just-relinked targets, coarse-vis maps), it ignores lag-comp (the
+		// client saw the target a few ms ago), and it would reject legitimate
+		// wallbangs (penetrating shots).  Net effect: bullets drew blood + a
+		// hitmarker but dealt ZERO damage with sv_trust_clienthits 1, while
+		// trust 0 (server-auth) hit fine.  Trust mode trusts the client's own
+		// trace; the body-damage cap above + W_ApplyDamage's team/FF gate stay.
 	}
 
 	// No dedup: when sv_trust_clienthits >= 1, W_PenetratingHitscanShoot's
@@ -3127,6 +3352,44 @@ void(string command_string) SV_ParseClientCommand =
 		return;
 	}
 
+	// `cmd buy <id>` — buy-menu purchase.  id is a weapon manifest id
+	// (1..WMF_WEP_LAST) or a BUYITEM_* equipment id (>=10000).  Server is
+	// authoritative: re-validate alive + affordability, deduct, then grant.
+	// Buy is allowed anytime while alive (no phase gate, per design).
+	if (cmd == "buy")
+	{
+		if (self.classname != "player" || self.is_dead)
+			return;
+		if (!Player_CanBuy(self))
+		{
+			sprint(self, PRINT_HIGH, "You can't buy here.\n");
+			return;
+		}
+		float buy_id = stof(argv(1));
+		float buy_cost;
+		if (BuyItem_IsItem(buy_id))
+		{
+			buy_cost = BuyItem_Price(buy_id);
+			if (self.money < buy_cost)
+				return;
+			if (!BuyItem_Apply(self, buy_id))
+				return;
+			AddMoney(self, -buy_cost);
+			return;
+		}
+		// Otherwise a weapon id — must be in a buyable category.
+		if (buy_id <= WMF_WEP_NONE || buy_id > WMF_WEP_LAST)
+			return;
+		if (WeaponManifest_BuyCat(buy_id) == BUYCAT_NONE)
+			return;
+		buy_cost = WeaponManifest_Price(buy_id);
+		if (self.money < buy_cost)
+			return;
+		AddMoney(self, -buy_cost);
+		W_GiveWeaponToSlot(buy_id);
+		return;
+	}
+
 	if (cmd == "spawnbarrel")
 	{
 		if (cvar("mp_cheats"))
@@ -3142,6 +3405,36 @@ void(string command_string) SV_ParseClientCommand =
 			phys_can_spawn_infront(self);
 		else
 			sprint(self, PRINT_HIGH, "spawncan requires mp_cheats 1\n");
+		return;
+	}
+
+	if (cmd == "spawnfiles")
+	{
+		if (cvar("mp_cheats"))
+			phys_files_spawn_infront(self);
+		else
+			sprint(self, PRINT_HIGH, "spawnfiles requires mp_cheats 1\n");
+		return;
+	}
+
+	// HL2 carry: +attack while holding a prop throws it (the client suppresses
+	// the actual fire and sends this instead of a `cs` client-shot).
+	if (cmd == "throwprop")
+	{
+		if (self.carried_prop != world)
+		{
+			Carry_Throw(self);
+			// Gravity gun: play "fire2" on the throw (the display frame shows
+			// fire2 in WS_FIRE while not carrying — Carry_Throw just cleared
+			// pm_carrying).  Other carriers (bare-hands +use) have no viewmodel.
+			if (self.weapon == WEP_GRAVITYGUN)
+			{
+				self.weaponstate    = WS_FIRE;
+				self.weaponframe    = GRAVGUN_SEQ_FIRE2;
+				self.wep_anim_start = time;
+				self.wep_nextframe  = time + GRAVGUN_FRAME_INTERVAL;
+			}
+		}
 		return;
 	}
 
@@ -3308,6 +3601,18 @@ void() SV_RunClientCommand =
 		input_movevalues_y = 0;
 		input_buttons = input_buttons & ~1;
 	}
+
+	// func_vehicle: capture the driver's REAL throttle/steer intent HERE, before
+	// PM_PlayerMove's driver-lock zeros input_movevalues.  Capturing in the real
+	// command path (not the shared pmove stash) stops the low-netfps continuation
+	// replay — which replays the already-zeroed cmd_last — from clobbering it back
+	// to 0 (which was freezing the car at fwd=0 every tick).
+	if (self.pm_driving)
+	{
+		self.veh_in_fwd  = input_movevalues_x;
+		self.veh_in_side = input_movevalues_y;
+	}
+
 	PM_PlayerMove();
 
 	if (cvar("sv_debug_wepswap"))

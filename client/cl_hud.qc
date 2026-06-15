@@ -92,7 +92,7 @@ void() HUD_DrawDefuseBar =
     float outer_x = (g_width - outer_w) * 0.5;
     float outer_y = g_height * 0.78;
 
-    vector border_col = '0.06 0.10 0.35';   // dark blue, opaque
+    vector border_col = '0.18 0.22 0.34';   // muted dark slate, opaque
 
     // 1 px border — four strips so the centre stays transparent
     // (no full-rect drawfill, otherwise we'd cover the see-through).
@@ -117,8 +117,8 @@ void() HUD_DrawDefuseBar =
     // an interpolated colour stop.  Drawn only up to fill_w so each
     // newly-revealed pixel has its own gradient shade as the defuse
     // climbs left-to-right.
-    vector grad_lo = '0.08 0.18 0.50';   // darker on the left
-    vector grad_hi = '0.25 0.55 0.95';   // lighter on the right
+    vector grad_lo = '0.62 0.68 0.80';   // cool light grey on the left
+    vector grad_hi = '0.94 0.97 1.00';   // near-white (faint blue tint) on the right
     float strips = 16;
     float strip_w_full = bar_w / strips;
     float i;
@@ -415,12 +415,23 @@ string hud_slot_cache_text1;
 string hud_slot_cache_text2;
 string hud_slot_cache_text3;
 string hud_slot_cache_text4;
+string hud_slot_cache_text5;        // C4 label "5 C4" — id-constant, built once
+float  hud_slot_cache_text5_valid;  // (no literal initializer: dodges the fteqcc const-global trap)
 float  hud_slot_cache_active;
 float  hud_slot_full_until;
 
 float  hud_health_cache_valid;
 float  hud_health_cache_value;
 string hud_health_cache_text;
+
+// Money / armor string caches — mirror the health cache.  Both change rarely
+// (a buy, a kill reward, taking damage) but were sprintf'd every render frame.
+float  hud_money_cache_valid;
+float  hud_money_cache_value;
+string hud_money_cache_text;
+float  hud_armor_cache_valid;
+float  hud_armor_cache_value;
+string hud_armor_cache_text;
 
 float  hud_ammo_cache_valid;
 float  hud_ammo_cache_weapon;
@@ -522,6 +533,28 @@ string() HUD_GetHealthString =
     }
 
     return hud_health_cache_text;
+};
+
+string(float money) HUD_GetMoneyString =
+{
+    if (!hud_money_cache_valid || hud_money_cache_value != money)
+    {
+        hud_money_cache_valid = TRUE;
+        hud_money_cache_value = money;
+        hud_money_cache_text  = sprintf("$%g", money);
+    }
+    return hud_money_cache_text;
+};
+
+string(float armor) HUD_GetArmorString =
+{
+    if (!hud_armor_cache_valid || hud_armor_cache_value != armor)
+    {
+        hud_armor_cache_valid = TRUE;
+        hud_armor_cache_value = armor;
+        hud_armor_cache_text  = sprintf("AP %g", armor);
+    }
+    return hud_armor_cache_text;
 };
 
 string(float weapon_id, float format_id, float value_a, float value_b) HUD_CacheAmmoString =
@@ -704,8 +737,6 @@ string() HUD_GetHLSMGGrenadeString =
 
 void(string slot_text, float is_active, vector pos) HUD_DrawWeaponSlot =
 {
-    vector bg_color;
-    float  bg_alpha;
     vector text_color;
     float  text_alpha;
     vector text_pos;
@@ -713,23 +744,22 @@ void(string slot_text, float is_active, vector pos) HUD_DrawWeaponSlot =
 
     if (is_active)
     {
-        bg_color = '0.2 0.35 0.5';
-        bg_alpha = 0.85;
         text_color = '1 1 1';
         text_alpha = 1.0;
     }
     else
     {
-        bg_color = '0.1 0.12 0.15';
-        bg_alpha = 0.6;
         text_color = '0.6 0.6 0.6';
         text_alpha = 0.8;
     }
 
-    drawfill(pos, [HUD_SLOT_WIDTH, HUD_SLOT_HEIGHT], bg_color, bg_alpha, 0);
-
+    // Background panel removed — the font's baked outline (loadfont outline=1)
+    // keeps the label readable over the world without a fill.  Active slot is
+    // marked by brighter text + a 2px accent bar at the LEFT edge (moved in from
+    // the old panel's right edge so it sits beside the label instead of floating
+    // where the now-invisible panel used to end).
     if (is_active)
-        drawfill([pos_x + HUD_SLOT_WIDTH - 2, pos_y], [2, HUD_SLOT_HEIGHT], '0.4 0.7 1', 1.0, 0);
+        drawfill([pos_x, pos_y], [2, HUD_SLOT_HEIGHT], '0.4 0.7 1', 1.0, 0);
 
     text_size = [HUD_SLOT_FONT, HUD_SLOT_FONT];
     text_pos_x = pos_x + HUD_SLOT_PADDING;
@@ -740,9 +770,8 @@ void(string slot_text, float is_active, vector pos) HUD_DrawWeaponSlot =
     text_pos_y = pos_y + (HUD_SLOT_HEIGHT - HUD_SLOT_FONT) * 0.5 + 1;
     text_pos_z = 0;
 
-    // Drop shadow
-    drawstring(text_pos + [HUD_SLOT_SHADOW, HUD_SLOT_SHADOW], slot_text, text_size, '0 0 0', text_alpha * 0.5, 0);
-    // Main text
+    // Single draw — legibility border comes from the font's baked outline
+    // (loadfont outline=1 in cl_main.qc), replacing the old shadow double-draw.
     drawstring(text_pos, slot_text, text_size, text_color, text_alpha, 0);
 };
 
@@ -755,15 +784,13 @@ float HUD_DROP_FONT   = 8;
 
 void(string label, float is_active, vector pos) HUD_DrawUtilityDropRow =
 {
-    vector bg_color  = is_active ? '0.18 0.30 0.42' : '0.07 0.09 0.11';
-    float  bg_alpha  = is_active ? 0.75 : 0.45;
     vector tx_color  = is_active ? '1 1 1'          : '0.7 0.75 0.85';
     float  tx_alpha  = is_active ? 1.0  : 0.7;
 
-    drawfill(pos, [HUD_SLOT_WIDTH, HUD_DROP_HEIGHT], bg_color, bg_alpha, 0);
-
+    // Background panel removed (see HUD_DrawWeaponSlot) — outlined text only,
+    // with a left-edge accent bar on the active row.
     if (is_active)
-        drawfill([pos_x + HUD_SLOT_WIDTH - 2, pos_y], [2, HUD_DROP_HEIGHT], '0.4 0.7 1', 1.0, 0);
+        drawfill([pos_x, pos_y], [2, HUD_DROP_HEIGHT], '0.4 0.7 1', 1.0, 0);
 
     vector text_size = [HUD_DROP_FONT, HUD_DROP_FONT];
     vector text_pos;
@@ -894,8 +921,16 @@ void() HUD_DrawWeaponSlots =
     float c4_y = slot_y + (HUD_SLOT_HEIGHT + HUD_SLOT_GAP) * 4;
     if (predicted_player.ammo_cfc4 > 0)
     {
-        string c4_text = sprintf("5 %s", HUD_WeaponName(WEP_CFC4));
-        HUD_DrawWeaponSlot(c4_text, active == WEP_CFC4, [slot_x, c4_y]);
+        // The C4 label is constant ("5 C4"), so build it once instead of
+        // sprintf'ing every frame the player carries the charge. (Cache-once
+        // is valid only while the label stays constant — revisit if it ever
+        // becomes dynamic, e.g. "5 C4 (armed)".)
+        if (!hud_slot_cache_text5_valid)
+        {
+            hud_slot_cache_text5       = sprintf("5 %s", HUD_WeaponName(WEP_CFC4));
+            hud_slot_cache_text5_valid = TRUE;
+        }
+        HUD_DrawWeaponSlot(hud_slot_cache_text5, active == WEP_CFC4, [slot_x, c4_y]);
         c4_y = c4_y + HUD_SLOT_HEIGHT + HUD_SLOT_GAP;
     }
 
@@ -905,15 +940,22 @@ void() HUD_DrawWeaponSlots =
     HUD_DrawUtilityDropdown([slot_x, c4_y]);
 };
 
+// Cached formatted timer — the displayed text is identical for a whole second
+// but was sprintf'd + stringwidth'd EVERY render frame (uncapped fps).  Re-format
+// only when the displayed second, phase, or red/normal colour-state changes.
+float  hud_rt_cache_valid;
+float  hud_rt_cache_phase;
+float  hud_rt_cache_second;
+float  hud_rt_cache_red;
+string hud_rt_cache_str;
+vector hud_rt_cache_color;
+float  hud_rt_cache_width;
+
 void() HUD_DrawRoundTimer =
 {
     float remaining;
-    float minutes;
-    float seconds;
-    string timer_str;
-    vector color;
-    float text_width;
-    float x, y;
+    float disp_sec;
+    float want_red = 0;
     float phase;
 
     phase = getstatf(STAT_ROUND_PHASE);
@@ -924,27 +966,54 @@ void() HUD_DrawRoundTimer =
         remaining = getstatf(STAT_FREEZE_TIMELEFT);
         if (remaining <= 0)
             return;
-        timer_str = sprintf("%.0f", ceil(remaining));
-        color = '1 0.8 0.2';
+        disp_sec = ceil(remaining);
     }
     else if (phase == ROUND_PHASE_ACTIVE)
     {
+        // Defuse: once the bomb is down the round clock is suspended on the
+        // server (the bomb fuse owns the round), so remove the timer from the
+        // HUD until the next round.  STAT_BOMB_PLANTED is only ever set in
+        // Defuse mode, so no extra gamemode check is needed here.
+        if (getstatf(STAT_BOMB_PLANTED))
+            return;
         remaining = getstatf(STAT_ROUNDTIMER);
         if (remaining <= 0)
             return;
-        minutes = floor(remaining / 60);
-        seconds = floor(remaining - minutes * 60);
-        timer_str = sprintf("%g:%02g", minutes, seconds);
-        color = (remaining <= 30) ? '1 0.2 0.2' : '1 1 1';
+        disp_sec = floor(remaining);
+        want_red = (remaining <= 30);
     }
     else
         return;  // hide timer during round end / map end phases
 
-    text_width = stringwidth(timer_str, 1, [32, 32]);
-    x = g_width * 0.5 - text_width * 0.5;
-    y = g_height - 52;
-    drawstring([x + HUD_SLOT_SHADOW, y + HUD_SLOT_SHADOW], timer_str, [32, 32], '0 0 0', 0.5, 0);
-    drawstring([x, y], timer_str, [32, 32], color, 0.9, 0);
+    // Re-format only on a second / phase / colour change (getstatf above is a
+    // cheap stat-array read; the sprintf + stringwidth were the per-frame waste).
+    if (!hud_rt_cache_valid
+        || phase != hud_rt_cache_phase
+        || disp_sec != hud_rt_cache_second
+        || want_red != hud_rt_cache_red)
+    {
+        hud_rt_cache_valid  = TRUE;
+        hud_rt_cache_phase  = phase;
+        hud_rt_cache_second = disp_sec;
+        hud_rt_cache_red    = want_red;
+        if (phase == ROUND_PHASE_FREEZE)
+        {
+            hud_rt_cache_str   = sprintf("%.0f", disp_sec);
+            hud_rt_cache_color = '1 0.8 0.2';
+        }
+        else
+        {
+            float minutes = floor(remaining / 60);
+            float seconds = floor(remaining - minutes * 60);
+            hud_rt_cache_str   = sprintf("%g:%02g", minutes, seconds);
+            hud_rt_cache_color = want_red ? '1 0.2 0.2' : '1 1 1';
+        }
+        hud_rt_cache_width = stringwidth(hud_rt_cache_str, 1, [32, 32]);
+    }
+
+    float x = g_width * 0.5 - hud_rt_cache_width * 0.5;
+    float y = g_height - 52;
+    drawstring([x, y], hud_rt_cache_str, [32, 32], hud_rt_cache_color, 0.9, 0);
 };
 
 void() HUD_DrawCenterMessage =
@@ -1005,12 +1074,10 @@ void() HUD_DrawCenterMessage =
 
     // Draw main text
     main_width = stringwidth(main_text, 1, main_size);
-    drawstring([cx - main_width * 0.5 + HUD_SLOT_SHADOW, cy + HUD_SLOT_SHADOW], main_text, main_size, '0 0 0', 0.5, 0);
     drawstring([cx - main_width * 0.5, cy], main_text, main_size, main_color, 0.9, 0);
 
     // Draw subtext
     sub_width = stringwidth(sub_text, 1, sub_size);
-    drawstring([cx - sub_width * 0.5 + HUD_SLOT_SHADOW, cy + 44 + HUD_SLOT_SHADOW], sub_text, sub_size, '0 0 0', 0.4, 0);
     drawstring([cx - sub_width * 0.5, cy + 44], sub_text, sub_size, '0.8 0.8 0.8', 0.85, 0);
 };
 
@@ -1081,8 +1148,33 @@ void() CSQC_DrawWeaponHUD =
 
     // Health — bottom left
     hp_str = HUD_GetHealthString();
-    drawstring([20 + HUD_SLOT_SHADOW, g_height - 52 + HUD_SLOT_SHADOW], hp_str, [36, 36], '0 0 0', 0.5, 0);
     drawstring([20, g_height - 52], hp_str, [36, 36], '1 1 1', 0.9, 0);
+
+    // Money — left side, just above health, in a smaller GoogleMed size
+    // (hud_font_mono).  Armor (Kevlar) sits above it, only when you have any.
+    {
+        float cur_money = getstatf(STAT_MONEY);
+        float cur_armor = getstatf(STAT_ARMOR);
+        float prev_money_font = drawfont;
+        string money_str;
+        string armor_str;
+        float my;
+        float ay;
+        drawfont = hud_font_mono;
+        // Yellow when the player can buy here (inside an allowed buy zone, or
+        // buy-anywhere / a zone-less map); green otherwise.
+        vector money_col = getstatf(STAT_IN_BUYZONE) ? '1 0.85 0.2' : '0.4 0.9 0.4';
+        money_str = HUD_GetMoneyString(cur_money);
+        my = g_height - 52 - 22;
+        drawstring([20, my], money_str, [18, 18], money_col, 0.9, 0);
+        if (cur_armor > 0)
+        {
+            armor_str = HUD_GetArmorString(cur_armor);
+            ay = my - 20;
+            drawstring([20, ay], armor_str, [18, 18], '0.5 0.7 1', 0.9, 0);
+        }
+        drawfont = prev_money_font;
+    }
 
     // Weapon slots — right side, vertically centered
     HUD_DrawWeaponSlots();
@@ -1117,12 +1209,10 @@ void() CSQC_DrawWeaponHUD =
     {
         string gren_str = HUD_GetHLSMGGrenadeString();
         float gx = g_width - 20 - hud_hlsmg_gren_cache_width;
-        drawstring([gx + HUD_SLOT_SHADOW, y - 20 + HUD_SLOT_SHADOW], gren_str, [16, 16], '0 0 0', 0.4, 0);
         drawstring([gx, y - 20], gren_str, [16, 16], '0.8 0.7 0.3', 0.85, 0);
     }
 
     x = g_width - 20 - hud_ammo_cache_width;
-    drawstring([x + HUD_SLOT_SHADOW, y + HUD_SLOT_SHADOW], mag_str, [32, 32], '0 0 0', 0.5, 0);
     drawstring([x, y], mag_str, [32, 32], '1 1 1', 0.9, 0);
 
     drawfont = prev_font;
@@ -1153,7 +1243,6 @@ void() HUD_DrawSpeedometer =
     float x = g_width * 0.5 - text_width * 0.5;
     float y = g_height * 0.55;
 
-    drawstring([x + 1, y + 1], speed_str, text_size, '0 0 0', 0.5, 0);
     drawstring([x, y], speed_str, text_size, '1 1 1', 0.9, 0);
 
     drawfont = prev_font;
@@ -1301,7 +1390,6 @@ void() HUD_DrawNetGraph =
         if (i == 3) col = (snap_dt_now > ng_cache_sv_tick * 2) ? '1 0.5 0.3' : '0.7 1 0.7';
         if (i == 4) col = ng_cache_extrap_master ? '0.7 1 0.7' : '1 0.7 0.7';
         if (i == 5) col = (ng_cache_smooth_enabled && ng_cache_smooth_time > 0) ? '0.7 1 0.7' : '0.8 0.8 0.8';
-        drawstring(p + [1, 1], ng_cache_lines[i], text_size, '0 0 0', 0.7, 0);
         drawstring(p, ng_cache_lines[i], text_size, col, 0.95, 0);
     }
 
