@@ -12,7 +12,7 @@ float(float modelindex, string bonename, float hitgroup, vector boxmins, vector 
 void(string modelname) Hitbox_RegisterModel;	// defined in sh_weapons.qc (where the $hbox table lives); takes the precache name (precache_model returns a string)
 
 const float FL_DUCKING = 8192;
-const float PM_CSQC_PROXY_VERSION = 19;  // bump on wire-layout change.  MUST NOT collide with any CSQC_ENT_* id below (CSQC_Ent_Update dispatches by equality before falling through to the pm_proxy parse — v13 collided with CSQC_ENT_CAMERA and silently routed proxy updates into the camera parser).  v14: ammo bitmask + movement byte/short re-encoding.  v15: origin/velocity now WriteFloat (full 32-bit) instead of WriteCoord (1/8 qu) — eliminates snapshot-rounding as a source of reconcile drift.  v16: weapon-state section now also carries pm_weapon_blend_progress + pm_weapon_prev_factor so the speed-factor blend is input-tick-driven instead of wall-clock-driven.  v17: utility proxy includes CS HE/flash/smoke ammo.  v18: primary/secondary ammo is slot-based.  v19: weapon-state section adds 4 floats + 1 byte for the sv_gunkick view-kick state (pitch/yaw offsets + spring velocities + per-burst shot index).
+const float PM_CSQC_PROXY_VERSION = 20;  // v20: movement section adds pm_jump_groundstick_off_until (remaining-secs) right after pm_jump_lag_end, so the post-jump ground-snap suppress window survives reconcile at high ping (codstamina/grapple low jumps).  bump on wire-layout change.  MUST NOT collide with any CSQC_ENT_* id below (CSQC_Ent_Update dispatches by equality before falling through to the pm_proxy parse — v13 collided with CSQC_ENT_CAMERA and silently routed proxy updates into the camera parser).  v14: ammo bitmask + movement byte/short re-encoding.  v15: origin/velocity now WriteFloat (full 32-bit) instead of WriteCoord (1/8 qu) — eliminates snapshot-rounding as a source of reconcile drift.  v16: weapon-state section now also carries pm_weapon_blend_progress + pm_weapon_prev_factor so the speed-factor blend is input-tick-driven instead of wall-clock-driven.  v17: utility proxy includes CS HE/flash/smoke ammo.  v18: primary/secondary ammo is slot-based.  v19: weapon-state section adds 4 floats + 1 byte for the sv_gunkick view-kick state (pitch/yaw offsets + spring velocities + per-burst shot index).
 const string PM_CSQC_PROXY_CLASSNAME = "pm_csqc_proxy";
 
 // PM_CSQC_PROXY SendFlags section bits — each section is gated separately
@@ -1433,15 +1433,15 @@ void() precache_everything =
 	precache_sound("sounds/weapons/wpn_cfbarrett/draw.WAV");
 
 	// CF PSG1 (cfpsg1)
-	precache_model("models/weapons/wpn_psg1/v_psg1.mdl");
-	precache_model("models/weapons/wpn_psg1/w_psg1.mdl");
-	precache_model("models/weapons/wpn_psg1/p_psg1.mdl");
-	precache_sound("sounds/weapons/wpn_psg1/fire.WAV");
-	precache_sound("sounds/weapons/wpn_psg1/reload.WAV");
-	precache_sound("sounds/weapons/wpn_psg1/clipin.WAV");
-	precache_sound("sounds/weapons/wpn_psg1/clipout.WAV");
-	precache_sound("sounds/weapons/wpn_psg1/cy.WAV");
-	precache_sound("sounds/weapons/wpn_psg1/bcy.WAV");
+	precache_model("models/weapons/wpn_cfpsg1/v_psg1.mdl");
+	precache_model("models/weapons/wpn_cfpsg1/w_psg1.mdl");
+	precache_model("models/weapons/wpn_cfpsg1/p_psg1.mdl");
+	precache_sound("sounds/weapons/wpn_cfpsg1/fire.WAV");
+	precache_sound("sounds/weapons/wpn_cfpsg1/reload.WAV");
+	precache_sound("sounds/weapons/wpn_cfpsg1/clipin.WAV");
+	precache_sound("sounds/weapons/wpn_cfpsg1/clipout.WAV");
+	precache_sound("sounds/weapons/wpn_cfpsg1/cy.WAV");
+	precache_sound("sounds/weapons/wpn_cfpsg1/bcy.WAV");
 
 	// CF Dual Desert Deagle (cfddeagle)
 	precache_model("models/weapons/wpn_cfddeagle/v_ddeagle.mdl");

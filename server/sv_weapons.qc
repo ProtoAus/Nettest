@@ -1517,6 +1517,10 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
         WriteByte(MSG_MULTICAST, CSQC_EVENT_PLAYER_FLINCH);
         WriteByte(MSG_MULTICAST, num_for_edict(target));
         WriteByte(MSG_MULTICAST, hg);
+        // nettest Patch 36: tag the attacker's slot so their own client can skip this flinch —
+        // they already predicted it locally (CSQC_SendHitclaim).  Timing-independent dedup (a
+        // client-side time window loses at high ping, e.g. sv_minping 500).  Witnesses apply it.
+        WriteByte(MSG_MULTICAST, num_for_edict(attacker));
         multicast(target.origin, MULTICAST_PVS);
     }
 

@@ -999,12 +999,9 @@ void(entity target, float damage, float bone_id, optional float in_hitgroup) CSQ
         float fdur = cvar("cl_player_flinch_time");
         target.vis_flinch_until    = cltime + fdur;
         target.vis_flinch_hitgroup = HITGROUP_GENERIC;
-        // nettest Patch 36: we just predicted this flinch locally.  The server ALSO multicasts
-        // CSQC_EVENT_PLAYER_FLINCH to everyone (incl. us) ~RTT later, and its handler re-stamps
-        // vis_flinch_until — RESTARTING the flinch anim, so the shooter sees it twice.  Latch a
-        // short window so the handler skips OUR own shot's server flinch (witnesses, who never
-        // set this latch, still see it once).  Only set on the proxy we predicted.
-        target.vis_flinch_pred_until = cltime + 0.5;
+        // The server's CSQC_EVENT_PLAYER_FLINCH multicast is now tagged with the attacker slot
+        // and skipped on the attacker's own client (cl_main.qc), so this prediction is NOT
+        // double-stamped — timing-independent, unlike the old client-side time-window latch.
     }
 };
 

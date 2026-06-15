@@ -98,8 +98,8 @@ const float CFPSG1_KICK_STRENGTH = 1.0;   // semi-auto — moderate per-shot del
 const string CFPSG1_MUZZLE_BONE   = "Bone01";
 #define CFPSG1_MUZZLE_OFFSET ('58.0 0.0 0.0')
 
-const string CFPSG1_VIEWMODEL    = "models/weapons/wpn_psg1/v_psg1.mdl";
-const string CFPSG1_WORLDMODEL   = "models/weapons/wpn_psg1/w_psg1.mdl";
+const string CFPSG1_VIEWMODEL    = "models/weapons/wpn_cfpsg1/v_psg1.mdl";
+const string CFPSG1_WORLDMODEL   = "models/weapons/wpn_cfpsg1/w_psg1.mdl";
 const string CFPSG1_DEPLOY_SOUND = "";
 const string CFPSG1_DISPLAY_NAME = "PSG1";
 
@@ -169,7 +169,7 @@ void() W_CFPSG1Fire =
 
         W_CFPSG1Shoot();
 
-        sound(self, CHAN_WEAPON, "sounds/weapons/wpn_psg1/fire.WAV", 1, ATTN_NORM);
+        sound(self, CHAN_WEAPON, "sounds/weapons/wpn_cfpsg1/fire.WAV", 1, ATTN_NORM);
 
         W_ShellEffect(SHELL_RIFLE, '8 6 -4', '6 46 36', '240 720 120');
     }
@@ -204,7 +204,7 @@ void() W_CFPSG1Frame =
     {
         if (elapsed >= CFPSG1_DRAW_CLACK_TIME && !self.cfpsg1_draw_snd_played)
         {
-            sound(self, CHAN_AUTO, "sounds/weapons/wpn_psg1/reload.WAV", 1, ATTN_NORM);
+            sound(self, CHAN_AUTO, "sounds/weapons/wpn_cfpsg1/reload.WAV", 1, ATTN_NORM);
             self.cfpsg1_draw_snd_played = 1;
         }
     }
@@ -212,23 +212,23 @@ void() W_CFPSG1Frame =
     {
         if (elapsed >= CFPSG1_RELOAD_CY_TIME && self.cfpsg1_reload_snd_stage < 1)
         {
-            sound(self, CHAN_AUTO, "sounds/weapons/wpn_psg1/cy.WAV", 1, ATTN_NORM);
+            sound(self, CHAN_AUTO, "sounds/weapons/wpn_cfpsg1/cy.WAV", 1, ATTN_NORM);
             self.cfpsg1_reload_snd_stage = 1;
         }
         if (elapsed >= CFPSG1_RELOAD_CLIPOUT_TIME && self.cfpsg1_reload_snd_stage < 2)
         {
-            sound(self, CHAN_AUTO, "sounds/weapons/wpn_psg1/clipout.WAV", 1, ATTN_NORM);
+            sound(self, CHAN_AUTO, "sounds/weapons/wpn_cfpsg1/clipout.WAV", 1, ATTN_NORM);
             W_MagDropEffect(MAG_RIFLE, '4 -4 -6', '0 -30 -20');
             self.cfpsg1_reload_snd_stage = 2;
         }
         if (elapsed >= CFPSG1_RELOAD_CLIPIN_TIME && self.cfpsg1_reload_snd_stage < 3)
         {
-            sound(self, CHAN_AUTO, "sounds/weapons/wpn_psg1/clipin.WAV", 1, ATTN_NORM);
+            sound(self, CHAN_AUTO, "sounds/weapons/wpn_cfpsg1/clipin.WAV", 1, ATTN_NORM);
             self.cfpsg1_reload_snd_stage = 3;
         }
         if (elapsed >= CFPSG1_RELOAD_BCY_TIME && self.cfpsg1_reload_snd_stage < 4)
         {
-            sound(self, CHAN_AUTO, "sounds/weapons/wpn_psg1/bcy.WAV", 1, ATTN_NORM);
+            sound(self, CHAN_AUTO, "sounds/weapons/wpn_cfpsg1/bcy.WAV", 1, ATTN_NORM);
             self.cfpsg1_reload_snd_stage = 4;
         }
     }
@@ -339,7 +339,7 @@ void() CSQC_PredictCFPSG1Command =
             CSQC_MarkPendingWeaponAck();
             if (CSQC_BeginFireActionEffects())
             {
-                sound(self, CHAN_WEAPON, "sounds/weapons/wpn_psg1/fire.WAV", 1, ATTN_NONE);
+                sound(self, CHAN_WEAPON, "sounds/weapons/wpn_cfpsg1/fire.WAV", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
                 CSQC_PredictedPenetratingImpact(CFPSG1_BASE_SPREAD, CFPSG1_MOVE_SPREAD, CFPSG1_FULL_SPREAD_SPEED,
                     CFPSG1_CLOSE_DAMAGE, CFPSG1_MIN_DAMAGE, CFPSG1_DAMAGE_FALLOFF_RANGE, 48, 0.97,
@@ -377,7 +377,7 @@ void() CSQC_PredictCFPSG1Command =
         {
             if (!csqc_cfpsg1_draw_snd_played && elapsed >= CFPSG1_DRAW_CLACK_TIME)
             {
-                localsound("sounds/weapons/wpn_psg1/reload.WAV");
+                localsound("sounds/weapons/wpn_cfpsg1/reload.WAV");
                 CSQC_RecordPredictedAutoSound();
                 csqc_cfpsg1_draw_snd_played = 1;
             }
@@ -386,26 +386,26 @@ void() CSQC_PredictCFPSG1Command =
         {
             if (csqc_cfpsg1_reload_snd_stage < 1 && elapsed >= CFPSG1_RELOAD_CY_TIME)
             {
-                localsound("sounds/weapons/wpn_psg1/cy.WAV");
+                localsound("sounds/weapons/wpn_cfpsg1/cy.WAV");
                 CSQC_RecordPredictedAutoSound();
                 csqc_cfpsg1_reload_snd_stage = 1;
             }
             if (csqc_cfpsg1_reload_snd_stage < 2 && elapsed >= CFPSG1_RELOAD_CLIPOUT_TIME)
             {
-                localsound("sounds/weapons/wpn_psg1/clipout.WAV");
+                localsound("sounds/weapons/wpn_cfpsg1/clipout.WAV");
                 CSQC_RecordPredictedAutoSound();
                 CSQC_SpawnMag("models/weapons/riflemag.mdl", '4 -4 -6', '0 -30 -20', '4 8 8', '0 180 0', '0 90 90');
                 csqc_cfpsg1_reload_snd_stage = 2;
             }
             if (csqc_cfpsg1_reload_snd_stage < 3 && elapsed >= CFPSG1_RELOAD_CLIPIN_TIME)
             {
-                localsound("sounds/weapons/wpn_psg1/clipin.WAV");
+                localsound("sounds/weapons/wpn_cfpsg1/clipin.WAV");
                 CSQC_RecordPredictedAutoSound();
                 csqc_cfpsg1_reload_snd_stage = 3;
             }
             if (csqc_cfpsg1_reload_snd_stage < 4 && elapsed >= CFPSG1_RELOAD_BCY_TIME)
             {
-                localsound("sounds/weapons/wpn_psg1/bcy.WAV");
+                localsound("sounds/weapons/wpn_cfpsg1/bcy.WAV");
                 CSQC_RecordPredictedAutoSound();
                 csqc_cfpsg1_reload_snd_stage = 4;
             }

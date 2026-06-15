@@ -244,7 +244,7 @@ float(float wep) WeaponManifest_LoadUncached =
     case WMF_WEP_CFBARRETT:
         WeaponManifest_Set(WMF_SLOT_PRIMARY, "Barrett M82", "BARRETT", "Barrett M82", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_SCOPE, 0.889, WMF_PANIM_RIFLE, "models/weapons/wpn_cfbarrett/p_barrett.mdl", 10, 30, 0, 24, 45); return TRUE;
     case WMF_WEP_CFPSG1:
-        WeaponManifest_Set(WMF_SLOT_PRIMARY, "PSG1", "PSG1", "PSG1", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_SCOPE, 0.926, WMF_PANIM_RIFLE, "models/weapons/wpn_psg1/p_psg1.mdl", 20, 60, 0, 25, 46); return TRUE;
+        WeaponManifest_Set(WMF_SLOT_PRIMARY, "PSG1", "PSG1", "PSG1", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_SCOPE, 0.926, WMF_PANIM_RIFLE, "models/weapons/wpn_cfpsg1/p_psg1.mdl", 20, 60, 0, 25, 46); return TRUE;
     case WMF_WEP_CFSPAS12:
         WeaponManifest_Set(WMF_SLOT_PRIMARY, "SPAS-12", "SPAS-12", "SPAS-12", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG | WMF_FLAG_CROSSHAIR, 0.945, WMF_PANIM_SHOTGUN, "models/weapons/wpn_cfspas12/p_spas12.mdl", 8, 32, 0, 26, 47); return TRUE;
     case WMF_WEP_CFM700:

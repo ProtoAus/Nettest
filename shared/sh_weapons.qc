@@ -265,6 +265,7 @@ const float CSQC_EVENT_ENV_MESSAGE       = 39;       // env_message title text. 
 const float CSQC_EVENT_DAMAGE_VIEWKICK   = 40;       // private victim camera punch. Payload: signed short pitch*100, signed short roll*100.
 const float CSQC_EVENT_RADIO_CALL        = 41;       // radio quick-chat playback. Payload: resolved voice-line path string. CSQC plays beep1 → voice → beep2 in sequence using soundlength() to time each stage.
 const float CSQC_EVENT_PHYSPROP_IMPACT   = 42;       // phys_files contact smoke. Payload: pos 3×coord, normal 3 bytes (0..255 = -1..1), bucket byte (0 slide / 1 soft / 2 hard). Server multicasts to PVS; CSQC fires "weapons.physprop_smoke" via pointparticles. The impact/slide SOUND is server-side sound(), NOT routed through this event.
+const float CSQC_EVENT_SLIDE_SOUND       = 43;       // CoD-slide engage sound. Routed to PVS clients EXCEPT the slider (whose CSQC plays it via localsound the instant the slide is predicted). Payload: 1 exclude byte + 1 variant byte (slideN.wav, N=1..5) + 3×coord origin. Mirrors CSQC_EVENT_FOOTSTEP_SOUND.
 
 // --- Kill-feed causes (byte payload of CSQC_EVENT_KILLFEED) ---
 const float KILL_CAUSE_WEAPON       = 0;

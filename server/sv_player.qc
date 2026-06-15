@@ -1501,6 +1501,11 @@ float(entity playerent, float changedflags) PM_PredictionProxy_SendEntity =
 		// local `time`), matching attack_finished / wep_anim_start above.
 		WriteByte (MSG_ENTITY, self.slide_friction_active);
 		WriteFloat(MSG_ENTITY, max(0, self.pm_jump_lag_end - time));
+		// Post-jump ground-snap suppress window (remaining-seconds, same
+		// encoding as pm_jump_lag_end above). Must be replicated or the
+		// reconcile replay re-grounds a sub-180 (codstamina/grapple) jump at
+		// high ping → the "stuck/flicker" symptom.
+		WriteFloat(MSG_ENTITY, max(0, self.pm_jump_groundstick_off_until - time));
 		WriteByte (MSG_ENTITY, self.grapple_rope_active);
 		WriteCoord(MSG_ENTITY, self.grapple_anchor_x);
 		WriteCoord(MSG_ENTITY, self.grapple_anchor_y);
@@ -1681,6 +1686,7 @@ void(entity player) PM_SyncPredictionProxy =
 	    proxy.pm_step_time        != player.pm_step_time ||
 	    proxy.slide_friction_active != player.slide_friction_active ||
 	    proxy.pm_jump_lag_end     != player.pm_jump_lag_end ||
+	    proxy.pm_jump_groundstick_off_until != player.pm_jump_groundstick_off_until ||
 	    proxy.grapple_rope_active != player.grapple_rope_active ||
 	    proxy.grapple_anchor      != player.grapple_anchor ||
 	    proxy.grapple_attached    != player.grapple_attached ||
@@ -1773,6 +1779,7 @@ void(entity player) PM_SyncPredictionProxy =
 	proxy.pm_step_time            = player.pm_step_time;
 	proxy.slide_friction_active   = player.slide_friction_active;
 	proxy.pm_jump_lag_end         = player.pm_jump_lag_end;
+	proxy.pm_jump_groundstick_off_until = player.pm_jump_groundstick_off_until;
 	proxy.grapple_rope_active     = player.grapple_rope_active;
 	proxy.grapple_anchor          = player.grapple_anchor;
 	proxy.grapple_attached        = player.grapple_attached;

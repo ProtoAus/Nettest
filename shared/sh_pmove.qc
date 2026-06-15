@@ -4555,6 +4555,11 @@ void() PM_UpdateStepSound =
 //  touching pm_velocity or emitting the random slide sound.
 // ============================================================================
 
+// CSQC-side cycling variant (1..5) for the locally-predicted slide sound so a
+// player's own repeated slides don't all reuse slide1.wav. Independent of the
+// server's random pick for remote listeners (the slider never hears that copy).
+float slide_local_variant;
+
 float() PM_TryEngageSlide =
 {
     if (self.slide_friction_active)
@@ -4593,17 +4598,34 @@ float() PM_TryEngageSlide =
         pm_velocity_y += hdir_y * boost;
     }
 
+    // One-shot slide sound — PREDICTED locally, multicast to others. Mirrors
+    // the footstep event (PM_EmitStepSound): the server sends it to OTHER
+    // clients in PVS with the slider's entnum as an exclude byte, and the
+    // slider's own CSQC plays it instantly via localsound on the fresh
+    // prediction pass. So at high ping you hear your slide the moment you
+    // start it (no ~RTT server echo for yourself); others hear it positionally
+    // at ping latency. No chain/loop — a slide longer than the sample goes
+    // silent for the remainder.
 #ifdef SSQC
-    // Random one-shot slide sound.  Picks a random sounds/player/slideN.wav
-    // (N = 1..5) on CHAN_BODY; no chain, no loop — slides longer than the
-    // sample just go silent for the remainder.  Cheap to vary so it
-    // doesn't get monotonous when the player slides repeatedly.
-    float sl_pick = 1 + floor(random() * 5);
+    float sl_pick = 1 + floor(random() * 5);   // remote-listener variant
     if (sl_pick > 5) sl_pick = 5;
-    sound(self, CHAN_BODY,
-        sprintf("sounds/player/slide%g.wav", sl_pick),
-        1, ATTN_NORM);
+    WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
+    WriteByte(MSG_MULTICAST, CSQC_EVENT_SLIDE_SOUND);
+    WriteByte(MSG_MULTICAST, num_for_edict(self));   // exclude = the slider
+    WriteByte(MSG_MULTICAST, sl_pick);               // variant 1..5
+    WriteCoord(MSG_MULTICAST, self.origin_x);
+    WriteCoord(MSG_MULTICAST, self.origin_y);
+    WriteCoord(MSG_MULTICAST, self.origin_z);
+    multicast(self.origin, MULTICAST_PVS);
 #endif
+    // NOTE: the slider's OWN predicted slide sound is intentionally NOT played
+    // here. At high ping the suppressed render-rate preview pmove
+    // (CSQC_BuildPresentationView) engages the slide a frame BEFORE the live
+    // input pass, so on the live pass this function short-circuits at the
+    // `slide_friction_active` guard above and a localsound here never fires.
+    // It is played instead from an edge-latch in CSQC_Input_Frame (cl_player.qc)
+    // right after the live predict pass, driven off predicted_player's clean
+    // slide_friction_active 0->1 transition.
 
     return 1;
 };

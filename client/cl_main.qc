@@ -1373,6 +1373,7 @@ float(float ev) _net_event_bytes =
 	if (ev == CSQC_EVENT_BREAKABLE_IMPACT_SOUND) return 16;  // 2 svc hdr + 1 exclude + 1 style + 12 origin
 	if (ev == CSQC_EVENT_BREAKABLE_BREAK_SOUND)  return 16;  // same wire layout as impact sound
 	if (ev == CSQC_EVENT_FOOTSTEP_SOUND)         return 17;  // 2 svc hdr + 1 exclude + 1 vol + 1 snd_idx + 12 origin
+	if (ev == CSQC_EVENT_SLIDE_SOUND)            return 16;  // 2 svc hdr + 1 exclude + 1 variant + 12 origin
 	if (ev == CSQC_EVENT_DEATH_DROP)             return 61;  // 2 svc hdr + 1 weapon + 1 slot + 24 origin/vel + ~32 model path (variable)
 	if (ev == CSQC_EVENT_GRENADE_EXPLODE)        return 16;  // 2 svc hdr + 1 exclude + 12 origin + 1 sample byte
 	if (ev == CSQC_EVENT_GRENADE_BOUNCE)         return 16;  // 2 svc hdr + 1 exclude + 12 origin + 1 sample byte
@@ -1388,7 +1389,7 @@ float(float ev) _net_event_bytes =
 	if (ev == CSQC_EVENT_ENV_EXPLOSION)          return 17;  // 2 svc hdr + 12 origin + 2 magnitude + 1 spawnflags
 	if (ev == CSQC_EVENT_SPRAY)                  return 53;  // 2 svc hdr + 2 sid + 1 owner + 12 pos + 12 normal + 12 eye + ~12 name (avg)
 	if (ev == CSQC_EVENT_SPRAY_REMOVE)           return 4;   // 2 svc hdr + 2 sid
-	if (ev == CSQC_EVENT_PLAYER_FLINCH)          return 4;   // 2 svc hdr + 1 victim slot + 1 hitgroup
+	if (ev == CSQC_EVENT_PLAYER_FLINCH)          return 5;   // 2 svc hdr + 1 victim slot + 1 hitgroup + 1 attacker slot
 	if (ev == CSQC_EVENT_ENV_FADE)               return 14;  // 2 svc hdr + rgba bytes + 2 floats + 1 flags
 	if (ev == CSQC_EVENT_ENV_MESSAGE)            return 34;  // 2 svc hdr + variable title key string
 	if (ev == CSQC_EVENT_DAMAGE_VIEWKICK)        return 6;   // 2 svc hdr + 2 signed shorts
@@ -1580,21 +1581,25 @@ void() CSQC_Parse_Event =
 			// torso back to the flinch pose before / during the death
 			// anim — the user-reported "flinch messes with death
 			// animation" symptom.
-			float flinch_slot = readbyte();
-			float flinch_hg   = readbyte();
+			float flinch_slot     = readbyte();
+			float flinch_hg       = readbyte();
+			float flinch_attacker = readbyte();
 			float flinch_dur  = cvar("cl_player_flinch_time");
 			if (flinch_dur <= 0)
 				break;   // disabled
+			// nettest Patch 36: the attacker already predicted this flinch locally
+			// (CSQC_SendHitclaim), so skip the server re-stamp on THEIR client — otherwise it
+			// restarts the flinch anim and double-plays on the shooter's screen.  This is
+			// timing-independent (works at any ping, incl. sv_minping 500, where a client-side
+			// time-window latch failed).  Witnesses (local != attacker) apply it once.
+			if (flinch_attacker == player_localentnum)
+				break;
 			entity fp = findchain(classname, "player_visual_proxy");
 			while (fp)
 			{
 				if (fp.vis_owner_entnum == flinch_slot)
 				{
-					// nettest Patch 36: if WE predicted this flinch (vis_flinch_pred_until still
-					// open), skip the server re-stamp so it doesn't restart the flinch anim and
-					// double-play on the shooter's screen.  Witnesses never set the latch, so they
-					// still get the flinch from this multicast.
-					if (!fp.vis_is_dead && fp.vis_flinch_pred_until <= cltime)
+					if (!fp.vis_is_dead)
 					{
 						fp.vis_flinch_until    = cltime + flinch_dur;
 						fp.vis_flinch_hitgroup = flinch_hg;
@@ -2108,6 +2113,32 @@ void() CSQC_Parse_Event =
 
 			if (!fs_is_own_echo)
 				pointsound(fs_pos, fs_snd, fs_vol, ATTN_NORM);
+			break;
+		}
+		case CSQC_EVENT_SLIDE_SOUND:
+		{
+			// The slider's own CSQC plays this instantly via an edge-latch in
+			// CSQC_Input_Frame (no ping lag). Remote clients receive it here; the
+			// exclude byte drops the slider's own echo so they never hear it twice.
+			float sl_exclude = readbyte();
+			float sl_variant = readbyte();
+			vector sl_pos;
+			sl_pos_x = readcoord();
+			sl_pos_y = readcoord();
+			sl_pos_z = readcoord();
+			if (!(sl_exclude != 0 && sl_exclude == player_localentnum))
+			{
+				// Play on the slider's body proxy (entity + CHAN_BODY) so a NEW
+				// slide CUTS the previous one. pointsound plays on channel 0,
+				// which SND_PickChannel never culls, so the long ~1.25s slide
+				// samples stacked and summed to full volume. The proxy's
+				// vis_owner_entnum == the slider's edict == the exclude byte.
+				entity sl_ent = findfloat(world, vis_owner_entnum, sl_exclude);
+				if (sl_ent && sl_ent.modelindex)
+					sound(sl_ent, CHAN_BODY, sprintf("sounds/player/slide%g.wav", sl_variant), 1, ATTN_NORM);
+				else
+					pointsound(sl_pos, sprintf("sounds/player/slide%g.wav", sl_variant), 1, ATTN_NORM);
+			}
 			break;
 		}
 		case CSQC_EVENT_BRUSH_DESTROY:

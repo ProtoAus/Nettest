@@ -151,10 +151,6 @@ void() CSQC_PlayersResolid;
 // declarations and the predraw application live in cl_player.qc.
 .float vis_flinch_until;
 .float vis_flinch_hitgroup;
-// nettest Patch 36: set when WE predicted a flinch on this proxy; the server's
-// CSQC_EVENT_PLAYER_FLINCH handler skips re-stamping while this window is open, so the
-// shooter doesn't see the flinch fire twice (predicted now + server multicast ~RTT later).
-.float vis_flinch_pred_until;
 
 // Forward-declared so cl_player.qc's CSQC_PlayerVisual_Predraw can gate
 // own-body visibility on the death-cam window. Defined in cl_spectate.qc,

@@ -47,6 +47,7 @@ float  sv_confirmed_step_time;
 // slide_friction_active = 0 and the slide ends.
 float  sv_confirmed_slide_friction_active;
 float  sv_confirmed_jump_lag_end;
+float  sv_confirmed_jump_groundstick_off_until;
 // Grappling hook rope-render state — stashed + restored across
 // reconcile-replay so the rope doesn't flicker during prediction
 // rewinds.
@@ -570,6 +571,7 @@ void(entity src) CSQC_StoreConfirmedStateFromEntity =
 	sv_confirmed_step_time            = src.pm_step_time;
 	sv_confirmed_slide_friction_active = src.slide_friction_active;
 	sv_confirmed_jump_lag_end         = src.pm_jump_lag_end;
+	sv_confirmed_jump_groundstick_off_until = src.pm_jump_groundstick_off_until;
 	sv_confirmed_grapple_rope_active  = src.grapple_rope_active;
 	sv_confirmed_pm_carrying          = src.pm_carrying;
 	sv_confirmed_pm_driving           = src.pm_driving;
@@ -680,6 +682,7 @@ void() CSQC_ResetToConfirmedMoveState =
 	self.pm_step_time            = sv_confirmed_step_time;
 	self.slide_friction_active   = sv_confirmed_slide_friction_active;
 	self.pm_jump_lag_end         = sv_confirmed_jump_lag_end;
+	self.pm_jump_groundstick_off_until = sv_confirmed_jump_groundstick_off_until;
 	self.grapple_rope_active     = sv_confirmed_grapple_rope_active;
 	self.pm_carrying             = sv_confirmed_pm_carrying;
 	self.pm_driving              = sv_confirmed_pm_driving;
@@ -2014,6 +2017,8 @@ void() CSQC_BuildPresentationView =
 	float saved_spread_penalty;
 	float saved_fire_spread_penalty;
 	float saved_step_time;
+	float saved_slide_friction_active;
+	float saved_jump_groundstick;
 	float saved_pm_on_ladder_cached;
 	float saved_impulse;
 	vector saved_origin;
@@ -2120,6 +2125,8 @@ void() CSQC_BuildPresentationView =
 	saved_spread_penalty = self.spread_penalty;
 	saved_fire_spread_penalty = self.fire_spread_penalty;
 	saved_step_time = self.pm_step_time;
+	saved_slide_friction_active = self.slide_friction_active;
+	saved_jump_groundstick = self.pm_jump_groundstick_off_until;
 	saved_pm_on_ladder_cached = self.pm_on_ladder_cached;
 	saved_platform_carry                      = self.platform_carry;
 	saved_platform_carry_velocity             = self.platform_carry_velocity;
@@ -2281,6 +2288,16 @@ void() CSQC_BuildPresentationView =
 	// next real prediction inherits a corrupted timer and fires extra
 	// steps. Restore it alongside the other move fields.
 	self.pm_step_time = saved_step_time;
+	// Same leak-prevention as pm_step_time: the suppressed preview pmove can
+	// engage a slide (slide_friction_active 0->1) a render-frame BEFORE the
+	// real prediction does. Without this restore that 1 leaks onto
+	// predicted_player, the live PM_TryEngageSlide short-circuits on its
+	// idempotency guard, and the edge-latch slide sound (CSQC_Input_Frame)
+	// never sees a clean 0->1 edge.
+	self.slide_friction_active = saved_slide_friction_active;
+	// Same: a preview-tick jump stamps pm_jump_groundstick_off_until; restore it
+	// so the suppress window doesn't leak forward by a frame (momentary float).
+	self.pm_jump_groundstick_off_until = saved_jump_groundstick;
 	// Same leak-prevention rationale as pm_step_time above: the
 	// preview's pmove writes pm_on_ladder_cached unconditionally at
 	// the done: block (sh_pmove.qc), so without this restore the
@@ -2766,6 +2783,10 @@ float csqc_jump_was_down;
 float csqc_carry_fire_last;   // +attack rising-edge latch for the carry throw
 float csqc_carry_throw_lockout; // keep fire suppressed after a throw until +attack released
 
+// Edge-latch state: last frame's live-predicted slide_friction_active, so the
+// predicted slide sound (above, after CSQC_PredictCurrentCommand) fires exactly
+// once on the 0->1 engage edge and re-arms when the slide ends.
+float csqc_slide_snd_prev;
 void() CSQC_Input_Frame =
 {
 	localplayer = CSQC_GetEngineLocalPlayer();
@@ -2996,6 +3017,23 @@ void() CSQC_Input_Frame =
 
 	CSQC_BufferInputCommand(clientcommandframe);
 	CSQC_PredictCurrentCommand();
+
+	// Predicted slide sound — play once on the live 0->1 engage edge, HERE
+	// (after the live predict pass) rather than inside PM_TryEngageSlide, which
+	// the suppressed render-preview pass reaches first and short-circuits. The
+	// preview no longer leaks slide_friction_active (restored in the preview),
+	// so this reads a clean live-predicted value → instant at any ping, once
+	// per slide; the latch self-clears when the slide ends.
+	if (predicted_player)
+	{
+		float slide_now = predicted_player.slide_friction_active;
+		if (slide_now && !csqc_slide_snd_prev)
+		{
+			slide_local_variant = (slide_local_variant % 5) + 1;
+			localsound(sprintf("sounds/player/slide%g.wav", slide_local_variant), CHAN_BODY, 1);
+		}
+		csqc_slide_snd_prev = slide_now;
+	}
 
 	if (veh_lock_active)
 		input_movevalues = veh_lock_saved_mv;   // restore real WASD for the engine's sent usercmd → car drives
@@ -4571,6 +4609,10 @@ noref void(float isnew) CSQC_Ent_Update =
 		// PM_CheckJump's `time < pm_jump_lag_end` gate releases in
 		// lockstep with the server.
 		self.pm_jump_lag_end         = time + readfloat();
+		// Ground-snap suppress window — remaining-secs, SAME wire position as
+		// the SSQC writer (right after pm_jump_lag_end, before grapple) so the
+		// movement-section decode stays byte-aligned.
+		self.pm_jump_groundstick_off_until = time + readfloat();
 		// Grappling-hook rope render: 1 byte + 3 coords matching the
 		// SSQC writer.  Reads onto the proxy entity → flows through
 		// CSQC_StoreConfirmedStateFromEntity into predicted_player so

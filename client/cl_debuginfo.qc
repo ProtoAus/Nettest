@@ -1179,10 +1179,45 @@ vector(float hg) dbg_hitbox_colour =
     return '1 1 1';
 };
 
-// Draw a wireframe box edge
+// nettest Patch 36: debug wireframe lines are now particle beams (particles/debug.cfg),
+// batched by the engine particle simulator instead of one R_BeginPolygon per edge.  The
+// effect handles are resolved lazily on first use (particleeffectnum auto-loads the
+// namespace).  Colour selects the matching effect (the colours are exact literals from
+// dbg_hitbox_colour / the fixed orange & expand-cyan callers, so vector == is reliable).
+float pe_dbg_line, pe_dbg_head, pe_dbg_chest, pe_dbg_stomach, pe_dbg_arm, pe_dbg_leg, pe_dbg_orange, pe_dbg_expand;
+float pe_dbg_resolved;
+
+void() dbg_resolve_particles =
+{
+    pe_dbg_line    = particleeffectnum("debug.line");
+    pe_dbg_head    = particleeffectnum("debug.line_head");
+    pe_dbg_chest   = particleeffectnum("debug.line_chest");
+    pe_dbg_stomach = particleeffectnum("debug.line_stomach");
+    pe_dbg_arm     = particleeffectnum("debug.line_arm");
+    pe_dbg_leg     = particleeffectnum("debug.line_leg");
+    pe_dbg_orange  = particleeffectnum("debug.line_orange");
+    pe_dbg_expand  = particleeffectnum("debug.line_expand");
+    pe_dbg_resolved = 1;
+};
+
+// Draw a wireframe box edge as a particle beam (col picks the effect).
 void(vector p1, vector p2, vector col, float alpha) dbg_hitbox_line =
 {
-    CSQC_DebugBeam(p1, p2, 0.5, col, alpha);
+    if (!pe_dbg_resolved)
+        dbg_resolve_particles();
+
+    float fx;
+    if      (col == '1 0 0')     fx = pe_dbg_head;
+    else if (col == '0 0.8 1')   fx = pe_dbg_chest;
+    else if (col == '1 0.8 0')   fx = pe_dbg_stomach;
+    else if (col == '0 1 0.3')   fx = pe_dbg_arm;
+    else if (col == '0.3 0.5 1') fx = pe_dbg_leg;
+    else if (col == '1 0.5 0')   fx = pe_dbg_orange;
+    else if (col == '0 1 1')     fx = pe_dbg_expand;
+    else                         fx = pe_dbg_line;
+
+    if (fx)
+        trailparticles(fx, world, p1, p2);
 };
 
 // Draw hitbox wireframes on all visible player_visual_proxy entities.
@@ -1216,7 +1251,11 @@ void() CSQC_DrawDebugHitboxes =
 
                 // Get bone world transform
                 vector bpos = gettaginfo(vis, bone);
-                // v_forward, v_right, v_up now contain the bone's axes
+                // v_forward, v_right, v_up now contain the bone's axes.
+                // nettest Patch 36: gettaginfo returns v_right = -col1 (bonemat_toqcvectors
+                // negates it), but the engine hitbox trace uses the raw col1 — so the drawn box
+                // was Y-mirrored vs the actual hitbox (backwards feet).  Negate to match the trace.
+                v_right = -v_right;
 
                 // Compute 8 corners of the OBB in world space
                 vector c0 = bpos + v_forward * bmins_x + v_right * bmins_y + v_up * bmins_z;
@@ -1510,6 +1549,7 @@ void() CSQC_DrawServerHitboxes =
             vector bmaxs = hitbox_maxs[j];
 
             vector bpos = gettaginfo(g, bone);
+            v_right = -v_right;   // Patch 36: match the engine trace's box frame (see CSQC_DrawDebugHitboxes)
 
             vector c0 = bpos + v_forward * bmins_x + v_right * bmins_y + v_up * bmins_z;
             vector c1 = bpos + v_forward * bmaxs_x + v_right * bmins_y + v_up * bmins_z;
@@ -1624,6 +1664,7 @@ void() CSQC_DrawContinuousHitboxes =
             vector col = '1 0.5 0'; // orange
 
             vector bpos = gettaginfo(g, bone);
+            v_right = -v_right;   // Patch 36: match the engine trace's box frame (see CSQC_DrawDebugHitboxes)
 
             vector c0 = bpos + v_forward * bmins_x + v_right * bmins_y + v_up * bmins_z;
             vector c1 = bpos + v_forward * bmaxs_x + v_right * bmins_y + v_up * bmins_z;
