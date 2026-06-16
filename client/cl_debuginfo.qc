@@ -1179,45 +1179,17 @@ vector(float hg) dbg_hitbox_colour =
     return '1 1 1';
 };
 
-// nettest Patch 36: debug wireframe lines are now particle beams (particles/debug.cfg),
-// batched by the engine particle simulator instead of one R_BeginPolygon per edge.  The
-// effect handles are resolved lazily on first use (particleeffectnum auto-loads the
-// namespace).  Colour selects the matching effect (the colours are exact literals from
-// dbg_hitbox_colour / the fixed orange & expand-cyan callers, so vector == is reliable).
-float pe_dbg_line, pe_dbg_head, pe_dbg_chest, pe_dbg_stomach, pe_dbg_arm, pe_dbg_leg, pe_dbg_orange, pe_dbg_expand;
-float pe_dbg_resolved;
-
-void() dbg_resolve_particles =
-{
-    pe_dbg_line    = particleeffectnum("debug.line");
-    pe_dbg_head    = particleeffectnum("debug.line_head");
-    pe_dbg_chest   = particleeffectnum("debug.line_chest");
-    pe_dbg_stomach = particleeffectnum("debug.line_stomach");
-    pe_dbg_arm     = particleeffectnum("debug.line_arm");
-    pe_dbg_leg     = particleeffectnum("debug.line_leg");
-    pe_dbg_orange  = particleeffectnum("debug.line_orange");
-    pe_dbg_expand  = particleeffectnum("debug.line_expand");
-    pe_dbg_resolved = 1;
-};
-
-// Draw a wireframe box edge as a particle beam (col picks the effect).
+// nettest Patch 36: debug wireframe edges draw as immediate-mode thin camera-facing
+// quads via CSQC_DebugBeam (R_BeginPolygon).  This was briefly switched to particle
+// beams (particles/debug.cfg), but FTE 'type beam' segments come from a tiny HARDCODED
+// 2048-slot pool (MAX_BEAMSEGS, p_script.c:396) shared with weapon tracers/gauss/egon —
+// and each box edge subdivides into length/step segments, so once ~8 boxes filled the
+// pool every box above the spine silently dropped, and it fought combat FX for slots.
+// R_BeginPolygon has no such cap (32k verts/batch, ~12% used even at 4 targets) and is
+// ~0.5ms for ~1000 edges — so the perf reason for the particle switch didn't hold.
 void(vector p1, vector p2, vector col, float alpha) dbg_hitbox_line =
 {
-    if (!pe_dbg_resolved)
-        dbg_resolve_particles();
-
-    float fx;
-    if      (col == '1 0 0')     fx = pe_dbg_head;
-    else if (col == '0 0.8 1')   fx = pe_dbg_chest;
-    else if (col == '1 0.8 0')   fx = pe_dbg_stomach;
-    else if (col == '0 1 0.3')   fx = pe_dbg_arm;
-    else if (col == '0.3 0.5 1') fx = pe_dbg_leg;
-    else if (col == '1 0.5 0')   fx = pe_dbg_orange;
-    else if (col == '0 1 1')     fx = pe_dbg_expand;
-    else                         fx = pe_dbg_line;
-
-    if (fx)
-        trailparticles(fx, world, p1, p2);
+    CSQC_DebugBeam(p1, p2, 0.5, col, alpha);
 };
 
 // Draw hitbox wireframes on all visible player_visual_proxy entities.
