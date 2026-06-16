@@ -72,7 +72,21 @@ entity bs_tail;
 .vector bs_tangent;       // pre-baked side axis perpendicular to normal
 .float  bs_size_scale;    // 1 = regular blood, 0.75 = smaller gib impact
 .string bs_shader;        // BLOOD_SHADER_N resolved ONCE at spawn (perf: was re-resolved per decal per frame)
+// Absolute slot index into the baked trisoup buffer (cl_bloodtrisoup.qc).
+// -1 = not baked.  Set by Blood_BakeTrisoup, cleared by Blood_FreeTrisoupSlot.
+.float  bs_slot;
 float   bs_count;
+
+// Baked-trisoup batch (cl_bloodtrisoup.qc, compiled AFTER cl_bulletholes.qc
+// so it can reuse the BH_* clip/write helpers).  Forward-declared here so
+// the spawn / remove / draw paths below can call them; the bodies live in
+// the later file.  Geometry is baked once at spawn; per-frame cost is the
+// fade alpha rewrite + one addtrisoup_simple per texture.
+void(entity bs) Blood_BakeTrisoup;
+void(entity bs) Blood_FreeTrisoupSlot;
+void(float abs_slot, float alpha) Blood_SetSlotAlpha;
+void() Blood_DrawTrisoup;
+void() Blood_ResetTrisoup;
 
 void() CSQC_Bloodsplat_Precache =
 {
@@ -95,6 +109,9 @@ void(entity bs) CSQC_BloodsplatRemove =
         bs.bs_next.bs_prev = bs.bs_prev;
     else
         bs_tail = bs.bs_prev;
+    // Release the baked trisoup slot before freeing the entity (no-op for
+    // splats whose bake failed / never ran — bs_slot stays at -1).
+    Blood_FreeTrisoupSlot(bs);
     remove(bs);
     bs_count = bs_count - 1;
 };
@@ -103,6 +120,9 @@ void() CSQC_BloodsplatWipeAll =
 {
     while (bs_head)
         CSQC_BloodsplatRemove(bs_head);
+    // Drain free lists + reset high-water marks so the next round starts
+    // with a clean slot pool (mirrors CSQC_BulletHolesWipeAll).
+    Blood_ResetTrisoup();
 };
 
 string(float idx) CSQC_BloodShaderForIndex =
@@ -152,6 +172,7 @@ void() CSQC_BloodsplatAddFromTrace =
         ref = '1 0 0';
     bs.bs_tangent = normalize(crossproduct(bs.bs_normal, ref));
 
+    bs.bs_slot = -1;
     bs.bs_prev = bs_tail;
     bs.bs_next = world;
     if (bs_tail)
@@ -160,6 +181,10 @@ void() CSQC_BloodsplatAddFromTrace =
         bs_head = bs;
     bs_tail = bs;
     bs_count = bs_count + 1;
+
+    // Bake the splat geometry ONCE now that origin/normal/tangent are
+    // resolved.  Per-frame draw is then just an alpha rewrite + batch.
+    Blood_BakeTrisoup(bs);
 };
 
 // Direct one-shot decal spawn for effects that already know their
@@ -197,6 +222,7 @@ void(vector pos, vector normal) CSQC_SpawnBloodDecalAt =
         ref = '1 0 0';
     bs.bs_tangent = normalize(crossproduct(bs.bs_normal, ref));
 
+    bs.bs_slot = -1;
     bs.bs_prev = bs_tail;
     bs.bs_next = world;
     if (bs_tail)
@@ -205,6 +231,8 @@ void(vector pos, vector normal) CSQC_SpawnBloodDecalAt =
         bs_head = bs;
     bs_tail = bs;
     bs_count = bs_count + 1;
+
+    Blood_BakeTrisoup(bs);
 };
 
 // Public spawn entry.  Called from Impact_SpawnParticles when the
@@ -295,30 +323,19 @@ void() CSQC_DrawBloodDecals =
     // new decals when cl_blood_decals is 0, so any entries in the
     // list are valid to keep drawing.  Toggling the cvar off mid-game
     // lets existing splats fade out naturally instead of snapping.
+    //
+    // PERF: geometry is now BAKED once at spawn (Blood_BakeTrisoup) and
+    // submitted as a per-texture trisoup batch by Blood_DrawTrisoup —
+    // adddecal() (which re-projected onto the BSP every decal every frame)
+    // is gone.  This loop only (a) ages each splat and removes expired
+    // ones, and (b) rewrites the 4 baked vertex alphas to drive the fade.
+    // The behind-camera / distance cull is dropped — the batch draws every
+    // splat and the engine frustum-culls the trisoup.
 
     entity bs = bs_head;
     entity next_bs;
     float  age, alpha;
-    vector decal_origin, side_arg;
     float  persistent = cvar("cl_blood_persistent");
-
-    // Per-FRAME caches (perf): the brightness cvar was read once PER DECAL and
-    // the shader re-resolved per decal every frame — both hoisted out now.
-    // adddecal's rgb arg feeds the shader's `rgbGen vertex`, so a sub-1 value
-    // darkens the splat (0.4 = dried-blood maroon) without touching the PNG.
-    float bright = cvar("cl_blood_decals_brightness");
-    if (bright <= 0) bright = 0.4;
-    vector tint = [bright, bright, bright];
-
-    // Off-screen culling so we skip reprojecting decals you can't see.  The
-    // behind-camera cull is always on (free + invisible); the distance cull is
-    // opt-in via cl_blood_decals_maxdist (0 = unlimited).  Mirrors the bullet-
-    // hole cull in cl_bulletholes.qc.
-    vector cam_origin  = (vector)getproperty(VF_ORIGIN);
-    makevectors((vector)getproperty(VF_ANGLES));
-    vector cam_forward = v_forward;
-    float  maxdist     = cvar("cl_blood_decals_maxdist");
-    float  maxdist_sq  = (maxdist > 0) ? maxdist * maxdist : 0;
 
     while (bs)
     {
@@ -344,30 +361,16 @@ void() CSQC_DrawBloodDecals =
                             / (BLOOD_FADE_END - BLOOD_FADE_START);
         }
 
-        decal_origin = bs.bs_origin;
-
-        // Cull off-screen decals BEFORE the expensive adddecal reprojection.
-        // 64u slop behind the view plane keeps decals straddling it visible on
-        // sharp turns.
-        vector to_decal = decal_origin - cam_origin;
-        if ((to_decal * cam_forward) < -64)
-        {
-            bs = next_bs;
-            continue;
-        }
-        if (maxdist_sq > 0 && (to_decal * to_decal) > maxdist_sq)
-        {
-            bs = next_bs;
-            continue;
-        }
-
-        float size_scale = bs.bs_size_scale;
-        if (size_scale <= 0) size_scale = 1.0;
-
-        side_arg = bs.bs_tangent / (BLOOD_HALF_SIZE * 2 * size_scale);
-
-        adddecal(bs.bs_shader, decal_origin, bs.bs_normal, side_arg, tint, alpha);
+        // Cheap: rewrite the 4 baked vertex alphas for this splat.  The
+        // geometry stays baked; only the alpha channel is live.  Skip
+        // splats that failed to bake (bs_slot == -1).
+        if (bs.bs_slot >= 0)
+            Blood_SetSlotAlpha(bs.bs_slot, alpha);
 
         bs = next_bs;
     }
+
+    // One addtrisoup_simple per non-empty texture — replaces the old
+    // per-decal adddecal storm.
+    Blood_DrawTrisoup();
 };

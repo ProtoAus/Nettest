@@ -789,6 +789,13 @@ void() CVar_Init =
     // 1 = full alpha forever, only the FIFO cap removes them.  Same
     //     semantics as cl_scorch_persistent.
     CVar_Add("Client", "cl_blood_persistent",         "0",   CVAR_SIDE_CL);
+    // Source-style edge clipping for the BAKED blood-decal trisoup.  When
+    // 1 (default) each splat's quad is clipped at spawn against the hit
+    // BSP triangle's 3 edges so it conforms to the surface boundary
+    // instead of overhanging.  One-shot CPU cost per splat — per-frame
+    // render is one addtrisoup_simple per texture either way.  Mirrors
+    // cl_bullethole_clip_geom; set 0 to see the raw axis-aligned quads.
+    CVar_Add("Client", "cl_blood_decals_clip",        "1",   CVAR_SIDE_CL);
     // Verbose per-shot hitgroup classifier trace.  Prints bone_id,
     // bone-name lookup result, Z fraction inside the target's bbox,
     // and the final classification for every player hit.  Toggle on
