@@ -733,6 +733,18 @@ void() SV_UpdateMovementServerInfo =
 	// menu reads the SERVER's sv_playerselect (via serverkeyfloat) instead of
 	// each client's local cvar() — otherwise the setting acts per-client.
 	sv_info_push_if_changed("sv_playerselect",  sv_info_last_playerselect);
+
+	// Gravity Shift: publish the GLOBAL gravity direction (set by the arbiter in
+	// GravShift_UpdateActivation) so every client reads it via serverkey("gravdir").
+	// MUST be pushed HERE at StartFrame, NOT from inside PM_PlayerMove — a localcmd
+	// serverinfo issued mid-client-command-processing interleaves a reliable message
+	// into the per-client stream and corrupts it ("Illegible server message" crash
+	// on release/fall).  On-change only, like the cvar pushes above.
+	if (gravshift_world_dir != gravshift_world_dir_last)
+	{
+		localcmd(sprintf("serverinfo gravdir \"%v\"\n", gravshift_world_dir));
+		gravshift_world_dir_last = gravshift_world_dir;
+	}
 	// Publish the server's authoritative tick interval (seconds per
 	// server frame) so CSQC debug panels can read the exact configured
 	// value rather than measuring it empirically from snapshot-arrival

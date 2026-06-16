@@ -294,10 +294,10 @@ vector csqc_muzzle_attach_offset;
 void(float fwd, float right_qu, float down, float action_id) CSQC_MuzzleFlashAtMuzzle =
 {
     float side = cvar("cl_lefthand") ? -1 : 1;
-    vector local = [fwd, right_qu * side, 0 - down];
-    csqc_muzzle_debug_offset = local;   // save for CSQC_DrawMuzzleDebug
+    vector loc = [fwd, right_qu * side, 0 - down];
+    csqc_muzzle_debug_offset = loc;   // save for CSQC_DrawMuzzleDebug
     csqc_muzzle_attach_bone = "";       // camera-offset path → no fresh re-pose
-    CSQC_SpawnMuzzleFlashSprite(local, action_id);
+    CSQC_SpawnMuzzleFlashSprite(loc, action_id);
 };
 
 // Animated-flash twin of the helper above — identical offset math,
@@ -307,10 +307,10 @@ void(float fwd, float right_qu, float down, float action_id) CSQC_MuzzleFlashAtM
 void(float fwd, float right_qu, float down, float action_id) CSQC_MuzzleFlashAtMuzzleAnimated =
 {
     float side = cvar("cl_lefthand") ? -1 : 1;
-    vector local = [fwd, right_qu * side, 0 - down];
-    csqc_muzzle_debug_offset = local;
+    vector loc = [fwd, right_qu * side, 0 - down];
+    csqc_muzzle_debug_offset = loc;
     csqc_muzzle_attach_bone = "";
-    CSQC_SpawnMuzzleFlashSpriteAnimated(local, action_id);
+    CSQC_SpawnMuzzleFlashSpriteAnimated(loc, action_id);
 };
 
 // Resolve the world position of the last-flashed muzzle.  Used by
@@ -468,9 +468,9 @@ void(vector world_pos, float action_id) CSQC_MuzzleFlashAtWorld =
     vector view_ang = (vector)getproperty(VF_ANGLES);
     makevectors(view_ang);
     vector rel = world_pos - view_pos;
-    vector local = [rel * v_forward, rel * v_right, rel * v_up];
-    csqc_muzzle_debug_offset = local;
-    CSQC_SpawnMuzzleFlashSprite(local, action_id);
+    vector loc = [rel * v_forward, rel * v_right, rel * v_up];
+    csqc_muzzle_debug_offset = loc;
+    CSQC_SpawnMuzzleFlashSprite(loc, action_id);
 };
 
 // Same as CSQC_MuzzleFlashAtWorld but emits the 12-frame animated
@@ -482,9 +482,9 @@ void(vector world_pos, float action_id) CSQC_MuzzleFlashAtWorldAnimated =
     vector view_ang = (vector)getproperty(VF_ANGLES);
     makevectors(view_ang);
     vector rel = world_pos - view_pos;
-    vector local = [rel * v_forward, rel * v_right, rel * v_up];
-    csqc_muzzle_debug_offset = local;
-    CSQC_SpawnMuzzleFlashSpriteAnimated(local, action_id);
+    vector loc = [rel * v_forward, rel * v_right, rel * v_up];
+    csqc_muzzle_debug_offset = loc;
+    CSQC_SpawnMuzzleFlashSpriteAnimated(loc, action_id);
 };
 
 // Forward decl from cl_debuginfo.qc — we draw the debug axes

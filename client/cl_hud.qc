@@ -735,7 +735,10 @@ string() HUD_GetHLSMGGrenadeString =
     return hud_hlsmg_gren_cache_text;
 };
 
-void(string slot_text, float is_active, vector pos) HUD_DrawWeaponSlot =
+// flash_red is REQUIRED (not optional): QC optional params are not zeroed — an
+// unpassed one reads stale OFS_PARM3 from the previous call, which made the
+// non-C4 slots flash with a garbage value.  All callers pass it explicitly.
+void(string slot_text, float is_active, vector pos, float flash_red) HUD_DrawWeaponSlot =
 {
     vector text_color;
     float  text_alpha;
@@ -753,12 +756,23 @@ void(string slot_text, float is_active, vector pos) HUD_DrawWeaponSlot =
         text_alpha = 0.8;
     }
 
+    // Bombsite plant-zone alert: when the caller flags this slot (the C4 slot,
+    // driven by STAT_CAN_PLANT — set only while the carrier stands on a bombsite),
+    // pulse it red so they can SEE they're able to plant.  Overrides the normal
+    // colour AND the active accent bar.  ~1.6 Hz sine on cltime.
+    if (flash_red)
+    {
+        float pulse = 0.5 + 0.5 * sin(cltime * 10);
+        drawfill([pos_x, pos_y], [HUD_SLOT_WIDTH, HUD_SLOT_HEIGHT], '1 0 0', 0.12 + 0.30 * pulse, 0);
+        text_color = '1 0.2 0.2';
+        text_alpha = 0.55 + 0.45 * pulse;
+    }
     // Background panel removed — the font's baked outline (loadfont outline=1)
     // keeps the label readable over the world without a fill.  Active slot is
     // marked by brighter text + a 2px accent bar at the LEFT edge (moved in from
     // the old panel's right edge so it sits beside the label instead of floating
     // where the now-invisible panel used to end).
-    if (is_active)
+    else if (is_active)
         drawfill([pos_x, pos_y], [2, HUD_SLOT_HEIGHT], '0.4 0.7 1', 1.0, 0);
 
     text_size = [HUD_SLOT_FONT, HUD_SLOT_FONT];
@@ -903,16 +917,16 @@ void() HUD_DrawWeaponSlots =
     // 0.6 / text_alpha 0.8.
 
     if (hud_slot_cache_text1 != "")
-        HUD_DrawWeaponSlot(hud_slot_cache_text1, active == predicted_player.slot_primary, [slot_x, slot_y]);
+        HUD_DrawWeaponSlot(hud_slot_cache_text1, active == predicted_player.slot_primary, [slot_x, slot_y], 0);
 
     if (hud_slot_cache_text2 != "")
-        HUD_DrawWeaponSlot(hud_slot_cache_text2, active == predicted_player.slot_secondary, [slot_x, slot_y + (HUD_SLOT_HEIGHT + HUD_SLOT_GAP)]);
+        HUD_DrawWeaponSlot(hud_slot_cache_text2, active == predicted_player.slot_secondary, [slot_x, slot_y + (HUD_SLOT_HEIGHT + HUD_SLOT_GAP)], 0);
 
     if (hud_slot_cache_text3 != "")
-        HUD_DrawWeaponSlot(hud_slot_cache_text3, active == predicted_player.slot_melee, [slot_x, slot_y + (HUD_SLOT_HEIGHT + HUD_SLOT_GAP) * 2]);
+        HUD_DrawWeaponSlot(hud_slot_cache_text3, active == predicted_player.slot_melee, [slot_x, slot_y + (HUD_SLOT_HEIGHT + HUD_SLOT_GAP) * 2], 0);
 
     if (hud_slot_cache_text4 != "")
-        HUD_DrawWeaponSlot(hud_slot_cache_text4, active == predicted_player.slot_utility, [slot_x, slot_y + (HUD_SLOT_HEIGHT + HUD_SLOT_GAP) * 3]);
+        HUD_DrawWeaponSlot(hud_slot_cache_text4, active == predicted_player.slot_utility, [slot_x, slot_y + (HUD_SLOT_HEIGHT + HUD_SLOT_GAP) * 3], 0);
 
     // Slot 5 — C4 (impulse 5).  Visible whenever the player carries a
     // charge, even if not currently holding it.  Lives outside the
@@ -930,7 +944,8 @@ void() HUD_DrawWeaponSlots =
             hud_slot_cache_text5       = sprintf("5 %s", HUD_WeaponName(WEP_CFC4));
             hud_slot_cache_text5_valid = TRUE;
         }
-        HUD_DrawWeaponSlot(hud_slot_cache_text5, active == WEP_CFC4, [slot_x, c4_y]);
+        // Flash the slot red while the carrier stands on a bombsite (can plant).
+        HUD_DrawWeaponSlot(hud_slot_cache_text5, active == WEP_CFC4, [slot_x, c4_y], getstatf(STAT_CAN_PLANT));
         c4_y = c4_y + HUD_SLOT_HEIGHT + HUD_SLOT_GAP;
     }
 
@@ -1016,6 +1031,182 @@ void() HUD_DrawRoundTimer =
     drawstring([x, y], hud_rt_cache_str, [32, 32], hud_rt_cache_color, 0.9, 0);
 };
 
+// ============================================================
+//  Dopamine kill/cash feedback  (kill popup, round cash, money floats)
+// ------------------------------------------------------------
+//  Driven by the CSQC_EVENT_KILL_REWARD / CSQC_EVENT_ROUND_REWARD
+//  handlers below (called from CSQC_Parse_Event) + a per-frame
+//  STAT_MONEY watch.  HUD_DopamineFrame() runs once per frame from
+//  both the alive HUD and the spectator HUD.
+// ============================================================
+
+// --- Kill-cash popup (center-top, delayed 0.5s, fade-in + shrink) ---
+float  killpop_armed;        // event received, waiting out the 0.5s delay
+float  killpop_fire_time;    // cltime the popup appears + orchestralhit plays
+float  killpop_start_time;   // cltime the popup actually started (0 = idle)
+float  killpop_amount;       // cash reward to print
+float  killpop_headshot;     // 1 = gold + HEADSHOT flair
+const float KILLPOP_DELAY = 0;      // post-kill delay before it appears (0 = instant)
+const float KILLPOP_RISE  = 0.15;   // fade-in (alpha 0->1) + shrink (1.8->1.0)
+const float KILLPOP_HOLD  = 0.55;   // full-alpha hold
+const float KILLPOP_FALL  = 0.45;   // fade-out
+const float KILLPOP_LIFE  = 1.15;   // RISE + HOLD + FALL
+
+// --- Round win/lose cash (drawn under the win/lose banner) ---
+float  roundrew_time;        // cltime the round-reward event arrived (0 = none)
+float  roundrew_amount;
+float  roundrew_won;
+const float ROUNDREW_WINDOW = 12;    // recency gate so a prior reward can't bleed onto a draw round
+
+// --- Money-add floats ("+$xxx" drifting down into the cash counter) ---
+const float MONEYADD_MAX  = 4;
+const float MONEYADD_LIFE = 0.7;
+float  moneyadd_amount [MONEYADD_MAX];
+float  moneyadd_start  [MONEYADD_MAX];
+float  moneyadd_head;        // ring write index
+float  moneyadd_prev;        // last-seen STAT_MONEY
+float  moneyadd_inited;      // FALSE until the first frame seeds moneyadd_prev
+
+// Event handlers — called from CSQC_Parse_Event (cl_main.qc).
+void(float amount, float headshot) HUD_OnKillReward =
+{
+    killpop_amount     = amount;
+    killpop_headshot   = headshot;
+    killpop_fire_time  = cltime + KILLPOP_DELAY;
+    killpop_start_time = 0;
+    killpop_armed      = TRUE;
+    // The "kill confirmed" sting plays IMMEDIATELY on a headshot kill;
+    // the +$ popup + orchestralhit still land KILLPOP_DELAY later.
+    if (headshot)
+        localsound("sounds/effects/killsound.wav");
+};
+
+void(float amount, float won) HUD_OnRoundReward =
+{
+    roundrew_amount = amount;
+    roundrew_won    = won;
+    roundrew_time   = cltime;
+    localsound("sounds/effects/cashregister1.mp3");
+};
+
+// Kill-cash popup — center-top "+$xxx" that fades in + shrinks big->small,
+// holds, then fades out.  Latches its real start (and plays orchestralhit)
+// once KILLPOP_DELAY has elapsed since the kill.
+void() HUD_DrawKillPopup =
+{
+    if (!killpop_armed && killpop_start_time == 0)
+        return;
+    if (killpop_armed)
+    {
+        if (cltime < killpop_fire_time)
+            return;                 // still waiting out the post-kill delay
+        killpop_armed      = FALSE;
+        killpop_start_time = cltime;
+        localsound("sounds/effects/orchestralhit.mp3");
+    }
+
+    float age = cltime - killpop_start_time;
+    if (age >= KILLPOP_LIFE)
+    {
+        killpop_start_time = 0;     // animation done
+        return;
+    }
+
+    float a, scale, t;
+    if (age < KILLPOP_RISE)
+    {
+        t     = age / KILLPOP_RISE;     // 0..1
+        a     = t;                      // alpha 0 -> 1
+        scale = 1.8 - 0.8 * t;          // big -> normal (1.8 -> 1.0)
+    }
+    else if (age < KILLPOP_RISE + KILLPOP_HOLD)
+    {
+        a = 1;  scale = 1.0;
+    }
+    else
+    {
+        t = (age - KILLPOP_RISE - KILLPOP_HOLD) / KILLPOP_FALL;  // 0..1
+        a = 1 - t;  scale = 1.0;
+    }
+
+    vector col = killpop_headshot ? '1 0.85 0.2' : '0.4 0.9 0.4';
+    string txt = sprintf("+$%g", killpop_amount);
+
+    float prev_font = drawfont;
+    drawfont = hud_font;
+
+    float base = 40;
+    vector sz = [base * scale, base * scale];
+    float w  = stringwidth(txt, 1, sz);
+    float cx = g_width * 0.5;
+    float cy = g_height * 0.30;
+    drawstring([cx - w * 0.5, cy], txt, sz, col, a, 0);
+
+    if (killpop_headshot)
+    {
+        vector hsz = [16, 16];
+        float hw = stringwidth("HEADSHOT", 1, hsz);
+        drawstring([cx - hw * 0.5, cy - 20], "HEADSHOT", hsz, '1 0.85 0.2', a, 0);
+    }
+
+    drawfont = prev_font;
+};
+
+// Money-add floats — each "+$delta" appears just above the cash counter and
+// drifts DOWN into it as it fades.  Spawned by HUD_MoneyWatch on any increase.
+void() HUD_DrawMoneyAdds =
+{
+    float i;
+    float prev_font = drawfont;
+    drawfont = hud_font_mono;
+    float counter_y = g_height - 74;    // matches the money counter draw
+    for (i = 0; i < MONEYADD_MAX; i = i + 1)
+    {
+        if (moneyadd_start[i] <= 0)
+            continue;
+        float age = cltime - moneyadd_start[i];
+        if (age >= MONEYADD_LIFE)
+        {
+            moneyadd_start[i] = 0;
+            continue;
+        }
+        float t = age / MONEYADD_LIFE;          // 0..1
+        float y = (counter_y - 22) + 22 * t;    // drift down into the counter
+        float a = 1 - t;                        // fade as it lands
+        drawstring([24, y], sprintf("+$%g", moneyadd_amount[i]), [14, 14], '0.5 1 0.5', a * 0.95, 0);
+    }
+    drawfont = prev_font;
+};
+
+// Watch our own STAT_MONEY; on any INCREASE push a money-add float.
+void() HUD_MoneyWatch =
+{
+    float m = getstatf(STAT_MONEY);
+    if (!moneyadd_inited)
+    {
+        moneyadd_inited = TRUE;
+        moneyadd_prev   = m;        // seed without spawning a connect-time float
+        return;
+    }
+    if (m > moneyadd_prev)
+    {
+        moneyadd_amount[moneyadd_head] = m - moneyadd_prev;
+        moneyadd_start [moneyadd_head] = cltime;
+        moneyadd_head = (moneyadd_head + 1) % MONEYADD_MAX;
+    }
+    moneyadd_prev = m;
+};
+
+// Per-frame entry — watch + draw.  Called from BOTH the alive HUD and the
+// spectator HUD so the money watch tracks continuously (no stale delta
+// across a death/respawn).
+void() HUD_DopamineFrame =
+{
+    HUD_MoneyWatch();
+    HUD_DrawKillPopup();
+    HUD_DrawMoneyAdds();
+};
+
 void() HUD_DrawCenterMessage =
 {
     float phase;
@@ -1079,6 +1270,20 @@ void() HUD_DrawCenterMessage =
     // Draw subtext
     sub_width = stringwidth(sub_text, 1, sub_size);
     drawstring([cx - sub_width * 0.5, cy + 44], sub_text, sub_size, '0.8 0.8 0.8', 0.85, 0);
+
+    // Dopamine round-cash line — under the win/lose banner.  Driven by the
+    // CSQC_EVENT_ROUND_REWARD event (no event on a draw → no line); the
+    // recency gate stops a prior round's reward bleeding onto a draw round.
+    if (phase == ROUND_PHASE_ROUND_END
+        && roundrew_time > 0
+        && (cltime - roundrew_time) < ROUNDREW_WINDOW)
+    {
+        string cash_txt = sprintf("+$%g", roundrew_amount);
+        vector cash_col = roundrew_won ? '0.4 0.95 0.4' : '0.8 0.8 0.85';
+        vector cash_sz  = [26, 26];
+        float  cash_w   = stringwidth(cash_txt, 1, cash_sz);
+        drawstring([cx - cash_w * 0.5, cy + 72], cash_txt, cash_sz, cash_col, 0.95, 0);
+    }
 };
 
 void() CSQC_DrawWeaponHUD =
@@ -1161,9 +1366,17 @@ void() CSQC_DrawWeaponHUD =
         float my;
         float ay;
         drawfont = hud_font_mono;
-        // Yellow when the player can buy here (inside an allowed buy zone, or
-        // buy-anywhere / a zone-less map); green otherwise.
-        vector money_col = getstatf(STAT_IN_BUYZONE) ? '1 0.85 0.2' : '0.4 0.9 0.4';
+        // Green normally; flashes gold -> bright-yellow while the player can buy
+        // here (in a buy zone, or buy-anywhere / a zone-less map) so they notice
+        // they can shop — same idea as the C4 slot's plant-zone flash.  ~1.3 Hz.
+        vector money_col;
+        if (getstatf(STAT_IN_BUYZONE))
+        {
+            float bz_pulse = 0.5 + 0.5 * sin(cltime * 8);
+            money_col = '1 0.85 0.2' + '0 0.15 0.55' * bz_pulse;
+        }
+        else
+            money_col = '0.4 0.9 0.4';
         money_str = HUD_GetMoneyString(cur_money);
         my = g_height - 52 - 22;
         drawstring([20, my], money_str, [18, 18], money_col, 0.9, 0);

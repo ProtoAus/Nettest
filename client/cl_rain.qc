@@ -211,6 +211,10 @@ float  rain_was_snow_simple;   // edge-detect for the RGB reset on entry
 // memalloc (cl_defs.qc #384) zero-inits the block, so the rd_active[i]==0
 // free-slot logic stays valid.  REQUIRES fteqcc64_latest.exe / _dev
 // (2025+); the 2022 fteqcc64.exe can no longer compile this tree.
+// NOTE: fteqcc64_latest emits a benign "INTERNAL: return+0@1 was already fully freed" on the
+// first `auto` decl below — an artifact of the auto memalloc-init codegen, NOT a bug (the block
+// still zero-inits + works in-game). It has no Q/F warning code to #pragma-disable, and dropping
+// `auto` reintroduces the 32-bit-codegen hang, so it stays. (fteqcc64_dev doesn't emit it.)
 auto float  rd_active[RAIN_MAX];
 auto vector rd_start[RAIN_MAX];
 auto vector rd_end[RAIN_MAX];

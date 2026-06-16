@@ -2,6 +2,19 @@
 #pragma target fte_5768
 #define printf(x, ...) print(sprintf(x, __VA_ARGS__))
 
+// Gravity Shift (gravity gun): 1 while this player's gravity is redirected.
+// Declared here (earliest shared include) so both sh_pmove.qc and the gravgun
+// weapon file can see it.  See GravShift_UpdateActivation in sh_pmove.qc.
+.float gravshift_active;
+// Gravity Shift GLOBAL state (server-authoritative; the WHOLE server shifts to
+// gravshift_world_dir, broadcast to clients via the "gravdir" serverinfo key, read
+// with serverkey).  Declared shared (inert on the client) so the gravgun prop-tick
+// can read the owner.  '0 0 0' world_dir = no shift active.
+entity gravshift_owner;          // player currently driving the shift (world = none)
+vector gravshift_world_dir;      // global gravity dir while active; '0 0 0' = none
+vector gravshift_world_dir_last; // last value pushed to serverinfo (on-change guard)
+float  gravshift_owner_assert;   // time the owner last asserted (auto-clear if stale)
+
 // nettest Patch 36 Part B: engine builtin (com_mesh.c Mod_AddHitbox) that registers a
 // per-bone hitbox on an alias/IQM player model.  Once a model has any hitbox, MOVE_HITMODEL
 // traces the boxes instead of the mesh triangles and reports the struck box's hitgroup via
@@ -175,10 +188,8 @@ const float PUSH_SOURCE   = 16; // boost along movedir up to speed, don't overwr
 .float  brush_type;
 .float  mover_state;
 .float  brush_is_rotating;
-.float  has_custom_pivot;
 .vector pos1;
 .vector pos2;
-.vector custom_pivot;
 
 // Generic movement/entity fields not declared in the engine-generated defs
 .float speed;
@@ -1336,17 +1347,17 @@ void() precache_everything =
 	// sound folder spelled "wpn_butterfly" (intentional, matches assets).
 	precache_model("models/weapons/wpn_butteryfly/v_knife.mdl");
 	precache_model("models/weapons/wpn_butteryfly/w_knife.mdl");
-	precache_sound("sounds/weapons/wpn_butterfly/Balisong_LE_Select.wav");
-	precache_sound("sounds/weapons/wpn_butterfly/Balisong_LE_Att_1.wav");
-	precache_sound("sounds/weapons/wpn_butterfly/Balisong_LE_Att_2.wav");
-	precache_sound("sounds/weapons/wpn_butterfly/Balisong_LE_Combo_1_Spin.wav");
-	precache_sound("sounds/weapons/wpn_butterfly/Balisong_LE_Combo_2_Spin.wav");
-	precache_sound("sounds/weapons/wpn_butterfly/Balisong_LE_BigShot.wav");
-	precache_sound("sounds/weapons/wpn_butterfly/Balisong_LE_BigShot_R.wav");
-	precache_sound("sounds/weapons/wpn_butterfly/Balisong_LE_BigShot_Spin.wav");
-	precache_sound("sounds/weapons/wpn_butterfly/Balisong_LE_BigShot_R_Spin.wav");
-	precache_sound("sounds/weapons/wpn_butterfly/Balisong_LE_Observe.wav");
-	precache_sound("sounds/weapons/wpn_butterfly/Balisong_LE_Observe_02.wav");
+	precache_sound("sounds/weapons/wpn_butterfly/select.wav");
+	precache_sound("sounds/weapons/wpn_butterfly/attack1.wav");
+	precache_sound("sounds/weapons/wpn_butterfly/attack2.wav");
+	precache_sound("sounds/weapons/wpn_butterfly/combo1.wav");
+	precache_sound("sounds/weapons/wpn_butterfly/combo2.wav");
+	precache_sound("sounds/weapons/wpn_butterfly/bigshot.wav");
+	precache_sound("sounds/weapons/wpn_butterfly/bigshot_r.wav");
+	precache_sound("sounds/weapons/wpn_butterfly/bigshot_spin.wav");
+	precache_sound("sounds/weapons/wpn_butterfly/bigshot_r_spin.wav");
+	precache_sound("sounds/weapons/wpn_butterfly/observe.wav");
+	precache_sound("sounds/weapons/wpn_butterfly/observe2.wav");
 	precache_sound("sounds/weapons/wpn_butterfly/hit1.wav");
 	precache_sound("sounds/weapons/wpn_butterfly/hit2.wav");
 	precache_sound("sounds/weapons/wpn_butterfly/hit3.wav");

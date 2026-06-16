@@ -3030,7 +3030,11 @@ void() CSQC_Input_Frame =
 		if (slide_now && !csqc_slide_snd_prev)
 		{
 			slide_local_variant = (slide_local_variant % 5) + 1;
-			localsound(sprintf("sounds/player/slide%g.wav", slide_local_variant), CHAN_BODY, 1);
+			// Channel 5, NOT CHAN_BODY (4): footsteps also play on CHAN_BODY and
+			// auto-replace the prior voice, so a footstep mid-slide was cutting
+			// the ~1.25s slide sample short. Its own dedicated channel lets the
+			// slide ring out; a fresh slide still cuts the previous one.
+			localsound(sprintf("sounds/player/slide%g.wav", slide_local_variant), 5, 1);
 		}
 		csqc_slide_snd_prev = slide_now;
 	}
@@ -3858,6 +3862,25 @@ float() CSQC_PlayerVisual_Predraw =
 	self.vis_trace_subblendfrac  = self.subblendfrac;
 	self.vis_trace_subblend2frac = self.subblend2frac;
 	self.vis_trace_pose_valid    = 1;
+
+	// Gravity Shift: orient the WHOLE model so its up-axis aligns with the global
+	// gravity's "up" (gup = -gravdir), preserving the model's facing yaw — so remote
+	// players visibly stand on the wall/ceiling with you (and the per-bone hitboxes,
+	// which read .angles, rotate with the model).  Inert when no shift is active.
+	vector gs_dir = stov(serverkey("gravdir"));
+	if (gs_dir != '0 0 0')
+	{
+		vector gs_up = '0 0 0' - gs_dir;
+		makevectors([0, self.angles_y, 0]);                       // facing from yaw only
+		vector gs_fwd = v_forward - gs_up * (v_forward * gs_up);  // project onto the wall plane
+		if (vlen(gs_fwd) < 0.01)                                  // facing ~parallel to gup -> fallback
+		{
+			makevectors([0, self.angles_y + 90, 0]);
+			gs_fwd = v_forward - gs_up * (v_forward * gs_up);
+		}
+		gs_fwd = normalize(gs_fwd);
+		self.angles = vectoangles(gs_fwd, gs_up);
+	}
 
 	addentity(self);
 

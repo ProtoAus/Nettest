@@ -1145,9 +1145,22 @@ void(entity attacker, entity victim) PlayerKilled =
             if (kf_cause == KILL_CAUSE_WEAPON)
             {
                 float reward = cvar("mp_cashreward");
-                if (victim.death_hitgroup == HITGROUP_HEAD)
+                float hs = (victim.death_hitgroup == HITGROUP_HEAD) ? 1 : 0;
+                if (hs)
                     reward = reward + cvar("mp_cashheadshot");
                 AddMoney(attacker, reward);
+
+                // Dopamine kill-cash popup — unicast to the killer only.
+                // CSQC delays the center-top "+$" popup 0.5s (orchestralhit)
+                // and plays killsound.wav immediately on a headshot kill.
+                if (reward > 0)
+                {
+                    msg_entity = attacker;
+                    WriteByte(MSG_ONE, SVC_CGAMEPACKET);
+                    WriteByte(MSG_ONE, CSQC_EVENT_KILL_REWARD);
+                    WriteShort(MSG_ONE, reward);
+                    WriteByte(MSG_ONE, hs);
+                }
             }
         }
 

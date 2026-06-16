@@ -15,11 +15,8 @@
 // definitions.
 .float  mover_state;
 .float  brush_is_rotating;
-.float  has_custom_pivot;
-.float  pivot_bbox_radius;
 .vector pos1;
 .vector pos2;
-.vector custom_pivot;
 // Server-intent non-solid bit — read by CSQC_SolidBrush_Update from
 // the wire and consumed by the solid assignment below.  Forward-decl
 // here so the parser block (which appears before the canonical
@@ -124,64 +121,6 @@ float(entity ent) CSQC_Brush_RotationAxis =
     return 1;
 };
 
-vector(vector pt, float deg, float ax_idx) CSQC_Brush_RotateFromWorldOrigin =
-{
-    float rad = deg * 0.017453293;
-    float c = cos(rad);
-    float s = sin(rad);
-    vector r;
-
-    if (ax_idx == 0)
-    {
-        r_x = pt_x * c + pt_z * s;
-        r_y = pt_y;
-        r_z = -pt_x * s + pt_z * c;
-    }
-    else if (ax_idx == 2)
-    {
-        r_x = pt_x;
-        r_y = pt_y * c - pt_z * s;
-        r_z = pt_y * s + pt_z * c;
-    }
-    else
-    {
-        r_x = pt_x * c - pt_y * s;
-        r_y = pt_x * s + pt_y * c;
-        r_z = pt_z;
-    }
-
-    return r;
-};
-
-void(entity ent) CSQC_Brush_ApplyCustomPivotOrigin =
-{
-    if (!ent.has_custom_pivot)
-        return;
-
-    float ax = CSQC_Brush_RotationAxis(ent);
-    float deg = ent.angles_y;
-    if (ax == 0)      deg = ent.angles_x;
-    else if (ax == 2) deg = ent.angles_z;
-
-    vector rp = CSQC_Brush_RotateFromWorldOrigin(ent.custom_pivot, deg, ax);
-    setorigin(ent, ent.custom_pivot - rp);
-
-    // Re-anchor the SOLID_BBOX cube on the pivot each frame.  See the
-    // engine-quirk comment in sv_doors_rotating.qc's Mover_ApplyCustomPivotOrigin
-    // for why custom-pivot brushes can't use SOLID_BSP — short version,
-    // mod->mins/maxs is in absolute world coords for TrenchBroom exports
-    // and the rotation-aware AABB blows up to ~2× the pivot's world
-    // distance.  Server ships pivot_bbox_radius once when has_custom_pivot
-    // is set; client recomputes mins/maxs = R*P ± r·(1,1,1) per render
-    // frame so the cube tracks the interpolated angle.
-    if (ent.pivot_bbox_radius > 0)
-    {
-        float r = ent.pivot_bbox_radius;
-        vector rv = '1 1 1' * r;
-        setsize(ent, rp - rv, rp + rv);
-    }
-};
-
 // GoldSrc renderfx (0..16) animation enum + per-entity state for the
 // BrushSync_ApplyRenderFX evaluator.  Declared here (above Predraw)
 // rather than next to rendermode further down so the Predraw function
@@ -258,7 +197,6 @@ float() CSQC_SolidBrush_Predraw =
         // when step crossed the per-axis remaining-distance.  `dest`
         // is left computed above but no longer consulted.
         self.angles = self.csqc_snap_angles + self.avelocity * elapsed;
-        CSQC_Brush_ApplyCustomPivotOrigin(self);
     }
 
     // TRAIN-specific extrapolation.  Engine MOVETYPE_NOCLIP integrates
@@ -407,11 +345,8 @@ float() CSQC_SolidBrush_Predraw =
 .float brush_type;      // BRUSH_TYPE_*
 .float mover_state;     // MOVER_STATE_*
 .float brush_is_rotating; // TRUE for func_door_rotating / func_rotating
-.float has_custom_pivot;  // TRUE when origin_target resolved server-side
-.float pivot_bbox_radius; // half-extent of the SOLID_BBOX cube around the pivot
 .vector pos1;           // closed/bottom position
 .vector pos2;           // open/top position
-.vector custom_pivot;    // world-space origin_target pivot
 .float speed;           // movement speed
 .float door_locked;     // TRUE if door has DOOR_LOCKED spawnflag
 .float brush_material;  // BREAKABLE_* code (0 = default/concrete);
@@ -618,17 +553,6 @@ void() CSQC_SolidBrush_Update =
 
     btype = readbyte();
     self.brush_is_rotating = readbyte();
-    self.has_custom_pivot = readbyte();
-    if (self.has_custom_pivot)
-    {
-        self.custom_pivot = readvector();
-        self.pivot_bbox_radius = readcoord();
-    }
-    else
-    {
-        self.custom_pivot = '0 0 0';
-        self.pivot_bbox_radius = 0;
-    }
 
     sv_state = 0;
     if (btype == BRUSH_TYPE_CONVEYOR)
@@ -730,12 +654,7 @@ void() CSQC_SolidBrush_Update =
     // client's pmove to collide with brushes the server lets you walk
     // through, producing rubberbanding when reconciliation snapped the
     // player back into the empty space the server says they should be.
-    // Custom-pivot brushes use SOLID_BBOX (see Mover_ApplyCustomPivotOrigin
-    // in sv_doors_rotating.qc).  CSQC_Brush_ApplyCustomPivotOrigin
-    // re-aims the cube every render frame so absmin/absmax stays
-    // anchored on the pivot regardless of the interpolated angle.
-    float wire_solid = self.has_custom_pivot ? SOLID_BBOX : SOLID_BSP;
-    self.solid       = (hide || self.wire_nonsolid) ? SOLID_NOT : wire_solid;
+    self.solid       = (hide || self.wire_nonsolid) ? SOLID_NOT : SOLID_BSP;
     self.drawmask    = (hide || aaa_hide) ? 0 : MASK_ENGINE;
     self.angles      = ang;
     self.alpha       = alpha_value;
@@ -868,7 +787,6 @@ void(entity ent, vector dest_angles) CSQC_RotateMoverPredict =
         ent.avelocity = '0 0 0';
         ent.csqc_snap_angles = ent.angles;
         ent.csqc_snap_time = cltime;
-        CSQC_Brush_ApplyCustomPivotOrigin(ent);
         RotatingBrush_RemoveFromList(ent);
         return;
     }

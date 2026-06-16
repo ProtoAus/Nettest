@@ -48,6 +48,13 @@ float() Buy_CanOpen =
         return FALSE;
     if (getstati(STAT_PLAYERTEAM) <= TEAM_NONE)
         return FALSE;
+    // Must be in a buy zone to open (or keep open) the buy menu.  STAT_IN_BUYZONE
+    // already folds in mp_buyanywhere AND the "map has no func_buyzone -> buy
+    // anywhere" fallback, so this single check covers every case.  Buy_IsOpen()
+    // re-runs Buy_CanOpen every frame via Buy_Draw, so the menu auto-closes the
+    // instant the player walks out of the zone.
+    if (!getstatf(STAT_IN_BUYZONE))
+        return FALSE;
     return TRUE;
 };
 
@@ -205,6 +212,10 @@ void(float id) Buy_Purchase =
         return;   // server re-checks anyway; skip the pointless round-trip
     // `cmd buy <id>` -> SV_ParseClientCommand on the server.
     localcmd(sprintf("cmd buy %g\n", id));
+    // Cash-register confirm (2D, buyer only).  Gated on affordability above, and
+    // the menu can only be open while alive + in a buy zone, so the server can't
+    // reject an affordable buy from here — the sound tracks an actual purchase.
+    localsound("sounds/effects/cashregister2.wav");
     Buy_Close();
 };
 

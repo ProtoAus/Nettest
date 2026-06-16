@@ -266,6 +266,8 @@ const float CSQC_EVENT_DAMAGE_VIEWKICK   = 40;       // private victim camera pu
 const float CSQC_EVENT_RADIO_CALL        = 41;       // radio quick-chat playback. Payload: resolved voice-line path string. CSQC plays beep1 → voice → beep2 in sequence using soundlength() to time each stage.
 const float CSQC_EVENT_PHYSPROP_IMPACT   = 42;       // phys_files contact smoke. Payload: pos 3×coord, normal 3 bytes (0..255 = -1..1), bucket byte (0 slide / 1 soft / 2 hard). Server multicasts to PVS; CSQC fires "weapons.physprop_smoke" via pointparticles. The impact/slide SOUND is server-side sound(), NOT routed through this event.
 const float CSQC_EVENT_SLIDE_SOUND       = 43;       // CoD-slide engage sound. Routed to PVS clients EXCEPT the slider (whose CSQC plays it via localsound the instant the slide is predicted). Payload: 1 exclude byte + 1 variant byte (slideN.wav, N=1..5) + 3×coord origin. Mirrors CSQC_EVENT_FOOTSTEP_SOUND.
+const float CSQC_EVENT_KILL_REWARD       = 44;       // dopamine kill-cash popup, sent ONLY to the killer. Payload: short reward + 1 headshot byte. CSQC delays the center-top popup 0.5s (orchestralhit) and plays killsound.wav immediately on a headshot kill.
+const float CSQC_EVENT_ROUND_REWARD      = 45;       // round win/lose cash, sent ONLY to each surviving-team player at round end. Payload: short amount + 1 win byte. CSQC shows "+$amount" under the win/lose banner + plays cashregister.
 
 // --- Kill-feed causes (byte payload of CSQC_EVENT_KILLFEED) ---
 const float KILL_CAUSE_WEAPON       = 0;

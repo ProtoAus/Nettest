@@ -10,10 +10,6 @@
 
 .float brush_type;      // BRUSH_TYPE_* — set by func_door/func_button
 .float mover_state;     // current movement state (shared with door_state/button_state)
-// Forward-decl: canonical in sv_doors_rotating.qc.  SendEntity ships
-// this when has_custom_pivot is set so CSQC can re-anchor the
-// SOLID_BBOX cube around the pivot per render frame.
-.float pivot_bbox_radius;
 // Forward-decl: defined in sv_doors.qc which compiles after this
 // file.  Used by solid_brush_SendEntity to inform CSQC's +use
 // predictor whether the door's ONE_MOVEMENT latch is exhausted.
@@ -348,25 +344,8 @@ float(entity playerent, float changedflags) solid_brush_SendEntity =
     WriteByte(MSG_ENTITY, self.brush_type);
     // Rotating-brush metadata.  `brush_is_rotating` tells CSQC
     // whether pos1/pos2 are ANGLES (func_door_rotating) rather than
-    // origins (func_door/func_button).  The custom-pivot pair lets
-    // CSQC re-anchor origin every render frame for origin_target
-    // hinges instead of snapping to server origins between angle
-    // snapshots.
+    // origins (func_door/func_button).
     WriteByte(MSG_ENTITY, self.brush_is_rotating ? 1 : 0);
-    WriteByte(MSG_ENTITY, self.has_custom_pivot ? 1 : 0);
-    if (self.has_custom_pivot)
-    {
-        WriteCoord(MSG_ENTITY, self.custom_pivot_x);
-        WriteCoord(MSG_ENTITY, self.custom_pivot_y);
-        WriteCoord(MSG_ENTITY, self.custom_pivot_z);
-        // Pivot-cube half-extent.  Server keeps SOLID_BBOX mins/maxs
-        // re-aimed every tick so absmin/absmax stays anchored on the
-        // pivot regardless of the current rotation; CSQC mirrors the
-        // same math in its predraw so the local collision bbox doesn't
-        // drift between server snapshots.  See the engine quirk note
-        // in Mover_ApplyCustomPivotOrigin (sv_doors_rotating.qc).
-        WriteCoord(MSG_ENTITY, self.pivot_bbox_radius);
-    }
     if (self.brush_type == BRUSH_TYPE_CONVEYOR)
     {
         // Conveyor: ship movedir + speed + spawnflags so CSQC pmove

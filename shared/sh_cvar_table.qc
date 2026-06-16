@@ -533,10 +533,11 @@ void() CVar_Init =
     // ~ping ms later and the prediction either matches (no snap) or
     // reverts (next snapshot's vis_is_dead=0 + alive anim restores).
     CVar_Add("Client", "cl_predict_death",        "1",     CVAR_SIDE_CL);
-    // 0 = no bullet-impact particles/lights, 1 = cheap spark/chip bursts,
-    // 2 = full smoke + spark particles, 3 = (reserved, currently same as 2 —
-    // dlight is now gated by cl_impact_light independently).
-    CVar_Add("Client", "cl_impact_quality",       "2",     CVAR_SIDE_CL);
+    // Bullet-impact particles on/off.  0 = none, >=1 = full smoke + spark
+    // particles.  (The old "1 = cheap _fast" tier was collapsed to a single
+    // quality; the per-impact dynamic light is gated separately by
+    // cl_impact_light.)
+    CVar_Add("Client", "cl_impact_quality",       "1",     CVAR_SIDE_CL);
     // Single offset knob for impact smoke/spark particles.  Floor
     // 2 u keeps the puff from z-fighting the bullet-hole decal;
     // higher values lift the smoke further off the wall.  Dlight
@@ -1289,6 +1290,9 @@ void() CVar_Init =
     CVar_Add("Client debug", "cl_debug_hitboxes",    "0", CVAR_SIDE_CL);
     CVar_Add("Client debug", "cl_debug_hbexpand",    "0", CVAR_SIDE_CL);
     CVar_Add("Client debug", "cl_debug_physprops",   "0", CVAR_SIDE_CL);
+    // Debug: disable phys-prop extrapolation smoothing to see the raw server
+    // send cadence (default 0 = extrapolation ON).  Read in cl_physprop.qc.
+    CVar_Add("Client debug", "cl_physprop_noextrap", "0", CVAR_SIDE_CL);
     // 0=off, 1=ODE tight rotated box, 2=trace inflated AABB, 3=both.
     // Draws every csqc_dropped_weapon's bbox so the user can verify
     // the ODE collision shape matches the visible mesh and that the

@@ -235,6 +235,10 @@ noref void(float apiver, string enginename, float enginever) CSQC_Init =
 	CSQC_Rain_Precache();
 	CSQC_Flashlight_Precache();
 	CSQC_MuzzleFlash_Precache();
+	// Dopamine kill/cash feedback sounds (cl_hud.qc popups).
+	precache_sound("sounds/effects/orchestralhit.mp3");
+	precache_sound("sounds/effects/killsound.wav");
+	precache_sound("sounds/effects/cashregister1.mp3");
 	CSQC_EnvHud_Reset();
 	precache_pic("gfx/scope.png");
 	precache_pic("gfx/360hitindicator.png");
@@ -587,6 +591,7 @@ void(float in_menu_backdrop) CSQC_UpdateViewSpectator =
 		HUD_DrawCenterMessage();
 		HUD_DrawRoundTimer();
 		HUD_DrawKillFeed();
+		HUD_DopamineFrame();
 		// Also draw the death-screen damage report here — when you
 		// die you immediately enter the spectate / death-cam branch
 		// (Spectate_IsActive() is true), and this `return` below
@@ -855,6 +860,7 @@ void(float in_menu_backdrop) CSQC_UpdateViewAliveHud =
 		HUD_DrawSpeedometer();
 		HUD_DrawNetGraph();
 		HUD_DrawKillFeed();
+		HUD_DopamineFrame();
 		HUD_DrawDamageReport();
 		HUD_VoIP_Tick();
 		HUD_VoIP_Draw();
@@ -1394,6 +1400,8 @@ float(float ev) _net_event_bytes =
 	if (ev == CSQC_EVENT_ENV_MESSAGE)            return 34;  // 2 svc hdr + variable title key string
 	if (ev == CSQC_EVENT_DAMAGE_VIEWKICK)        return 6;   // 2 svc hdr + 2 signed shorts
 	if (ev == CSQC_EVENT_RADIO_CALL)             return 34;  // 2 svc hdr + ~32 voice-path string (variable)
+	if (ev == CSQC_EVENT_KILL_REWARD)            return 5;   // 2 svc hdr + 2 short reward + 1 headshot byte
+	if (ev == CSQC_EVENT_ROUND_REWARD)           return 5;   // 2 svc hdr + 2 short amount + 1 win byte
 	return 2;
 };
 
@@ -2128,17 +2136,38 @@ void() CSQC_Parse_Event =
 			sl_pos_z = readcoord();
 			if (!(sl_exclude != 0 && sl_exclude == player_localentnum))
 			{
-				// Play on the slider's body proxy (entity + CHAN_BODY) so a NEW
-				// slide CUTS the previous one. pointsound plays on channel 0,
-				// which SND_PickChannel never culls, so the long ~1.25s slide
-				// samples stacked and summed to full volume. The proxy's
-				// vis_owner_entnum == the slider's edict == the exclude byte.
-				entity sl_ent = findfloat(world, vis_owner_entnum, sl_exclude);
-				if (sl_ent && sl_ent.modelindex)
-					sound(sl_ent, CHAN_BODY, sprintf("sounds/player/slide%g.wav", sl_variant), 1, ATTN_NORM);
-				else
-					pointsound(sl_pos, sprintf("sounds/player/slide%g.wav", sl_variant), 1, ATTN_NORM);
+				// pointsound is the one that actually plays for remotes — a CSQC
+				// sound() on a player_visual_proxy is silent (its .entnum is the
+				// SERVER number, not the CSQC edict slot). FTE's falloff is LINEAR
+				// to a true zero at 1000/attenuation units, so ATTN_NORM (1.0) cut
+				// to dead silence at exactly 1000u — that hard arithmetic edge is
+				// the "instant cutoff". attenuation 0.5 doubles the radius to
+				// ~2000u so the ramp is longer and tapers off smoothly. Also
+				// re-anchor at the slider's CURRENT proxy origin instead of the
+				// stale server engage-point sl_pos (proxy carries the slider's
+				// slot as vis_owner_entnum == the exclude byte; modelindex guards
+				// a real proxy). vol 0.4 — lowered for other players (the gentler
+				// 0.5 attenuation raised mid-range loudness, so trim the volume).
+				vector sl_play = sl_pos;
+				entity sl_p = findfloat(world, vis_owner_entnum, sl_exclude);
+				if (sl_p && sl_p.modelindex)
+					sl_play = sl_p.origin;
+				pointsound(sl_play, sprintf("sounds/player/slide%g.wav", sl_variant), 0.4, 0.5);
 			}
+			break;
+		}
+		case CSQC_EVENT_KILL_REWARD:
+		{
+			float kr_reward = readshort();
+			float kr_hs     = readbyte();
+			HUD_OnKillReward(kr_reward, kr_hs);
+			break;
+		}
+		case CSQC_EVENT_ROUND_REWARD:
+		{
+			float rr_amount = readshort();
+			float rr_won    = readbyte();
+			HUD_OnRoundReward(rr_amount, rr_won);
 			break;
 		}
 		case CSQC_EVENT_BRUSH_DESTROY:

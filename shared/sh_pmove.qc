@@ -50,6 +50,11 @@ float  PM_BTN_FIRE         = 1;     // +attack — bit 0 of input_buttons
 // the legacy `impulse 9` toggle for users who bound that; the two
 // systems share the same .grapple_hook / .grapple_rope_active state.
 float  PM_BTN_GRAPPLE      = 256;   // +button9 / +grapple — press-and-hold
+// Gravity Shift held-bit (+button5, bit 16 — verified free).  While the gravity
+// gun is equipped and this is held, mouse-X rolls the view and redirects gravity
+// for the whole server (sh_wpn_gravitygun.qc / sv_player.qc).  Bind: +button5.
+float  PM_BTN_GRAVSHIFT    = 16;    // +button5 / +gravityshift — gravity-gun only
+// .float gravshift_active is declared in sh_customdefs.qc (loaded before this file)
 
 // Forward decl — sh_weapon_logic.qc is included AFTER sh_pmove.qc on
 // the CSQC side (cl_progs.src), so the per-tick gunkick decay call
@@ -553,7 +558,10 @@ void PM_UnDuck()
     // PM_DUCK_MINS_z alone — this works whether PM_MINS_z is 0 (legacy: feet
     // at origin) or negative (player model with body-center origin).
     if (pm_onground)
-        new_origin_z += PM_DUCK_MINS_z - PM_MINS_z;
+    {   // Gravity Shift: shift along the gravity axis (gup), not literal Z
+        vector gup = '0 0 0' - (self.gravshift_active ? self.gravitydir : '0 0 -1');
+        new_origin += gup * (PM_DUCK_MINS_z - PM_MINS_z);
+    }
 
     // MOVE_NORMAL (Full) so a physics prop overhead — the filing cabinet — blocks
     // standing up instead of being ignored, which let the player un-duck up into it
@@ -680,14 +688,16 @@ void PM_CheckDuck()
                 // or body center (PM_MINS_z=-36, GoldSrc model offset).
                 if (pm_onground)
                 {
-                    pm_origin_z += PM_MINS_z - PM_DUCK_MINS_z;
+                    // Gravity Shift: shift along the gravity axis (gup), not literal Z
+                    vector gup = '0 0 0' - (self.gravshift_active ? self.gravitydir : '0 0 -1');
+                    pm_origin += gup * (PM_MINS_z - PM_DUCK_MINS_z);
                     // Unstick if the shift pushed us into geometry
                     if (!PM_TestPosition(pm_origin))
                     {
                         local float nudge;
                         for (nudge = 0; nudge < 36; nudge = nudge + 1)
                         {
-                            pm_origin_z = pm_origin_z + 1;
+                            pm_origin += gup;
                             if (PM_TestPosition(pm_origin))
                                 break;
                         }
@@ -1189,13 +1199,16 @@ void PM_Friction()
         // Ground friction is based on horizontal speed only. Slope-clipped
         // vertical velocity is not player input and should not add extra drag
         // while walking up clip ramps or other sloped floors.
-        vel2d   = pm_velocity;
-        vel2d_z = 0;
+        // Gravity Shift: friction acts on the speed IN the surface plane (perp to
+        // gravity), preserving the gravity-axis component.  gup='0 0 1' when not
+        // shifted, so this is the old XY-only friction.
+        vector gdir = self.gravshift_active ? self.gravitydir : '0 0 -1';
+        vector gup  = '0 0 0' - gdir;
+        vel2d = pm_velocity - gup * (pm_velocity * gup);
         speed = vlen(vel2d);
         if (speed < 1)
         {
-            pm_velocity_x = 0;
-            pm_velocity_y = 0;
+            pm_velocity = gup * (pm_velocity * gup);
             return;
         }
 
@@ -1223,8 +1236,7 @@ void PM_Friction()
         drop += control * friction * pm_frametime;
 
         newspeed = max(speed - drop, 0) / speed;
-        pm_velocity_x *= newspeed;
-        pm_velocity_y *= newspeed;
+        pm_velocity = vel2d * newspeed + gup * (pm_velocity * gup);
         return;
     }
     else
@@ -1377,21 +1389,25 @@ float PM_FlyMove()
 void PM_StayOnGround()
 {
     vector start;
+    // Gravity Shift: "up"/"down" follow gravity (gup/gdir) so we snap onto a
+    // wall/ceiling surface, not only floors.  When not shifted gup='0 0 1'.
+    vector gdir = self.gravshift_active ? self.gravitydir : '0 0 -1';
+    vector gup  = '0 0 0' - gdir;
 
-    start = pm_origin + '0 0 2';
+    start = pm_origin + gup * 2;
 
     // Up trace: find guaranteed safe space above. Hull-traced so it
     // handles ceilings — same as Source's TracePlayerBBox.
     PM_Trace(pm_origin, start);
     start = trace_endpos;
 
-    // Down trace from the safe position.
-    PM_Trace(start, pm_origin - '0 0 1' * PM_STEPSIZE);
+    // Down trace from the safe position (down = along gravity).
+    PM_Trace(start, pm_origin + gdir * PM_STEPSIZE);
     if (trace_fraction <= 0 || trace_fraction >= 1)
         return;
     if (trace_startsolid || trace_allsolid)
         return;
-    if (trace_plane_normal_z < 0.5)
+    if ((trace_plane_normal * gup) < 0.5)
         return;
 
     pm_origin = trace_endpos;
@@ -1404,15 +1420,19 @@ void PM_FollowGroundPlane()
     // This prevents ramp collision from shaving X/Y speed while walking uphill.
     if (!pm_onground)
         return;
-    if (pm_groundnormal_z < PM_MIN_STEP_NORMAL)
+    // Gravity Shift: solve the GRAVITY-axis velocity component so total velocity
+    // stays tangent to the ground plane (velocity . normal == 0), instead of
+    // solving Z.  When not shifted gup='0 0 1' and this is the old Z solve.
+    vector gdir = self.gravshift_active ? self.gravitydir : '0 0 -1';
+    vector gup  = '0 0 0' - gdir;
+    float  nup  = pm_groundnormal * gup;            // = pm_groundnormal_z when not shifted
+    if (nup < PM_MIN_STEP_NORMAL)
         return;
-    if (pm_groundnormal_z <= PM_FIXEDSTEP_EPSILON)
+    if (nup <= PM_FIXEDSTEP_EPSILON)
         return;
 
-    pm_velocity_z = -(
-        pm_velocity_x * pm_groundnormal_x +
-        pm_velocity_y * pm_groundnormal_y
-    ) / pm_groundnormal_z;
+    vector v_tan = pm_velocity - gup * (pm_velocity * gup);
+    pm_velocity  = v_tan + gup * (0 - (v_tan * pm_groundnormal) / nup);
 }
 
 // ============================================================================
@@ -1432,17 +1452,19 @@ float PM_AirMove()
     fmove = input_movevalues_x * scale;
     smove = input_movevalues_y * scale;
 
-    // flatten forward and right into the horizontal plane
-    fwd2d   = pm_forward;
-    fwd2d_z = 0;
-    right2d   = pm_right;
-    right2d_z = 0;
+    // Gravity Shift: project forward/right into the plane PERPENDICULAR to gravity
+    // (gup) so WASD walks along a wall/ceiling surface, not world-XY.  When not
+    // shifted gup='0 0 1', so this reduces to the old "zero the Z component" flatten.
+    vector gdir = self.gravshift_active ? self.gravitydir : '0 0 -1';
+    vector gup  = '0 0 0' - gdir;
+    fwd2d   = pm_forward - gup * (pm_forward * gup);
+    right2d = pm_right   - gup * (pm_right   * gup);
 
     if (fwd2d != '0 0 0')   fwd2d   = normalize(fwd2d);
     if (right2d != '0 0 0') right2d = normalize(right2d);
 
     wishvel   = fwd2d * fmove + right2d * smove;
-    wishvel_z = 0;
+    wishvel   = wishvel - gup * (wishvel * gup);
 
     wishspeed = vlen(wishvel);
 
@@ -1478,7 +1500,8 @@ float PM_AirMove()
         // unless the separate slidefix branch is being used. Keeping a
         // residual negative z here causes forward+down traces and "sticky"
         // wall catches on brush seams and 45-degree walls.
-        pm_velocity_z = 0;
+        // (Gravity Shift: zero the GRAVITY-axis component, not literal Z.)
+        pm_velocity = pm_velocity - gdir * (pm_velocity * gdir);
 
         // CS 1.6 stamina: landing fatigue bleeds horizontal speed for ~1.3s
         // after each jump (fuser2 decays from 1315 to 0 over that window).
@@ -1527,11 +1550,9 @@ float PM_AirMove()
         // a thin downhill ramp" bug that gets worse at low speed. The flat
         // horizontal trace stays clear; PM_StayOnGround in PM_PlayerMoveStep
         // pulls us back onto the slope after.
-        walk_dest = [
-            pm_origin_x + pm_velocity_x * pm_frametime,
-            pm_origin_y + pm_velocity_y * pm_frametime,
-            pm_origin_z
-        ];
+        // Walk in the plane perpendicular to gravity (hold the gravity-axis
+        // position constant).  When not shifted this is the old XY-only walk.
+        walk_dest = pm_origin + (pm_velocity - gdir * (pm_velocity * gdir)) * pm_frametime;
 
         PM_Trace(pm_origin, walk_dest);
         if (trace_fraction == 1 && !trace_startsolid && !trace_allsolid)
@@ -1549,8 +1570,12 @@ float PM_AirMove()
         // airborne – uses the separate air-acceleration value (GoldSrc-style)
         PM_AirAccelerate(wishdir, wishspeed, mv_airaccelerate);
 
-        // gravity
-        pm_velocity_z -= mv_entgravity * mv_gravity * pm_frametime;
+        // gravity — along self.gravitydir while gravity-shifting (gravity gun),
+        // otherwise the normal scalar -Z.  (gravitydir '0 0 -1' == the old line.)
+        if (self.gravshift_active)
+            pm_velocity += self.gravitydir * (mv_entgravity * mv_gravity * pm_frametime);
+        else
+            pm_velocity_z -= mv_entgravity * mv_gravity * pm_frametime;
 
         return PM_SlideMove();
     }
@@ -1601,9 +1626,16 @@ void PM_CategorizePosition()
     }
 
     // --- ground check ---
-    // trace 2 units below origin (Momentum Mod uses 2 for more generous
+    // Gravity Shift: the ground trace + the walkable-normal/velocity tests run
+    // along the active gravity direction (gdir) instead of hardcoded Z, so the
+    // player grounds on whatever surface OPPOSES gravity (a wall/ceiling).
+    // gup = "up" = opposite gravity.  When not shifted gdir='0 0 -1'/gup='0 0 1',
+    // so every dot-product below reduces to the original _z test (unchanged).
+    vector gdir = self.gravshift_active ? self.gravitydir : '0 0 -1';
+    vector gup  = '0 0 0' - gdir;
+    // trace 2 units along gravity (Momentum Mod uses 2 for more generous
     // ground detection, reducing ground-state flicker on uneven surfaces)
-    PM_Trace(pm_origin, pm_origin - '0 0 2');
+    PM_Trace(pm_origin, pm_origin + gdir * 2);
 
     // Capture the entity directly below the player NOW, before the groundsnap
     // quadrant traces below clobber trace_ent — PM_UpdateStepSound reads it to
@@ -1626,19 +1658,19 @@ void PM_CategorizePosition()
                         || (self.grapple_attached
                             && !(input_buttons & PM_BTN_JUMP));
 
-    if (pm_velocity_z > 180 || groundsnap_off)
+    if ((pm_velocity * gup) > 180 || groundsnap_off)   // moving AGAINST gravity fast -> airborne
     {
         pm_onground    = FALSE;
-        pm_groundnormal = '0 0 1';
+        pm_groundnormal = gup;
     }
-    else if (trace_fraction < 1 && trace_plane_normal_z >= PM_MIN_STEP_NORMAL)
+    else if (trace_fraction < 1 && (trace_plane_normal * gup) >= PM_MIN_STEP_NORMAL)   // surface opposes gravity -> walkable
     {
         pm_onground     = TRUE;
         pm_groundnormal = trace_plane_normal;
         // Skip the floor snap while swimming — it would kill upward velocity each frame.
         // Only snap if within 1 unit to avoid visible popping off small ledges
         // (ground detection reaches 2 units but snap stays conservative).
-        if (pm_waterlevel < 2 && (pm_origin_z - trace_endpos_z) <= 1)
+        if (pm_waterlevel < 2 && ((pm_origin - trace_endpos) * gup) <= 1)
             pm_origin   = trace_endpos;
         self.pm_waterjumptime = 0;        // cancel water-jump on landing
     }
@@ -1824,9 +1856,15 @@ void PM_CheckJump()
     if (mv_jumpstyle == 0 && !mv_autohop && self.pm_jump_strict_block)
         return;
 
+    // Gravity Shift: the jump impulse + ramp-fix act along the gravity axis
+    // (gup = opposite gravity) so you jump OFF a wall/ceiling, not toward world-up.
+    // gup='0 0 1' when not shifted, so every line below is unchanged.
+    vector gdir = self.gravshift_active ? self.gravitydir : '0 0 -1';
+    vector gup  = '0 0 0' - gdir;
+
     // ramp fix: if we have downward momentum along the ground normal, clip it
     dp = pm_velocity * pm_groundnormal;
-    if (pm_velocity_z < 0 && dp < PM_MAX_JUMPFIX_DP)
+    if ((pm_velocity * gup) < 0 && dp < PM_MAX_JUMPFIX_DP)
         pm_velocity = PM_ClipVelocity(pm_velocity, pm_groundnormal, 1);
 
     // Inherit tangent velocity from a rotating ground brush — runs
@@ -1845,7 +1883,7 @@ void PM_CheckJump()
     pm_onground       = FALSE;
     // CS 1.6 jump impulse: sqrt(2 * sv_gravity * 45) — 45-unit apex at g=800
     // gives the canonical 268.328 u/s.  Scales correctly with custom gravity.
-    pm_velocity_z    += sqrt(2 * mv_gravity * 45);
+    pm_velocity += gup * sqrt(2 * mv_gravity * 45);
     self.spread_penalty = SPREAD_PENALTY_JUMP;
 
     // sv_codstamina: jumps eat a fixed slice of the pool (the user
@@ -1900,7 +1938,7 @@ void PM_CheckJump()
     {
         if (self.pm_fuser2 > 0
             && PM_ReadMovevar("sv_codstamina", 0) <= 0)
-            pm_velocity_z *= (100 - self.pm_fuser2 * 0.001 * 19) * 0.01;
+            pm_velocity += gup * ((pm_velocity * gup) * ((100 - self.pm_fuser2 * 0.001 * 19) * 0.01 - 1));
         self.pm_fuser2 = 1315.7894;
     }
 
@@ -1917,7 +1955,7 @@ void PM_CheckJump()
         {
             // Below the 180 u/s ground-snap floor — block the jump
             // entirely (no spam, press is spent until release).
-            pm_velocity_z -= sqrt(2 * mv_gravity * 45);
+            pm_velocity -= gup * sqrt(2 * mv_gravity * 45);
             pm_onground = TRUE;
             self.pm_jump_held = TRUE;
             return;
@@ -1925,8 +1963,8 @@ void PM_CheckJump()
         // Set absolute target: subtract the line-1751 impulse to
         // recover pre-jump z, then add the apex-derived target.
         // No CS taper inversion needed — it's gated off above.
-        float pre_jump_z = pm_velocity_z - sqrt(2 * mv_gravity * 45);
-        pm_velocity_z = pre_jump_z + target_vel;
+        float pre_jump_z = (pm_velocity * gup) - sqrt(2 * mv_gravity * 45);
+        pm_velocity = pm_velocity - gup * (pm_velocity * gup) + gup * (pre_jump_z + target_vel);
     }
 
     self.pm_jump_held  = TRUE;
@@ -2937,8 +2975,6 @@ vector(vector pt, vector pivot, float deg, float ax_idx) PM_RotateAroundPivot =
 
 vector(entity rb) PM_RotatorPivot =
 {
-    if (rb.has_custom_pivot)
-        return rb.custom_pivot;
     return rb.origin;
 };
 
@@ -5261,12 +5297,93 @@ void() PM_NoblockRestore =
     pm_noblock_stash_count = 0;
 };
 
+// ===================== Gravity Shift (gravity gun) =====================
+// GLOBAL: while ANY player holds +button5 with the gravgun, the WHOLE server's
+// gravity points along gravshift_world_dir (latched to that shifter's look dir).
+// Server-authoritative; broadcast to every client via the "gravdir" serverinfo key.
+// Each player (server) and the predicted local player (client) reads the global dir
+// into self.gravitydir, so everyone falls/walks the same way and every client's view
+// tilts to match.  Runs at the top of PM_PlayerMove, before the move uses gravitydir.
+void() GravShift_UpdateActivation =
+{
+#ifdef SSQC
+    // SERVER: one owner drives the global dir — latch their look-dir on the press,
+    // clear on release.  Auto-clear a stale owner (disconnect / stopped sending).
+    float want = (self.weapon == WEP_GRAVITYGUN && (input_buttons & PM_BTN_GRAVSHIFT) && !self.is_dead) ? 1 : 0;
+    if (want)
+    {
+        if (gravshift_owner == world)       // claim ownership + latch the faced dir
+        {
+            vector dir;
+            makevectors(input_angles);
+            dir   = v_forward;
+            dir_z = 0;                       // horizontal -> fall toward the wall faced
+            dir   = normalize(dir);
+            if (dir != '0 0 0')
+            {
+                gravshift_owner     = self;
+                gravshift_world_dir = dir;
+            }
+        }
+        if (gravshift_owner == self)
+            gravshift_owner_assert = time;   // keep-alive stamp
+    }
+    else if (gravshift_owner == self)        // owner released
+    {
+        gravshift_owner     = world;
+        gravshift_world_dir = '0 0 0';
+    }
+    if (gravshift_owner != world && time > gravshift_owner_assert + 0.5)
+    {                                        // owner went silent (disconnect/lag) -> drop it
+        gravshift_owner     = world;
+        gravshift_world_dir = '0 0 0';
+    }
+    // (The "gravdir" serverinfo broadcast is pushed from SV_UpdateMovementServerInfo
+    // at StartFrame, NOT here — a localcmd serverinfo issued mid-client-command
+    // processing corrupts the message stream.  The arbiter just sets the global.)
+    // Apply the global dir to THIS player (everyone in the server shifts).
+    if (gravshift_world_dir != '0 0 0')
+    {
+        self.gravitydir       = gravshift_world_dir;
+        self.gravshift_active = 1;
+    }
+    else if (self.gravshift_active)
+    {
+        self.gravshift_active = 0;
+        self.gravitydir       = '0 0 -1';
+    }
+#else
+    // CLIENT: read the broadcast global dir and apply to the predicted player so its
+    // movement (and the engine's gravitydir view tilt) matches the server.
+    vector ndir = stov(serverkey("gravdir"));
+    if (ndir != '0 0 0')
+    {
+        self.gravitydir       = ndir;
+        self.gravshift_active = 1;
+    }
+    else if (self.gravshift_active)
+    {
+        self.gravshift_active = 0;
+        self.gravitydir       = '0 0 -1';
+    }
+#endif
+};
+
 void PM_PlayerMove()
 {
     float fixedstep;
     float remaining;
     float saved_timelength;
     float noblock_active;
+
+    // ---- Gravity Shift (gravity gun) ----
+    // Computed identically on client-predict + server (input-driven) so the owner
+    // stays in lockstep.  We do NOT delegate to runstandardplayerphysics — it
+    // fights the custom CoD state (no move + engine rewrites the view = spin).
+    // Instead the custom move itself redirects gravity: the ground check forces
+    // this player airborne while shifted (groundsnap_off below) and the airborne
+    // gravity is applied along self.gravitydir.
+    GravShift_UpdateActivation();
 
     // ---- func_vehicle driver lock (SERVER-SIDE ONLY) ----
     // While driving, the WASD axes steer the vehicle, NOT the driver's feet.

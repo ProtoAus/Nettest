@@ -53,6 +53,10 @@ float lagcomp_valid[LAGCOMP_MAX_PLAYERS];  // number of filled slots, capped at 
 // qwprogs under the 65530 16-bit threshold.  memalloc zero-inits, matching the
 // old static-BSS behaviour.  Accessed only during gameplay traces (well after
 // worldspawn allocates them).  See sv_defs.qc + [[fteqcc-compiler-hang]].
+// NOTE: fteqcc64_latest emits a benign "INTERNAL: return+0@1 was already fully freed" on the
+// first `auto` decl below — an artifact of the auto memalloc-init codegen, NOT a bug (still
+// zero-inits + works). No Q/F code to #pragma-disable; dropping `auto` brings back the
+// 32-bit-codegen hang, so it stays. (fteqcc64_dev doesn't emit it.)
 auto float lc_time              [LAGCOMP_RING_TOTAL];
 auto float lc_frame             [LAGCOMP_RING_TOTAL];
 auto float lc_frame1time        [LAGCOMP_RING_TOTAL];

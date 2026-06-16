@@ -54,10 +54,17 @@ void() Money_AwardRoundEnd =
     {
         if (e.player_team != TEAM_BLUE && e.player_team != TEAM_RED)
             continue;
-        if (e.player_team == round_winning_team)
-            AddMoney(e, cvar("mp_cashwin"));
-        else
-            AddMoney(e, cvar("mp_cashlose"));
+        float won    = (e.player_team == round_winning_team) ? 1 : 0;
+        float amount = won ? cvar("mp_cashwin") : cvar("mp_cashlose");
+        AddMoney(e, amount);
+
+        // Dopamine round-cash popup — unicast; CSQC shows "+$amount"
+        // under the win/lose banner + plays cashregister.
+        msg_entity = e;
+        WriteByte(MSG_ONE, SVC_CGAMEPACKET);
+        WriteByte(MSG_ONE, CSQC_EVENT_ROUND_REWARD);
+        WriteShort(MSG_ONE, amount);
+        WriteByte(MSG_ONE, won);
     }
 };
 

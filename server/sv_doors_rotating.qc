@@ -88,34 +88,6 @@ void() rotdoor_blocked;
 // engine's physics tick and the carry tick rate.
 .vector   rotdoor_carry_last_angles;
 
-// --- Custom rotation pivot (TrenchBroom-style, no origin brush) ---
-//
-// Mapper sets `origin_target` to the targetname of an info_notnull
-// (or any entity with an origin).  At spawn we resolve that to a
-// world-space point and store it in `custom_pivot`; per rotation
-// tick we update self.origin to `custom_pivot - R(angles)*custom_pivot`
-// so the brush appears to swing around the info_notnull regardless
-// of where its baked BSP origin sits.  has_custom_pivot is the gate
-// (cheaper than checking vlen(custom_pivot) every tick, and lets a
-// pivot legitimately sit at world (0,0,0)).
-.string origin_target;
-.vector custom_pivot;
-.float  has_custom_pivot;
-.float  custom_pivot_resolve_tries;
-// Half-extent of the pivot-centered cube the engine uses for AABB on
-// a custom-pivot brush.  Cached at spawn — Mover_ApplyCustomPivotOrigin
-// re-derives mins/maxs from this each tick so absmin/absmax always
-// span pivot ± pivot_bbox_radius regardless of the current angle.
-.float  pivot_bbox_radius;
-// BSP-baked authored mins/maxs (absolute world coords for the brush at
-// its un-rotated pose).  Cached BEFORE Mover_ResizeBboxAroundPivot
-// stomps self.mins/maxs with the inflated cube — Brush_RotateCarry
-// uses these to back-test "did the trace hit the actual slab, or just
-// the inflated AABB?" so SOLID_BBOX-mode rotators don't false-carry
-// players standing in empty cube corners.
-.vector pivot_bsp_mins;
-.vector pivot_bsp_maxs;
-
 // Rotate `pt` around `pivot` by `deg` degrees on the given axis
 // component (0=pitch/X, 1=yaw/Z, 2=roll/Y per Quake angles
 // convention — see the rotation constant comments below).  Used by
@@ -153,212 +125,12 @@ vector(vector pt, vector pivot, float deg, float axis_idx) RotDoor_RotateAround 
     return pivot + r;
 };
 
-// Apply the custom-pivot origin formula to self based on current
-// self.angles and self.rotdoor_axis_index.  Called once at spawn
-// and again every rotation tick / hit callback so the brush keeps
-// sweeping around custom_pivot.  No-op when has_custom_pivot is 0.
-//
-// Formula derivation:
-//   Without an origin brush, the BSP stores brush vertices at their
-//   authored world positions and self.origin defaults to (0,0,0).
-//   The engine renders each vertex at `origin + R(angles)*vert`.
-//   To make the brush appear to rotate around P, we need
-//      world_vert = P + R(angles)*(vert - P)
-//                 = R(angles)*vert + (P - R(angles)*P)
-//   so self.origin = P - R(angles)*P.  At angles=0 that's (0,0,0),
-//   matching the un-rotated authored placement.
-void() Mover_ApplyCustomPivotOrigin =
-{
-    if (!self.has_custom_pivot) return;
-
-    float ax = self.rotdoor_axis_index;
-    float deg = self.angles_x;
-    if (ax == 1)      deg = self.angles_y;
-    else if (ax == 2) deg = self.angles_z;
-
-    vector rp = RotDoor_RotateAround(self.custom_pivot, '0 0 0', deg, ax);
-    setorigin(self, self.custom_pivot - rp);
-
-    // Track the AABB around the pivot.  Engine quirk (world.c:533-578):
-    // SOLID_BSP rotating brushes IGNORE setsize() — the link path
-    // overrides mins/maxs from mod->mins/maxs (the BSP-baked submodel
-    // extents) and then absmin/absmax = origin ± max(|mod->mins|,
-    // |mod->maxs|).  For TrenchBroom-exported brushes (no ORIGIN
-    // texture) mod->mins/maxs are in ABSOLUTE world coords, so that
-    // max blows up to the brush's world distance and the AABB stretches
-    // from origin out to ~2× the pivot's world position — the
-    // "bbox reaches to world (0,0,0)" symptom the user reported.
-    //
-    // Workaround: switch to SOLID_BBOX (done once in
-    // Mover_ResolveCustomPivot) so the link path takes the non-BSP
-    // branch (world.c:612-615) which DOES honour ent->v->mins/maxs:
-    //   absmin = origin + mins ; absmax = origin + maxs
-    // Then re-aim mins/maxs each tick so the cube stays anchored on
-    // the pivot regardless of where origin = P - R(angles)*P has swung:
-    //   mins = R*P - r·(1,1,1)
-    //   maxs = R*P + r·(1,1,1)
-    //   → absmin = (P - R*P) + (R*P - r) = P - r ✓
-    // Tradeoff documented at top of Mover_ResolveCustomPivot.
-    if (self.pivot_bbox_radius > 0)
-    {
-        float r = self.pivot_bbox_radius;
-        vector rv = '1 1 1' * r;
-        setsize(self, rp - rv, rp + rv);
-    }
-};
-
+// Rotation pivot = the brush's BSP-baked origin (from the ORIGIN-
+// textured pivot brush).  Used by the carry pass to rotate players
+// along the brush's arc.
 vector() Mover_RotationPivot =
 {
-    if (self.has_custom_pivot)
-        return self.custom_pivot;
     return self.origin;
-};
-
-// True when the world-space point `wp` is inside the brush's actual
-// slab at its current rotation.  Only meaningful for has_custom_pivot
-// rotators (SOLID_BBOX mode); without that gate the answer would be
-// "use the engine trace_ent==self semantics" which already gave you a
-// per-poly hit on SOLID_BSP brushes.
-//
-// Back-projects wp into the brush's authored (un-rotated) frame by
-// inverse-rotating it around custom_pivot, then AABB-tests against the
-// cached pivot_bsp_mins/maxs.  Margin is added so floor traces that
-// land at exactly +/- 4u of the slab surface still register.
-float(vector wp, float margin) Mover_PointInRotatedSlab =
-{
-    if (!self.has_custom_pivot) return TRUE;   // SOLID_BSP path is precise
-    float ax = self.rotdoor_axis_index;
-    float deg = self.angles_x;
-    if (ax == 1)      deg = self.angles_y;
-    else if (ax == 2) deg = self.angles_z;
-    vector wp_unrot = RotDoor_RotateAround(wp, self.custom_pivot, -deg, ax);
-    vector mn = self.pivot_bsp_mins;
-    vector mx = self.pivot_bsp_maxs;
-    if (wp_unrot_x < mn_x - margin || wp_unrot_x > mx_x + margin) return FALSE;
-    if (wp_unrot_y < mn_y - margin || wp_unrot_y > mx_y + margin) return FALSE;
-    if (wp_unrot_z < mn_z - margin || wp_unrot_z > mx_z + margin) return FALSE;
-    return TRUE;
-};
-
-// One-shot at spawn: pick the radius of the pivot-centered cube big
-// enough to wrap the brush at any rotation, and switch the brush to
-// SOLID_BBOX so the engine's link path actually honours it (see the
-// long comment in Mover_ApplyCustomPivotOrigin for the engine quirk).
-//
-// Tradeoff vs SOLID_BSP: collision queries hit the AABB cube instead
-// of the brush mesh.  For TrenchBroom-exported origin_target brushes
-// this is the only option — the engine bakes mod->mins/maxs in
-// absolute world coords for non-ORIGIN-textured submodels, so
-// SOLID_BSP would always blow up the AABB to ~2× the pivot's world
-// distance.  Mappers who want per-poly collision on a rotator must
-// author an ORIGIN-textured brush (origin_target left unset); that
-// path keeps SOLID_BSP and skips this entire workaround.
-void() Mover_ResizeBboxAroundPivot =
-{
-    if (!self.has_custom_pivot) return;
-    // self.mins / self.maxs at this point are whatever setmodel
-    // stamped — for a non-ORIGIN-textured BSP submodel these are the
-    // brush's absolute world-space AABB.  Walk the 8 corners, find
-    // the furthest from the pivot — that's the cube half-extent that
-    // wraps the brush at every angle of rotation.
-    vector bmins = self.mins;
-    vector bmaxs = self.maxs;
-    // Cache before the setsize() below overwrites with the inflated
-    // cube; Brush_RotateCarry needs these to verify trace hits landed
-    // inside the actual rotated slab and not in a cube-corner void.
-    self.pivot_bsp_mins = bmins;
-    self.pivot_bsp_maxs = bmaxs;
-    vector p = self.custom_pivot;
-    float r2 = 0;
-    float i, j, k;
-    for (i = 0; i < 2; i = i + 1)
-    for (j = 0; j < 2; j = j + 1)
-    for (k = 0; k < 2; k = k + 1)
-    {
-        vector c;
-        c_x = i ? bmaxs_x : bmins_x;
-        c_y = j ? bmaxs_y : bmins_y;
-        c_z = k ? bmaxs_z : bmins_z;
-        vector d = c - p;
-        float dd = d * d;
-        if (dd > r2) r2 = dd;
-    }
-    self.pivot_bbox_radius = sqrt(r2);
-    // SOLID_BBOX → engine takes world.c:612-615 (absmin = origin +
-    // mins) on the next link instead of the rotation-aware path that
-    // overrides mins from mod->mins.  Mover_ApplyCustomPivotOrigin
-    // then re-aims mins/maxs each tick to keep the cube centered on
-    // the pivot.  PASSABLE/NOT_SOLID brushes stay SOLID_NOT — those
-    // already skip AABB-driven collision queries entirely.
-    if (self.solid != SOLID_NOT)
-        self.solid = SOLID_BBOX;
-};
-
-float() Mover_ResolveCustomPivot =
-{
-    if (!self.origin_target || self.origin_target == "")
-        return TRUE;
-    if (self.has_custom_pivot)
-        return TRUE;
-
-    entity tgt = find(world, targetname, self.origin_target);
-    if (!tgt)
-    {
-        if (cvar("sv_debug_use"))
-            print(sprintf("[rotpivot] %s '%s' origin_target='%s' not found yet\n",
-                          self.classname, self.targetname, self.origin_target));
-        return FALSE;
-    }
-
-    self.custom_pivot     = tgt.origin;
-    self.has_custom_pivot = 1;
-    // Order matters: ResizeBboxAroundPivot caches pivot_bbox_radius
-    // and switches solid to SOLID_BBOX; ApplyCustomPivotOrigin then
-    // reads the radius to set per-tick mins/maxs.
-    Mover_ResizeBboxAroundPivot();
-    Mover_ApplyCustomPivotOrigin();
-    self.SendFlags = 1;
-
-    if (cvar("sv_debug_use"))
-        print(sprintf("[rotpivot] %s '%s' origin_target='%s' pivot=%v origin=%v\n",
-                      self.classname, self.targetname, self.origin_target,
-                      self.custom_pivot, self.origin));
-    return TRUE;
-};
-
-void() Mover_ResolveCustomPivotThink =
-{
-    if (Mover_ResolveCustomPivot())
-    {
-        self.think = __NULL__;
-        self.nextthink = 0;
-        return;
-    }
-
-    self.custom_pivot_resolve_tries = self.custom_pivot_resolve_tries + 1;
-    if (self.custom_pivot_resolve_tries < 40)
-    {
-        self.think = Mover_ResolveCustomPivotThink;
-        self.nextthink = time + 0.05;
-    }
-    else
-    {
-        if (cvar("sv_debug_use"))
-            print(sprintf("[rotpivot] %s '%s' giving up on origin_target='%s'\n",
-                          self.classname, self.targetname, self.origin_target));
-        self.think = __NULL__;
-        self.nextthink = 0;
-    }
-};
-
-void() Mover_DeferCustomPivotResolve =
-{
-    if (!self.origin_target || self.origin_target == "" || self.has_custom_pivot)
-        return;
-
-    self.custom_pivot_resolve_tries = 0;
-    self.think = Mover_ResolveCustomPivotThink;
-    self.nextthink = time + 0.05;
 };
 
 // Per-tick carry pass.  Finds players whose bbox overlaps the
@@ -450,12 +222,7 @@ float() Brush_RotateCarry =
             self.solid = saved_solid;        // ensure SOLID_BSP for trace
             tracebox(p.origin, p.mins, p.maxs,
                      p.origin - '0 0 4', MOVE_NORMAL, p);
-            // SOLID_BBOX custom-pivot rotators hit an inflated cube,
-            // not the slab — verify the trace hit point is actually
-            // inside the rotated slab before treating it as a ground
-            // surface.  Small margin handles surface-flush hits.
-            float on_this_brush = (trace_fraction < 1 && trace_ent == self
-                                   && Mover_PointInRotatedSlab(trace_endpos, 2));
+            float on_this_brush = (trace_fraction < 1 && trace_ent == self);
 
             if ((p.flags & FL_ONGROUND) && on_this_brush)
             {
@@ -528,12 +295,7 @@ float() Brush_RotateCarry =
             tracebox(p2.origin, p2.mins, p2.maxs, p2.origin,
                      MOVE_NORMAL, p2);
             self.solid = SOLID_NOT;
-            // Custom-pivot cube re-test (see Phase 1 comment).  The
-            // player's origin must actually be inside the rotated slab
-            // for the tangent kick to make sense — without this, players
-            // jumping through the empty cube corner get false-pushed.
-            if (trace_startsolid && trace_ent == self
-                && Mover_PointInRotatedSlab(p2.origin, 0))
+            if (trace_startsolid && trace_ent == self)
             {
                 vector rel = p2.origin - pivot;
                 float omega_rad =
@@ -582,8 +344,7 @@ float() Brush_RotateCarry =
             self.solid = saved_solid;       // SOLID_BSP for traces
             tracebox(p3.origin, p3.mins, p3.maxs,
                      p3.origin - '0 0 4', MOVE_NORMAL, p3);
-            float on_self = (trace_fraction < 1 && trace_ent == self
-                             && Mover_PointInRotatedSlab(trace_endpos, 2));
+            float on_self = (trace_fraction < 1 && trace_ent == self);
             // "Standing on a DIFFERENT rotating brush" check — skip
             // Phase 3 here so the player isn't slid by this brush
             // when another currently-rotating brush is already
@@ -602,8 +363,7 @@ float() Brush_RotateCarry =
             {
                 tracebox(p3.origin, p3.mins, p3.maxs, p3.origin,
                          MOVE_NORMAL, p3);
-                if (trace_startsolid && trace_ent == self
-                    && Mover_PointInRotatedSlab(p3.origin, 0))
+                if (trace_startsolid && trace_ent == self)
                 {
                     // Brush mesh is sweeping into this ground player.
                     // Compute tangent at their position and try to
@@ -760,11 +520,6 @@ float() RotDoor_TickInterval =
 
 void() RotDoor_CarryTick =
 {
-    // Custom-pivot doors need their origin updated to the engine-
-    // integrated angle BEFORE traces/carry run; otherwise collision
-    // for this tick still sits at the previous angular pose.
-    Mover_ApplyCustomPivotOrigin();
-
     // Drive the carry pass at sv_func_tickrate cadence.  Each
     // invocation moves players touching the door by the same
     // angular delta the engine integrated this tick — so the
@@ -857,7 +612,6 @@ void() rotdoor_hit_bottom =
     self.avelocity   = '0 0 0';
     self.door_state  = DOOR_STATE_BOTTOM;
     self.mover_state = MOVER_STATE_BOTTOM;
-    Mover_ApplyCustomPivotOrigin();
     self.SendFlags   = 1;
     RotatingBrush_RemoveFromList(self);
     Door_PlayStopSound();
@@ -879,7 +633,6 @@ void() rotdoor_hit_top =
     self.avelocity   = '0 0 0';
     self.door_state  = DOOR_STATE_TOP;
     self.mover_state = MOVER_STATE_TOP;
-    Mover_ApplyCustomPivotOrigin();
     self.SendFlags   = 1;
     RotatingBrush_RemoveFromList(self);
     Door_PlayStopSound();
@@ -891,9 +644,6 @@ void() rotdoor_hit_top =
 
 void() rotdoor_go_up =
 {
-    if (self.origin_target && self.origin_target != "" && !self.has_custom_pivot)
-        Mover_ResolveCustomPivot();
-
     if (self.door_state == DOOR_STATE_TOP)
     {
         if (!(self.spawnflags & DOORROT_TOGGLE) && self.wait >= 0)
@@ -1015,9 +765,6 @@ void() rotdoor_use =
 {
     if (cvar("mp_disabledoors")) return;
 
-    if (self.origin_target && self.origin_target != "" && !self.has_custom_pivot)
-        Mover_ResolveCustomPivot();
-
     // USE_ONLY rejects target-trigger fires (auto proximity isn't
     // spawned for these brushes either) — exactly the behaviour
     // func_door's USE_ONLY flag implements.
@@ -1099,15 +846,10 @@ void() rotdoor_spawn_trigger =
 };
 
 /*QUAKED func_door_rotating (0 .5 .8) ? START_OPEN REVERSE x PASSABLE ONE_WAY TOGGLE X_AXIS Y_AXIS USE_ONLY
-A door that rotates around a hinge pivot.  Pick ONE of:
-  - GoldSrc-style: include an ORIGIN-textured brush in the entity
-    (the BSP compiler bakes its centre into self.origin), or
-  - TrenchBroom-style: place an info_notnull at the hinge, give it
-    a unique "targetname", then set this door's "origin_target" key
-    to that same name.  No origin brush needed.
+A door that rotates around a hinge pivot.  Define the pivot with an
+ORIGIN-textured brush included in the entity (the BSP compiler bakes
+its centre into self.origin); the door swings around that point.
 
-"origin_target"  targetname of an info_notnull whose origin marks
-                 the rotation hinge.  Overrides any origin brush.
 "distance"   degrees to rotate (default 90)
 "speed"      degrees per second (default 100)
 "wait"       seconds before auto-close (default 3, -1 = stay open)
@@ -1210,22 +952,11 @@ void() func_door_rotating =
         self.pos2 = swap;
     }
 
-    // Resolve TrenchBroom-style "point at an info_notnull for the
-    // pivot" mapping after the initial angles are settled (so a
-    // START_OPEN door's first origin write matches its open pose).
-    // Safe no-op when origin_target is unset — falls back to the
-    // BSP-baked origin (origin-brush convention).
-    if (!Mover_ResolveCustomPivot())
-        Mover_DeferCustomPivotResolve();
-
     // Worst-case bounds for proximity trigger / group sizing —
     // rotation can sweep through any point inside the brush's
     // bounding sphere, so just inflate by the diagonal radius.
-    // Center on the brush's absolute bounds rather than self.origin:
-    // with a custom info_notnull pivot at angles=0, self.origin is
-    // (0,0,0) and the brush sits at arbitrary world coords, so an
-    // origin-centred bbox would put the proximity trigger near
-    // world (0,0,0) instead of near the actual door.
+    // Center on the brush's absolute bounds so the proximity trigger
+    // hugs the brush's actual world position.
     float radius = vlen(self.maxs - self.mins) * 0.5 + 8;
     vector brush_center = (self.absmin + self.absmax) * 0.5;
     self.cmins = brush_center - [radius, radius, radius];

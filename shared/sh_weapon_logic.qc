@@ -366,6 +366,23 @@ float() SH_GetSpreadScale =
         self.fire_spread_pending = 0;
     }
 
+    // CoD scope: bullets land EXACTLY on the crosshair while scoped in (ADS through
+    // a cod scope), regardless of movement/jumping.  Computed AFTER the normal
+    // crouch/jump/sustained-fire logic + the fire_spread_pending flush above so the
+    // shared state stays consistent with the unscoped path; this just overrides the
+    // returned scale.  Both server and client reach here with the same scoped state
+    // (Weapon_IsADSActive + the synced weapon_scope_class), so they agree on zero
+    // spread.  Applies to any cod-scope weapon (weapon_scope_class != NONE), not
+    // plain red-dot/iron-sight ADS.  The crosshair (cl_crosshair.qc) calls this too,
+    // so the reticle reads tight to confirm the pinpoint accuracy.
+    if (self.weapon_scope_class != SCOPE_CLASS_NONE
+        && Weapon_IsADSActive()
+        && PM_ReadMovevar("sv_codscopes", 0))
+    {
+        sh_spread_flat = 0;
+        return 0;
+    }
+
     return scale;
 };
 
@@ -1157,13 +1174,17 @@ void(float spread_base, float spread_move, float spread_fullspeed,
                           is_player_hit, bone_f));
         }
 
+        // hoisted: also read in the cl_debug_impacts block below (same is_player_hit guard);
+        // initialising here keeps fteqcc's F302 flow-analysis happy (it can't prove the two
+        // separate is_player_hit branches are mutually consistent).
+        float hit_hg = 0;
         if (is_player_hit)
         {
             // Patch 36: classify the hitgroup NOW, while the trace globals are fresh.  The FX
             // below (CSQC_BulletImpactSilent re-traces for the impact decal) clobber
             // trace_bone_id/trace_surface_id to 0, so deferring this to CSQC_SendHitclaim would
             // lose the engine per-bone box and fall back to a Z-height guess (arms -> chest).
-            float hit_hg  = W_HitgroupClassify(trace_ent, trace_endpos, trace_bone_id);
+            hit_hg  = W_HitgroupClassify(trace_ent, trace_endpos, trace_bone_id);
             float hit_bid = trace_bone_id;
             CSQC_TryPlayPredictedHitmarker();
             // Local flesh splash + impact light. Impact_ClassifyLocal
@@ -1597,9 +1618,8 @@ float(float range, float damage,
         //                picks the flesh-lethal variant for players)
         //   wall hit   → smoke puff only, no sparks / chips, no decal.
         //                Impact_SpawnSmokeOnly is NOT quality-gated, so
-        //                the smoke shows even at cl_impact_quality 1
-        //                where the bullet-impact "fast" variant is
-        //                sparks-only.
+        //                the melee smoke shows even when cl_impact_quality 0
+        //                turns the bullet-impact particles off entirely.
         if (is_player_hit)
         {
             CSQC_BulletImpactSilent(trace_endpos, trace_plane_normal);

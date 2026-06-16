@@ -963,6 +963,7 @@ void() PlayerPreThink =
 	// frame while spinning.  No-op unless WEP_GRAVITYGUN is equipped + spinning.
 	W_GravGun_HeldTick();
 	W_GravGun_PullTick();
+	W_GravGun_ShiftPropTick();   // gravity shift: tilt ODE phys props (cabinets) the new way
 	// Defuse poll — runs every server frame on every alive player; cheap
 	// single bit-test early-out when +use isn't held (see sh_wpn_cfc4.qc).
 	C4_TickDefuseInteraction(self);
@@ -1057,6 +1058,15 @@ void() PlayerPostThink =
 {
     if (PlayerNeedsTeamSelection())
         return;
+
+    // sv_gunkick: fold this tick's pending view-kick and decay the spring, mirroring
+    // CSQC's post-fire/post-pmove call (cl_player.qc:1938).  The fire + bullet trace
+    // ran earlier (PlayerPreThink W_WeaponFrame -> engine PM_Move), reading the
+    // pre-fold kick; folding HERE keeps the server's penetrating-hitscan trace
+    // following the recoil identically to the client.  Without this call the server
+    // traced a perpetually-zero kick while the client's bullets followed the spray,
+    // so the two diverged (growing across a sustained spray).
+    SH_TickViewKickFrame();
 
     PlayerCheckFallDamage();
     SH_PlayerAnim_Update();

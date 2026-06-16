@@ -56,12 +56,6 @@ float impact_effect_flesh_lethal;
 float impact_effect_metal;
 float impact_effect_glass;
 float impact_effect_wood;
-float impact_effect_default_fast;
-float impact_effect_flesh_fast;
-float impact_effect_flesh_lethal_fast;
-float impact_effect_metal_fast;
-float impact_effect_glass_fast;
-float impact_effect_wood_fast;
 // Smoke-only variant of "impact" — same dark rising puff component
 // the bullet effect uses, with the orange chip-burst and the
 // streaking textured-sparks layer omitted.  Used by melee weapons
@@ -123,12 +117,6 @@ void() Impact_ResolveAll =
     impact_effect_metal        = Impact_NormalizeEffect(particleeffectnum("weapons.metal_impact"));
     impact_effect_glass        = Impact_NormalizeEffect(particleeffectnum("weapons.glass_impact"));
     impact_effect_wood         = Impact_NormalizeEffect(particleeffectnum("weapons.wood_impact"));
-    impact_effect_default_fast      = Impact_NormalizeEffect(particleeffectnum("weapons.impact_fast"));
-    impact_effect_flesh_fast        = Impact_NormalizeEffect(particleeffectnum("weapons.flesh_impact_fast"));
-    impact_effect_flesh_lethal_fast = Impact_NormalizeEffect(particleeffectnum("weapons.flesh_impact_lethal_fast"));
-    impact_effect_metal_fast        = Impact_NormalizeEffect(particleeffectnum("weapons.metal_impact_fast"));
-    impact_effect_glass_fast        = Impact_NormalizeEffect(particleeffectnum("weapons.glass_impact_fast"));
-    impact_effect_wood_fast         = Impact_NormalizeEffect(particleeffectnum("weapons.wood_impact_fast"));
     // Skip Impact_NormalizeEffect — particleeffectquery returns "" for the
     // smoke recipe even when valid, zeroing it and silently disabling the
     // melee smoke spawn.  Trust the raw slot id.
@@ -172,19 +160,6 @@ float(float mat) Impact_GetEffectFor =
     return impact_effect_default;
 };
 
-float(float mat) Impact_GetFastEffectFor =
-{
-    Impact_ResolveAll();
-    if (mat == IMPACT_MAT_FLESH_LETHAL && impact_effect_flesh_lethal_fast != 0) return impact_effect_flesh_lethal_fast;
-    if (mat == IMPACT_MAT_FLESH        && impact_effect_flesh_fast        != 0) return impact_effect_flesh_fast;
-    if (mat == IMPACT_MAT_METAL        && impact_effect_metal_fast        != 0) return impact_effect_metal_fast;
-    if (mat == IMPACT_MAT_METAL_NODECAL && impact_effect_metal_fast       != 0) return impact_effect_metal_fast;
-    if (mat == IMPACT_MAT_GLASS        && impact_effect_glass_fast        != 0) return impact_effect_glass_fast;
-    if (mat == IMPACT_MAT_WOOD         && impact_effect_wood_fast         != 0) return impact_effect_wood_fast;
-    if (impact_effect_default_fast != 0) return impact_effect_default_fast;
-    return Impact_GetEffectFor(mat);
-};
-
 // Per-shot impact counters — declared above the first user
 // (Impact_SpawnParticles below) since cl_bulletimpact.qc has the
 // const-block decls further down.  Reset by CSQC_Impact_ResetShot at
@@ -195,13 +170,14 @@ float(float mat) Impact_GetFastEffectFor =
 float  impact_per_shot_light_count;
 float  impact_per_shot_effect_count;
 
+// Impact particles on/off.  cl_impact_quality 0 = none; >=1 = full per-material
+// smoke + sparks.  (The old "1 = cheap _fast spark/chip" tier was collapsed —
+// there's a single particle quality now.  The per-impact dynamic light is a
+// separate toggle, cl_impact_light.)
 float() Impact_Quality =
 {
-    float q = cvar("cl_impact_quality");
-    if (q <= 0) return 0;
-    if (q < 2) return 1;
-    if (q < 3) return 2;
-    return 3;
+    if (cvar("cl_impact_quality") <= 0) return 0;
+    return 1;
 };
 
 void(vector pos, vector normal, float mat) Impact_SpawnParticles =
@@ -230,10 +206,7 @@ void(vector pos, vector normal, float mat) Impact_SpawnParticles =
     if (mat == IMPACT_MAT_METAL || mat == IMPACT_MAT_METAL_NODECAL)
         vel_scale = 100;
 
-    if (q < 2)
-        pointparticles(Impact_GetFastEffectFor(mat), pos, normal * vel_scale, 1);
-    else
-        pointparticles(Impact_GetEffectFor(mat), pos, normal * vel_scale, 1);
+    pointparticles(Impact_GetEffectFor(mat), pos, normal * vel_scale, 1);
 
     // Flesh hits also stamp projected blood-splat decals on nearby
     // BSP geometry — wall behind the target plus a small floor pool.

@@ -18,8 +18,6 @@
 void() SV_InitReplicatedSolidBrush;                                  // sv_brushsync.qc
 float(entity attacker, entity target, float damage) W_ApplyDamage;   // sv_weapons.qc
 float() Brush_RotateCarry;                                           // sv_doors_rotating.qc
-void()  Mover_ApplyCustomPivotOrigin;                                // sv_doors_rotating.qc
-float() Mover_ResolveCustomPivot;                                    // sv_doors_rotating.qc
 
 // Spawnflag bits — match HL/GoldSrc func_rotating exactly so existing
 // .bsp entity dumps decode correctly.
@@ -73,9 +71,6 @@ string(float idx) Rotating_LookupSound =
 // bumps SendFlags so brushsync re-ships the new spin to clients.
 void() rotating_think =
 {
-    if (self.origin_target && self.origin_target != "" && !self.has_custom_pivot)
-        Mover_ResolveCustomPivot();
-
     float step = self.fan_target_speed * (self.fanfriction / 100);
     float target;
     if (self.fan_active)
@@ -152,11 +147,6 @@ void() rotating_think =
         }
     }
 
-    // Re-anchor self.origin to the info_notnull pivot after this
-    // tick's angle integration.  Cheap no-op when no custom pivot
-    // is configured — preserves the BSP-baked origin-brush flow.
-    Mover_ApplyCustomPivotOrigin();
-
     // Tick at sv_func_tickrate (default 64 Hz) so the carry pass
     // applies smoothly per server tick instead of the previous 10 Hz
     // chunks — at slow rotation speeds (e.g. fanfriction 20 + speed 30)
@@ -214,15 +204,10 @@ void() rotating_blocked =
 };
 
 /*QUAKED func_rotating (0 .5 .8) ? START_ON REVERSE X_AXIS Y_AXIS ACC_DCC FAN_PAIN NOT_SOLID SMALL_RADIUS MEDIUM_RADIUS LARGE_RADIUS
-A continuously-rotating brush (fan / drill / spinner).  Pick ONE of:
-  - GoldSrc-style: include an ORIGIN-textured brush so the BSP
-    compiler bakes the rotation axis into self.origin, or
-  - TrenchBroom-style: place an info_notnull on the rotation axis,
-    give it a unique "targetname", then set this brush's
-    "origin_target" key to that same name.  No origin brush needed.
+A continuously-rotating brush (fan / drill / spinner).  Define the
+rotation axis with an ORIGIN-textured brush included in the entity
+(the BSP compiler bakes the axis into self.origin).
 
-"origin_target" targetname of an info_notnull whose origin sits on
-                the rotation axis.  Overrides any origin brush.
 "speed"        peak rotation speed (deg/sec, default 100)
 "fanfriction"  Acc/Dcc ramp rate 1-100 (default 50; only matters with ACC_DCC flag)
 "volume"       sound volume 0-10 (default 10 = 1.0)
@@ -294,14 +279,9 @@ void() func_rotating =
     if (self.spawnflags & ROT_FAN_PAIN)
         self.touch = rotating_touch;
 
-    // Pre-set rotdoor_axis_index so Mover_ResolveCustomPivot's
-    // initial origin write picks the right rotation axis.  Per-tick
-    // rotating_think also keeps this in sync with fan_axis_index.
+    // Pre-set rotdoor_axis_index for the carry-rotation math; per-tick
+    // rotating_think keeps it in sync with fan_axis_index.
     self.rotdoor_axis_index = self.fan_axis_index;
-
-    // TrenchBroom-style pivot via info_notnull (origin_target key).
-    // No-op when not used; falls back to BSP origin brush.
-    Mover_ResolveCustomPivot();
 
     if (self.spawnflags & ROT_NOT_SOLID)
         self.solid = SOLID_NOT;
