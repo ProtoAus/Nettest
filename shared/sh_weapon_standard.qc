@@ -730,6 +730,18 @@ void(float base_spread, float move_spread, float full_spread_speed,
 
         if (W_CanDamageTarget(trace_ent))
         {
+            // Per-shot debug overlay (sv_debug_hitboxes 1): emit the rewound
+            // hitbox snapshot for ANY player hit, regardless of trust mode.  The
+            // !defer_player damage block below is SKIPPED when sv_trust_clienthits 1
+            // defers the hit to the client's claim, so the send must sit OUTSIDE it
+            // or mode-1 never spawns in trust-1.  Players are still rewound here
+            // (Lagcomp_EndRewind is at function end), so it matches where the trace
+            // actually hit.  Self-gates on the cvar + player classname.  SSQC-only:
+            // it's a server multicast (undefined on CSQC).
+#ifdef SSQC
+            W_SendServerHitboxes(trace_ent);
+#endif
+
             float defer_player = (trace_ent.classname == "player")
                                  && W_ShouldDeferToClaim(self);
             // Breakable defer is handled INSIDE W_ApplyDamage (single
@@ -740,11 +752,6 @@ void(float base_spread, float move_spread, float full_spread_speed,
             if (!defer_player)
             {
                 trace_ent.death_hitgroup = hitgroup;
-                // Emitted while players are still rewound — the
-                // hitbox sent here matches where the trace actually
-                // hit, so the per-hit debug overlay shows shooters
-                // exactly where they need to aim.
-                W_SendServerHitboxes(trace_ent);
                 W_ApplyDamage(self, trace_ent, damage);
             }
             // Players: every hit uses the spark-splash lethal variant
@@ -875,13 +882,18 @@ void(float base_spread, float move_spread, float full_spread_speed,
 
         if (W_CanDamageTarget(trace_ent))
         {
+            // Per-shot debug overlay: emit regardless of trust mode (see
+            // W_HitscanShoot) — the !defer_player block is skipped in trust-1.
+#ifdef SSQC
+            W_SendServerHitboxes(trace_ent);
+#endif
+
             float defer_player = (trace_ent.classname == "player")
                                  && W_ShouldDeferToClaim(self);
             // Breakable defer is centralized inside W_ApplyDamage.
             if (!defer_player)
             {
                 trace_ent.death_hitgroup = hitgroup;
-                W_SendServerHitboxes(trace_ent);
                 W_ApplyDamage(self, trace_ent, damage);
             }
             // Players: every hit uses the spark-splash lethal variant.

@@ -1477,9 +1477,13 @@ void(float mdlidx, vector org, vector ang, float fr, float bfr, float bb, float 
     g.frame1time = f1t;
     g.baseframe = bfr;
     g.baseframe1time = bf1t;
-    // lerpfrac=1 makes gettaginfo use .frame/.baseframe; default 0 would use .frame2 (idle).
-    g.lerpfrac = 1;
-    g.baselerpfrac = 1;
+    // cs_getframestate: weight(.frame) = 1-lerpfrac, weight(.frame2) = lerpfrac.
+    // So lerpfrac MUST be 0 to use .frame; lerpfrac=1 selected .frame2 (unset = the
+    // dummy sequence 0) — THAT was the "stuck on the bind pose" bug.  Same for base.
+    g.lerpfrac = 0;
+    g.baselerpfrac = 0;
+    g.frame2 = 0;
+    g.baseframe2 = 0;
     g.basebone = bb;
     g.subblendfrac = sbf;
     g.subblend2frac = sb2f;
@@ -1581,9 +1585,14 @@ void(float entnum, float mdlidx, vector org, vector ang, float fr, float bfr, fl
     g.frame = fr;
     g.baseframe = bfr;
 
-    // lerpfrac=1 makes gettaginfo() use .frame; default 0 would use .frame2 (= idle).
-    g.lerpfrac = 1;
-    g.baselerpfrac = 1;
+    // cs_getframestate weights .frame by (1-lerpfrac) and .frame2 by lerpfrac, so
+    // lerpfrac MUST be 0 to pose from .frame; lerpfrac=1 used .frame2 (unset = dummy
+    // sequence 0) — the "stuck on bind pose" bug.  No QC skeleton on the ghost, so the
+    // engine spine-bend (r_skel_spinebend) applies the lean = exactly the server trace.
+    g.lerpfrac = 0;
+    g.baselerpfrac = 0;
+    g.frame2 = 0;
+    g.baseframe2 = 0;
 
     g.basebone = bb;
     g.subblendfrac = sbf;

@@ -339,11 +339,16 @@ void() W_PaintballShoot =
 
         if (W_CanDamageTarget(trace_ent))
         {
+            // Per-shot debug overlay: emit regardless of trust mode (the
+            // !defer_player block is skipped in trust-1). Self-gates on the cvar.
+#ifdef SSQC
+            W_SendServerHitboxes(trace_ent);
+#endif
+
             float defer_player = (trace_ent.classname == "player") && W_ShouldDeferToClaim(self);
             if (!defer_player)
             {
                 trace_ent.death_hitgroup = hitgroup;
-                W_SendServerHitboxes(trace_ent);
                 // Paintgun gamemode: any paintball hit on a player is a
                 // tag kill.  Bump damage to far above any reasonable
                 // health pool — W_ApplyDamage clamps to remaining HP
