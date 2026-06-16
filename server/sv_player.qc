@@ -1010,12 +1010,23 @@ void() PlayerCheckFallDamage =
         {
             self.health = self.health - damage;
 
-            // Send damage flash only to the victim
+            // Send damage flash only to the victim.  Must write the SAME
+            // payload as the weapons path (sv_weapons.qc): dmg byte + 3
+            // attacker-origin coords — the CSQC_EVENT_DAMAGE_FLASH receiver
+            // reads all four.  Omitting the coords made the client read 12
+            // bytes past this event into the next one (e.g. the fall-death
+            // kill-feed below), desyncing the CSQC event stream → the
+            // "Illegible server message" crash.  Fall damage has no external
+            // attacker, so write the victim's own origin (same fallback the
+            // weapons path uses → a non-directional flash, no hit arrow).
             {
                 msg_entity = self;
                 WriteByte(MSG_ONE, SVC_CGAMEPACKET);
                 WriteByte(MSG_ONE, CSQC_EVENT_DAMAGE_FLASH);
                 WriteByte(MSG_ONE, bound(1, damage, 255));
+                WriteCoord(MSG_ONE, self.origin_x);
+                WriteCoord(MSG_ONE, self.origin_y);
+                WriteCoord(MSG_ONE, self.origin_z);
             }
 
             if (self.health <= 0)
@@ -1273,6 +1284,7 @@ void(entity player) Player_VisualProxy_Ensure =
 // then spectate) — neither path touches a detached proxy.
 void(entity player) Player_VisualProxy_DetachAsCorpse;
 void(entity player) Player_VisualProxy_Sync;
+void(entity corpse) VisProxy_RetireCorpse;   // defined in sv_main.qc (compiled later)
 void(entity player) Player_VisualProxy_DetachAsCorpse =
 {
 	entity vis = player.player_visual_proxy;
@@ -1301,10 +1313,16 @@ void(entity player) Player_VisualProxy_DetachAsCorpse =
 	// see the corpse blink out and back.
 	vis.pvsflags = PVSF_NOREMOVE;
 
-	// Track for mp_deadbodys 0 — PlayerSpawn removes this corpse
-	// before spawning a fresh proxy so the player has at most one
-	// body on the map.  When mp_deadbodys 1, this pointer is still
-	// kept but PlayerSpawn ignores it.
+	// Corpse cap (mp_deadbodies).  >=1: keep at most ONE body per player —
+	// retire this player's PREVIOUS corpse now so only the latest remains (it
+	// survives respawn, unlike the 0 case which clears it in PlayerSpawn).
+	// VisProxy_RetireCorpse, NOT bare remove(): a PVSF_NOREMOVE corpse bare-
+	// removed never networks CSQC_Ent_Remove and would ghost on clients.
+	if (cvar("mp_deadbodies") >= 1
+	    && player.last_corpse
+	    && player.last_corpse.classname == "player_visual_proxy"
+	    && player.last_corpse.vis_is_corpse)
+		VisProxy_RetireCorpse(player.last_corpse);
 	player.last_corpse = vis;
 
 	player.player_visual_proxy = world;
@@ -1767,6 +1785,16 @@ void(entity player) PM_SyncPredictionProxy =
 	 || proxy.pm_ammo_mb3 || proxy.pm_ammo_mb4 || proxy.pm_ammo_mb5
 	 || proxy.pm_ammo_mb6)
 		bits |= PM_SF_AMMO;
+
+	// nettest perf: nothing changed since the last snapshot (proxy already equals
+	// player; no pending ammo), so skip the 135-field copy below AND the no-op
+	// `SendFlags | 0`.  Safe because every SENT field is either diffed above or
+	// moves in lockstep with one that is (e.g. per-weapon mag_* only change with
+	// the active slot ammo, which IS diffed) — bits==0 means there is genuinely
+	// nothing to send.  A freshly-created proxy diffs against a zeroed cache, so
+	// its first sync has bits!=0 and still runs the full copy.
+	if (!bits)
+		return;
 
 	// Copy player → proxy cache (so next call compares against this snapshot).
 	proxy.origin = player.origin;
@@ -2502,18 +2530,20 @@ void() PlayerSpawn =
 
 	PM_ReadMovevars();
 
-	// mp_deadbodys 0: at most one corpse per player.  Sweep the
-	// previous death's body before allocating a fresh proxy — this
-	// runs after DetachAsCorpse stashed the pointer at PlayerKilled
-	// time.  mp_deadbodys 1 (default) leaves the pointer alone and
-	// the corpse stays around for the round-end sweep.
+	// mp_deadbodies 0: no persistent corpses — retire this player's body the
+	// moment they respawn.  >=1: keep it (1-per-player is enforced in
+	// DetachAsCorpse, which retires the PREVIOUS body on the next death), so
+	// leave last_corpse pointing at it.  Networked retire — a bare remove() on
+	// a PVSF_NOREMOVE corpse is silent and would ghost on clients.
 	if (self.last_corpse)
 	{
-		if (cvar("mp_deadbodys") == 0
-		    && self.last_corpse.classname == "player_visual_proxy"
-		    && self.last_corpse.vis_is_corpse)
-			remove(self.last_corpse);
-		self.last_corpse = world;
+		if (cvar("mp_deadbodies") == 0)
+		{
+			if (self.last_corpse.classname == "player_visual_proxy"
+			    && self.last_corpse.vis_is_corpse)
+				VisProxy_RetireCorpse(self.last_corpse);
+			self.last_corpse = world;
+		}
 	}
 
 	Player_VisualProxy_Ensure(self);

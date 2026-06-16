@@ -3361,6 +3361,21 @@ void(float skel) PlayerVis_OrthonormalizeSkeleton =
 	}
 };
 
+// Orthonormalize a SINGLE bone.  perf: the spine deform only rotates 5 bones, so
+// only those need the IQM-blend scaling cleanup — not all ~50 (see the predraw).
+void(float skel, float bone_idx) PlayerVis_OrthonormalizeBone =
+{
+	if (bone_idx <= 0)
+		return;
+	vector bone_org = skel_get_bonerel(skel, bone_idx);
+	if (!PlayerVis_VectorGood(bone_org))
+		bone_org = '0 0 0';
+	if (PlayerVis_LoadBoneBasis(skel, bone_idx))
+		skel_set_bone(skel, bone_idx, bone_org, v_forward, v_right, v_up);
+	else
+		skel_set_bone(skel, bone_idx, bone_org, '1 0 0', '0 1 0', '0 0 1');
+};
+
 void(float skel) PlayerVis_BuildPoseSkeleton =
 {
 	float splitbone = self.basebone;
@@ -3411,6 +3426,46 @@ void(float skel, float bone_idx, float deg) PlayerVis_PitchBone =
     vector new_fwd   = lf * c - lr * s;
     vector new_right = lf * s + lr * c;
     skel_set_bone(skel, bone_idx, bone_org, new_fwd, new_right, lu);
+};
+
+// nettest perf: corpse skeleton freeze.  A settled corpse holds a static death
+// pose, so it does NOT need its ~50-bone IQM skeleton rebuilt + orthonormalized
+// every frame (the dominant client cost when many dead bodies are on screen).
+// The death/fall animation plays for VIS_CORPSE_FREEZE_DELAY seconds, then the
+// per-frame skeleton rebuild is skipped and the persisted skeleton holds the
+// final pose.  Live players are unaffected (they keep rebuilding).
+const float VIS_CORPSE_FREEZE_DELAY = 4.0;   // fallback freeze delay when frameduration can't read the death-anim length
+.float vis_death_cltime;    // cltime when this proxy became a corpse (0 = alive/never)
+.float vis_skel_was_dead;   // edge-detects the alive->dead transition for the stamp
+
+// nettest perf: the spine-deform cvars are identical for every proxy in a frame
+// but were re-read via cvar() per proxy; cache them once per frame.  The spine
+// bone indices are model-constant but were re-found via skel_find_bone (a string
+// walk) per proxy every frame; cache them per proxy keyed on modelindex.
+float g_spine_cv_time;
+float g_spine_deform, g_spine_twist_scale, g_spine_twist_max, g_spine_twist_waist;
+float g_spine_twist_upper, g_spine_pitch_scale, g_spine_pitch_upper, g_spine_pitch_max;
+float g_spine_idle_rate;    // cl_player_skel_idle_rate: rebuild Hz for STILL players (0 = every frame)
+.float vis_spine_sb0, vis_spine_sb1, vis_spine_sb2, vis_spine_sb3, vis_spine_sbn;
+.float vis_spine_bones_mdl;
+.float vis_skel_next_rebuild;   // next cltime an idle proxy may rebuild its skeleton
+
+void() PlayerVis_RefreshSpineCvars =
+{
+	if (cltime == g_spine_cv_time)
+		return;
+	g_spine_cv_time      = cltime;
+	g_spine_deform       = cvar("cl_player_spine_deform");
+	g_spine_twist_scale  = cvar("cl_player_spine_twist_scale");
+	g_spine_twist_max    = cvar("cl_player_spine_twist_max");
+	if (g_spine_twist_max <= 0) g_spine_twist_max = 50;
+	g_spine_twist_waist  = bound(0, cvar("cl_player_spine_twist_waist_scale"), 2);
+	g_spine_twist_upper  = bound(0, cvar("cl_player_spine_twist_upper_scale"), 2);
+	g_spine_pitch_scale  = cvar("cl_player_spine_pitch_scale");
+	g_spine_pitch_upper  = bound(0, cvar("cl_player_spine_pitch_upper_scale"), 2);
+	g_spine_pitch_max    = cvar("cl_player_spine_pitch_max");
+	if (g_spine_pitch_max <= 0) g_spine_pitch_max = 35;
+	g_spine_idle_rate    = cvar("cl_player_skel_idle_rate");
 };
 
 float() CSQC_PlayerVisual_Predraw =
@@ -3724,23 +3779,32 @@ float() CSQC_PlayerVisual_Predraw =
 		self.vis_skel_modelindex = 0;
 	}
 
-	float twist_scale = cvar("cl_player_spine_twist_scale");
-	float twist_max = cvar("cl_player_spine_twist_max");
-	float twist_waist_scale = bound(0, cvar("cl_player_spine_twist_waist_scale"), 2);
-	float twist_upper_scale = bound(0, cvar("cl_player_spine_twist_upper_scale"), 2);
-	float pitch_scale = cvar("cl_player_spine_pitch_scale");
-	float pitch_upper_scale = bound(0, cvar("cl_player_spine_pitch_upper_scale"), 2);
-	if (twist_max <= 0)
-		twist_max = 50;
+	// nettest perf: edge-detect the alive->dead transition so the corpse skeleton
+	// freeze (below) knows when this body died.  Runs for every visible proxy;
+	// corpses are NOT hidden by the first-person guard above, so they reach here.
+	if (self.vis_is_dead != self.vis_skel_was_dead)
+	{
+		if (self.vis_is_dead)
+			self.vis_death_cltime = cltime;
+		self.vis_skel_was_dead = self.vis_is_dead;
+	}
+
+	PlayerVis_RefreshSpineCvars();           // perf: read the 8 spine cvars once/frame
+	float twist_scale       = g_spine_twist_scale;
+	float twist_max         = g_spine_twist_max;
+	float twist_waist_scale = g_spine_twist_waist;
+	float twist_upper_scale = g_spine_twist_upper;
+	float pitch_scale       = g_spine_pitch_scale;
+	float pitch_upper_scale = g_spine_pitch_upper;
 	float spine_has_work = (twist_scale != 0 || pitch_scale != 0);
 
 	if (spine_debug
 	    && cltime >= self.vis_spine_debug_next
-	    && (!cvar("cl_player_spine_deform") || !is_iqm_player || !self.modelindex || !spine_has_work))
+	    && (!g_spine_deform || !is_iqm_player || !self.modelindex || !spine_has_work))
 	{
 		print(sprintf("[spine] inactive: ent=%g model='%s' modelindex=%g iqm=%g deform=%g scales=%.2f/%.2f\n",
 		              self.vis_owner_entnum, self.model, self.modelindex,
-		              is_iqm_player, cvar("cl_player_spine_deform"),
+		              is_iqm_player, g_spine_deform,
 		              twist_scale, pitch_scale));
 		self.vis_spine_debug_next = cltime + 0.5;
 	}
@@ -3754,17 +3818,18 @@ float() CSQC_PlayerVisual_Predraw =
 	// SKIPS any entity that has a skeletal object (Alias_SpineBendActive in com_mesh.c), so the
 	// client proxy is never double-bent.  Applying the engine bend directly to the proxy (the
 	// earlier Part A approach) warped the pose/gun — hence this split.
-	if ((!cvar("cl_player_spine_deform") || !spine_has_work) && self.skeletonindex)
+	if ((!g_spine_deform || !spine_has_work) && self.skeletonindex)
 	{
 		skel_delete(self.skeletonindex);
 		self.skeletonindex = 0;
 		self.vis_skel_modelindex = 0;
 	}
 
-	if (cvar("cl_player_spine_deform") && spine_has_work && is_iqm_player && self.modelindex)
+	if (g_spine_deform && spine_has_work && is_iqm_player && self.modelindex)
 	{
 		// One-time skeleton allocation per proxy.  Reused across
 		// frames; the proxy entity's remove path tears it down.
+		float fresh_skel = FALSE;
 		if (self.skeletonindex && self.vis_skel_modelindex != self.modelindex)
 		{
 			skel_delete(self.skeletonindex);
@@ -3775,29 +3840,92 @@ float() CSQC_PlayerVisual_Predraw =
 		{
 			self.skeletonindex = skel_create(self.modelindex);
 			self.vis_skel_modelindex = self.modelindex;
+			fresh_skel = TRUE;
 		}
 
-		if (self.skeletonindex)
+		// nettest perf: a settled corpse holds a static death pose — skip the
+		// per-frame ~50-bone rebuild + orthonormalize + spine deform (the dominant
+		// cost with many dead bodies on screen).  The persisted skeletonindex keeps
+		// the last-built (settled) pose, which addentity still renders.  A freshly
+		// (re)created skeleton always builds once so it's never left in bind pose.
+		//
+		// Freeze only AFTER the death animation has fully PLAYED.  A flat delay
+		// froze long falls mid-animation ("stuck half falling"), so key off the
+		// death seq's own frameduration (+ a settle margin) rather than a constant.
+		// Fall back to VIS_CORPSE_FREEZE_DELAY if frameduration whiffs, and a hard
+		// 8s cap guarantees the corpse always freezes eventually.
+		float corpse_frozen = FALSE;
+		if (self.vis_is_dead && self.vis_death_cltime > 0)
+		{
+			float corpse_age = cltime - self.vis_death_cltime;
+			float death_dur  = frameduration(self.modelindex, self.vis_anim_bottom);
+			if (death_dur <= 0)
+				death_dur = VIS_CORPSE_FREEZE_DELAY;
+			corpse_frozen = (corpse_age > death_dur + 0.4) || (corpse_age > 8.0);
+		}
+
+		// perf (b): rate-limit STILL live players' rebuild.  A standing crowd's
+		// breathing pose barely changes, yet re-solving the skeleton every frame
+		// is the top idle-server cost.  Fresh skeletons AND moving players rebuild
+		// every frame (smooth animation); corpses use the freeze above.  The trace
+		// poses against this same cached skeleton (Patch 36), so render + trust-1
+		// hit detection stay consistent at the lower rate.  cl_player_skel_idle_rate
+		// 0 = always rebuild.
+		float do_rebuild = TRUE;
+		if (corpse_frozen && !fresh_skel)
+			do_rebuild = FALSE;
+		else if (!fresh_skel && !self.vis_is_dead && g_spine_idle_rate > 0
+		         && vlen(self.velocity) <= 8)
+		{
+			do_rebuild = (cltime >= self.vis_skel_next_rebuild);
+			if (do_rebuild)
+				self.vis_skel_next_rebuild = cltime + 1.0 / g_spine_idle_rate;
+		}
+
+		if (self.skeletonindex && do_rebuild)
 		{
 			// Rebuild the skeleton from the current animated pose.  Split
 			// the baseframe/regular-frame bone ranges so locomotion bones
 			// keep animating while the torso gets its own aim/fire pose.
 			PlayerVis_BuildPoseSkeleton(self.skeletonindex);
-			PlayerVis_OrthonormalizeSkeleton(self.skeletonindex);
 
-			// Body-twist fractions match the old HL controllers
-			// (1.0 / 0.5 / 0.25 / 0.125 — bigger near the waist).
-			//
-			// Use leg_twist, not fCorrect: fCorrect is computed after
-			// self.angles_y has already turned toward movement, which
-			// can zero it out on a pure strafe.  leg_twist is the actual
-			// lower-body yaw delta we need to counter across the spine.
+			// perf: spine bone indices are model-constant — cache per proxy and
+			// re-find (skel_find_bone string walk) only when the model changes.
+			float sb0, sb1, sb2, sb3, sbn;
+			if (self.vis_spine_bones_mdl == self.modelindex)
+			{
+				sb0 = self.vis_spine_sb0; sb1 = self.vis_spine_sb1;
+				sb2 = self.vis_spine_sb2; sb3 = self.vis_spine_sb3;
+				sbn = self.vis_spine_sbn;
+			}
+			else
+			{
+				sb0 = PlayerVis_FindBone(self.skeletonindex, "Bip01 Spine");
+				sb1 = PlayerVis_FindBone(self.skeletonindex, "Bip01 Spine1");
+				sb2 = PlayerVis_FindBone(self.skeletonindex, "Bip01 Spine2");
+				sb3 = PlayerVis_FindBone(self.skeletonindex, "Bip01 Spine3");
+				sbn = PlayerVis_FindBone(self.skeletonindex, "Bip01 Neck");
+				self.vis_spine_sb0 = sb0; self.vis_spine_sb1 = sb1;
+				self.vis_spine_sb2 = sb2; self.vis_spine_sb3 = sb3;
+				self.vis_spine_sbn = sbn;
+				self.vis_spine_bones_mdl = self.modelindex;
+			}
+
+			// perf (a): orthonormalize ONLY the 5 spine bones the deform rotates
+			// (was all ~50 every frame — the dominant idle-server cost).  The
+			// IQM-blend scaling cleanup is only needed on bones we then rotate; the
+			// rest keep skel_build's fresh per-frame pose.
+			PlayerVis_OrthonormalizeBone(self.skeletonindex, sb0);
+			PlayerVis_OrthonormalizeBone(self.skeletonindex, sb1);
+			PlayerVis_OrthonormalizeBone(self.skeletonindex, sb2);
+			PlayerVis_OrthonormalizeBone(self.skeletonindex, sb3);
+			PlayerVis_OrthonormalizeBone(self.skeletonindex, sbn);
+
+			// Body-twist fractions match the old HL controllers (1.0/0.5/0.25/0.125
+			// — bigger near the waist).  Use leg_twist, not fCorrect (which the
+			// self.angles_y movement-turn can zero on a pure strafe); leg_twist is
+			// the lower-body yaw delta to counter across the spine.
 			float iqm_twist = bound(-twist_max, -leg_twist * twist_scale, twist_max);
-			float sb0 = PlayerVis_FindBone(self.skeletonindex, "Bip01 Spine");
-			float sb1 = PlayerVis_FindBone(self.skeletonindex, "Bip01 Spine1");
-			float sb2 = PlayerVis_FindBone(self.skeletonindex, "Bip01 Spine2");
-			float sb3 = PlayerVis_FindBone(self.skeletonindex, "Bip01 Spine3");
-			float sbn = PlayerVis_FindBone(self.skeletonindex, "Bip01 Neck");
 
 			if (iqm_twist != 0)
 			{
@@ -3814,9 +3942,7 @@ float() CSQC_PlayerVisual_Predraw =
 			// full -90..90 view range into -pitch_max..pitch_max; do
 			// not clamp raw view pitch early, or the max pose is hit
 			// halfway through the player's actual aim range.
-			float pitch_max = cvar("cl_player_spine_pitch_max");
-			if (pitch_max <= 0)
-				pitch_max = 35;
+			float pitch_max = g_spine_pitch_max;   // perf: cached once/frame
 			float pitch_frac = bound(-1, self.vis_pitch / 90, 1);
 			float iqm_pitch = bound(-pitch_max, pitch_frac * pitch_max * pitch_scale, pitch_max);
 			if (iqm_pitch != 0)

@@ -905,7 +905,7 @@ void() main_menu =
 	// Build tag — bottom-right corner of the screen, dimmed.
 	sui_set_align([SUI_ALIGN_END, SUI_ALIGN_END]);
 	sui_text([-6, -6], MENU_TEXT_SMALL,
-	         "Build: nettest15",
+	         "Build: nettest16",
 	         '0.80 0.80 0.80', 1, 0);
 
 	// --- Floating left-anchored option column ---

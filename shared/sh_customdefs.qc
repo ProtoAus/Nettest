@@ -782,10 +782,15 @@ const float STAT_DEFUSE_PROGRESS  = 54;
 const float STAT_FUNC_TICKRATE    = 55;
 
 // CS-style economy.  STAT_MONEY = the owning player's current cash (drives
-// the HUD money line + buy-menu greyout).  STAT_ARMOR = current Kevlar value
-// (0..100).  Both published per-snapshot via clientstat in sv_main.qc.
+// the HUD money line + buy-menu greyout).  STAT_CSARMOR = current Kevlar value
+// (0..100).  NOTE: named CSARMOR, not ARMOR — the engine ALREADY defines a
+// built-in `const float STAT_ARMOR = 4` (cl_defs.qc / fteextensions.qc).  A
+// duplicate const keeps the FIRST (engine) definition, so a mod STAT_ARMOR=57
+// silently resolved to 4, and getstatf(STAT_ARMOR) read the engine's unused
+// armor stat (always 0) — armor never showed on the HUD.  Both published
+// per-snapshot via clientstat in sv_main.qc.
 const float STAT_MONEY            = 56;
-const float STAT_ARMOR            = 57;
+const float STAT_CSARMOR          = 57;
 // 1 when the owning player may currently buy (inside an allowed func_buyzone,
 // or mp_buyanywhere, or the map has no buy zones).  Drives the HUD money
 // colour (yellow = can buy).

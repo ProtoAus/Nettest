@@ -1446,6 +1446,7 @@ void() worldspawn =
 	localcmd("alias writecvars \"sv_writecvars 1\"\n");
 
 	precache_everything();
+	precache_sound("sounds/effects/zipup.wav");   // Kevlar/helmet buy confirm
 
 	Lagcomp_Init();
 
@@ -1472,7 +1473,7 @@ void() worldspawn =
 	clientstat(STAT_BLUE_SCORE, EV_FLOAT, sv_blue_score);
 	clientstat(STAT_RED_SCORE, EV_FLOAT, sv_red_score);
 	clientstat(STAT_MONEY, EV_FLOAT, sv_money);
-	clientstat(STAT_ARMOR, EV_FLOAT, sv_armor);
+	clientstat(STAT_CSARMOR, EV_FLOAT, sv_armor);
 	clientstat(STAT_IN_BUYZONE, EV_FLOAT, sv_in_buyzone);
 	clientstat(STAT_CAN_PLANT, EV_FLOAT, sv_can_plant_c4);
 	clientstat(STAT_BOMB_PLANTED, EV_FLOAT, sv_bomb_planted);

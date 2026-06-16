@@ -71,6 +71,7 @@ entity bs_tail;
 .vector bs_normal;        // outward surface normal
 .vector bs_tangent;       // pre-baked side axis perpendicular to normal
 .float  bs_size_scale;    // 1 = regular blood, 0.75 = smaller gib impact
+.string bs_shader;        // BLOOD_SHADER_N resolved ONCE at spawn (perf: was re-resolved per decal per frame)
 float   bs_count;
 
 void() CSQC_Bloodsplat_Precache =
@@ -134,6 +135,7 @@ void() CSQC_BloodsplatAddFromTrace =
     bs.classname     = "blood_decal";
     bs.bs_tex        = 1 + floor(random() * 7);   // 1..7
     if (bs.bs_tex > 7) bs.bs_tex = 7;
+    bs.bs_shader     = CSQC_BloodShaderForIndex(bs.bs_tex);  // resolve once, not per-frame
     bs.bs_spawn_time = cltime;
     bs.bs_origin     = trace_endpos;
     bs.bs_normal     = normalize(trace_plane_normal);
@@ -182,6 +184,7 @@ void(vector pos, vector normal) CSQC_SpawnBloodDecalAt =
     bs.classname     = "blood_decal";
     bs.bs_tex        = 1 + floor(random() * 7);
     if (bs.bs_tex > 7) bs.bs_tex = 7;
+    bs.bs_shader     = CSQC_BloodShaderForIndex(bs.bs_tex);  // resolve once, not per-frame
     bs.bs_spawn_time = cltime;
     bs.bs_origin     = pos;
     bs.bs_normal     = normal;
@@ -299,6 +302,24 @@ void() CSQC_DrawBloodDecals =
     vector decal_origin, side_arg;
     float  persistent = cvar("cl_blood_persistent");
 
+    // Per-FRAME caches (perf): the brightness cvar was read once PER DECAL and
+    // the shader re-resolved per decal every frame — both hoisted out now.
+    // adddecal's rgb arg feeds the shader's `rgbGen vertex`, so a sub-1 value
+    // darkens the splat (0.4 = dried-blood maroon) without touching the PNG.
+    float bright = cvar("cl_blood_decals_brightness");
+    if (bright <= 0) bright = 0.4;
+    vector tint = [bright, bright, bright];
+
+    // Off-screen culling so we skip reprojecting decals you can't see.  The
+    // behind-camera cull is always on (free + invisible); the distance cull is
+    // opt-in via cl_blood_decals_maxdist (0 = unlimited).  Mirrors the bullet-
+    // hole cull in cl_bulletholes.qc.
+    vector cam_origin  = (vector)getproperty(VF_ORIGIN);
+    makevectors((vector)getproperty(VF_ANGLES));
+    vector cam_forward = v_forward;
+    float  maxdist     = cvar("cl_blood_decals_maxdist");
+    float  maxdist_sq  = (maxdist > 0) ? maxdist * maxdist : 0;
+
     while (bs)
     {
         next_bs = bs.bs_next;
@@ -323,25 +344,29 @@ void() CSQC_DrawBloodDecals =
                             / (BLOOD_FADE_END - BLOOD_FADE_START);
         }
 
+        decal_origin = bs.bs_origin;
+
+        // Cull off-screen decals BEFORE the expensive adddecal reprojection.
+        // 64u slop behind the view plane keeps decals straddling it visible on
+        // sharp turns.
+        vector to_decal = decal_origin - cam_origin;
+        if ((to_decal * cam_forward) < -64)
+        {
+            bs = next_bs;
+            continue;
+        }
+        if (maxdist_sq > 0 && (to_decal * to_decal) > maxdist_sq)
+        {
+            bs = next_bs;
+            continue;
+        }
+
         float size_scale = bs.bs_size_scale;
         if (size_scale <= 0) size_scale = 1.0;
 
-        side_arg     = bs.bs_tangent / (BLOOD_HALF_SIZE * 2 * size_scale);
-        decal_origin = bs.bs_origin;
+        side_arg = bs.bs_tangent / (BLOOD_HALF_SIZE * 2 * size_scale);
 
-        // Per-frame brightness multiplier — adddecal's rgb argument
-        // is fed through the shader's `rgbGen vertex`, so passing
-        // a sub-1 value darkens the splat without changing the
-        // source PNG.  Default 0.4 reads as dried-blood maroon over
-        // most floor textures.  Pure black ('0 0 0') makes the
-        // decal invisible (since SRC_ALPHA blend with black RGB
-        // pulls toward black, which then alpha-blends to no change).
-        float bright = cvar("cl_blood_decals_brightness");
-        if (bright <= 0) bright = 0.4;
-        vector tint = [bright, bright, bright];
-
-        adddecal(CSQC_BloodShaderForIndex(bs.bs_tex),
-                 decal_origin, bs.bs_normal, side_arg, tint, alpha);
+        adddecal(bs.bs_shader, decal_origin, bs.bs_normal, side_arg, tint, alpha);
 
         bs = next_bs;
     }

@@ -115,12 +115,21 @@ float(entity player, float item) BuyItem_Apply =
     switch (item)
     {
     case BUYITEM_KEVLAR:
+        // Already at full armor — refuse so the caller doesn't take the
+        // player's money for nothing (BuyItem_Apply FALSE = no deduction).
+        if (player.armor >= ARMOR_FULL)
+            return FALSE;
         player.armor = ARMOR_FULL;
         player.has_helmet = 0;
+        sound(player, CHAN_ITEM, "sounds/effects/zipup.wav", 1, ATTN_NORM);
         return TRUE;
     case BUYITEM_KEVLARHELM:
+        // Already at full armor — refuse (no buying armor you already have).
+        if (player.armor >= ARMOR_FULL)
+            return FALSE;
         player.armor = ARMOR_FULL;
         player.has_helmet = 1;
+        sound(player, CHAN_ITEM, "sounds/effects/zipup.wav", 1, ATTN_NORM);
         return TRUE;
     case BUYITEM_DEFUSEKIT:
         player.has_defusekit = 1;

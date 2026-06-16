@@ -95,15 +95,20 @@ void() CSQC_ApplyTeamTints =
     vector tint;
     float scale;
 
+    entity oldself = self;
     vis = findchain(classname, "player_visual_proxy");
     while (vis)
     {
         slot = vis.vis_owner_entnum - 1;
 
-        // Brightness cap is sampled at the visible body's render
-        // origin so a player crossing a bright tile dims uniformly.
-        // Scalar = 1 when below the cap (cheap, the common case).
-        scale = CSQC_MaxlightScale(vis.origin, cap, knee);
+        // Brightness cap sampled at the body's render origin so a player
+        // crossing a bright tile dims uniformly.  Use the per-entity CACHED
+        // sampler — it re-runs getlight() only when the body moved >1qu or the
+        // cap/knee changed, so standing/slow bodies skip the per-frame sample
+        // (this getlight() was the CSQC_MaxlightScale cost in the full-server
+        // profile).  The cached fn keys off `self`, so aim it at the proxy.
+        self = vis;
+        scale = CSQC_MaxlightScale_Cached(cap, knee);
 
         if (!enabled || slot < 0 || slot >= maxclients)
         {
@@ -127,4 +132,5 @@ void() CSQC_ApplyTeamTints =
         vis.colormod = tint * scale;
         vis = vis.chain;
     }
+    self = oldself;
 };

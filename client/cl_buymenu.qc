@@ -210,11 +210,16 @@ void(float id) Buy_Purchase =
         return;
     if (!Buy_Affordable(id))
         return;   // server re-checks anyway; skip the pointless round-trip
+    // Armor you're already full of is refused server-side (no zipup, no
+    // deduction).  Gate it here too so a redundant click is fully silent —
+    // STAT_CSARMOR is the live Kevlar value (100 = full).
+    if ((id == BUYITEM_KEVLAR || id == BUYITEM_KEVLARHELM)
+        && getstatf(STAT_CSARMOR) >= 100)
+        return;
     // `cmd buy <id>` -> SV_ParseClientCommand on the server.
     localcmd(sprintf("cmd buy %g\n", id));
-    // Cash-register confirm (2D, buyer only).  Gated on affordability above, and
-    // the menu can only be open while alive + in a buy zone, so the server can't
-    // reject an affordable buy from here — the sound tracks an actual purchase.
+    // Cash-register confirm (2D, buyer only).  Only reached for buys the server
+    // will accept (affordable + not redundant armor) — tracks a real purchase.
     localsound("sounds/effects/cashregister2.wav");
     Buy_Close();
 };

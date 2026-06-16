@@ -60,6 +60,16 @@ vector DR_PlayerColour(float slot1)
     return '0.85 0.85 0.85';
 }
 
+// Active-slot accent-bar colour for the weapon / utility selector.  Red for
+// the red team, light blue otherwise (blue team, FFA, or pre-team-select).
+vector() HUD_SelectorAccentColour =
+{
+    string tv = getplayerkeyvalue(player_localnum, "modteam");
+    if (tv != "" && stof(tv) == TEAM_RED)
+        return '1 0.42 0.42';
+    return '0.4 0.7 1';
+};
+
 // --- Hitmarker X ---
 float csqc_hitmarker_time;
 const float HITMARKER_DURATION = 0.25;
@@ -773,7 +783,7 @@ void(string slot_text, float is_active, vector pos, float flash_red) HUD_DrawWea
     // the old panel's right edge so it sits beside the label instead of floating
     // where the now-invisible panel used to end).
     else if (is_active)
-        drawfill([pos_x, pos_y], [2, HUD_SLOT_HEIGHT], '0.4 0.7 1', 1.0, 0);
+        drawfill([pos_x, pos_y], [2, HUD_SLOT_HEIGHT], HUD_SelectorAccentColour(), 1.0, 0);
 
     text_size = [HUD_SLOT_FONT, HUD_SLOT_FONT];
     text_pos_x = pos_x + HUD_SLOT_PADDING;
@@ -804,7 +814,7 @@ void(string label, float is_active, vector pos) HUD_DrawUtilityDropRow =
     // Background panel removed (see HUD_DrawWeaponSlot) — outlined text only,
     // with a left-edge accent bar on the active row.
     if (is_active)
-        drawfill([pos_x, pos_y], [2, HUD_DROP_HEIGHT], '0.4 0.7 1', 1.0, 0);
+        drawfill([pos_x, pos_y], [2, HUD_DROP_HEIGHT], HUD_SelectorAccentColour(), 1.0, 0);
 
     vector text_size = [HUD_DROP_FONT, HUD_DROP_FONT];
     vector text_pos;
@@ -1355,16 +1365,29 @@ void() CSQC_DrawWeaponHUD =
     hp_str = HUD_GetHealthString();
     drawstring([20, g_height - 52], hp_str, [36, 36], '1 1 1', 0.9, 0);
 
+    // Armor (Kevlar) — same hud_font as health but a notch smaller, sitting to
+    // the RIGHT of the health number with their floors (text baselines) aligned.
+    // Only drawn when you actually have armor.  (Health text: top g_height-52,
+    // 36 tall -> floor at g_height-16; armor top = floor - its size.)
+    {
+        float cur_armor_hp = getstatf(STAT_CSARMOR);
+        if (cur_armor_hp > 0)
+        {
+            float hp_w  = stringwidth(hp_str, 1, [36, 36]);
+            float ar_sz = 24;
+            drawstring([20 + hp_w + 10, (g_height - 16) - ar_sz],
+                       HUD_GetArmorString(cur_armor_hp), [ar_sz, ar_sz],
+                       '0.5 0.7 1', 0.9, 0);
+        }
+    }
+
     // Money — left side, just above health, in a smaller GoogleMed size
-    // (hud_font_mono).  Armor (Kevlar) sits above it, only when you have any.
+    // (hud_font_mono).
     {
         float cur_money = getstatf(STAT_MONEY);
-        float cur_armor = getstatf(STAT_ARMOR);
         float prev_money_font = drawfont;
         string money_str;
-        string armor_str;
         float my;
-        float ay;
         drawfont = hud_font_mono;
         // Green normally; flashes gold -> bright-yellow while the player can buy
         // here (in a buy zone, or buy-anywhere / a zone-less map) so they notice
@@ -1380,12 +1403,6 @@ void() CSQC_DrawWeaponHUD =
         money_str = HUD_GetMoneyString(cur_money);
         my = g_height - 52 - 22;
         drawstring([20, my], money_str, [18, 18], money_col, 0.9, 0);
-        if (cur_armor > 0)
-        {
-            armor_str = HUD_GetArmorString(cur_armor);
-            ay = my - 20;
-            drawstring([20, ay], armor_str, [18, 18], '0.5 0.7 1', 0.9, 0);
-        }
         drawfont = prev_money_font;
     }
 

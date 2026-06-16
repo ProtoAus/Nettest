@@ -506,6 +506,12 @@ void() CVar_Init =
     // Scales spine3 + neck pitch fractions so the head bobs less when
     // looking up/down.  1.0 = original feel.
     CVar_Add("Client", "cl_player_spine_pitch_upper_scale", "0.6", CVAR_SIDE_BOTH);
+    // perf: skeleton rebuild rate (Hz) for STILL players (velocity <= 8).  A
+    // standing crowd's breathing pose barely changes, so re-solving the ~50-bone
+    // skeleton every frame is wasted; cap it.  Moving players always rebuild every
+    // frame.  The trust-1 trace uses the SAME cached skeleton, so hit detection
+    // stays consistent at this rate.  0 = always rebuild (off).
+    CVar_Add("Client", "cl_player_skel_idle_rate", "25", CVAR_SIDE_BOTH);
     CVar_Add("Client", "cl_player_backpedal_enter_angle", "150", CVAR_SIDE_BOTH);
     CVar_Add("Client", "cl_player_backpedal_exit_angle",  "100", CVAR_SIDE_BOTH);
     CVar_Add("Client", "cl_player_spine_debug",       "0",     CVAR_SIDE_BOTH);
@@ -1373,14 +1379,13 @@ void() CVar_Init =
     CVar_AddUI("Server debug", "sv_debug_c4",         "0",  CVAR_SIDE_SV,
         CVAR_UI_TOGGLE, 0, "",
         0, CVAR_ENUM_NONE, 0, 0);
-    // Per-player corpse cap.  0 = no persistent corpses (the body is
-    // removed the moment the player respawns); 1..8 = FIFO rolling
-    // limit — when a player dies and would exceed N corpses on the
-    // map, the OLDEST of theirs vanishes so the new one can take its
-    // place.  In Elimination/Defuse modes a player only dies once per
-    // round, so the practical cap is 1 there; in deathmatch / TDM the
-    // cap matters.  Round restart still wipes everything regardless.
-    CVar_AddUI("Multiplayer", "mp_deadbodys",         "1",  CVAR_SIDE_SV,
+    // Per-player corpse cap.  0 = no persistent corpses (the body is removed
+    // the moment the player respawns); >=1 = keep at most ONE body per player
+    // — when a player dies, THEIR previous corpse is retired so only the latest
+    // remains (the body survives respawn).  Values >1 currently behave the same
+    // as 1 (single-corpse tracking; true N-per-player would need a per-player
+    // corpse list).  Round restart still wipes everything regardless.
+    CVar_AddUI("Multiplayer", "mp_deadbodies",        "1",  CVAR_SIDE_SV,
         CVAR_UI_SCALAR, CVAR_TAB_MULTI, "",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 8);
     // Server-console trigger cvars — set to non-zero from the server
@@ -1679,7 +1684,7 @@ void() CVar_Init =
     CVar_Add("Server", "sv_codstamina_ground_grace",    "0.1",    CVAR_SIDE_SV);
     // Fraction of the pool a single jump costs.  Default 0.10 = 10
     // jumps to fully deplete from full if nothing else is running.
-    CVar_Add("Server", "sv_codstamina_jump_cost",       "0.40",   CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_codstamina_jump_cost",       "0.20",   CVAR_SIDE_SV);
     // Jump-height multiplier applied while codstamina_punished is
     // set.  Default 0.5 = half height.  Composes with the existing
     // CS 1.6 pm_fuser2 stamina taper.
