@@ -3428,6 +3428,54 @@ void(float skel, float bone_idx, float deg) PlayerVis_PitchBone =
     skel_set_bone(skel, bone_idx, bone_org, new_fwd, new_right, lu);
 };
 
+// Rotate vector v around a UNIT axis by `deg` degrees (Rodrigues' formula).
+vector(vector v, vector axis, float deg) PlayerVis_RotAxis =
+{
+    float r = deg * PI_RAD / 180;
+    float c = cos(r), s = sin(r);
+    // v*cos + (axis x v)*sin + axis*(axis . v)*(1-cos)
+    return v * c + crossproduct(axis, v) * s + axis * (axis * v) * (1 - c);
+};
+
+// Yaw a spine bone around the model-VERTICAL axis (a pure horizontal turn) for
+// the strafe twist.  PlayerVis_TwistBone rotated around the bone's own +X
+// (up-the-spine); when the run/strafe animation leans the torso forward that
+// axis tilts forward, so the strafe yaw bled into a PITCH — the head dipped
+// toward the floor on +moveright and lifted on +moveleft, growing with strafe
+// speed (more speed = more forward lean).  Yawing around model-up keeps it a
+// clean turn at any lean.
+//
+// The skeleton lives in model space (Z is up, baked by the iqmtool `rotate`), so
+// model-up is '0 0 1'.  A bone's local basis (what skel_set_bone takes) is
+// expressed in its PARENT's frame, so we express model-up in the parent's frame
+// via the parent's absolute axes (skel_get_boneabs) and rotate the bone's basis
+// around that.  parent_idx<=0 falls back to the bone's own +X (old behaviour).
+void(float skel, float bone_idx, float parent_idx, float deg) PlayerVis_YawBone =
+{
+    vector bone_org = skel_get_bonerel(skel, bone_idx);
+    if (!PlayerVis_LoadBoneBasis(skel, bone_idx))
+        return;
+    vector lf = v_forward, lr = v_right, lu = v_up;
+
+    vector axis = lf;   // fallback: rotate around local +X (old TwistBone)
+    if (parent_idx > 0)
+    {
+        // model-up '0 0 1' in the parent's frame = (Z.pf, Z.pr, Z.pu), i.e. the
+        // z-components of the parent's absolute axes.
+        skel_get_boneabs(skel, parent_idx);
+        vector pf = v_forward, pr = v_right, pu = v_up;
+        axis = [pf * '0 0 1', pr * '0 0 1', pu * '0 0 1'];
+        if (vlen(axis) < 0.001)
+            axis = lf;
+    }
+    axis = normalize(axis);
+
+    lf = PlayerVis_RotAxis(lf, axis, deg);
+    lr = PlayerVis_RotAxis(lr, axis, deg);
+    lu = PlayerVis_RotAxis(lu, axis, deg);
+    skel_set_bone(skel, bone_idx, bone_org, lf, lr, lu);
+};
+
 // nettest perf: corpse skeleton freeze.  A settled corpse holds a static death
 // pose, so it does NOT need its ~50-bone IQM skeleton rebuilt + orthonormalized
 // every frame (the dominant client cost when many dead bodies are on screen).
@@ -3455,6 +3503,7 @@ float g_spine_deform, g_spine_twist_scale, g_spine_twist_max, g_spine_twist_wais
 float g_spine_twist_upper, g_spine_pitch_scale, g_spine_pitch_upper, g_spine_pitch_max;
 float g_spine_idle_rate;    // cl_player_skel_idle_rate: rebuild Hz for STILL players (0 = every frame)
 .float vis_spine_sb0, vis_spine_sb1, vis_spine_sb2, vis_spine_sb3, vis_spine_sbn;
+.float vis_spine_pelvis;    // parent of sb0 — used to yaw the strafe-twist around world-up
 .float vis_spine_bones_mdl;
 .float vis_skel_next_rebuild;   // next cltime an idle proxy may rebuild its skeleton
 
@@ -3956,12 +4005,12 @@ float() CSQC_PlayerVisual_Predraw =
 
 			// perf: spine bone indices are model-constant — cache per proxy and
 			// re-find (skel_find_bone string walk) only when the model changes.
-			float sb0, sb1, sb2, sb3, sbn;
+			float sb0, sb1, sb2, sb3, sbn, pelvis;
 			if (self.vis_spine_bones_mdl == self.modelindex)
 			{
 				sb0 = self.vis_spine_sb0; sb1 = self.vis_spine_sb1;
 				sb2 = self.vis_spine_sb2; sb3 = self.vis_spine_sb3;
-				sbn = self.vis_spine_sbn;
+				sbn = self.vis_spine_sbn; pelvis = self.vis_spine_pelvis;
 			}
 			else
 			{
@@ -3970,9 +4019,10 @@ float() CSQC_PlayerVisual_Predraw =
 				sb2 = PlayerVis_FindBone(self.skeletonindex, "Bip01 Spine2");
 				sb3 = PlayerVis_FindBone(self.skeletonindex, "Bip01 Spine3");
 				sbn = PlayerVis_FindBone(self.skeletonindex, "Bip01 Neck");
+				pelvis = PlayerVis_FindBone(self.skeletonindex, "Bip01 Pelvis");
 				self.vis_spine_sb0 = sb0; self.vis_spine_sb1 = sb1;
 				self.vis_spine_sb2 = sb2; self.vis_spine_sb3 = sb3;
-				self.vis_spine_sbn = sbn;
+				self.vis_spine_sbn = sbn; self.vis_spine_pelvis = pelvis;
 				self.vis_spine_bones_mdl = self.modelindex;
 			}
 
@@ -3996,10 +4046,14 @@ float() CSQC_PlayerVisual_Predraw =
 			{
 				// Upper-spine fractions scale by twist_upper_scale so the
 				// head/shoulders rotate less than the waist when strafing.
-				PlayerVis_TwistBone(self.skeletonindex, sb0, iqm_twist * twist_waist_scale);
-				PlayerVis_TwistBone(self.skeletonindex, sb1, iqm_twist * 0.5);
-				PlayerVis_TwistBone(self.skeletonindex, sb2, iqm_twist * 0.25 * twist_upper_scale);
-				PlayerVis_TwistBone(self.skeletonindex, sb3, iqm_twist * 0.125 * twist_upper_scale);
+				// Yaw around model-up (each bone's parent gives the frame) so the
+				// strafe twist stays a clean horizontal turn — no pitch bleed when
+				// the run animation leans the torso forward.  Chain parents:
+				// sb0<-pelvis, sb1<-sb0, sb2<-sb1, sb3<-sb2.
+				PlayerVis_YawBone(self.skeletonindex, sb0, pelvis, iqm_twist * twist_waist_scale);
+				PlayerVis_YawBone(self.skeletonindex, sb1, sb0, iqm_twist * 0.5);
+				PlayerVis_YawBone(self.skeletonindex, sb2, sb1, iqm_twist * 0.25 * twist_upper_scale);
+				PlayerVis_YawBone(self.skeletonindex, sb3, sb2, iqm_twist * 0.125 * twist_upper_scale);
 			}
 
 			// Pitch-aim — distribute the view pitch across the

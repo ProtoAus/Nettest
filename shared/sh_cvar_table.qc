@@ -494,7 +494,7 @@ void() CVar_Init =
     // yaw delta after the whole player model turns toward movement;
     // negative keeps the torso facing aim on the current CS IQM axes.
     // Pitch scales view pitch before distributing it across the spine.
-    CVar_Add("Client", "cl_player_spine_twist_scale", "-0.55", CVAR_SIDE_BOTH);
+    CVar_Add("Client", "cl_player_spine_twist_scale", "0.55",  CVAR_SIDE_BOTH);
     CVar_Add("Client", "cl_player_spine_twist_max",   "50",    CVAR_SIDE_BOTH);
     CVar_Add("Client", "cl_player_spine_twist_waist_scale", "1", CVAR_SIDE_BOTH);
     // Scales the upper spine bones (spine2 + spine3) yaw fraction.
