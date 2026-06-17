@@ -3463,6 +3463,27 @@ float g_spine_idle_rate;    // cl_player_skel_idle_rate: rebuild Hz for STILL pl
 .float vis_spine_bones_mdl;
 .float vis_skel_next_rebuild;   // next cltime an idle proxy may rebuild its skeleton
 
+// nettest perf: corpse render cull (the only QC lever on the engine scene floor —
+// not submitting an off-screen corpse removes its edict-copy + skin from the
+// 2.46s CSQC_UpdateViewAliveScene cost).  Scoped to SETTLED corpses only.  Cvars
+// (r_corpses_pvscull default 1, r_corpses_maxdist default 0) are identical for
+// every proxy in a frame, so cache them + the view origin once per frame.
+float  g_corpse_cull_time;
+float  g_corpse_pvscull;
+float  g_corpse_maxdist_sq;
+vector g_corpse_vieworg;
+
+void() PlayerVis_RefreshCorpseCull =
+{
+    if (cltime == g_corpse_cull_time)
+        return;
+    g_corpse_cull_time  = cltime;
+    g_corpse_pvscull    = cvar("r_corpses_pvscull");
+    float md            = cvar("r_corpses_maxdist");
+    g_corpse_maxdist_sq = (md > 0) ? md * md : 0;
+    g_corpse_vieworg    = (vector)getproperty(VF_ORIGIN);
+};
+
 void() PlayerVis_RefreshSpineCvars =
 {
 	if (cltime == g_spine_cv_time)
@@ -3806,6 +3827,36 @@ float() CSQC_PlayerVisual_Predraw =
 		if (self.vis_is_dead)
 			self.vis_death_cltime = cltime;
 		self.vis_skel_was_dead = self.vis_is_dead;
+	}
+
+	// perf: corpse render cull — the only QC lever on the engine scene floor
+	// (skip the addentity entirely for a body you can't see).  GATED on the body
+	// being a SETTLED corpse: keyed off the SAME frameduration freeze the skeleton
+	// uses, so we never cull a corpse mid-fall (the death anim keeps rebuilding
+	// while unculled, so by settle time the skeleton already holds the final pose;
+	// culling earlier could freeze a half-fall on PVS re-entry).  Placed AFTER the
+	// vis_death_cltime stamp so a body that dies off-screen still latches its death
+	// time + freeze.  checkpvs is fail-safe (returns visible when PVS data is
+	// missing, e.g. CoD), so it never hides a corpse in your line of sight.
+	// r_corpses_pvscull 1 (default), r_corpses_maxdist 0 = distance off (default).
+	if (self.vis_is_dead && self.vis_death_cltime > 0)
+	{
+		float cull_age  = cltime - self.vis_death_cltime;
+		float cull_ddur = frameduration(self.modelindex, self.vis_anim_bottom);
+		if (cull_ddur <= 0)
+			cull_ddur = VIS_CORPSE_FREEZE_DELAY;
+		if ((cull_age > cull_ddur + 0.4) || (cull_age > 8.0))
+		{
+			PlayerVis_RefreshCorpseCull();
+			if (g_corpse_maxdist_sq > 0)
+			{
+				vector cull_dv = self.origin - g_corpse_vieworg;
+				if ((cull_dv * cull_dv) > g_corpse_maxdist_sq)
+					return PREDRAW_NEXT;
+			}
+			if (g_corpse_pvscull && !checkpvs(g_corpse_vieworg, self))
+				return PREDRAW_NEXT;
+		}
 	}
 
 	PlayerVis_RefreshSpineCvars();           // perf: read the 8 spine cvars once/frame

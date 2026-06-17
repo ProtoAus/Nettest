@@ -1116,6 +1116,20 @@ void() CVar_Init =
     // maps; on Source/CoD maps each test decompresses vis, so it costs a little
     // more per nearby drop — enable where a map accumulates many occluded drops.
     CVar_Add("Client", "r_physdrops_pvscull",     "0",     CVAR_SIDE_CL);
+    // Corpse render cull — the only client lever on the engine scene-render
+    // floor (an off-screen corpse still costs a full edict-copy + ~50-bone skin
+    // every frame with no engine pre-cull). Scoped to SETTLED corpses, keyed off
+    // the same death-anim freeze, so a body mid-fall is never culled.
+    //   r_corpses_pvscull 1 (default): don't draw a settled corpse that is behind
+    //     walls / out of the potentially-visible set. checkpvs is fail-safe
+    //     (returns visible when vis data is missing) so it NEVER hides a body in
+    //     your line of sight — no pop-in. Biggest win on large maps with bodies
+    //     scattered across rooms; ~0 on small maps where everything is in view.
+    //   r_corpses_maxdist 0 (default off): also drop settled corpses past this
+    //     many units. Opt-in (a distant body can pop in at the radius boundary);
+    //     set ~1500-2000 on very open maps if corpse skinning still dominates.
+    CVar_Add("Client", "r_corpses_pvscull",       "1",     CVAR_SIDE_CL);
+    CVar_Add("Client", "r_corpses_maxdist",       "0",     CVAR_SIDE_CL);
     // Mirror the viewmodel horizontally for left-handed weapon view.
     // XOR'd against the per-weapon `weapon_viewmodel_flip` default so a
     // model that is already left-handed in its source data flips back
