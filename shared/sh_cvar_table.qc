@@ -796,6 +796,11 @@ void() CVar_Init =
     // render is one addtrisoup_simple per texture either way.  Mirrors
     // cl_bullethole_clip_geom; set 0 to see the raw axis-aligned quads.
     CVar_Add("Client", "cl_blood_decals_clip",        "1",   CVAR_SIDE_CL);
+    // Max simultaneous blood splats (FIFO — oldest evicted past the cap).  Now
+    // that decals are baked to a trisoup batch (cheap per-frame), this can go
+    // well above the old 96.  Clamped to the compile-time buffer ceiling
+    // BLOOD_HARD_MAX (256); raise that + BLOOD_TRISOUP_MAX together for more.
+    CVar_Add("Client", "cl_blood_decals_max",         "96",  CVAR_SIDE_CL);
     // Verbose per-shot hitgroup classifier trace.  Prints bone_id,
     // bone-name lookup result, Z fraction inside the target's bbox,
     // and the final classification for every player hit.  Toggle on

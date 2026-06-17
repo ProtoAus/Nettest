@@ -59,7 +59,11 @@ const float  BLOOD_SPAWN_FLOOR  = 1;
 
 const float  BLOOD_FADE_START   = 25;
 const float  BLOOD_FADE_END     = 30;
-const float  BLOOD_MAX          = 96;
+const float  BLOOD_MAX          = 96;    // default live cap (cl_blood_decals_max overrides)
+// Compile-time ceiling for cl_blood_decals_max.  MUST equal BLOOD_TRISOUP_MAX in
+// cl_bloodtrisoup.qc (each of the 7 baked-trisoup partitions is sized to this, so
+// the cap can never exceed it without overrunning the vertex buffer).
+const float  BLOOD_HARD_MAX     = 256;
 
 entity bs_head;
 entity bs_tail;
@@ -142,6 +146,19 @@ string(float idx) CSQC_BloodShaderForIndex =
     return BLOOD_SHADER_7;
 };
 
+// Resolve the live decal cap.  cl_blood_decals_max overrides BLOOD_MAX; <=0
+// falls back to the default, and it is clamped to BLOOD_HARD_MAX (the baked
+// trisoup buffer ceiling — exceeding it would overrun blood_verts).
+float() Blood_ResolveMax =
+{
+    float m = cvar("cl_blood_decals_max");
+    if (m <= 0)
+        m = BLOOD_MAX;
+    if (m > BLOOD_HARD_MAX)
+        m = BLOOD_HARD_MAX;
+    return m;
+};
+
 // Append one decal to the list at trace_endpos / trace_plane_normal.
 // Caller is responsible for issuing the traceline first; this just
 // reads the trace_* globals.  Skips when the trace whiffed or hit sky.
@@ -154,7 +171,8 @@ void() CSQC_BloodsplatAddFromTrace =
     if (pointcontents(trace_endpos - trace_plane_normal * 2) == CONTENT_SKY)
         return;
 
-    while (bs_count >= BLOOD_MAX && bs_head)
+    float bmax = Blood_ResolveMax();
+    while (bs_count >= bmax && bs_head)
         CSQC_BloodsplatRemove(bs_head);
 
     entity bs = spawn();
@@ -208,7 +226,8 @@ void(vector pos, vector normal) CSQC_SpawnBloodDecalAt =
     if (pointcontents(pos - normal * 2) == CONTENT_SKY)
         return;
 
-    while (bs_count >= BLOOD_MAX && bs_head)
+    float bmax = Blood_ResolveMax();
+    while (bs_count >= bmax && bs_head)
         CSQC_BloodsplatRemove(bs_head);
 
     entity bs = spawn();

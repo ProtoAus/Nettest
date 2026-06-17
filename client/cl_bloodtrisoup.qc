@@ -27,10 +27,12 @@
 // ============================================================
 
 const int BLOOD_TEX_COUNT     = 7;
-// Per-texture quad capacity.  Worst case every one of the BLOOD_MAX (96)
-// live splats picks the same texture, so each partition must hold the
-// full cap.  Read from BLOOD_MAX in cl_bloodsplat.qc — keep in sync.
-const int BLOOD_TRISOUP_MAX   = 96;        // == BLOOD_MAX
+// Per-texture quad capacity == the COMPILE-TIME ceiling for the runtime
+// cl_blood_decals_max cvar (cl_bloodsplat.qc clamps the live FIFO cap to this).
+// Worst case every live splat picks the same texture, so each of the 7
+// partitions must hold the full ceiling.  MUST equal BLOOD_HARD_MAX in
+// cl_bloodsplat.qc (fteqcc can't share a const across the compile-order split).
+const int BLOOD_TRISOUP_MAX   = 256;       // == BLOOD_HARD_MAX
 // Off-surface nudge + half-extent, mirroring CSQC_BakeStaticBulletHoleQuad
 // and the old CSQC_DrawBloodDecals projection size.
 const float BLOOD_BAKE_NUDGE  = 0.4;
@@ -42,14 +44,14 @@ const float BLOOD_BAKE_NUDGE  = 0.4;
 // &blood_idx[part_base] so the indices they write are relative to that
 // partition's sub-array — exactly what addtrisoup_simple wants for the
 // per-texture draw.
-auto trisoup_simple_vert_t blood_verts[7 * 96 * 4];
-auto int                   blood_idx  [7 * 96 * 6];
+auto trisoup_simple_vert_t blood_verts[7 * 256 * 4];   // 7 partitions x BLOOD_TRISOUP_MAX x 4
+auto int                   blood_idx  [7 * 256 * 6];
 
 // Per-texture slot bookkeeping (mirrors bh_bullet_static_count / _count /
 // _free / _free_count, one set per texture partition).
 int blood_static_count[7];      // high-water mark of allocated slots in this partition
 int blood_count[7];             // submit count (== static_count; blood has no dynamic suffix)
-auto int blood_free[7 * 96];    // per-partition free lists (flattened: part t at [t*MAX, …))
+auto int blood_free[7 * 256];   // per-partition free lists (flattened: part t at [t*MAX, …))
 int blood_free_count[7];
 
 // .bs_slot (declared in cl_bloodsplat.qc, init -1 at spawn) holds the
