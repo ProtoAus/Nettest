@@ -192,6 +192,11 @@ float() Spectate_InDeathCam;
 .vector maxlight_cache_origin;
 .float  maxlight_cache_cap;
 .float  maxlight_cache_knee;
+// Settle latch: once a still drop's colormod has been written for the current
+// (origin, cap, knee) it persists on the edict, so re-writing it every frame is
+// redundant.  Set after the colormod write; the latch elides both the
+// CSQC_MaxlightScale_Cached call and the colormod store while the keys match.
+.float  maxlight_cache_committed;
 
 // Forward — defined in cl_player.qc, dispatched from cl_main.qc's
 // CSQC_ConsoleCommand. Both files compile after cl_customdefs.qc.

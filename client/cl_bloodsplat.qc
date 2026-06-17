@@ -75,6 +75,12 @@ entity bs_tail;
 // Absolute slot index into the baked trisoup buffer (cl_bloodtrisoup.qc).
 // -1 = not baked.  Set by Blood_BakeTrisoup, cleared by Blood_FreeTrisoupSlot.
 .float  bs_slot;
+// Last vertex alpha written to the baked quad.  The bake seeds the verts (and
+// this) to 1.0, alpha is constant 1.0 for the whole 25 s hold, and only changes
+// during the 5 s fade — so the per-frame alpha rewrite is rewritten ONLY when it
+// actually differs from this (change-detection).  Seeded in Blood_BakeTrisoup
+// (not at declaration — fteqcc const-global-initializer trap).
+.float  bs_last_alpha;
 float   bs_count;
 
 // Baked-trisoup batch (cl_bloodtrisoup.qc, compiled AFTER cl_bulletholes.qc
@@ -361,11 +367,17 @@ void() CSQC_DrawBloodDecals =
                             / (BLOOD_FADE_END - BLOOD_FADE_START);
         }
 
-        // Cheap: rewrite the 4 baked vertex alphas for this splat.  The
-        // geometry stays baked; only the alpha channel is live.  Skip
-        // splats that failed to bake (bs_slot == -1).
-        if (bs.bs_slot >= 0)
+        // Rewrite the 4 baked vertex alphas ONLY when alpha actually changed
+        // since last frame (change-detection).  During the 25 s opaque hold and
+        // in persistent mode alpha is a constant 1.0 already baked into the
+        // verts, so this skips the write entirely; it fires only across the 5 s
+        // fade (and once to restore 1.0 if persistent is toggled on mid-fade).
+        // Skips splats that failed to bake (bs_slot == -1).
+        if (bs.bs_slot >= 0 && alpha != bs.bs_last_alpha)
+        {
             Blood_SetSlotAlpha(bs.bs_slot, alpha);
+            bs.bs_last_alpha = alpha;
+        }
 
         bs = next_bs;
     }

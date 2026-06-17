@@ -493,6 +493,7 @@ void() CSQC_DrawSprays =
     // --- trisoup-quad path (cl_spray_style 0) ---
     // Each active quad contributes 12 indices (4 triangles — double-
     // sided).  See CSQC_Spray_WriteQuad for the winding layout.
+    float spray_dbg = cvar("cl_debug_spray");   // hoisted out of the per-bucket loop
     int b;
     for (b = 0; b < SPRAY_BUCKETS; b = b + 1)
     {
@@ -500,7 +501,7 @@ void() CSQC_DrawSprays =
         if (sp_bucket_tex[b] == "")  continue;
         int base_v = b * SPRAY_PER_BUCKET * 4;
         int base_i = b * SPRAY_PER_BUCKET * 12;
-        if (cvar("cl_debug_spray") >= 2)
+        if (spray_dbg >= 2)
             print(sprintf("[spray] submit b=%g tex='%s' cnt=%g v0=%g i0=%g\n",
                           (float)b, sp_bucket_tex[b],
                           (float)sp_bucket_count[b],

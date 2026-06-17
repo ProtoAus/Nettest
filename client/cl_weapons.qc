@@ -790,8 +790,23 @@ float() CSQC_DroppedWeapon_Predraw =
         // PREDRAW_AUTOADD lets the engine add the entity itself (identical
         // CopyCSQCEdictToEntity, reads colormod live) — one fewer QC->builtin
         // call than an explicit addentity(self).
+        //
+        // Settle latch: the colormod persists on the edict, so once it has been
+        // written for this exact (origin, cap, knee) there is nothing to do — skip
+        // both the Cached call and the store. The key match is the same hit
+        // condition CSQC_MaxlightScale_Cached uses internally, so a cvar change or
+        // a wake-up (origin move) falls through and recomputes correctly.
+        if (self.maxlight_cache_committed
+            && self.maxlight_cache_cap  == g_physdrop_maxlight
+            && self.maxlight_cache_knee == g_physdrop_knee)
+        {
+            vector cd = self.origin - self.maxlight_cache_origin;
+            if ((cd * cd) < 1)
+                return PREDRAW_AUTOADD;
+        }
         float scale = CSQC_MaxlightScale_Cached(g_physdrop_maxlight, g_physdrop_knee);
         self.colormod = '1 1 1' * scale;
+        self.maxlight_cache_committed = 1;
         return PREDRAW_AUTOADD;
     }
 

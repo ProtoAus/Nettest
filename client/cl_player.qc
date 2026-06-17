@@ -3154,6 +3154,11 @@ float() PlayerVis_LerpDuration =
 // Weapon attachment entity + state
 .entity vis_weapon_ent;
 .string vis_weapon_model;
+// perf P1: 1 when the weapon attachment is posed via world-space bone-mirror
+// (the common Bip01 path), 0 when it fell back to engine setattachment.  Only
+// world-posed weapons may use the frozen-corpse mirror-skip (re-setting origin
+// on an engine-attached weapon would break its tag-follow).
+.float vis_weapon_world_posed;
 
 float spec_target;
 float spec_mode;
@@ -3437,6 +3442,14 @@ void(float skel, float bone_idx, float deg) PlayerVis_PitchBone =
 const float VIS_CORPSE_FREEZE_DELAY = 4.0;   // fallback freeze delay when frameduration can't read the death-anim length
 .float vis_death_cltime;    // cltime when this proxy became a corpse (0 = alive/never)
 .float vis_skel_was_dead;   // edge-detects the alive->dead transition for the stamp
+
+// nettest perf: PlayerVis_ModelIsIQM does strlen+strtolower+substring on .model
+// every frame, but the model type is constant for a given modelindex (it only
+// changes on an identity model swap).  Cache the bool keyed on modelindex; the
+// modelindex-match doubles as the validity check (no literal initializer, per the
+// fteqcc const-global-initializer trap).
+.float vis_is_iqm;          // cached PlayerVis_ModelIsIQM result
+.float vis_is_iqm_mdl;      // modelindex the cache was computed for (0 = stale)
 
 // nettest perf: the spine-deform cvars are identical for every proxy in a frame
 // but were re-read via cvar() per proxy; cache them once per frame.  The spine
@@ -3771,7 +3784,13 @@ float() CSQC_PlayerVisual_Predraw =
 	// Gated on cl_player_spine_deform so users can disable for A/B
 	// testing.  Also skipped on HL studio models (sini etc.) since
 	// they already have working bone-controllers + subblend.
-	float is_iqm_player = PlayerVis_ModelIsIQM(self);
+	// Cached per proxy keyed on modelindex (recompute only on a model swap).
+	if (self.vis_is_iqm_mdl != self.modelindex)
+	{
+		self.vis_is_iqm     = PlayerVis_ModelIsIQM(self);
+		self.vis_is_iqm_mdl = self.modelindex;
+	}
+	float is_iqm_player = self.vis_is_iqm;
 	if (!is_iqm_player && self.skeletonindex)
 	{
 		skel_delete(self.skeletonindex);
@@ -3824,6 +3843,13 @@ float() CSQC_PlayerVisual_Predraw =
 		self.skeletonindex = 0;
 		self.vis_skel_modelindex = 0;
 	}
+
+	// perf P1: set TRUE below for a settled corpse whose body skeleton is frozen,
+	// so the weapon-attachment block can re-submit the gun without re-running the
+	// per-frame skel_build + 72-bone gettaginfo mirror.  Stays FALSE for live
+	// players (incl. idle/rate-limited — they can turn in place) and for the
+	// spine-off / non-IQM config, all of which keep mirroring every frame.
+	float vis_skip_weapon_mirror = FALSE;
 
 	if (g_spine_deform && spine_has_work && is_iqm_player && self.modelindex)
 	{
@@ -3881,6 +3907,12 @@ float() CSQC_PlayerVisual_Predraw =
 			if (do_rebuild)
 				self.vis_skel_next_rebuild = cltime + 1.0 / g_spine_idle_rate;
 		}
+
+		// perf P1: a frozen corpse's body skeleton was NOT rebuilt this frame and
+		// its origin/angles are pinned (extrap-skipped), so the world-space weapon
+		// bone-mirror below would reproduce a bit-identical pose — let it skip.
+		// fresh_skel guards the one frame a recreated skeleton DID rebuild.
+		vis_skip_weapon_mirror = (corpse_frozen && !fresh_skel);
 
 		if (self.skeletonindex && do_rebuild)
 		{
@@ -4036,10 +4068,29 @@ float() CSQC_PlayerVisual_Predraw =
 
 		if (wep.modelindex)
 		{
+			float wep_skel_was_new = FALSE;
 			if (!wep.skeletonindex)
+			{
 				wep.skeletonindex = skel_create(wep.modelindex);
+				wep_skel_was_new = TRUE;
+			}
 
-			if (wep.skeletonindex)
+			if (wep.skeletonindex
+			    && vis_skip_weapon_mirror
+			    && !wep_skel_was_new
+			    && self.vis_weapon_world_posed)
+			{
+				// perf P1: frozen corpse, weapon already world-posed last frame.
+				// The weapon skeleton holds the last mirror and the corpse's
+				// origin/angles are static, so re-submit the gun WITHOUT the
+				// skel_build + 72-bone gettaginfo mirror.  Re-set origin/angles to
+				// the same (stable) values the bones were baked against so the
+				// world-space-bone invariant holds (see the long note below).
+				setorigin(wep, self.origin);
+				wep.angles = '0 0 0';
+				addentity(wep);
+			}
+			else if (wep.skeletonindex)
 			{
 				// Build the weapon skeleton from its own default pose
 				skel_build(wep.skeletonindex, wep, wep.modelindex, 0, 0, -1);
@@ -4088,6 +4139,9 @@ float() CSQC_PlayerVisual_Predraw =
 
 				if (matched > 0)
 				{
+					// World-space bone path — eligible for the frozen-corpse
+					// mirror-skip next frame (the gun is detached at world origin).
+					self.vis_weapon_world_posed = 1;
 					addentity(wep);
 				}
 				else
@@ -4100,6 +4154,9 @@ float() CSQC_PlayerVisual_Predraw =
 					// per-frame follow.  Pose won't track individual
 					// finger bones, but the weapon at least sits in the
 					// hand instead of teleporting to world origin.
+					// NOT world-posed: engine-attached, so it must NOT use the
+					// origin-resetting mirror-skip (would break the tag follow).
+					self.vis_weapon_world_posed = 0;
 					float hand = gettagindex(self, "Bip01 R Hand");
 					if (hand > 0)
 					{

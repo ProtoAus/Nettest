@@ -196,6 +196,9 @@ void(entity bs) Blood_BakeTrisoup =
     if (part > BLOOD_TEX_COUNT - 1) part = BLOOD_TEX_COUNT - 1;
 
     bs.bs_slot = Blood_AllocSlot(part, clipped, q0, q1, q2, q3, tint, 1.0);
+    // The 4 baked vertex alphas start at 1.0; seed the change-detection cache to
+    // match so the opaque hold (alpha stays 1.0) issues zero per-frame rewrites.
+    bs.bs_last_alpha = 1.0;
 };
 
 // ------------------------------------------------------------------
