@@ -502,10 +502,19 @@ void() CVar_Init =
     // the head/shoulders rotate when strafing.  1.0 = original feel.
     CVar_Add("Client", "cl_player_spine_twist_upper_scale", "0.5", CVAR_SIDE_BOTH);
     CVar_Add("Client", "cl_player_spine_pitch_scale", "1",     CVAR_SIDE_BOTH);
-    CVar_Add("Client", "cl_player_spine_pitch_max",   "35",    CVAR_SIDE_BOTH);
+    CVar_Add("Client", "cl_player_spine_pitch_max",   "55",    CVAR_SIDE_BOTH);
     // Scales spine3 + neck pitch fractions so the head bobs less when
     // looking up/down.  1.0 = original feel.
     CVar_Add("Client", "cl_player_spine_pitch_upper_scale", "0.6", CVAR_SIDE_BOTH);
+    // Orthonormalize the spine's parents (pelvis + Bip01 root) before the strafe
+    // yaw.  The yaw rotates each spine bone's local basis and the engine rebuilds
+    // model space through the parent's actual matrix; IQM frame-blend leaves that
+    // parent skewed (large on a deep CROUCH forward-lean), which shears the yaw
+    // into PITCH (the strafe-direction up/down tilt).  Cleaning the parents makes
+    // the yaw a true horizontal turn.  1 = on (default).  Set 0 if it ever
+    // disturbs the legs (they hang off the pelvis) — reverts to the prior
+    // clean-standing / slight-crouch-leak behaviour.
+    CVar_Add("Client", "cl_player_spine_orthoparents", "1",  CVAR_SIDE_BOTH);
     // perf: skeleton rebuild rate (Hz) for STILL players (velocity <= 8).  A
     // standing crowd's breathing pose barely changes, so re-solving the ~50-bone
     // skeleton every frame is wasted; cap it.  Moving players always rebuild every

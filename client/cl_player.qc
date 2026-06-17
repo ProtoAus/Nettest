@@ -3395,38 +3395,11 @@ void(float skel) PlayerVis_BuildPoseSkeleton =
 	}
 };
 
-// Twist a bone around its own local +X (v_forward).  HL biped
-// convention: +X runs up the spine, so this rotates yaw around the
-// spine — the per-bone body-twist contribution.
-void(float skel, float bone_idx, float deg) PlayerVis_TwistBone =
-{
-    vector bone_org = skel_get_bonerel(skel, bone_idx);
-    if (!PlayerVis_LoadBoneBasis(skel, bone_idx))
-        return;
-    vector lf = v_forward, lr = v_right, lu = v_up;
-    float c = cos(deg * PI_RAD / 180);
-    float s = sin(deg * PI_RAD / 180);
-    // Rotate (right, up) plane around forward.
-    vector new_right = lr * c + lu * s;
-    vector new_up    = -lr * s + lu * c;
-    skel_set_bone(skel, bone_idx, bone_org, lf, new_right, new_up);
-};
-
-// Pitch a bone around its own local +Z (v_up).  On these converted
-// CS IQMs, local +Y is roll; +Z gives the forward/back torso bend.
-void(float skel, float bone_idx, float deg) PlayerVis_PitchBone =
-{
-    vector bone_org = skel_get_bonerel(skel, bone_idx);
-    if (!PlayerVis_LoadBoneBasis(skel, bone_idx))
-        return;
-    vector lf = v_forward, lr = v_right, lu = v_up;
-    float c = cos(deg * PI_RAD / 180);
-    float s = sin(deg * PI_RAD / 180);
-    // Rotate (forward, right) plane around up.
-    vector new_fwd   = lf * c - lr * s;
-    vector new_right = lf * s + lr * c;
-    skel_set_bone(skel, bone_idx, bone_org, new_fwd, new_right, lu);
-};
+// (PlayerVis_TwistBone / PlayerVis_PitchBone were the old LOCAL-axis spine
+// deforms.  They rotated a bone's parent-relative basis, which on a non-vertical
+// spine sheared yaw->pitch and pitch->twist.  Replaced by PlayerVis_YawBone /
+// PlayerVis_PitchBoneWorld, which rotate the bone's WORLD orientation and let the
+// engine recompute the local via skel_set_bone_world — exact at any lean.)
 
 // Rotate vector v around a UNIT axis by `deg` degrees (Rodrigues' formula).
 vector(vector v, vector axis, float deg) PlayerVis_RotAxis =
@@ -3437,43 +3410,63 @@ vector(vector v, vector axis, float deg) PlayerVis_RotAxis =
     return v * c + crossproduct(axis, v) * s + axis * (axis * v) * (1 - c);
 };
 
-// Yaw a spine bone around the model-VERTICAL axis (a pure horizontal turn) for
-// the strafe twist.  PlayerVis_TwistBone rotated around the bone's own +X
-// (up-the-spine); when the run/strafe animation leans the torso forward that
-// axis tilts forward, so the strafe yaw bled into a PITCH — the head dipped
-// toward the floor on +moveright and lifted on +moveleft, growing with strafe
-// speed (more speed = more forward lean).  Yawing around model-up keeps it a
-// clean turn at any lean.
+// DEBUG (cl_player_spine_debug): world pitch in degrees of a bone's up-the-spine
+// axis (v_forward.z via skel_get_boneabs).  Upright spine -> ~90.  The strafe yaw
+// is a horizontal turn, so this must NOT change with strafe direction; if it
+// shifts left-vs-right the yaw is still leaking pitch.
+float(float skel, float bone_idx) PlayerVis_DbgBonePitch =
+{
+    if (bone_idx <= 0 || skel == 0)
+        return 0;
+    skel_get_boneabs(skel, bone_idx);
+    return asin(bound(-1, v_forward * '0 0 1', 1)) * 180 / PI_RAD;
+};
+
+// Yaw a spine bone around model-vertical for the strafe twist.
 //
-// The skeleton lives in model space (Z is up, baked by the iqmtool `rotate`), so
-// model-up is '0 0 1'.  A bone's local basis (what skel_set_bone takes) is
-// expressed in its PARENT's frame, so we express model-up in the parent's frame
-// via the parent's absolute axes (skel_get_boneabs) and rotate the bone's basis
-// around that.  parent_idx<=0 falls back to the bone's own +X (old behaviour).
+// We do NOT rotate the bone's local (parent-relative) basis ourselves: at a deep
+// crouch lean that conjugates through the parent and shears the yaw into pitch
+// (confirmed empirically — even an orthonormal parent chain leaked).  Instead we
+// read the bone's WORLD orientation with gettaginfo, yaw it around world-up
+// '0 0 1' (a Z-rotation can never change a vector's z-component, so pitch is
+// preserved at ANY lean), and write it straight back with skel_set_bone_world —
+// the engine recomputes the parent-relative transform using the TRUE parent
+// inverse, so no skew/lean math is left to us.  The proxy is upright (angles =
+// yaw only) so world-up == model-up, and gettaginfo/skel_set_bone_world both
+// apply the same entity transform, which cancels.  parent_idx is unused now
+// (the engine owns the parent) but kept so call sites don't change.
 void(float skel, float bone_idx, float parent_idx, float deg) PlayerVis_YawBone =
 {
-    vector bone_org = skel_get_bonerel(skel, bone_idx);
-    if (!PlayerVis_LoadBoneBasis(skel, bone_idx))
+    vector world_org = gettaginfo(self, bone_idx);   // sets v_forward/right/up = WORLD axes
+    if (!PlayerVis_TagBasisGood())
         return;
-    vector lf = v_forward, lr = v_right, lu = v_up;
+    vector wf = v_forward, wr = v_right, wu = v_up;
 
-    vector axis = lf;   // fallback: rotate around local +X (old TwistBone)
-    if (parent_idx > 0)
-    {
-        // model-up '0 0 1' in the parent's frame = (Z.pf, Z.pr, Z.pu), i.e. the
-        // z-components of the parent's absolute axes.
-        skel_get_boneabs(skel, parent_idx);
-        vector pf = v_forward, pr = v_right, pu = v_up;
-        axis = [pf * '0 0 1', pr * '0 0 1', pu * '0 0 1'];
-        if (vlen(axis) < 0.001)
-            axis = lf;
-    }
-    axis = normalize(axis);
+    vector up = '0 0 1';
+    wf = PlayerVis_RotAxis(wf, up, deg);
+    wr = PlayerVis_RotAxis(wr, up, deg);
+    wu = PlayerVis_RotAxis(wu, up, deg);
 
-    lf = PlayerVis_RotAxis(lf, axis, deg);
-    lr = PlayerVis_RotAxis(lr, axis, deg);
-    lu = PlayerVis_RotAxis(lu, axis, deg);
-    skel_set_bone(skel, bone_idx, bone_org, lf, lr, lu);
+    skel_set_bone_world(self, bone_idx, world_org, wf, wr, wu);
+};
+
+// Pitch a spine bone (the look up/down lean) the same robust way as
+// PlayerVis_YawBone: read the bone's WORLD orientation, rotate it around a fixed
+// horizontal LATERAL axis (the player's left-right, perpendicular to aim), and
+// write it back via skel_set_bone_world.  The old PlayerVis_PitchBone rotated the
+// bone's LOCAL axis, which on a non-vertical spine bled a left/right TWIST into
+// the forward/back lean.  Rotating around a horizontal axis keeps the lean purely
+// in the vertical plane.  lat_axis is supplied by the caller (computed once).
+void(float skel, float bone_idx, vector lat_axis, float deg) PlayerVis_PitchBoneWorld =
+{
+    vector world_org = gettaginfo(self, bone_idx);
+    if (!PlayerVis_TagBasisGood())
+        return;
+    vector wf = v_forward, wr = v_right, wu = v_up;
+    wf = PlayerVis_RotAxis(wf, lat_axis, deg);
+    wr = PlayerVis_RotAxis(wr, lat_axis, deg);
+    wu = PlayerVis_RotAxis(wu, lat_axis, deg);
+    skel_set_bone_world(self, bone_idx, world_org, wf, wr, wu);
 };
 
 // nettest perf: corpse skeleton freeze.  A settled corpse holds a static death
@@ -3504,6 +3497,8 @@ float g_spine_twist_upper, g_spine_pitch_scale, g_spine_pitch_upper, g_spine_pit
 float g_spine_idle_rate;    // cl_player_skel_idle_rate: rebuild Hz for STILL players (0 = every frame)
 .float vis_spine_sb0, vis_spine_sb1, vis_spine_sb2, vis_spine_sb3, vis_spine_sbn;
 .float vis_spine_pelvis;    // parent of sb0 — used to yaw the strafe-twist around world-up
+.float vis_spine_root;      // Bip01 root — orthonormalized with the pelvis so the spine's
+                            //   parent chain is clean (else crouch-lean skew shears yaw->pitch)
 .float vis_spine_bones_mdl;
 .float vis_skel_next_rebuild;   // next cltime an idle proxy may rebuild its skeleton
 
@@ -4005,12 +4000,13 @@ float() CSQC_PlayerVisual_Predraw =
 
 			// perf: spine bone indices are model-constant — cache per proxy and
 			// re-find (skel_find_bone string walk) only when the model changes.
-			float sb0, sb1, sb2, sb3, sbn, pelvis;
+			float sb0, sb1, sb2, sb3, sbn, pelvis, root;
 			if (self.vis_spine_bones_mdl == self.modelindex)
 			{
 				sb0 = self.vis_spine_sb0; sb1 = self.vis_spine_sb1;
 				sb2 = self.vis_spine_sb2; sb3 = self.vis_spine_sb3;
 				sbn = self.vis_spine_sbn; pelvis = self.vis_spine_pelvis;
+				root = self.vis_spine_root;
 			}
 			else
 			{
@@ -4020,10 +4016,27 @@ float() CSQC_PlayerVisual_Predraw =
 				sb3 = PlayerVis_FindBone(self.skeletonindex, "Bip01 Spine3");
 				sbn = PlayerVis_FindBone(self.skeletonindex, "Bip01 Neck");
 				pelvis = PlayerVis_FindBone(self.skeletonindex, "Bip01 Pelvis");
+				root = PlayerVis_FindBone(self.skeletonindex, "Bip01");
 				self.vis_spine_sb0 = sb0; self.vis_spine_sb1 = sb1;
 				self.vis_spine_sb2 = sb2; self.vis_spine_sb3 = sb3;
 				self.vis_spine_sbn = sbn; self.vis_spine_pelvis = pelvis;
+				self.vis_spine_root = root;
 				self.vis_spine_bones_mdl = self.modelindex;
+			}
+
+			// nettest crouch fix: orthonormalize the spine's PARENTS (pelvis + root)
+			// too.  The strafe yaw rotates each spine bone's local basis and the
+			// engine reconstructs model space through the parent's actual matrix; if
+			// that parent is non-orthonormal (IQM frame-blend skew, large on a deep
+			// crouch forward-lean) the rotation is NOT a pure model-up yaw and shears
+			// into PITCH (the strafe-sign-dependent crouch leak).  Cleaning the
+			// parent chain makes the yaw exact.  Gated: cl_player_spine_orthoparents 0
+			// reverts to clean-standing / slight-crouch-leak if it ever disturbs the
+			// legs (which hang off the pelvis).
+			if (cvar("cl_player_spine_orthoparents"))
+			{
+				if (root > 0)   PlayerVis_OrthonormalizeBone(self.skeletonindex, root);
+				if (pelvis > 0) PlayerVis_OrthonormalizeBone(self.skeletonindex, pelvis);
 			}
 
 			// perf (a): orthonormalize ONLY the 5 spine bones the deform rotates
@@ -4066,11 +4079,20 @@ float() CSQC_PlayerVisual_Predraw =
 			float iqm_pitch = bound(-pitch_max, pitch_frac * pitch_max * pitch_scale, pitch_max);
 			if (iqm_pitch != 0)
 			{
-				PlayerVis_PitchBone(self.skeletonindex, sb0, iqm_pitch * 0.05);
-				PlayerVis_PitchBone(self.skeletonindex, sb1, iqm_pitch * 0.15);
-				PlayerVis_PitchBone(self.skeletonindex, sb2, iqm_pitch * 0.30);
-				PlayerVis_PitchBone(self.skeletonindex, sb3, iqm_pitch * 0.35 * pitch_upper_scale);
-				PlayerVis_PitchBone(self.skeletonindex, sbn, iqm_pitch * 0.15 * pitch_upper_scale);
+				// Fixed horizontal lateral axis (player's right, perpendicular to
+				// aim) so the lean stays in the vertical plane — no left/right
+				// twist bleed.  -iqm_pitch: +view-pitch (looking down) tilts the
+				// spine forward/down around this axis.
+				makevectors([0, self.vis_aim_yaw, 0]);
+				vector pitch_axis = v_right;
+				// Distribute the bend lower down the spine (was 0.05/0.15/0.30/
+				// 0.35/0.15, almost all in the upper torso + neck) so the player
+				// bends from the waist, engaging the whole spine.
+				PlayerVis_PitchBoneWorld(self.skeletonindex, sb0, pitch_axis, -iqm_pitch * 0.18);
+				PlayerVis_PitchBoneWorld(self.skeletonindex, sb1, pitch_axis, -iqm_pitch * 0.22);
+				PlayerVis_PitchBoneWorld(self.skeletonindex, sb2, pitch_axis, -iqm_pitch * 0.24);
+				PlayerVis_PitchBoneWorld(self.skeletonindex, sb3, pitch_axis, -iqm_pitch * 0.22 * pitch_upper_scale);
+				PlayerVis_PitchBoneWorld(self.skeletonindex, sbn, pitch_axis, -iqm_pitch * 0.14 * pitch_upper_scale);
 			}
 
 			if (spine_debug && cltime >= self.vis_spine_debug_next)
@@ -4082,8 +4104,9 @@ float() CSQC_PlayerVisual_Predraw =
 				print(sprintf("        leg=%.1f twist=%.1f pitch=%.1f scales=%.2f/%.2f max=%.1f\n",
 				              leg_twist, iqm_twist, iqm_pitch,
 				              twist_scale, pitch_scale, pitch_max));
-				print(sprintf("        waist=%.2f bp=%g\n",
-				              twist_waist_scale, backpedaling));
+				print(sprintf("        waist=%.2f bp=%g  root=%g pelvis=%g  neck_pitch=%.2f\n",
+				              twist_waist_scale, backpedaling, root, pelvis,
+				              PlayerVis_DbgBonePitch(self.skeletonindex, sbn)));
 				self.vis_spine_debug_next = cltime + 0.5;
 			}
 		}
