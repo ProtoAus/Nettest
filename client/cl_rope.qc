@@ -55,21 +55,23 @@ void() CSQC_Rope_Init =
     shaderforname(ROPE_SHADER, ROPE_SHADER_BODY);
 };
 
+// Render-side smoothed anchor for REMOTE ropes: the networked grapple_anchor
+// steps per snapshot during the hook's flight, so we ease toward it each frame
+// (the player END is already the interp-smoothed proxy origin).  grapple_render_init
+// snaps it on (re)activation so a new throw doesn't streak from a stale point.
+.vector grapple_anchor_render;
+.float  grapple_render_init;
+
+// Remote waist offset from the proxy origin.  Remote proxies don't carry view_ofs,
+// so approximate the standing waist (origin + ~eye(22) - 16).  Tunable to taste.
+const vector ROPE_REMOTE_WAIST = '0 0 6';
+
 // ----------------------------------------------------------------
-//  Per-frame draw — called from CSQC_UpdateViewAliveScene after
-//  addentities(MASK_ENGINE) and before renderscene().
+//  Draw one rope segment (waist -> tip) as a screen-facing tiled
+//  textured quad.  Shared by the local and remote rope paths.
 // ----------------------------------------------------------------
-void() CSQC_Rope_Draw =
+void(vector p_waist, vector p_tip) Rope_DrawSegment =
 {
-    if (!predicted_player)
-        return;
-    if (!predicted_player.grapple_rope_active)
-        return;
-
-    vector p_waist = predicted_player.origin
-                   + predicted_player.view_ofs + '0 0 -16';
-    vector p_tip   = predicted_player.grapple_anchor;
-
     vector dir = p_tip - p_waist;
     float  len = vlen(dir);
     if (len < 1)
@@ -131,4 +133,50 @@ void() CSQC_Rope_Draw =
     R_PolygonVertex(p2p, [u_tile, 1, 0],  colour, 1);
     R_PolygonVertex(p2n, [u_tile, 0, 0],  colour, 1);
     R_EndPolygon();
+};
+
+// ----------------------------------------------------------------
+//  Local player's rope — waist+anchor from the prediction proxy.
+//  Called per-frame from CSQC_UpdateView.
+// ----------------------------------------------------------------
+void() CSQC_Rope_Draw =
+{
+    if (!predicted_player || !predicted_player.grapple_rope_active)
+        return;
+    Rope_DrawSegment(predicted_player.origin + predicted_player.view_ofs + '0 0 -16',
+                     predicted_player.grapple_anchor);
+};
+
+// ----------------------------------------------------------------
+//  Remote players' ropes — driven by the visual-proxy GRAPPLE section
+//  (grapple_rope_active + grapple_anchor).  Waist follows the proxy's
+//  already-interp-smoothed origin; the anchor is eased per frame so the
+//  hook's per-snapshot flight reads smooth.  Called alongside CSQC_Rope_Draw.
+// ----------------------------------------------------------------
+void() CSQC_Rope_DrawRemotes =
+{
+    entity proxy = findchain(classname, "player_visual_proxy");
+    while (proxy)
+    {
+        if (proxy.grapple_rope_active
+            && proxy.vis_owner_entnum != player_localentnum
+            && !proxy.vis_is_dead)
+        {
+            if (!proxy.grapple_render_init)
+            {
+                proxy.grapple_anchor_render = proxy.grapple_anchor;   // snap on activate
+                proxy.grapple_render_init   = 1;
+            }
+            else
+            {
+                float k = bound(0, frametime * 18, 1);   // exp-ease toward the networked anchor
+                proxy.grapple_anchor_render = proxy.grapple_anchor_render
+                    + (proxy.grapple_anchor - proxy.grapple_anchor_render) * k;
+            }
+            Rope_DrawSegment(proxy.origin + ROPE_REMOTE_WAIST, proxy.grapple_anchor_render);
+        }
+        else
+            proxy.grapple_render_init = 0;   // reset so the next throw snaps fresh
+        proxy = proxy.chain;
+    }
 };

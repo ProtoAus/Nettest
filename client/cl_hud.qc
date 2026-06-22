@@ -1077,6 +1077,12 @@ float  moneyadd_head;        // ring write index
 float  moneyadd_prev;        // last-seen STAT_MONEY
 float  moneyadd_inited;      // FALSE until the first frame seeds moneyadd_prev
 
+// --- Progression HUD (Part 1): rank/XP widget + rank-up flash ---
+const float PROG_LEVELUP_FLASH = 2.5;   // seconds the "RANK UP" banner shows
+float  prog_level_prev;                 // last-seen STAT_LEVEL
+float  prog_level_inited;               // FALSE until the first frame seeds prog_level_prev
+float  prog_levelup_time;               // cltime of the last rank-up (drives the flash + sound)
+
 // Event handlers — called from CSQC_Parse_Event (cl_main.qc).
 void(float amount, float headshot) HUD_OnKillReward =
 {
@@ -1207,6 +1213,76 @@ void() HUD_MoneyWatch =
     moneyadd_prev = m;
 };
 
+// Rank title for a level band — mirrors server Prog_RankName (sv_progression.qc).
+string(float lvl) HUD_RankName =
+{
+    if (lvl >= 50) return "Commander";
+    if (lvl >= 40) return "Captain";
+    if (lvl >= 30) return "Lieutenant";
+    if (lvl >= 20) return "Sergeant";
+    if (lvl >= 10) return "Corporal";
+    if (lvl >= 5)  return "Private";
+    return "Recruit";
+};
+
+// Watch STAT_LEVEL; on an increase latch a rank-up flash + fanfare.  Level only
+// ever rises (the server subtracts xp on level-up but never lowers level), so a
+// plain delta is reliable here.
+void() HUD_ProgWatch =
+{
+    float lvl = getstatf(STAT_LEVEL);
+    if (!prog_level_inited)
+    {
+        prog_level_inited = TRUE;
+        prog_level_prev   = lvl;   // seed without a connect-time false rank-up
+        return;
+    }
+    if (lvl > prog_level_prev)
+    {
+        prog_levelup_time = cltime;
+        localsound("sounds/effects/orchestralhit.mp3");
+    }
+    prog_level_prev = lvl;
+};
+
+// Compact rank widget (bottom-left, above the cash counter): "Lv N  Rank" + a
+// thin XP progress bar, plus the transient centered "RANK UP" banner.
+void() HUD_DrawRankWidget =
+{
+    float lvl = getstatf(STAT_LEVEL);
+    float xp  = getstatf(STAT_XP);
+    float xpn = getstatf(STAT_XP_NEXT);
+    if (lvl < 1)  lvl = 1;
+    if (xpn <= 0) xpn = 1;
+
+    float bx = 24;
+    float by = g_height - 116;
+    float bw = 168;
+    float bh = 6;
+
+    float prev_font = drawfont;
+    drawfont = hud_font;
+    drawstring([bx, by - 16], sprintf("Lv %g  %s", lvl, HUD_RankName(lvl)),
+               [12, 12], '0.75 0.85 1', 0.9, 0);
+    drawfont = prev_font;
+
+    drawfill([bx, by], [bw, bh], '0.10 0.13 0.20', 0.85, 0);
+    float fillw = bw * (xp / xpn);
+    if (fillw < 0)  fillw = 0;
+    if (fillw > bw) fillw = bw;
+    if (fillw > 0)
+        drawfill([bx, by], [fillw, bh], '0.40 0.62 0.95', 0.95, 0);
+
+    if (prog_levelup_time > 0 && (cltime - prog_levelup_time) < PROG_LEVELUP_FLASH)
+    {
+        float a = 1 - (cltime - prog_levelup_time) / PROG_LEVELUP_FLASH;
+        string up = sprintf("RANK UP  -  %s", HUD_RankName(lvl));
+        vector usz = [26, 26];
+        float  uw  = stringwidth(up, 1, usz);
+        drawstring([g_width * 0.5 - uw * 0.5, g_height * 0.30], up, usz, '1 0.92 0.5', a, 0);
+    }
+};
+
 // Per-frame entry — watch + draw.  Called from BOTH the alive HUD and the
 // spectator HUD so the money watch tracks continuously (no stale delta
 // across a death/respawn).
@@ -1215,6 +1291,8 @@ void() HUD_DopamineFrame =
     HUD_MoneyWatch();
     HUD_DrawKillPopup();
     HUD_DrawMoneyAdds();
+    HUD_ProgWatch();
+    HUD_DrawRankWidget();
 };
 
 void() HUD_DrawCenterMessage =
@@ -1293,6 +1371,19 @@ void() HUD_DrawCenterMessage =
         vector cash_sz  = [26, 26];
         float  cash_w   = stringwidth(cash_txt, 1, cash_sz);
         drawstring([cx - cash_w * 0.5, cy + 72], cash_txt, cash_sz, cash_col, 0.95, 0);
+    }
+
+    // nettest progression: session-XP + rank summary on the round/match-end
+    // banner (networked via STAT_PROG_SESSIONXP / STAT_LEVEL).
+    if (phase == ROUND_PHASE_ROUND_END || phase == ROUND_PHASE_MAP_END)
+    {
+        float sxp = getstatf(STAT_PROG_SESSIONXP);
+        float lvl = getstatf(STAT_LEVEL);
+        if (lvl < 1) lvl = 1;
+        string xp_txt = sprintf("Session XP +%g   -   Lv %g  %s", sxp, lvl, HUD_RankName(lvl));
+        vector xp_sz  = [18, 18];
+        float  xp_w   = stringwidth(xp_txt, 1, xp_sz);
+        drawstring([cx - xp_w * 0.5, cy + 104], xp_txt, xp_sz, '0.7 0.85 1', 0.9, 0);
     }
 };
 
@@ -1452,20 +1543,16 @@ void() CSQC_DrawWeaponHUD =
 //  Speedometer — horizontal speed display (cl_speedometer 1)
 // ============================================================
 
-void() HUD_DrawSpeedometer =
+// Draw a speed readout from a precomputed horizontal speed.  Shared by the alive
+// HUD (predicted velocity) and the spectator HUD (spectated body's velocity) so
+// cl_speedometer works while spectating — handy for reading bot speeds.
+void(float speed) HUD_DrawSpeedometerValue =
 {
     if (!cvar("cl_speedometer"))
-        return;
-    if (!predicted_player || !csqc_prediction_valid)
         return;
 
     float prev_font = drawfont;
     drawfont = hud_font;
-
-    // Horizontal speed only (ignore vertical component)
-    vector flat_vel = predicted_player.velocity;
-    flat_vel_z = 0;
-    float speed = vlen(flat_vel);
 
     string speed_str = sprintf("%.0f u/s", speed);
     vector text_size = [24, 24];
@@ -1476,6 +1563,19 @@ void() HUD_DrawSpeedometer =
     drawstring([x, y], speed_str, text_size, '1 1 1', 0.9, 0);
 
     drawfont = prev_font;
+};
+
+void() HUD_DrawSpeedometer =
+{
+    if (!cvar("cl_speedometer"))
+        return;
+    if (!predicted_player || !csqc_prediction_valid)
+        return;
+
+    // Horizontal speed only (ignore vertical component)
+    vector flat_vel = predicted_player.velocity;
+    flat_vel_z = 0;
+    HUD_DrawSpeedometerValue(vlen(flat_vel));
 };
 
 // net_graph HUD — bottom-right readout of netcode + interp state.

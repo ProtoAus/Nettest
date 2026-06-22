@@ -35,6 +35,9 @@ Available options:
 #pragma warning enable F301 /*non-utf-8 strings*/
 #pragma warning enable F302 /*uninitialised locals*/
 #pragma target FTE
+// BUILD NOTE: this CSQC progs exceeds fteqcc's default 2MB string buffer, so the
+// client MUST be built with the flag (no working #pragma equivalent):
+//     fteqcc64.exe cl_progs.src -max_strings 8388608
 #ifndef CSQC
 #define CSQC
 #endif

@@ -34,6 +34,16 @@ const float EF_ADDITIVE = 32;
 .entity last_damaged_target;
 .float  last_damaged_time;
 
+// Per-client flood cap for the hit-reporting stringcmds (hitclaim / breakclaim /
+// paintprojhit / snowprojhit / cs).  The engine applies no flood protection to
+// client stringcmds, so a buggy/cheating client could spam these toward a
+// reliable-backbuf overflow.  SV_ClaimFloodOK (sv_player.qc) meters them in a 1s
+// sliding window per player; sv_claim_flood_max bounds it (default 60, well above
+// the ~26-30/s legit peak).  Fields on the player entity — self is the engine-set
+// attacker for every metered cmd; respawn entity-reuse zeroes them (fresh budget).
+.float claim_flood_window_start;   // time the current 1s window opened
+.float claim_flood_count;          // metered msgs counted this window
+
 // Grappling hook (sv_grappling) per-player state — server-only half.
 // The CSQC-visible half (grapple_rope_active, grapple_anchor) lives in
 // shared/sh_pmove.qc next to the slide state because predicted_player
@@ -347,6 +357,77 @@ float red_team_score;       // rounds won by red team
 .float sv_can_plant_c4; // clientstat mirror (STAT_CAN_PLANT) — 1 when the C4 carrier may plant here
 .float sv_bomb_planted; // clientstat mirror (STAT_BOMB_PLANTED) — 1 while a planted_c4 is live in Defuse
 
+// nettest progression spine (Part 1) — persistent XP / levels.  Authoritative
+// .prog_* fields load from / save to the sqlite player store (sv_progression.qc);
+// the .sv_* mirrors are networked to the owning client via clientstat each frame.
+.float prog_xp;          // XP banked toward the next level (0..prog_xp_next)
+.float prog_level;       // current level (>=1)
+.float prog_xp_next;     // XP required to reach the next level
+.float prog_kills;       // lifetime kills (persisted)
+.float prog_deaths;      // lifetime deaths (persisted)
+.float prog_headshots;   // lifetime headshot kills (persisted)
+.float prog_wins;        // lifetime round wins (persisted)
+.float prog_playtime;    // lifetime seconds played (persisted)
+.string prog_guid;       // identity key (engine GUID, or IP fallback; "" = unpersisted)
+.float prog_loaded;      // 1 once the async DB load has applied
+.float prog_pending_xp;  // XP earned during the load gap, folded in on load
+.float prog_match_xp;    // XP earned this session (drives the match-end summary)
+.float prog_dirty;       // 1 when there are unsaved changes (autosave gate)
+.float prog_last_save;   // server time of the last DB flush
+.float sv_xp;            // clientstat mirror (STAT_XP)
+.float sv_level;         // clientstat mirror (STAT_LEVEL)
+.float sv_xp_next;       // clientstat mirror (STAT_XP_NEXT)
+.float sv_sessionxp;     // clientstat mirror (STAT_PROG_SESSIONXP)
+
+// nettest bots (sv_bots.qc) — server-side AI fake clients (.is_bot is declared shared in sh_customdefs.qc)
+float bot_adding;          // TRUE only while spawnclient() runs in Bot_Add — is_bot isn't set yet but the
+                           // connect/spawn-time per-player unicasts already fire, so guard them on this too
+
+// TRUE only for a slot the engine will actually deliver a per-player (MSG_ONE)
+// message to.  clienttype()==CLIENTTYPE_REAL tests protocol!=SCP_BAD — the SAME
+// condition the engine's Write_GetClient() uses (it returns NULL for a bot slot,
+// which spams "Not a client" / "msg_entity: not a client").  This reads the
+// ENGINE truth, so it stays correct even when .is_bot desyncs — which it does on
+// a listen-server map change: the engine re-homes surviving bot slots and
+// ED_Clear wipes .is_bot to FALSE while the slot is still a SCP_BAD bot, leaving
+// a roster "player" with is_bot==FALSE that every !is_bot unicast then spams.
+float(entity p) SV_PlayerHasNetchan =
+{
+	return p && p.classname == "player" && !bot_adding && clienttype(p) == CLIENTTYPE_REAL;
+};
+.entity bot_enemy;         // current target
+.float  bot_enemy_time;    // last time the enemy was visible
+.vector bot_enemy_lastpos; // last-known enemy position
+.float  bot_repath_time;   // next allowed A* re-path
+.vector bot_aim;           // smoothed aim angles
+.vector bot_aimoff;        // slow human-like aim error offset (deg)
+.float  bot_aimoff_time;   // when to re-roll bot_aimoff
+.float  bot_fire_time;     // reaction gate before opening fire
+.float  bot_path_len;      // waypoints in this bot's path slice
+.float  bot_path_cur;      // cursor into the path slice
+.float  bot_goal_node;     // current roam goal node index
+.vector bot_lastpos;       // for stuck detection
+.float  bot_stuck_time;    // time of last meaningful movement
+.float  bot_strafe;        // -1/+1 strafe direction
+.float  bot_strafe_time;   // when to flip strafe
+.float  bot_los_lost_time; // time LOS to bot_enemy was first lost (0 = currently have LOS) — anti-flicker grace
+
+// IsBotEnemy is defined in sv_bots.qc (compiles after sv_weapons.qc); forward-declare
+// here so the wake-when-shot reaction in W_ApplyDamage (sv_weapons.qc) can call it.
+float(entity bot, entity t) IsBotEnemy;
+
+// nav/bot debug overlay (sv_bots.qc NavDbg_*) — one per-client SendEntity proxy that
+// streams the nav graph + per-bot state/path to that viewer (sv_nav_debug 1).
+.entity nav_debug_proxy;     // the proxy entity owned by this client
+.float  navdbg_cursor;       // on proxy: graph-stream cursor (nodes sent so far)
+.float  navdbg_bottime;      // on proxy: next allowed bot-state/path push
+.float  navdbg_build_serial; // on proxy: nav_build_serial last streamed (graph resend trigger)
+.float  bot_roam_time;     // when to pick a new roam goal
+.float  bot_state;         // debug: behaviour state 0 roam / 1 hunt / 2 engage
+.float  bot_burst_end;     // end time of the current fire BURST
+.float  bot_burst_cycle;   // end time of the burst+sidestep cycle (then start a new burst)
+.float  bot_fire_held;     // fire-button pulse state (toggle so semi-auto re-triggers)
+
 // Count of func_buyzone brushes on the current map (0 = buy anywhere fallback).
 // Reset in worldspawn before entities spawn; incremented by each func_buyzone.
 float buyzone_count;
@@ -364,6 +445,12 @@ void() RoundStart;                                 // sv_main.qc
 // Drift-trace ring buffer (sv_player.qc).
 void(float t_now, float msec, vector mv, float btn, float wep, vector org, vector vel) Drift_Append;
 void(string label) Drift_Dump;
+
+// Server-side killcam track (sv_killcam.qc, compiled after sv_weapons.qc which calls
+// SendTrack — hence these forward decls, like Lagcomp_TraceLine in sh_customdefs.qc).
+void() Killcam_SV_Init;
+void() Killcam_SV_RecordAll;
+void(entity attacker, entity victim) Killcam_SV_SendTrack;
 
 entity player_chain_head;
 .entity player_chain_next;

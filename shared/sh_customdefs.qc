@@ -53,6 +53,13 @@ const float CSQC_ENT_PHYS_PROP      = 18; // ODE filing cabinet — CSQC-network
                                           // custom QC pmove → fall-through/driftlock without this).
                                           // 18 is permanently safe: PM_CSQC_PROXY_VERSION (19) only
                                           // ever bumps UPWARD, never down onto 18.
+const float CSQC_ENT_NAV_DEBUG      = 40; // bot/nav debug overlay proxy (per-client SendEntity).
+                                          // High id: clear of the 2-18 ids AND PM_CSQC_PROXY_VERSION's
+                                          // upward growth, so the next proxy bump can't collide.
+// nav-debug proxy SendFlags sections (sv_bots.qc NavDbg_SendEntity <-> cl_navdebug.qc NavDebug_EntUpdate)
+const float NAVDBG_SF_GRAPH = 1;  // static nav graph chunk (node positions + links)
+const float NAVDBG_SF_BOTS  = 2;  // per-bot live state (origin/state/enemy/weapon/mag)
+const float NAVDBG_SF_PATHS = 4;  // per-bot A* path: node indices + cursor + roam goal
 
 // phys_files carry phase — the (formerly csolid 0/1) phase byte of phys_files_Send.
 // 0/1 keep their old csolid meaning so an in-flight snapshot during a hot-reload still
@@ -441,6 +448,11 @@ void(entity player) PM_SyncPredictionProxy;
 // declaration + writer is in cl_player.qc (parser populates it from
 // the VP_SF_IDENTITY_CL section).
 .float vis_weapon_id;
+// nettest killcam/spectate: remote weapon-anim state (networked via VP_SF_ANIM)
+// + the local-clock stamp of when the current weapon action began (viewmodel anim).
+.float vis_weaponstate;
+.float vis_wep_action;
+.float vis_wep_anim_start;
 
 // Forward decl — defined in client/cl_cameras.qc.
 entity(float required_flag) CSQC_GetPreviewCamera;
@@ -806,6 +818,19 @@ const float STAT_CAN_PLANT        = 59;
 // round now) and hides the round timer from the HUD until the next round.
 // Set server-side from find(world,"planted_c4"); 0 in every other gamemode.
 const float STAT_BOMB_PLANTED     = 60;
+
+// nettest progression spine (Part 1) — persistent XP / level, networked to the
+// owning client.  STAT_XP is XP banked into the current level (0..STAT_XP_NEXT).
+const float STAT_XP               = 61;
+const float STAT_LEVEL            = 62;
+const float STAT_XP_NEXT          = 63;
+const float STAT_PROG_SESSIONXP   = 64;   // XP earned this session (match-end summary)
+
+// Shared marker: 1 on a server-side AI bot (spawnclient).  Declared shared so
+// W_ShouldDeferToClaim (sh_weapon_standard.qc) can apply a bot's hitscan damage
+// server-side instead of deferring to a client hitclaim that never comes.
+// Always 0 on the client (not networked).
+.float is_bot;
 
 // Gamemode constants
 const float GAMEMODE_TDM         = 0;

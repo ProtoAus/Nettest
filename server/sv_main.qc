@@ -319,6 +319,33 @@ void() RoundStart =
 	Defuse_AssignBombAtRoundStart();
 };
 
+// COD-style corpse despawn: SINK the body slowly into the ground over
+// mp_deadbody_sink_time seconds (re-networking the falling origin each tick like
+// VisProxy_CorpseSettleThink), then do the real removal.  ~64u clears the ~56u model
+// below the floor.  Reuses the settle-think's SendFlags|=VP_SF_POSE re-network pattern.
+void() VisProxy_CorpseSinkThink =
+{
+	if (self.classname != "player_visual_proxy")	// repurposed — remove safely
+	{
+		self.pvsflags = 0; self.think = SUB_Remove; self.nextthink = time + 0.1;
+		return;
+	}
+	float depth = cvar("mp_deadbody_sink_depth"); if (depth <= 0) depth = 64;
+	float stime = cvar("mp_deadbody_sink_time");  if (stime <= 0) stime = 1.0;
+	self.origin_z = self.origin_z - (depth / stime) * VISCORPSE_SETTLE_DT;
+	setorigin(self, self.origin);
+	self.SendFlags |= VP_SF_POSE;			// re-network the sinking origin
+
+	if (time >= self.vis_sink_endtime)		// sunk — now the NOREMOVE-safe removal
+	{
+		self.pvsflags  = 0;			// drop NOREMOVE so the remove networks
+		self.think     = SUB_Remove;
+		self.nextthink = time + 0.1;
+		return;
+	}
+	self.nextthink = time + VISCORPSE_SETTLE_DT;
+};
+
 // Retire a visual-proxy corpse so it disappears on ALL clients.  The corpse
 // carries PVSF_NOREMOVE (kept during the round so it doesn't blink when a
 // viewer briefly looks away), and the proxy's MODEL is rebuilt CSQC-side from
@@ -331,11 +358,30 @@ void() RoundStart =
 // out-of-PVS viewer culls it immediately, and an in-PVS viewer gets a proper
 // remove when SUB_Remove frees it next frame (deferred one tick so the
 // flag-clear is in effect before the edict is freed).
+//
+// COD-style polish: instead of an instant removal, kick off VisProxy_CorpseSinkThink
+// to slide the body into the ground first (NOREMOVE stays set DURING the sink so it
+// doesn't blink out for a viewer who looks away — it's cleared at the final removal
+// inside the sink think).  mp_deadbody_sink_time <= 0 keeps the old instant removal.
 void(entity corpse) VisProxy_RetireCorpse =
 {
-	corpse.pvsflags  = 0;          // drop PVSF_NOREMOVE so the remove networks
-	corpse.think     = SUB_Remove; // free next frame -> CSQC_Ent_Remove reaches clients
-	corpse.nextthink = time + 0.1;
+	if (corpse.vis_sinking)		// idempotent: a double-retire (RoundRestart racing
+		return;			// DetachAsCorpse) must not restart/double the sink
+
+	float stime = cvar("mp_deadbody_sink_time");
+	if (stime <= 0 || cvar("mp_deadbody_sink_depth") <= 0)
+	{
+		corpse.pvsflags  = 0;          // sink disabled — original instant removal
+		corpse.think     = SUB_Remove;
+		corpse.nextthink = time + 0.1;
+		return;
+	}
+
+	corpse.vis_sinking      = TRUE;
+	corpse.velocity         = '0 0 0';	// stop any in-progress settle drop (Part E)
+	corpse.vis_sink_endtime = time + stime;
+	corpse.think            = VisProxy_CorpseSinkThink;	// overrides the settle think if mid-fall
+	corpse.nextthink        = time + VISCORPSE_SETTLE_DT;
 };
 
 void() RoundRestart =
@@ -1050,7 +1096,7 @@ void() StartFrame =
 				}
 				ge_e = ge_e.player_chain_next;
 			}
-			bprint(PRINT_HIGH, "Gamemode changed — respawning all players.\n");
+			bprint(PRINT_HIGH, "Gamemode changed - respawning all players.\n");
 		}
 	}
 
@@ -1085,6 +1131,11 @@ void() StartFrame =
 	// Synthesize missed input ticks for low-cl_netfps players so other
 	// clients see them move smoothly instead of freeze-then-jump.
 	SV_RunCommandContinuation();
+
+	// nettest bots: advance the incremental nav-graph build (sv_navnodes.qc),
+	// then run the bot fill + per-bot AI (sv_bots.qc).
+	Nav_Tick();
+	Bot_RunFrame();
 
 	// Admin trigger: `sv_roundrestart 1` (or alias command
 	// `restartround`) queues a round restart after
@@ -1228,6 +1279,15 @@ void() StartFrame =
 			{
 				round_phase = ROUND_PHASE_MAP_END;
 				map_restart_time = time + cvar("mp_maprestartdelay");
+
+				// nettest progression: match-completion XP + force-save everyone
+				// (the autosave cadence may not have flushed recent gains).
+				for (e = world; (e = find(e, classname, "player")); )
+				{
+					if (e.player_team == TEAM_BLUE || e.player_team == TEAM_RED)
+						Prog_AwardXP(e, PROG_XP_MATCHEND, "matchend");
+					Prog_Save(e);
+				}
 			}
 			else
 			{
@@ -1307,12 +1367,12 @@ void() StartFrame =
 		}
 		e.sv_is_dead = e.is_dead;
 
-		e.round_timer_remaining = remaining;
-		e.sv_maptimeleft = map_remaining;
+		e.round_timer_remaining = floor(remaining);	// nettest: quantize to whole seconds (client renders floor MM:SS) so this global stat deltas once/sec to every client, not every tick
+		e.sv_maptimeleft = floor(map_remaining);	// nettest: ditto (debug MM:SS uses floor)
 		e.sv_roundnum = round_number;
 		e.sv_maxrounds = max_rounds;
 		e.sv_round_phase = round_phase;
-		e.sv_freeze_timeleft = (round_phase == ROUND_PHASE_FREEZE) ? max(0, freeze_end_time - time) : 0;
+		e.sv_freeze_timeleft = (round_phase == ROUND_PHASE_FREEZE) ? ceil(max(0, freeze_end_time - time)) : 0;	// nettest: quantize to whole seconds (client renders ceil) - delta once/sec to every client, not every tick
 		e.sv_gamemode = gamemode;
 		e.sv_winning_team = round_winning_team;
 		// Mirror the (auto-tied) sv_func_tickrate so CSQC prediction reads the
@@ -1329,6 +1389,19 @@ void() StartFrame =
 		// Defuse-only: 1 while the bomb is down, so the HUD hides the round
 		// timer (the round clock is suspended — see the timer-expiry guard).
 		e.sv_bomb_planted = (gamemode == GAMEMODE_DEFUSE && bomb_planted) ? 1 : 0;
+
+		// nettest progression: mirror XP/level to clientstats, accrue playtime,
+		// and flush a dirty player to the DB at most once per PROG_AUTOSAVE_SECS.
+		e.sv_xp         = e.prog_xp;
+		e.sv_level      = e.prog_level;
+		e.sv_xp_next    = e.prog_xp_next;
+		e.sv_sessionxp  = e.prog_match_xp;
+		e.prog_playtime = e.prog_playtime + frametime;
+		if (e.prog_dirty && (time - e.prog_last_save) > PROG_AUTOSAVE_SECS)
+		{
+			Prog_Save(e);
+			e.prog_last_save = time;
+		}
 		e = e.player_chain_next;
 	}
 
@@ -1341,6 +1414,7 @@ void() StartFrame =
 	// skeletal fields from the previous tick's PlayerPostThink are settled
 	// at this point.
 	Lagcomp_RecordAllAlive();
+	Killcam_SV_RecordAll();		// nettest: server-side killcam camera-track ring (sv_killcam.qc)
 
 	// sv_debug_hitboxes 2: continuously send all player hitbox states
 	if (cvar("sv_debug_hitboxes") == 2)
@@ -1387,6 +1461,7 @@ void() worldspawn =
 	// accumulates across a map (camera linked-list head, one-shot
 	// flags, cycling RNG state) needs an explicit clear here.
 	Camera_ResetState();
+	Nav_Reset();		// nettest bots: clear the nav graph before this map's info_node entities spawn
 
 	// Backdrop latch — the menu backdrop launchers (m_main / m_menu) set
 	// sv_backdrop_pending 1 immediately before `map <menumap>`. Consume it
@@ -1449,6 +1524,7 @@ void() worldspawn =
 	precache_sound("sounds/effects/zipup.wav");   // Kevlar/helmet buy confirm
 
 	Lagcomp_Init();
+	Killcam_SV_Init();		// nettest: reset the server killcam ring on (re)spawn of the server
 
 	clientstat(STAT_CROSSHAIR_BASESPREAD, EV_FLOAT,   sv_crosshair_basespread);
 	clientstat(STAT_CROSSHAIR_MOVESPREAD, EV_FLOAT,   sv_crosshair_movespread);
@@ -1481,6 +1557,13 @@ void() worldspawn =
 	// C4_TickDefuseInteraction on the active defuser — drives HUD_DrawDefuseBar.
 	// Without this registration the field never networks and the bar never shows.
 	clientstat(STAT_DEFUSE_PROGRESS, EV_FLOAT, defuse_progress_stat);
+
+	// nettest progression spine (Part 1): persistent XP / level + session XP.
+	clientstat(STAT_XP, EV_FLOAT, sv_xp);
+	clientstat(STAT_LEVEL, EV_FLOAT, sv_level);
+	clientstat(STAT_XP_NEXT, EV_FLOAT, sv_xp_next);
+	clientstat(STAT_PROG_SESSIONXP, EV_FLOAT, sv_sessionxp);
+	Prog_DBInit();	// open the sqlite player store + ensure schema (once)
 
 	// All custom cvars are registered from a single shared table —
 	// edit shared/sh_cvar_table.qc CVar_Init() to change defaults or

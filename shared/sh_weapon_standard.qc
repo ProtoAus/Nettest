@@ -603,6 +603,11 @@ float(entity attacker) W_ShouldDeferToClaim =
 {
     if (cvar("sv_trust_clienthits") < 1) return 0;
     if (!attacker || attacker.classname != "player") return 0;
+#ifdef SSQC
+    // Bots have no client to send a `cmd cs` hitclaim, so deferring would drop
+    // their damage entirely.  Always apply a bot's player-damage server-side.
+    if (attacker.is_bot) return 0;
+#endif
     // Default cl_predict_hits to ON when the userinfo key is missing
     // (legacy clients that haven't pushed it yet).
     string s = infokey(attacker, "cl_predict_hits");

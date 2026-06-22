@@ -542,38 +542,80 @@ void() CSQC_DrawTeamDebugServerPanels =
 	}
 };
 
+// nettest: reconstruct + show the spectated target's first-person viewmodel
+// (their gun, animated from the networked weapon state) while watching through
+// their eyes.  Used by live spectate; the killcam replay calls the builder directly.
+void() Spectate_AddViewmodel =
+{
+	if (spec_mode != SPEC_MODE_FIRSTPERSON || spec_target <= 0 || Spectate_InDeathCam())
+		return;
+	entity vp = Spectate_FindProxy(spec_target);	// the live body, not a lingering corpse
+	if (!vp || vp.classname != "player_visual_proxy" || vp.vis_is_dead)
+		return;
+	CSQC_AddRemoteViewmodel(vp.vis_weapon_id, vp.vis_weaponstate, vp.vis_wep_action, vp.vis_wep_anim_start);
+};
+
 void(float in_menu_backdrop) CSQC_UpdateViewSpectator =
 {
-	Spectate_CheckTargetAlive();
-	Spectate_UpdateCamera();
-	CSQC_EnvSound_UpdateListener();
+	// nettest killcam: while replaying, Killcam_Replay drives the camera + poses
+	// the recorded scene + renders the killer's viewmodel; skip the live spectate
+	// camera/extrapolation for the duration.
+	float kc = Killcam_Active();
+	if (kc)
+		kc = Killcam_Replay();
 
-	CSQC_SampleRemotePlayersForInterp();
-	CSQC_ExtrapolateRemotePlayers();
-	if (spec_mode == SPEC_MODE_FIRSTPERSON && spec_target > 0 && !Spectate_InDeathCam())
+	if (!kc)
 	{
-		setproperty(VF_VIEWENTITY, spec_target);
-		// Lock mouse — the target's view drives angles, the local mouse
-		// delta would just accumulate as phantom drift to be resolved on
-		// detach / freecam swap.
-		setsensitivityscaler(0);
+		Spectate_CheckTargetAlive();
+		Spectate_UpdateCamera();
+		CSQC_EnvSound_UpdateListener();
+
+		CSQC_SampleRemotePlayersForInterp();
+		CSQC_ExtrapolateRemotePlayers();
+		if (spec_mode == SPEC_MODE_FIRSTPERSON && spec_target > 0 && !Spectate_InDeathCam())
+		{
+			setproperty(VF_VIEWENTITY, spec_target);
+			// Lock mouse — the target's view drives angles, the local mouse
+			// delta would just accumulate as phantom drift to be resolved on
+			// detach / freecam swap.
+			setsensitivityscaler(0);
+		}
+		else
+		{
+			setproperty(VF_VIEWENTITY, 0);
+			setsensitivityscaler(1);
+		}
 	}
 	else
-	{
-		setproperty(VF_VIEWENTITY, 0);
-		setsensitivityscaler(1);
-	}
+		setsensitivityscaler(0);
+
 	addentities(MASK_ENGINE);
-	CSQC_DrawMuzzleFlash();
-	CSQC_DrawMuzzleFlashSprite();
-	CSQC_DrawMuzzleSmoke();
-	CSQC_Rope_Draw();
-	CSQC_ThrowTrail_Tick();
-	CSQC_C4_DrawLights();
-	CSQC_C4_DrawPlanterFlash();
-	CSQC_DrawMuzzleDebug();
-	CSQC_DrawImpactLights();
-	CSQC_ProcessPendingImpacts();
+	// nettest killcam slow-mo: while DEAD, keep recording the death AFTERMATH (your
+	// corpse's death anim) here — the alive-path Killcam_Record below never runs once
+	// you're spectating.  NOT gated on killcam_on: the killfeed (which sets killcam_on)
+	// can land AFTER the death registers, so we must start capturing from the real death
+	// S or the aftermath has an empty head.  Killcam_Record self-bounds it (kc_posed
+	// skips replayed frames; the S+window cap stops it), so it only grabs the LIVE death.
+	if (getstatf(STAT_IS_DEAD))
+		Killcam_Record();
+	if (!kc)
+	{
+		Spectate_AddViewmodel();	// nettest: the spectated player's animated viewmodel
+		// Live-player FX (muzzle flash/smoke, tracers/impacts, ropes, throw trails)
+		// are MASKED during the killcam replay so alive players outside the replay
+		// don't bleed their effects into the recorded scene.
+		CSQC_DrawMuzzleFlash();
+		CSQC_DrawMuzzleFlashSprite();
+		CSQC_DrawMuzzleSmoke();
+		CSQC_Rope_Draw();
+		CSQC_Rope_DrawRemotes();
+		CSQC_ThrowTrail_Tick();
+		CSQC_C4_DrawLights();
+		CSQC_C4_DrawPlanterFlash();
+		CSQC_DrawMuzzleDebug();
+		CSQC_DrawImpactLights();
+		CSQC_ProcessPendingImpacts();
+	}
 	CSQC_DrawDebugHitboxes();
 	CSQC_DrawDebugHitboxExpand();
 	CSQC_DrawDebugPhysProps();
@@ -588,6 +630,9 @@ void(float in_menu_backdrop) CSQC_UpdateViewSpectator =
 		float spec_prev_font = drawfont;
 		drawfont = hud_font;
 		Spectate_DrawHUD();
+		HUD_DrawSpectatorCrosshair();	// nettest: crosshair for first-person spectate
+		HUD_DrawKillcamCrosshair();	// nettest: crosshair for the killcam (killer's weapon)
+		Killcam_DrawHUD();	// nettest: KILLCAM / "killed by X" banner
 		HUD_DrawCenterMessage();
 		HUD_DrawRoundTimer();
 		HUD_DrawKillFeed();
@@ -807,6 +852,7 @@ void() CSQC_UpdateViewAliveScene =
 	CSQC_DrawMuzzleFlashSprite();
 	CSQC_DrawMuzzleSmoke();
 	CSQC_Rope_Draw();
+	CSQC_Rope_DrawRemotes();
 	CSQC_ThrowTrail_Tick();
 	CSQC_C4_DrawLights();
 	CSQC_C4_DrawPlanterFlash();
@@ -818,6 +864,7 @@ void() CSQC_UpdateViewAliveScene =
 	CSQC_DrawBloodDecals();
 	CSQC_Rain_Tick();
 	CSQC_DrawDebugImpacts();
+	NavDebug_DrawScene();	// nettest: bot nav-graph + links + enemy lines (server-gated on sv_nav_debug)
 	CSQC_DrawDebugHitboxes();
 	CSQC_DrawDebugHitboxExpand();
 	CSQC_DrawDebugPhysProps();
@@ -835,6 +882,7 @@ void() CSQC_UpdateViewAliveScene =
 	//does what you think it does
 	renderscene();
 	CSQC_DrawDebugImpactText();
+	NavDebug_DrawText();	// nettest: bot state labels (2D, after renderscene)
 };
 
 void(float in_menu_backdrop) CSQC_UpdateViewAliveHud =
@@ -947,6 +995,8 @@ void(float width, float height, float menushown) CSQC_UpdateView =
 
 	// --- Spectator / death cam ---
 	Spectate_UpdateState();
+	Killcam_DeathWatch();	// nettest: latch the REAL death time S (before any record/replay this frame)
+	Killcam_MaybeRestore();	// nettest: restore killcam-posed proxies every frame (alive or dead)
 	if (spike_debug)
 		spike_t_state = gettime(0);
 
@@ -991,6 +1041,10 @@ void(float width, float height, float menushown) CSQC_UpdateView =
 	if (spike_debug)
 		spike_t_env = gettime(0);
 	CSQC_UpdateViewAliveScene();
+	// nettest killcam: record AFTER the scene's predraw so the proxy anim clocks
+	// (vis_anim_*_time) are this frame's freshly-computed values, not last frame's
+	// stale ones — otherwise the buffered victim body plays back frozen.
+	Killcam_Record();
 	if (spike_debug)
 		spike_t_scene = gettime(0);
 	CSQC_UpdateViewAliveHud(in_menu_backdrop);
@@ -1017,6 +1071,15 @@ CSQC_Event_Sound =
 {
     float ping_est;
     float age;
+
+    // During the killcam, MUTE all LIVE weapon/auto sounds — they play in real time
+    // (the killer is still alive shooting), DOUBLING the replayed shot.  Do NOT key
+    // on `entnum != player_localentnum`: a TRUE spectator auto-tracking the killer
+    // (Elimination) has player_localentnum == the killer, so that term SKIPPED the
+    // mute — the persistent double.  The killcam's own replay sound is localsound()
+    // (never routed through here), so it still plays = exactly one sound per shot.
+    if (Killcam_Active() && (channel == CHAN_WEAPON || channel == CHAN_AUTO))
+        return TRUE;
 
     if (entnum != player_localentnum || player_localentnum <= 0)
         return FALSE;
@@ -1361,7 +1424,7 @@ float(float evtype, float scanx, float chary, float devid) CSQC_InputEvent =
 // POINTSOUND is a string → rough average. Use for the debug bandwidth HUD.
 float(float ev) _net_event_bytes =
 {
-	if (ev == CSQC_EVENT_IMPACT)          return 21;  // svc+ev+pos[3 coord]+normal[3 byte]+mat byte+target entnum (short)+shooter entnum (byte)
+	if (ev == CSQC_EVENT_IMPACT)          return 22;  // svc+ev+pos[3 coord]+normal[3 byte]+mat byte+target entnum (short)+shooter entnum (byte)+is_entry (byte)
 	if (ev == CSQC_EVENT_SHELL)           return 39;
 	if (ev == CSQC_EVENT_MAGDROP)         return 27;
 	if (ev == CSQC_EVENT_POINTSOUND)      return 34;
@@ -1402,6 +1465,7 @@ float(float ev) _net_event_bytes =
 	if (ev == CSQC_EVENT_RADIO_CALL)             return 34;  // 2 svc hdr + ~32 voice-path string (variable)
 	if (ev == CSQC_EVENT_KILL_REWARD)            return 5;   // 2 svc hdr + 2 short reward + 1 headshot byte
 	if (ev == CSQC_EVENT_ROUND_REWARD)           return 5;   // 2 svc hdr + 2 short amount + 1 win byte
+	if (ev == CSQC_EVENT_KILLCAM_TRACK)          return 860;  // 4 hdr + ~66 frames × 13 bytes (one-shot per death, variable)
 	return 2;
 };
 
@@ -1421,6 +1485,9 @@ void() CSQC_Parse_Event =
 	switch(first) {
 		case CSQC_EVENT_KILLFEED:
 			KillFeed_Parse();
+			break;
+		case CSQC_EVENT_KILLCAM_TRACK:
+			Killcam_SV_ParseTrack();	// server-side killcam: the killer's recorded camera track
 			break;
 		case CSQC_EVENT_IMPACT:
 		{
@@ -1450,7 +1517,10 @@ void() CSQC_Parse_Event =
 			// 0 / out-of-range falls back to no-tracer (CSQC_BulletImpactRemote
 			// skips the spawn when it can't resolve the shooter).
 			float rem_shooter = readbyte();
-			CSQC_BulletImpactRemote(pos, normal, rem_mat, rem_target, rem_shooter);
+			// is_entry: 1 = entry/primary impact (draw the tracer), 0 = penetration
+			// EXIT (decal only — drawing it too gave the "two tracer lines" double).
+			float rem_entry = readbyte();
+			CSQC_BulletImpactRemote(pos, normal, rem_mat, rem_target, rem_shooter, rem_entry);
 			break;
 		}
 		case CSQC_EVENT_SHELL:
@@ -1460,7 +1530,8 @@ void() CSQC_Parse_Event =
 			vector sh_vel = readvector();
 			vector sh_avel = readvector();
 			string sh_mdl = CSQC_ShellModelForType(sh_type);
-			CSQC_SpawnRemoteCasing(sh_mdl, sh_org, sh_vel, sh_avel);
+			if (!Killcam_Active())	// D: live casings must not bleed into the killcam replay
+				CSQC_SpawnRemoteCasing(sh_mdl, sh_org, sh_vel, sh_avel);
 			break;
 		}
 		case CSQC_EVENT_MAGDROP:
@@ -1469,7 +1540,8 @@ void() CSQC_Parse_Event =
 			vector mg_org = readvector();
 			vector mg_vel = readvector();
 			string mg_mdl = CSQC_MagModelForType(mg_type);
-			CSQC_SpawnRemoteMag(mg_mdl, mg_org, mg_vel, '0 180 0');
+			if (!Killcam_Active())	// D: no live mag drops during the killcam replay
+				CSQC_SpawnRemoteMag(mg_mdl, mg_org, mg_vel, '0 180 0');
 			break;
 		}
 		case CSQC_EVENT_POINTSOUND:
@@ -1479,7 +1551,8 @@ void() CSQC_Parse_Event =
 			snd_pos_y = readcoord();
 			snd_pos_z = readcoord();
 			string snd_path = readstring();
-			pointsound(snd_pos, snd_path, 1, ATTN_NORM);
+			if (!Killcam_Active())	// D: mute live world sounds so only the replay plays
+				pointsound(snd_pos, snd_path, 1, ATTN_NORM);
 			break;
 		}
 		case CSQC_EVENT_RADIO_CALL:
@@ -1562,7 +1635,8 @@ void() CSQC_Parse_Event =
 			vector seye;
 			seye_x = readcoord(); seye_y = readcoord(); seye_z = readcoord();
 			string sname = readstring();
-			CSQC_SpawnSprayDecal(sid, spos, snrm, seye, sname);
+			if (!Killcam_Active())	// D: no live sprays during the killcam replay
+				CSQC_SpawnSprayDecal(sid, spos, snrm, seye, sname);
 			break;
 		}
 		case CSQC_EVENT_SPRAY_REMOVE:
@@ -1954,9 +2028,9 @@ void() CSQC_Parse_Event =
 			gb_throw_dir_y = (readbyte() - 127) * (1.0 / 127.0);
 			gb_throw_dir_z = (readbyte() - 127) * (1.0 / 127.0);
 			float gb_throw_force = readbyte();
-			if (gb_exclude == 0 || gb_exclude != player_localentnum)
+			if ((gb_exclude == 0 || gb_exclude != player_localentnum) && !Killcam_Active())
 				CSQC_SpawnGlassGibs(gb_mins, gb_maxs, gb_count, gb_dmg, 0,
-				                    gb_throw_mode, gb_throw_dir, gb_throw_force);
+				                    gb_throw_mode, gb_throw_dir, gb_throw_force);	// D: no live gibs in the killcam
 			break;
 		}
 		case CSQC_EVENT_PLAYER_GIBS:
@@ -1991,7 +2065,13 @@ void() CSQC_Parse_Event =
 						pg_skip = 1;
 				}
 			}
-			if (!pg_skip)
+			// No live player gibs during the killcam.  ALSO suppress the LOCAL victim's
+			// live head-gibs (cl_killcam replays them at the kill moment) so they aren't
+			// already lying on the ground during the rewind.  pg_target_slot is a 1-based
+			// num_for_edict (server sv_weapons.qc), so compare player_localentnum.  When
+			// cl_killcam is off the clause is false -> live gibs spawn normally.
+			float pg_local_kc = (cvar("cl_killcam") && pg_target_slot == player_localentnum);
+			if (!pg_skip && !Killcam_Active() && !pg_local_kc)
 				CSQC_SpawnPlayerGibs(pg_pos, pg_dir, pg_count, pg_dmg);
 			break;
 		}
@@ -2017,10 +2097,10 @@ void() CSQC_Parse_Event =
 			db_throw_dir_y = (readbyte() - 127) * (1.0 / 127.0);
 			db_throw_dir_z = (readbyte() - 127) * (1.0 / 127.0);
 			float db_throw_force = readbyte();
-			if (db_exclude == 0 || db_exclude != player_localentnum)
+			if ((db_exclude == 0 || db_exclude != player_localentnum) && !Killcam_Active())
 				CSQC_SpawnDebrisGibs(db_mins, db_maxs, db_style, db_count,
 				                     db_dmg, db_idx, db_alpha, 0,
-				                     db_throw_mode, db_throw_dir, db_throw_force);
+				                     db_throw_mode, db_throw_dir, db_throw_force);	// D: no live debris in the killcam
 			break;
 		}
 		case CSQC_EVENT_WEAPON_PICKUP_SOUND:

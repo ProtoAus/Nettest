@@ -347,3 +347,73 @@ void(float zoomstage) HUD_DrawCrosshair =
     sz_z = 0;
     drawfill(pos, sz, colour, xhair_alpha, 0);
 };
+
+// Spectator crosshair.  The live HUD_DrawCrosshair can't run while dead (it keys
+// off predicted_player + a cache only populated in the alive HUD), so draw a
+// static crosshair driven by the SPECTATED player's weapon.  Scoped weapons
+// (snipers) correctly show none via Weapon_HasCrosshair.  Called from the
+// spectator HUD pass (cl_main.qc).  Compiled after cl_spectate + cl_killcam, so
+// spec_*/Spectate_*/Killcam_Active are all visible here.
+void() HUD_DrawSpectatorCrosshair =
+{
+    if (!cvar("cl_crosshair"))
+        return;
+    if (spec_target < 1 || spec_mode != SPEC_MODE_FIRSTPERSON)
+        return;
+    if (Spectate_InDeathCam() || Killcam_Active())
+        return;
+
+    entity vp = Spectate_FindProxy(spec_target);	// the live body, not a lingering corpse
+    if (!vp || vp.vis_is_dead || !Weapon_HasCrosshair(vp.vis_weapon_id))
+        return;
+
+    float length    = cvar("cl_crosshairlength");
+    float thickness = cvar("cl_crosshairthickness");
+    float gap       = cvar("cl_crosshairgap");
+    if (length    <= 0) length    = HUD_CROSSHAIR_DEFAULT_LENGTH;
+    if (thickness <= 0) thickness = HUD_CROSSHAIR_DEFAULT_THICKNESS;
+    if (gap        < 0) gap       = HUD_CROSSHAIR_DEFAULT_GAP;
+    length    = bound(1, length, 64);
+    thickness = bound(0.5, thickness * 0.5, 8);
+    gap       = bound(0, gap, 64);
+
+    vector colour = HUD_GetCrosshairColour();
+    float a = 0.9;
+    float cx = g_width * 0.5, cy = g_height * 0.5;
+    vector pos, sz;
+
+    pos = [cx - thickness * 0.5, cy - gap - length, 0]; sz = [thickness, length, 0]; drawfill(pos, sz, colour, a, 0);
+    pos = [cx - thickness * 0.5, cy + gap, 0];          sz = [thickness, length, 0]; drawfill(pos, sz, colour, a, 0);
+    pos = [cx - gap - length, cy - thickness * 0.5, 0]; sz = [length, thickness, 0]; drawfill(pos, sz, colour, a, 0);
+    pos = [cx + gap, cy - thickness * 0.5, 0];          sz = [length, thickness, 0]; drawfill(pos, sz, colour, a, 0);
+};
+
+// Killcam crosshair — HUD_DrawSpectatorCrosshair bails on Killcam_Active() + reads
+// spec_target, so draw a parallel one centred for the KILLER's weapon (the global
+// kc_replay_killer_wepid, set in Killcam_Replay).  Called from the killcam HUD path.
+void() HUD_DrawKillcamCrosshair =
+{
+    if (!cvar("cl_crosshair") || !Killcam_Active())
+        return;
+    if (!Weapon_HasCrosshair(kc_replay_killer_wepid))
+        return;
+
+    float length    = cvar("cl_crosshairlength");
+    float thickness = cvar("cl_crosshairthickness");
+    float gap       = cvar("cl_crosshairgap");
+    if (length    <= 0) length    = HUD_CROSSHAIR_DEFAULT_LENGTH;
+    if (thickness <= 0) thickness = HUD_CROSSHAIR_DEFAULT_THICKNESS;
+    if (gap        < 0) gap       = HUD_CROSSHAIR_DEFAULT_GAP;
+    length    = bound(1, length, 64);
+    thickness = bound(0.5, thickness * 0.5, 8);
+    gap       = bound(0, gap, 64);
+
+    vector colour = HUD_GetCrosshairColour();
+    float a = 0.9;
+    float cx = g_width * 0.5, cy = g_height * 0.5;
+    vector pos, sz;
+    pos = [cx - thickness * 0.5, cy - gap - length, 0]; sz = [thickness, length, 0]; drawfill(pos, sz, colour, a, 0);
+    pos = [cx - thickness * 0.5, cy + gap, 0];          sz = [thickness, length, 0]; drawfill(pos, sz, colour, a, 0);
+    pos = [cx - gap - length, cy - thickness * 0.5, 0]; sz = [length, thickness, 0]; drawfill(pos, sz, colour, a, 0);
+    pos = [cx + gap, cy - thickness * 0.5, 0];          sz = [length, thickness, 0]; drawfill(pos, sz, colour, a, 0);
+};

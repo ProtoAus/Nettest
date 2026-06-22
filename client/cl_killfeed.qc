@@ -158,9 +158,45 @@ void KillFeed_Parse()
     // (matters only for suicide: atk == vic == local → treat as death).
     float highlight = KILLFEED_HL_NONE;
     if (vic_slot == player_localnum)
+    {
         highlight = KILLFEED_HL_YOUR_DEATH;
+        // nettest killcam: replay this death from the killer's POV (weapon kills
+        // only — suicide / fall have no valid killer).
+        if (cause == KILL_CAUSE_WEAPON || cause == KILL_CAUSE_FRIENDLYFIRE)
+            Killcam_Begin(atk_slot + 1, atk_name, headshot);
+        else
+            Killcam_End();
+    }
     else if (atk_slot == player_localnum && atk_slot != vic_slot)
         highlight = KILLFEED_HL_YOUR_KILL;
+
+    // --- PVS-independent corpse death latch --------------------------------
+    // A bot/player that dies OUTSIDE this viewer's PVS never receives the
+    // corpse proxy's single (PVS-gated, PVSF_NOREMOVE -> NORMALPVS) death
+    // snapshot, so on the client that proxy stays cached ALIVE: vis_is_dead==0,
+    // never freezes its death pose, and gets dragged to the respawned body via
+    // the shared vis_owner_entnum interp ring (extrap loop) — and Spectate_FindProxy
+    // can pick the corpse over the live body. The killfeed is multicast(MULTICAST_ALL)
+    // (no PVS gate), so latch the proxy dead here. Idempotent with the in-PVS death
+    // path (which already set vis_is_dead via the proxy's IDENTITY section); mirrors
+    // the alive->dead snap at cl_player.qc:4550-4558.
+    entity vp;
+    for (vp = findchain(classname, "player_visual_proxy"); vp; vp = vp.chain)
+    {
+        if (vp.vis_owner_entnum != vic_slot + 1)
+            continue;
+        if (vp.vis_is_dead)
+            continue;                      // already latched (in-PVS death) — don't restart anim
+        vp.vis_is_dead        = 1;
+        vp.vis_server_is_dead = 1;         // SOLID_NOT gate (cl_player.qc:4819)
+        if (vp.vis_anim_bottom < CSANIM_DEATH1 || vp.vis_anim_bottom > CSANIM_DIE_FORWARD)
+        {
+            vp.vis_anim_bottom      = CSANIM_DEATH1;   // generic death pose (real dir unknown offscreen)
+            vp.vis_anim_top         = CSANIM_DEATH1;
+            vp.vis_anim_bottom_time = 0;
+            vp.vis_anim_top_time    = 0;
+        }
+    }
 
     KillFeed_Add(atk_name, atk_col, connector, vic_name, vic_col, suffix, highlight);
 }

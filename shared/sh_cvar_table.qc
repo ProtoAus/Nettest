@@ -188,6 +188,28 @@ void() CVar_Init =
 {
     g_cvar_count = 0;
 
+    // ---------- Bots / Navigation ----------
+    CVar_Add("Bots", "sv_bot_minplayers", "0",  CVAR_SIDE_SV);  // fill total players up to N with bots (0 = off)
+    CVar_Add("Bots", "sv_bot_add",        "0",  CVAR_SIDE_SV);  // momentary: add this many bots, then resets to 0
+    CVar_Add("Bots", "sv_bot_kick",       "0",  CVAR_SIDE_SV);  // momentary: kick this many bots, then resets to 0
+    CVar_Add("Bots", "sv_bot_skill",      "50", CVAR_SIDE_SV);  // 0-100: reaction time + aim turn-rate
+    CVar_Add("Bots", "sv_bot_fov",        "150",CVAR_SIDE_SV);  // frontal ACQUISITION cone, full angle deg (<=0 or >=360 = 360/off); tracking stays 360
+    CVar_Add("Bots", "sv_bot_los_grace",  "0.35",CVAR_SIDE_SV); // keep engaging this long (s) after a momentary LOS break (anti-flicker)
+    CVar_Add("Bots", "sv_bot_target_margin","0.85",CVAR_SIDE_SV);// only swap to a new enemy if it is <this fraction of the current target's distance
+    CVar_Add("Bots", "sv_bot_debug",      "0",  CVAR_SIDE_SV);  // developer: log bot fill/activity
+    CVar_Add("Bots", "sv_nav_gridstep",   "96", CVAR_SIDE_SV);  // auto-grid node spacing (units)
+    CVar_Add("Bots", "sv_nav_debug",      "0",  CVAR_SIDE_SV);  // stream nav graph + bot state to clients (debug draw)
+    CVar_Add("Client", "cl_killcam",      "1",  CVAR_SIDE_CL);  // rewind-replay killcam on death
+    CVar_Add("Client", "cl_killcam_lookback", "2.0", CVAR_SIDE_CL); // seconds rewound before the kill
+    CVar_Add("Client", "cl_killcam_duration", "3.5", CVAR_SIDE_CL); // total killcam length (seconds)
+    CVar_Add("Client", "cl_killcam_delay",    "1.5", CVAR_SIDE_CL); // third-person death cam seconds before the killcam
+    CVar_Add("Client", "cl_killcam_slowmo",   "0.4", CVAR_SIDE_CL); // slow-mo aftermath PAST the kill (0 = off, lower = slower)
+    CVar_Add("Client", "cl_killcam_aftermath","1.2", CVAR_SIDE_CL); // seconds of post-kill death anim to replay in slow-mo
+    CVar_Add("Client", "cl_killcam_tickrate", "64",  CVAR_SIDE_CL); // killcam record/replay sample rate (Hz, 10..60)
+    CVar_Add("Client", "cl_killcam_fade",     "1",   CVAR_SIDE_CL); // killcam cinematic fade in/out
+    CVar_Add("Client", "cl_killcam_scanlines","1",   CVAR_SIDE_CL); // killcam CRT scanline overlay
+    CVar_Add("Client", "cl_killcam_debug",    "0",   CVAR_SIDE_CL); // killcam on-screen readout: which camera source (green SERVER TRACK = server killcam filling an out-of-PVS gap) + server frame count
+
     // ---------- Engine ----------
     // FTE pre-registers these — registercvar() here is a harmless
     // re-register so menus can read defaults via the manifest and so
@@ -1423,6 +1445,9 @@ void() CVar_Init =
     CVar_AddUI("Multiplayer", "mp_deadbodies",        "1",  CVAR_SIDE_SV,
         CVAR_UI_SCALAR, CVAR_TAB_MULTI, "",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 8);
+    CVar_Add("Multiplayer", "mp_deadbody_sink_depth", "64",  CVAR_SIDE_SV); // COD despawn: units a corpse sinks into the ground
+    CVar_Add("Multiplayer", "mp_deadbody_sink_time",  "1.0", CVAR_SIDE_SV); // seconds the sink takes (0 = instant removal)
+    CVar_Add("Multiplayer", "sv_killcam",             "1",   CVAR_SIDE_SV); // server records every player's camera track + unicasts the killer's to the victim on death (fills the killcam's out-of-PVS approach gap; 0 = client-buffer killcam only)
     // Server-console trigger cvars — set to non-zero from the server
     // console (or via rcon) to invoke a one-shot cleanup pass.  The
     // server StartFrame (sv_main.qc) detects the non-zero value, runs
@@ -1482,7 +1507,7 @@ void() CVar_Init =
     CVar_AddUI("Multiplayer", "mp_dropweapons",       "2",  CVAR_SIDE_SV,
         CVAR_UI_SCALAR, CVAR_TAB_MULTI, "",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 2);
-    CVar_AddUI("Multiplayer", "mp_respawndelay",      "3",  CVAR_SIDE_SV,
+    CVar_AddUI("Multiplayer", "mp_respawndelay",      "7",  CVAR_SIDE_SV,
         CVAR_UI_SCALAR, CVAR_TAB_MULTI | CVAR_TAB_CREATE_GAME, "",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 1, 30);
     CVar_AddUI("Multiplayer", "mp_roundrestartdelay", "5",  CVAR_SIDE_SV,
@@ -2052,6 +2077,13 @@ void() CVar_Init =
     // the debug-UI builder runs (so `+set sv_debug_hitclaim 1` on
     // the command line works).
     CVar_Add("Server", "sv_debug_hitclaim",            "0", CVAR_SIDE_SV);
+    // Per-client flood cap (msgs/sec) for the hit-reporting stringcmds
+    // (hitclaim/breakclaim/paintprojhit/snowprojhit/cs).  The engine has no
+    // stringcmd flood protection, so this bounds spam toward a reliable-backbuf
+    // overflow.  60 is well above the ~26-30/s legit peak (a `cs` per shot + a
+    // `hitclaim` per hit on a sustained-fire SMG); 0 disables.  See
+    // SV_ClaimFloodOK in sv_player.qc.
+    CVar_Add("Server", "sv_claim_flood_max",           "60", CVAR_SIDE_SV);
     CVar_AddUI("Server debug", "sv_debug_hitclaim",     "0", CVAR_SIDE_SV,
         CVAR_UI_TOGGLE, CVAR_TAB_DEBUG, "", 0, CVAR_ENUM_NONE, 0, 0);
     CVar_AddUI("Server debug", "sv_debug_lagcomp",      "0", CVAR_SIDE_SV,

@@ -1199,8 +1199,15 @@ void(vector start_pos, vector end_pos) CSQC_SpawnTracer;
 // position.  Not used for any gameplay decision — purely a visual
 // anchor.  0 (or a slot we can't resolve) skips the tracer, all
 // other effects still play normally.
-void(vector pos, vector normal, float mat, entity target, float shooter_entnum) CSQC_BulletImpactRemote =
+float() Killcam_Active;	// cl_killcam.qc (compiled later) — mask remote FX during a replay
+vector(float weapon_id) CSQC_WeaponMuzzleOffsetVec;	// cl_weapons.qc (compiled later)
+float csqc_remote_muz_seq;	// decrementing unique action-id for remote muzzle-flash dedup
+
+void(vector pos, vector normal, float mat, entity target, float shooter_entnum, float is_entry) CSQC_BulletImpactRemote =
 {
+    if (Killcam_Active())	// don't bleed live-player impact/tracer FX into the killcam
+        return;
+
     // Check slightly into the surface to detect sky
     if (pointcontents(pos - normal * 2) == CONTENT_SKY)
         return;
@@ -1225,11 +1232,58 @@ void(vector pos, vector normal, float mat, entity target, float shooter_entnum) 
     float has_shooter = 0;
     if (shooter_entnum > 0 && shooter_entnum != player_localentnum)
     {
-        entity shooter = findfloat(world, entnum, shooter_entnum);
+        // Bots / remote players exist on the client only as a player_visual_proxy
+        // (keyed by vis_owner_entnum, NOT .entnum), so the live-entity lookup missed
+        // them and no tracer drew for a spectator.  Resolve the proxy first — but a
+        // dead player's CORPSE proxy shares vis_owner_entnum with their RESPAWNED
+        // proxy, so a bare findfloat can return the corpse and anchor the tracer at
+        // the death-spot ("across the map").  Walk the chain and take the LIVE one.
+        // (Gate on vis_is_dead — vis_is_corpse is SSQC-only, always 0 in CSQC.  Same
+        // precedent as the extrap/killcam/lookatname owner-keyed lookups.)
+        entity shooter = world;
+        entity sp;
+        for (sp = findchain(classname, "player_visual_proxy"); sp; sp = sp.chain)
+        {
+            if (sp.vis_owner_entnum != shooter_entnum || sp.vis_is_dead)
+                continue;
+            shooter = sp;
+            break;
+        }
         if (shooter && shooter != world)
         {
-            shooter_eye = shooter.origin + shooter.view_ofs;
-            has_shooter = 1;
+            float eh = PM_VIEW_OFS_z; if (eh <= 0) eh = 22;
+            // Start the tracer at the shooter's actual per-weapon MUZZLE (the offset
+            // configured for that gun) instead of a generic chest point — applied in
+            // the shooter's aim basis (pitch+yaw, from vis_pitch + vis_aim_yaw, the
+            // CLEAN aim with no leg-twist).  Bone-attached weapons (no scalar offset)
+            // fall back to the generic gun-line.
+            makevectors([shooter.vis_pitch, shooter.vis_aim_yaw, 0]);
+            vector mo = CSQC_WeaponMuzzleOffsetVec(shooter.vis_weapon_id);
+            if (mo != '0 0 0')
+                shooter_eye = shooter.origin + [0, 0, eh] + v_forward * mo_x + v_right * mo_y - v_up * mo_z;
+            else
+                shooter_eye = shooter.origin + [0, 0, eh - 10] + v_forward * 14 + v_right * 5;
+            // Muzzle FLASH for remote shots while DEAD/spectating (no local gun to
+            // clobber the shared sprite state; a unique decrementing action-id dodges
+            // the dedup).  STAT_IS_DEAD avoids needing spec_target (declared later).
+            if (getstatf(STAT_IS_DEAD))
+            {
+                csqc_remote_muz_seq = csqc_remote_muz_seq - 1;
+                CSQC_MuzzleFlashAtWorld(shooter_eye, csqc_remote_muz_seq);
+            }
+        }
+        else
+        {
+            shooter = findfloat(world, entnum, shooter_entnum);
+            if (shooter && shooter != world)
+            {
+                makevectors([0, shooter.angles_y, 0]);
+                shooter_eye = shooter.origin + shooter.view_ofs - '0 0 10' + v_forward * 14 + v_right * 5;
+            }
+        }
+        if (shooter && shooter != world && is_entry)	// penetration EXIT (is_entry=0): decal
+        {						// only, NO tracer (entry drew it) + no
+            has_shooter = 1;				// travel delay so the exit decal is instant
             CSQC_SpawnTracer(shooter_eye, pos);
         }
     }
@@ -1243,6 +1297,9 @@ void(vector pos, vector normal, float mat, entity target, float shooter_entnum) 
 
     // mat = server-classified material (glass/metal/wood — accurate).  action -1
     // = no per-shot debris cap (each remote impact is its own networked event).
-    // play_ric 1 (remote always pings, generic ric).
-    CSQC_EnqueueImpact(pos, normal, mat, 0, -1, target, 0, 1, arrival);
+    // play_ric = is_entry: the penetration EXIT (is_entry=0) still spawns its decal/
+    // particles but plays NO ricochet ping — the entry already pinged, and a 2nd ping
+    // was the "doubled sound" (a pointsound, so the CHAN_WEAPON mute couldn't catch it,
+    // and it bleeds into the death-cam delay where Killcam_Active() is false).
+    CSQC_EnqueueImpact(pos, normal, mat, 0, -1, target, 0, is_entry, arrival);
 };

@@ -857,7 +857,7 @@ void(vector pos) W_ImpactEffect =
     entity p = player_chain_head;
     while (p)
     {
-        if (p != self)
+        if (p != self && SV_PlayerHasNetchan(p) && checkpvs(pos, p))   // nettest: PVS-cull + skip bots (no netchan) - only players who can see the impact need the ric/decal/tracer (was sent to ALL players)
         {
             msg_entity = p;
             WriteByte(MSG_ONE, SVC_CGAMEPACKET);
@@ -880,6 +880,7 @@ void(vector pos) W_ImpactEffect =
             // bullet tracer's start at the shooter's eye position.
             // Players never exceed maxclients so a byte is enough.
             WriteByte(MSG_ONE, num_for_edict(self));
+            WriteByte(MSG_ONE, 1);   // is_entry=1: the primary/entry impact draws the tracer
         }
         p = p.player_chain_next;
     }
@@ -901,7 +902,7 @@ void(vector pos, vector normal) W_ImpactEffectAll =
     entity p = player_chain_head;
     while (p)
     {
-        if (p != self)
+        if (p != self && SV_PlayerHasNetchan(p) && checkpvs(pos, p))   // nettest: PVS-cull + skip bots (no netchan) - only players who can see the impact need the ric/decal/tracer (was sent to ALL players)
         {
             msg_entity = p;
             WriteByte(MSG_ONE, SVC_CGAMEPACKET);
@@ -915,6 +916,8 @@ void(vector pos, vector normal) W_ImpactEffectAll =
             WriteByte(MSG_ONE, mat);
             WriteShort(MSG_ONE, num_for_edict(trace_ent));   // target entnum for decal attach
             WriteByte(MSG_ONE, num_for_edict(self));         // shooter entnum for tracer start
+            WriteByte(MSG_ONE, 0);   // is_entry=0: penetration EXIT — decal only, NO tracer (the
+                                     // entry already drew it; an exit tracer = the doubled line)
         }
         p = p.player_chain_next;
     }
@@ -934,7 +937,7 @@ void(vector pos, vector normal, float mat) W_ImpactEffectAllMat =
     entity p = player_chain_head;
     while (p)
     {
-        if (p != self)
+        if (p != self && SV_PlayerHasNetchan(p) && checkpvs(pos, p))   // nettest: PVS-cull + skip bots (no netchan) - only players who can see the impact need the ric/decal/tracer (was sent to ALL players)
         {
             msg_entity = p;
             WriteByte(MSG_ONE, SVC_CGAMEPACKET);
@@ -948,6 +951,7 @@ void(vector pos, vector normal, float mat) W_ImpactEffectAllMat =
             WriteByte(MSG_ONE, mat);
             WriteShort(MSG_ONE, num_for_edict(trace_ent));   // target entnum for decal attach
             WriteByte(MSG_ONE, num_for_edict(self));         // shooter entnum for tracer start
+            WriteByte(MSG_ONE, 1);   // is_entry=1: explicit-material primary hit (player/flesh) — tracer
         }
         p = p.player_chain_next;
     }
@@ -1004,7 +1008,7 @@ void(float shell_type, vector origin_offset, vector base_vel, vector base_avel) 
     entity p = player_chain_head;
     while (p)
     {
-        if (p != self)
+        if (p != self && SV_PlayerHasNetchan(p) && checkpvs(org, p))   // nettest: PVS-cull + skip bots - only players who can see the shooter need the casing eject (was sent to ALL players)
         {
             msg_entity = p;
             WriteByte(MSG_ONE, SVC_CGAMEPACKET);
@@ -1046,7 +1050,7 @@ void(float mag_type, vector origin_offset, vector base_vel) W_MagDropEffect =
     entity p = player_chain_head;
     while (p)
     {
-        if (p != self)
+        if (p != self && SV_PlayerHasNetchan(p) && checkpvs(org, p))   // nettest: PVS-cull + skip bots - only players who can see the reload need the mag drop (was sent to ALL players)
         {
             msg_entity = p;
             WriteByte(MSG_ONE, SVC_CGAMEPACKET);
@@ -1113,6 +1117,7 @@ void(entity attacker, entity victim) PlayerKilled =
     Carry_Drop(victim);   // drop any carried prop on death so it falls free
 
     victim.deaths = victim.deaths + 1;
+    victim.prog_deaths = victim.prog_deaths + 1;   // nettest progression: lifetime deaths
 
     // Kill-feed broadcast — attacker may be non-player (world / env_hurt)
     // which we surface as KILLFEED_NO_ATTACKER.  Headshot flag is latched
@@ -1132,6 +1137,12 @@ void(entity attacker, entity victim) PlayerKilled =
         kf_cause = KILL_CAUSE_WEAPON;
     SV_SendKillFeed(kf_atk_slot, kf_vic_slot, kf_cause, attacker.weapon,
                     (victim.death_hitgroup == HITGROUP_HEAD) ? 1 : 0);
+
+    // nettest server-side killcam: weapon/FF deaths trigger the victim's killcam
+    // (matches cl_killfeed.qc) — unicast the killer's recorded camera track so the
+    // rewind shows their approach even through stretches the victim's PVS never saw.
+    if (kf_cause == KILL_CAUSE_WEAPON || kf_cause == KILL_CAUSE_FRIENDLYFIRE)
+        Killcam_SV_SendTrack(attacker, victim);
 
     if (attacker.classname == "player")
     {
@@ -1153,7 +1164,7 @@ void(entity attacker, entity victim) PlayerKilled =
                 // Dopamine kill-cash popup — unicast to the killer only.
                 // CSQC delays the center-top "+$" popup 0.5s (orchestralhit)
                 // and plays killsound.wav immediately on a headshot kill.
-                if (reward > 0)
+                if (reward > 0 && SV_PlayerHasNetchan(attacker))
                 {
                     msg_entity = attacker;
                     WriteByte(MSG_ONE, SVC_CGAMEPACKET);
@@ -1161,6 +1172,12 @@ void(entity attacker, entity victim) PlayerKilled =
                     WriteShort(MSG_ONE, reward);
                     WriteByte(MSG_ONE, hs);
                 }
+
+                // nettest progression: XP for a legitimate kill (+headshot bonus).
+                Prog_AwardXP(attacker, PROG_XP_KILL + (hs ? PROG_XP_HEADSHOT : 0), "kill");
+                attacker.prog_kills = attacker.prog_kills + 1;
+                if (hs)
+                    attacker.prog_headshots = attacker.prog_headshots + 1;
             }
         }
 
@@ -1267,7 +1284,7 @@ void(entity attacker, entity target, float damage) DamageReport_Record =
 // report as a single CSQC event to the victim.
 void(entity victim) DamageReport_Send =
 {
-    if (!victim || victim.classname != "player") return;
+    if (!victim || victim.classname != "player" || clienttype(victim) != CLIENTTYPE_REAL) return;   // skip bots (engine-truth guard)
     float v = num_for_edict(victim) - 1;
     if (v < 0 || v >= DR_MAX_PLAYERS) return;
 
@@ -1370,7 +1387,7 @@ void(entity victim, float damage, float fall_twist) SV_SendDamageViewKick =
         pitch = 0 - bound(0, damage * pitch_strength, pitch_max);
     }
 
-    if (pitch == 0 && roll == 0)
+    if ((pitch == 0 && roll == 0) || clienttype(victim) != CLIENTTYPE_REAL)   // skip bots (engine-truth guard)
         return;
 
     msg_entity = victim;
@@ -1492,7 +1509,7 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
     // the source.  Falls back to target.origin (zero relative
     // direction → indicator suppresses itself) when there's no
     // meaningful external attacker.
-    if (target.classname == "player")
+    if (target.classname == "player" && SV_PlayerHasNetchan(target))   // skip bots (engine-truth guard)
     {
         vector atk_pos = attacker ? attacker.origin : target.origin;
         msg_entity = target;
@@ -1503,6 +1520,21 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
         WriteCoord(MSG_ONE, atk_pos_y);
         WriteCoord(MSG_ONE, atk_pos_z);
         SV_SendDamageViewKick(target, damage, FALSE);
+    }
+
+    // Shot a bot with no / stale enemy: wake it to the attacker.  This bypasses the
+    // frontal acquisition cone (sv_bot_fov) — being hit is legitimate knowledge of
+    // where the shot came from, so a flanked bot turns to fight instead of staying blind.
+    if (target.classname == "player" && target.is_bot
+        && attacker && attacker != target && IsBotEnemy(target, attacker))
+    {
+        if (!target.bot_enemy || target.bot_enemy.is_dead
+            || (time - target.bot_enemy_time) > 5)
+        {
+            target.bot_enemy         = attacker;
+            target.bot_enemy_time    = time;            // open the 360 tracking window
+            target.bot_enemy_lastpos = attacker.origin; // hunt toward the shooter if no LOS
+        }
     }
 
     // Visual flinch broadcast — all clients in PVS see the victim's
@@ -1546,7 +1578,7 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
     // back ~ping ms later.  Breakable / phys-prop / world hits keep
     // firing the server marker because the client doesn't predict
     // hitmarkers for non-player targets.
-    if (attacker.classname == "player")
+    if (attacker.classname == "player" && SV_PlayerHasNetchan(attacker))   // skip bots (engine-truth guard)
     {
         float trust = cvar("sv_trust_clienthits");
         float client_owns_marker = (target.classname == "player" && trust >= 1);
@@ -3061,7 +3093,7 @@ void() W_DropAllWeaponsOnDeath =
             drop_ent.nextthink = time + 0.05;
         }
 
-        if (!phys_drop)
+        if (!phys_drop && SV_PlayerHasNetchan(self))   // skip bots (no netchan); engine-truth guard
         {
             // Unicast the victim a CSQC fake-drop event so they see the
             // scatter visually during the pickup-grace window. Physics drops skip
@@ -3255,7 +3287,12 @@ void() W_WeaponFrame =
     // self.fire() autonomously or it does nothing under sv_trust_clienthits>=1.
     // W_GravGunFire self-gates (cooldown / already-carrying / spinning), so
     // polling it every held-button frame is safe.
-    float wep_bypasses_cs_notify = (self.weapon == WEP_HLGRENADE
+    // Bots have no client to emit the `cmd cs` fire notification, so under
+    // sv_trust_clienthits>=1 they'd never shoot.  Always let a bot fire its
+    // weapon server-side (autonomous path) — same as the grenade/C4/gravgun
+    // entry points below.
+    float wep_bypasses_cs_notify = (self.is_bot
+                                 || self.weapon == WEP_HLGRENADE
                                  || self.weapon == WEP_CSHEGRENADE
                                  || self.weapon == WEP_CSFLASHBANG
                                  || self.weapon == WEP_CSSMOKEGRENADE

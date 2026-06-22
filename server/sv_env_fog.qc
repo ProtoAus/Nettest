@@ -44,7 +44,7 @@ string() EnvFog_BuildCommand =
 void(entity p) EnvFog_StuffPlayer =
 {
     if (!env_fog_active) return;
-    if (!p) return;
+    if (!p || bot_adding || clienttype(p) != CLIENTTYPE_REAL) return;	// bots have no netchan (engine-truth guard; bot_adding covers the spawnclient window)
     stuffcmd(p, EnvFog_BuildCommand());
 };
 
@@ -71,7 +71,7 @@ void() EnvFog_StuffAll =
 //       cl_rain || cl_snow, so snow no longer needs to ride cl_rain).
 void(entity p) SV_WeatherStuffPlayer =
 {
-    if (!p) return;
+    if (!p || bot_adding || clienttype(p) != CLIENTTYPE_REAL) return;	// bots have no netchan (engine-truth guard; bot_adding covers the spawnclient window)
     // Always clear first so a map without weather keys doesn't inherit
     // the previous map's cl_rain / cl_snow state.
     stuffcmd(p, "set cl_rain 0;set cl_snow 0\n");

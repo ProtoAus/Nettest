@@ -1712,6 +1712,100 @@ void() CSQC_AddPredictedViewmodel =
 };
 
 // ============================================================
+//  CSQC_AddRemoteViewmodel — first-person viewmodel for ANOTHER player
+//  (spectated target / killcam killer), reconstructed from the networked
+//  weapon id + weaponstate + wep_action (proxy vis_* fields, sh_customdefs).
+//
+//  Reuses the per-weapon equip + display callback by pointing a scratch
+//  "source" entity (and predicted_player, which the callbacks read) at the
+//  remote's state.  SAFE only while the local player is dead/spectating: the
+//  equip's only side effects are weapon-specific sound globals, meaningless
+//  with no live local gun and reset on respawn.  Idle/fire/draw are faithful;
+//  multi-phase reloads show their first phase (per-weapon reload state isn't
+//  networked).  The pose is simplified (no bob/sway — remote input isn't sent).
+// ============================================================
+entity csqc_remotevm_src;   // scratch holding the reconstructed weapon config
+entity csqc_remotevm_ent;   // the rendered viewmodel entity
+
+void(float wepid, float wstate, float wep_action, float anim_start) CSQC_AddRemoteViewmodel =
+{
+    if (wepid == WEP_NONE)
+        return;
+
+    if (!csqc_remotevm_src)
+    {
+        csqc_remotevm_src = spawn();
+        csqc_remotevm_src.classname = "remote_vm_src";
+    }
+    if (!csqc_remotevm_ent)
+    {
+        csqc_remotevm_ent = spawn();
+        csqc_remotevm_ent.classname = "remote_vm";
+        csqc_remotevm_ent.movetype = MOVETYPE_NONE;
+        csqc_remotevm_ent.solid = SOLID_NOT;
+    }
+
+    entity old_self = self;
+    entity old_pp   = predicted_player;
+
+    csqc_remotevm_src.weaponstate    = wstate;
+    csqc_remotevm_src.wep_action_id  = wep_action;
+    csqc_remotevm_src.wep_anim_start = anim_start;
+
+    // (Re)configure the scratch's viewmodel fields only on weapon change.
+    if (csqc_remotevm_src.weapon != wepid)
+    {
+        csqc_remotevm_src.weapon = wepid;
+        self = csqc_remotevm_src;
+        predicted_player = csqc_remotevm_src;
+        CSQC_WeaponEquip(wepid);
+        self = old_self;
+        predicted_player = old_pp;
+    }
+
+    string mdl = csqc_remotevm_src.weapon_viewmodel;
+    if (mdl == "")
+        return;
+    if (csqc_remotevm_ent.model != mdl)
+        setmodel(csqc_remotevm_ent, mdl);
+
+    // Frame: the per-weapon display callback reads predicted_player.*, so point
+    // it at the scratch for the duration of the call.
+    float elapsed = max(0, cltime - anim_start);
+    float disp = 0;
+    predicted_player = csqc_remotevm_src;
+    if (csqc_remotevm_src.csqc_display_frame)
+        disp = csqc_remotevm_src.csqc_display_frame(elapsed);
+    predicted_player = old_pp;
+
+    if (csqc_remotevm_src.weapon_uses_sequences)
+    {
+        csqc_remotevm_ent.frame      = disp;
+        csqc_remotevm_ent.frame1time = elapsed;
+    }
+    else
+    {
+        float fi = floor(disp);
+        csqc_remotevm_ent.frame    = fi;
+        csqc_remotevm_ent.frame2   = fi + 1;
+        csqc_remotevm_ent.lerpfrac = disp - fi;
+    }
+
+    float vm_flip = csqc_remotevm_src.weapon_viewmodel_flip;
+    if (cvar("cl_lefthand"))
+        vm_flip = !vm_flip;
+    float rf = RF_VIEWMODEL | RF_DEPTHHACK;
+    if (vm_flip)
+        rf |= RF_XFLIP;
+    csqc_remotevm_ent.renderflags = rf;
+    csqc_remotevm_ent.effects = cvar("cl_viewmodel_nolight") ? EF_FULLBRIGHT : 0;
+    // Simplified pose: base viewmodel position (camera-relative for RF_VIEWMODEL).
+    setorigin(csqc_remotevm_ent, '0 0 0');
+    csqc_remotevm_ent.angles = '0 0 0';
+    addentity(csqc_remotevm_ent);
+};
+
+// ============================================================
 //  CSQC_WeaponEquip — single dispatch
 //  Maps weapon ID to per-weapon CSQC equip function.
 //  Sets all client-side function pointers and weapon data fields.
@@ -1754,6 +1848,23 @@ void(float weapon_id) CSQC_PrimeMuzzleSmokeOffsets =
     // tick.  Keyed off the weapon_muzzle_bone the equip set (no WEP_* list).
     else if (self.weapon_muzzle_bone != "")
         CSQC_MuzzleSmokeSetOffsets(0, 0, 0);
+};
+
+// Vector form of the per-weapon muzzle offset (forward, right, down) for the REMOTE /
+// spectated shot path (CSQC_BulletImpactRemote).  Reuses the CSQC_PrimeMuzzleSmokeOffsets
+// switch (no per-weapon table drift) but SNAPSHOTS + restores the local muzzle-smoke
+// chain globals so a remote shot doesn't clobber the local player's smoke offsets.
+// Returns '0 0 0' for bone-attached / unknown weapons -> caller uses a generic gun-line.
+vector(float weapon_id) CSQC_WeaponMuzzleOffsetVec =
+{
+    float sf = ms_chain_fwd, sr = ms_chain_right, sd = ms_chain_down;
+    float ss = ms_chain_side, sh = ms_has_offsets;
+    ms_has_offsets = 0;
+    CSQC_PrimeMuzzleSmokeOffsets(weapon_id);
+    vector r = ms_has_offsets ? [ms_chain_fwd, ms_chain_right, ms_chain_down] : '0 0 0';
+    ms_chain_fwd = sf; ms_chain_right = sr; ms_chain_down = sd;
+    ms_chain_side = ss; ms_has_offsets = sh;
+    return r;
 };
 
 void(float weapon_id) CSQC_WeaponEquip =

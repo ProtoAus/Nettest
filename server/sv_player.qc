@@ -1019,6 +1019,7 @@ void() PlayerCheckFallDamage =
             // "Illegible server message" crash.  Fall damage has no external
             // attacker, so write the victim's own origin (same fallback the
             // weapons path uses → a non-directional flash, no hit arrow).
+            if (SV_PlayerHasNetchan(self))   // skip bots (no netchan); engine-truth guard
             {
                 msg_entity = self;
                 WriteByte(MSG_ONE, SVC_CGAMEPACKET);
@@ -1130,12 +1131,15 @@ void() ClientConnect =
 const float VP_SF_POSE     = 1;  // origin, angles, velocity
 const float VP_SF_ANIM     = 2;  // frame, baseframe, v_angle_x, anim_top_gen, flags
 const float VP_SF_IDENTITY = 4;  // weapon, skin, colormap, team_model byte, is_dead
+const float VP_SF_GRAPPLE  = 8;  // grapple_rope_active (+ anchor when active) — remote ropes
 
 // Cached "last-sent" values for fields that come from the owner (not
 // mirrored on the proxy itself) or need encoding. Compared in
 // Player_VisualProxy_Sync to decide which section bits to dirty.
 .float vps_last_v_pitch;
 .float vps_last_anim_top_gen;
+.float vps_last_weaponstate;	// nettest killcam/spectate: remote viewmodel anim state
+.float vps_last_wep_action;	// wep_action_id (mod 256) — change == a new weapon action started
 .float vps_last_weapon;
 .float vps_last_team_model;
 .float vps_last_is_dead;
@@ -1181,7 +1185,7 @@ float(entity playerent, float changedflags) Player_Visual_SendEntity =
 	WriteByte(MSG_ENTITY, CSQC_ENT_PLAYER_VISUAL);
 	WriteByte(MSG_ENTITY, num_for_edict(self.owner));
 
-	float bits = changedflags & (VP_SF_POSE | VP_SF_ANIM | VP_SF_IDENTITY);
+	float bits = changedflags & (VP_SF_POSE | VP_SF_ANIM | VP_SF_IDENTITY | VP_SF_GRAPPLE);
 	WriteByte(MSG_ENTITY, bits);
 
 	if (bits & VP_SF_POSE)
@@ -1204,6 +1208,8 @@ float(entity playerent, float changedflags) Player_Visual_SendEntity =
 		WriteFloat(MSG_ENTITY, self.vps_last_v_pitch);
 		WriteFloat(MSG_ENTITY, self.flags);
 		WriteByte(MSG_ENTITY, self.vps_last_anim_top_gen);
+		WriteByte(MSG_ENTITY, self.vps_last_weaponstate);	// nettest killcam/spectate
+		WriteByte(MSG_ENTITY, self.vps_last_wep_action);
 	}
 
 	if (bits & VP_SF_IDENTITY)
@@ -1218,6 +1224,21 @@ float(entity playerent, float changedflags) Player_Visual_SendEntity =
 		// Mirrors the CSQC reader (vis_bodygroup / vis_life_serial).
 		WriteByte(MSG_ENTITY, self.vps_last_bodygroup);
 		WriteByte(MSG_ENTITY, self.vps_last_life_serial);
+	}
+
+	// Grapple rope (broadcast so everyone sees the rope, not just the owner).
+	// The player END of the rope is this proxy's (already-smoothed) origin; only
+	// the anchor + active flag travel here.  Anchor coords are gated on the active
+	// flag so a release update is a single byte.  MUST match the CSQC reader.
+	if (bits & VP_SF_GRAPPLE)
+	{
+		WriteByte(MSG_ENTITY, self.grapple_rope_active);
+		if (self.grapple_rope_active)
+		{
+			WriteCoord(MSG_ENTITY, self.grapple_anchor_x);
+			WriteCoord(MSG_ENTITY, self.grapple_anchor_y);
+			WriteCoord(MSG_ENTITY, self.grapple_anchor_z);
+		}
 	}
 
 	return TRUE;
@@ -1285,6 +1306,40 @@ void(entity player) Player_VisualProxy_Ensure =
 void(entity player) Player_VisualProxy_DetachAsCorpse;
 void(entity player) Player_VisualProxy_Sync;
 void(entity corpse) VisProxy_RetireCorpse;   // defined in sv_main.qc (compiled later)
+
+// Server-side corpse settle.  A detached corpse is MOVETYPE_NONE (the engine
+// never ticks physics on it), so a player who dies airborne hangs at the death
+// height.  This think drops the corpse under gravity a step at a time, re-
+// networking each step via SendFlags (Player_VisualProxy_Sync no longer runs on
+// a detached proxy), and re-freezes it the instant it lands.  Short-lived: it
+// stops as soon as the floor trace blocks.
+const float VISCORPSE_SETTLE_DT = 0.05;
+.float vis_sinking;		// corpse despawn: TRUE while sinking into the ground (idempotent guard)
+.float vis_sink_endtime;	// corpse despawn: when the sink finishes -> the real removal
+void() VisProxy_CorpseSettleThink =
+{
+	if (self.classname != "player_visual_proxy" || !self.vis_is_corpse)
+		return;		// retired / repurposed — stop ticking
+
+	float grav = cvar("sv_gravity");
+	if (grav <= 0) grav = 800;
+	self.velocity_z = self.velocity_z - grav * VISCORPSE_SETTLE_DT;
+
+	vector dest = self.origin + self.velocity * VISCORPSE_SETTLE_DT;
+	tracebox(self.origin, self.mins, self.maxs, dest, MOVE_NOMONSTERS, self);
+	setorigin(self, trace_endpos);
+	self.SendFlags |= VP_SF_POSE;		// re-network the new corpse origin
+
+	if (trace_fraction < 1)			// landed — settle + re-freeze
+	{
+		self.velocity = '0 0 0';
+		self.SendFlags |= VP_SF_POSE;
+		self.nextthink = 0;
+		return;
+	}
+	self.nextthink = time + VISCORPSE_SETTLE_DT;
+};
+
 void(entity player) Player_VisualProxy_DetachAsCorpse =
 {
 	entity vis = player.player_visual_proxy;
@@ -1324,6 +1379,18 @@ void(entity player) Player_VisualProxy_DetachAsCorpse =
 	    && player.last_corpse.vis_is_corpse)
 		VisProxy_RetireCorpse(player.last_corpse);
 	player.last_corpse = vis;
+
+	// If the player died airborne, let the corpse FALL to the floor instead of
+	// hanging at the death height.  Give the floor trace the player's own box so
+	// it rests like they'd stand/crouch; the settle think re-syncs the drop and
+	// re-freezes on landing.  A grounded death needs no settle (already on floor).
+	if (!(player.flags & FL_ONGROUND))
+	{
+		setsize(vis, player.mins, player.maxs);
+		vis.velocity   = '0 0 0';
+		vis.think      = VisProxy_CorpseSettleThink;
+		vis.nextthink  = time + VISCORPSE_SETTLE_DT;
+	}
 
 	player.player_visual_proxy = world;
 };
@@ -1398,11 +1465,14 @@ void(entity player) Player_VisualProxy_Sync =
 	    || (time - vis.vis_last_pose_resync) > keepalive_interval)
 		bits |= VP_SF_POSE;
 
+	float next_wep_action = player.wep_action_id - floor(player.wep_action_id / 256) * 256;
 	if (vis.frame != player.frame
 	    || vis.baseframe != player.baseframe
 	    || vis.flags != player.flags
 	    || vis.vps_last_v_pitch != player.v_angle_x
-	    || vis.vps_last_anim_top_gen != player.anim_top_gen)
+	    || vis.vps_last_anim_top_gen != player.anim_top_gen
+	    || vis.vps_last_weaponstate != player.weaponstate
+	    || vis.vps_last_wep_action != next_wep_action)
 		bits |= VP_SF_ANIM;
 
 	float next_health = bound(0, player.health, 255);
@@ -1429,6 +1499,13 @@ void(entity player) Player_VisualProxy_Sync =
 	    || vis.vps_last_life_serial != next_life_serial)
 		bits |= VP_SF_IDENTITY;
 
+	// Grapple rope: dirty on a flag flip, or (while active) whenever the anchor
+	// moves — the hook flies during throw, then sits at a fixed world point once
+	// attached, so a settled rope sends nothing.
+	if (vis.grapple_rope_active != player.grapple_rope_active
+	    || (player.grapple_rope_active && vis.grapple_anchor != player.grapple_anchor))
+		bits |= VP_SF_GRAPPLE;
+
 	// Apply new values to the proxy unconditionally — the cached
 	// fields are the "last sent" record, so the next compare sees
 	// these as the baseline.
@@ -1442,12 +1519,16 @@ void(entity player) Player_VisualProxy_Sync =
 	vis.colormap  = player.colormap;
 	vis.vps_last_v_pitch      = player.v_angle_x;
 	vis.vps_last_anim_top_gen = player.anim_top_gen;
+	vis.vps_last_weaponstate  = player.weaponstate;
+	vis.vps_last_wep_action   = next_wep_action;
 	vis.vps_last_weapon       = player.weapon;
 	vis.vps_last_team_model   = next_tmbyte;
 	vis.vps_last_is_dead      = next_is_dead;
 	vis.vps_last_health       = next_health;
 	vis.vps_last_bodygroup    = next_bodygroup;
 	vis.vps_last_life_serial  = next_life_serial;
+	vis.grapple_rope_active   = player.grapple_rope_active;   // last-sent cache + proxy value
+	vis.grapple_anchor        = player.grapple_anchor;
 
 	if (bits & VP_SF_POSE)
 		vis.vis_last_pose_resync = time;
@@ -2773,11 +2854,16 @@ void() PutClientInServer =
 	self.dimension_see  = 255;
 
 	player_chain_add(self);
+	Prog_Load(self);	// nettest progression: load persistent XP/level (async, GUID-keyed)
 	PlayerBeginTeamSelection();
 };
 
 void() ClientDisconnect =
 {
+	Prog_Save(self);	// nettest progression: flush persistent XP/level before teardown
+
+	self.is_bot = FALSE;	// engine recycles this slot — don't let a stale bot flag ride into a real client (see SV_PlayerHasNetchan)
+
 	Carry_Drop(self);   // release any carried prop so it falls and the link clears
 
 	if (self.pm_prediction_proxy)
@@ -3294,10 +3380,45 @@ float(string command_string, string expected_classname) SV_HandleProjhitClaim =
 	return applied;
 };
 
+// Per-client flood cap for the hit-reporting stringcmds.  The engine applies no
+// flood protection to client stringcmds (only chat/suicide), so a buggy/cheating
+// client could spam hitclaim/cs/... toward a reliable-backbuf overflow.  Meters
+// them in a 1s sliding window on the attacker (self); returns FALSE to drop once
+// over sv_claim_flood_max.  Generous default (60) leaves >2x headroom over the
+// ~26-30/s legit peak, so live play never trips it; 0 disables.
+float() SV_ClaimFloodOK =
+{
+	float cap = cvar("sv_claim_flood_max");
+	if (cap <= 0)
+		return TRUE;                              // disabled
+	if (time - self.claim_flood_window_start >= 1)
+	{
+		self.claim_flood_window_start = time;     // roll the window
+		self.claim_flood_count = 0;
+	}
+	self.claim_flood_count = self.claim_flood_count + 1;
+	if (self.claim_flood_count > cap)
+	{
+		if (cvar("sv_debug_hitclaim"))
+			print(sprintf("[claim-flood] drop %s: %g > cap %g\n",
+			              self.netname, self.claim_flood_count, cap));
+		return FALSE;
+	}
+	return TRUE;
+};
+
 void(string command_string) SV_ParseClientCommand =
 {
 	tokenize(command_string);
 	string cmd = argv(0);
+
+	// Rate-cap the hit-reporting stringcmds before dispatch (engine has none).
+	if (cmd == "hitclaim" || cmd == "breakclaim" || cmd == "paintprojhit"
+	    || cmd == "snowprojhit" || cmd == "cs")
+	{
+		if (self && self.classname == "player" && !SV_ClaimFloodOK())
+			return;   // silently drop excess
+	}
 
 	if (cmd == "hitclaim")
 	{

@@ -58,13 +58,22 @@ void() Money_AwardRoundEnd =
         float amount = won ? cvar("mp_cashwin") : cvar("mp_cashlose");
         AddMoney(e, amount);
 
+        // nettest progression: round XP (winners more; losers still earn so a
+        // lost round is never wasted time).  Track lifetime wins.
+        Prog_AwardXP(e, won ? PROG_XP_ROUNDWIN : PROG_XP_ROUNDLOSE, "round");
+        if (won)
+            e.prog_wins = e.prog_wins + 1;
+
         // Dopamine round-cash popup — unicast; CSQC shows "+$amount"
         // under the win/lose banner + plays cashregister.
-        msg_entity = e;
-        WriteByte(MSG_ONE, SVC_CGAMEPACKET);
-        WriteByte(MSG_ONE, CSQC_EVENT_ROUND_REWARD);
-        WriteShort(MSG_ONE, amount);
-        WriteByte(MSG_ONE, won);
+        if (SV_PlayerHasNetchan(e))   // skip bots (no netchan); engine-truth guard
+        {
+            msg_entity = e;
+            WriteByte(MSG_ONE, SVC_CGAMEPACKET);
+            WriteByte(MSG_ONE, CSQC_EVENT_ROUND_REWARD);
+            WriteShort(MSG_ONE, amount);
+            WriteByte(MSG_ONE, won);
+        }
     }
 };
 

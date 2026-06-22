@@ -9,6 +9,7 @@ shared/sh_player_anims.qc
 shared/sh_weapon_logic.qc
 shared/sh_weapon_standard.qc
 server/sv_customdefs.qc
+server/sv_progression.qc
 server/sv_money.qc
 shared/sh_hlbeamfx.qc
 server/sv_breakable.qc
@@ -138,5 +139,8 @@ shared/sh_pmove.qc
 server/sv_grapple.qc
 server/sv_player.qc
 server/sv_lagcomp.qc
+server/sv_killcam.qc
 server/sv_radio.qc
+server/sv_navnodes.qc
+server/sv_bots.qc
 server/sv_main.qc

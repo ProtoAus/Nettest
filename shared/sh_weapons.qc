@@ -268,6 +268,9 @@ const float CSQC_EVENT_PHYSPROP_IMPACT   = 42;       // phys_files contact smoke
 const float CSQC_EVENT_SLIDE_SOUND       = 43;       // CoD-slide engage sound. Routed to PVS clients EXCEPT the slider (whose CSQC plays it via localsound the instant the slide is predicted). Payload: 1 exclude byte + 1 variant byte (slideN.wav, N=1..5) + 3×coord origin. Mirrors CSQC_EVENT_FOOTSTEP_SOUND.
 const float CSQC_EVENT_KILL_REWARD       = 44;       // dopamine kill-cash popup, sent ONLY to the killer. Payload: short reward + 1 headshot byte. CSQC delays the center-top popup 0.5s (orchestralhit) and plays killsound.wav immediately on a headshot kill.
 const float CSQC_EVENT_ROUND_REWARD      = 45;       // round win/lose cash, sent ONLY to each surviving-team player at round end. Payload: short amount + 1 win byte. CSQC shows "+$amount" under the win/lose banner + plays cashregister.
+const float CSQC_EVENT_NAV_GRAPH         = 46;       // debug: bot nav-graph node chunk. Payload: short total, short start, byte n, then per node: 3×coord + byte linkcount + linkcount×short neighbour. Gated on sv_nav_debug; multicast ALL; cl_navdebug draws nodes + links.
+const float CSQC_EVENT_BOT_DEBUG         = 47;       // debug: per-bot AI state. Payload: byte n, then per bot: byte entnum + 3×coord origin + byte state + byte enemy entnum + byte weapon + byte mag. Gated on sv_nav_debug; multicast ALL; cl_navdebug draws labels + enemy lines.
+const float CSQC_EVENT_KILLCAM_TRACK     = 48;       // server-side killcam: the KILLER's recorded camera track, reliably unicast to the victim on death so the rewind shows the killer's out-of-PVS approach. Payload: killer slot byte + frame_count byte, then per frame (oldest→newest): short delta_ms (kill_time - frame_time) + 3×coord origin + 2×WriteAngle (pitch, yaw) + weaponstate byte + weapon_id byte.
 
 // --- Kill-feed causes (byte payload of CSQC_EVENT_KILLFEED) ---
 const float KILL_CAUSE_WEAPON       = 0;

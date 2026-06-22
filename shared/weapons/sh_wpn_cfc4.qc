@@ -256,6 +256,10 @@ void() W_CFC4PlantCommit =
     // Decrement held ammo first so the auto-switch below sees no C4
     // to come back to.
     planter.ammo_cfc4 = 0;
+
+    // nettest progression: XP for completing a plant.
+    Prog_AwardXP(planter, PROG_XP_PLANT, "plant");
+
     SH_WeaponEnterIdle();
 
     // Force the player off the (now-empty) C4 onto whatever they have
@@ -630,6 +634,9 @@ void(entity defuser) C4_PlantedDefuseComplete =
         self.c4_defused = TRUE;
         self.enemy      = world;
         self.SendFlags  = -1;   // re-replicate the full payload with defuse_state = 2
+
+        // nettest progression: XP for completing a defuse.
+        Prog_AwardXP(defuser, PROG_XP_DEFUSE, "defuse");
 
         // BLUE wins — Defuse_TriggerRoundEnd reads the defuser's team.
         round_winning_team = defuser.player_team;   // captures real winner

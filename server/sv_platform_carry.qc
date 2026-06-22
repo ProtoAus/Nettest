@@ -177,7 +177,7 @@ float(entity p) Mover_PlatformCarry_Player =
             // on turns.  The receive path was already wired in
             // cl_main.qc:1154 for func_rotating-style carries; this
             // is the missing server-side send.
-            if (yaw_delta != 0)
+            if (yaw_delta != 0 && SV_PlayerHasNetchan(p))   // skip bots (no netchan); engine-truth guard
             {
                 msg_entity = p;
                 WriteByte(MSG_ONE, SVC_CGAMEPACKET);

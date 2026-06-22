@@ -65,7 +65,7 @@ entity() EnvHud_FirstPlayer =
 
 float(entity p, vector col, float alpha, float duration_s, float hold_s, float flags) EnvFade_SendOne =
 {
-    if (!p || p.classname != "player")
+    if (!p || p.classname != "player" || bot_adding || clienttype(p) != CLIENTTYPE_REAL)   // skip bots (engine-truth guard; bot_adding = spawn window)
         return FALSE;
 
     msg_entity = p;
@@ -83,7 +83,7 @@ float(entity p, vector col, float alpha, float duration_s, float hold_s, float f
 
 float(string msg, entity p) EnvMessage_SendOne =
 {
-    if (!p || p.classname != "player")
+    if (!p || p.classname != "player" || bot_adding || clienttype(p) != CLIENTTYPE_REAL)   // skip bots (engine-truth guard; bot_adding = spawn window)
         return FALSE;
 
     msg_entity = p;

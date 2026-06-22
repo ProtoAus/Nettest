@@ -3088,6 +3088,22 @@ float() PlayerVis_LerpDuration =
 .float vis_anim_bottom_time;
 .float vis_weapon_id;
 .float vis_pitch;
+.float vis_killcam_posed;	// P0: cltime stamp from Killcam_Replay — "killcam owns this proxy this frame"
+.vector vis_kc_save_origin;	// killcam: pre-replay pose snapshot, restored so out-of-PVS proxies don't freeze
+.vector vis_kc_save_velocity;
+.float  vis_kc_save_angy;
+.float  vis_kc_save_pitch;
+.float  vis_kc_save_anim_bottom;	// pre-replay anim pose — restored so a corpse reverts to its
+.float  vis_kc_save_anim_top;		// DEATH pose (not the last replayed ALIVE frame) after the cam
+.float  vis_kc_save_anim_bottime;
+.float  vis_kc_save_anim_toptime;
+.float  vis_force_rebuild;		// one-shot: force a skeleton rebuild next predraw (killcam restore)
+.float  vis_kc_last_fx_action;		// killcam: this proxy's last shot-FX action-id (per-body muzzle/tracer)
+.float  vis_kc_saved;
+.float  vis_last_leg_twist;	// leg_twist computed in the NORMAL predraw path — recorded by the killcam
+.float  vis_kc_legtwist;	// killcam replay: the recorded leg_twist, applied in P5 (strafe twist)
+.vector vis_kc_replay_prevorg;	// killcam replay: previous posed origin (drives the locomotion foot-clock)
+.float  vis_kc_replay_valid;	// killcam replay: vis_kc_replay_prevorg seeded this killcam
 .float vis_prev_cltime;
 .vector vis_prev_origin;
 .float vis_last_anim_top;
@@ -3438,8 +3454,13 @@ float(float skel, float bone_idx) PlayerVis_DbgBonePitch =
 void(float skel, float bone_idx, float parent_idx, float deg) PlayerVis_YawBone =
 {
     vector world_org = gettaginfo(self, bone_idx);   // sets v_forward/right/up = WORLD axes
-    if (!PlayerVis_TagBasisGood())
-        return;
+    if (!PlayerVis_TagBasisGood() || !PlayerVis_VectorGood(world_org)
+        || vlen(world_org - self.origin) > 256)	// finite-but-FAR spike (a player bone is never
+						// >256u from the entity origin) = the single-frame morph;
+						// VectorGood only catches NaN/>100000, not a few-thousand-u spike
+        return;	// guard the POSITION too: a degenerate world_org (NaN/huge from a bad
+			// IQM frame-blend during a crouch/anim swap) written straight back via
+			// skel_set_bone_world stretches the bone across the map for a frame
     vector wf = v_forward, wr = v_right, wu = v_up;
 
     vector up = '0 0 1';
@@ -3460,8 +3481,12 @@ void(float skel, float bone_idx, float parent_idx, float deg) PlayerVis_YawBone 
 void(float skel, float bone_idx, vector lat_axis, float deg) PlayerVis_PitchBoneWorld =
 {
     vector world_org = gettaginfo(self, bone_idx);
-    if (!PlayerVis_TagBasisGood())
-        return;
+    if (!PlayerVis_TagBasisGood() || !PlayerVis_VectorGood(world_org)
+        || vlen(world_org - self.origin) > 256)	// finite-but-FAR spike (a player bone is never
+						// >256u from the entity origin) = the single-frame morph;
+						// VectorGood only catches NaN/>100000, not a few-thousand-u spike
+        return;	// guard the POSITION too (see PlayerVis_YawBone) — a degenerate world_org
+			// written back stretches the bone across the map for a frame
     vector wf = v_forward, wr = v_right, wu = v_up;
     wf = PlayerVis_RotAxis(wf, lat_axis, deg);
     wr = PlayerVis_RotAxis(wr, lat_axis, deg);
@@ -3501,6 +3526,8 @@ float g_spine_idle_rate;    // cl_player_skel_idle_rate: rebuild Hz for STILL pl
                             //   parent chain is clean (else crouch-lean skew shears yaw->pitch)
 .float vis_spine_bones_mdl;
 .float vis_skel_next_rebuild;   // next cltime an idle proxy may rebuild its skeleton
+.float vis_skel_last_pitch;     // aim pitch the skeleton was last built for (anti-jitter)
+.float vis_skel_last_aim_yaw;   // aim yaw   "        "      "    "     "    (anti-jitter)
 
 // nettest perf: corpse render cull (the only QC lever on the engine scene floor —
 // not submitting an off-screen corpse removes its edict-copy + skin from the
@@ -3541,9 +3568,31 @@ void() PlayerVis_RefreshSpineCvars =
 	g_spine_idle_rate    = cvar("cl_player_skel_idle_rate");
 };
 
+// Forward decls — defined in cl_killcam.qc (compiled after this file).
+float() Killcam_Active;
+float() Killcam_IsPosing;
+
+// P0: Killcam_Replay stamps every proxy it posed this frame (vis_killcam_posed =
+// cltime).  The predraw checks this to DEFER to the killcam — skip its own anim
+// recompute, the first-person/spectated hide rules, and the prediction snap.
+float(entity e) PlayerVis_KillcamOwned = { return e.vis_killcam_posed == cltime; };
+
 float() CSQC_PlayerVisual_Predraw =
 {
 	float spine_debug = cvar("cl_player_spine_debug");
+	float vis_skip_render = FALSE;	// local first-person body: compute anim (for killcam), skip render
+
+	// P1: during an active replay, any proxy the killcam did NOT pose this frame
+	// (fast-respawn live body, skipped corpse, late-joiner) is fully suppressed —
+	// body + weapon hidden, returns before the weapon section so no floating gun.
+	// IsPosing() guards a failed-bracket frame from hiding everything.
+	if (Killcam_Active() && Killcam_IsPosing() && !PlayerVis_KillcamOwned(self))
+	{
+		self.alpha = -1;
+		if (self.vis_weapon_ent)
+			self.vis_weapon_ent.alpha = -1;
+		return PREDRAW_NEXT;
+	}
 
 	// Hide the visual proxy when we shouldn't see it:
 	// 1. Own body in first person (not chase cam, not spectating, not death cam)
@@ -3558,15 +3607,20 @@ float() CSQC_PlayerVisual_Predraw =
 	if (self.vis_owner_entnum == player_localentnum
 	    && !self.vis_is_dead
 	    && spec_target == 0 && !cvar("chase_active")
-	    && !Spectate_InDeathCam())
+	    && !Spectate_InDeathCam()
+	    && !PlayerVis_KillcamOwned(self))	// P2: draw the victim during the killcam
 	{
+		// Don't RENDER our own first-person body, but DON'T early-return — fall
+		// through to compute its third-person animation so the killcam (which
+		// records this proxy during the pre-death window) has live anim timing to
+		// replay.  Without this the victim's body is FROZEN in the killcam.
+		vis_skip_render = TRUE;
 		if (spine_debug && cltime >= self.vis_spine_debug_next)
 		{
 			print(sprintf("[spine] local proxy hidden: owner=%g model='%s' chase_active=%g\n",
 			              self.vis_owner_entnum, self.model, cvar("chase_active")));
 			self.vis_spine_debug_next = cltime + 0.5;
 		}
-		return PREDRAW_NEXT;
 	}
 
 	// Hide the spectated player's proxy so it doesn't block the first-
@@ -3578,7 +3632,8 @@ float() CSQC_PlayerVisual_Predraw =
 	// excluded).
 	if (spec_target > 0 && spec_mode == SPEC_MODE_FIRSTPERSON_FWD
 	    && self.vis_owner_entnum == spec_target
-	    && !Spectate_InDeathCam())
+	    && !Spectate_InDeathCam()
+	    && !PlayerVis_KillcamOwned(self))	// P3
 		return PREDRAW_NEXT;
 
 	// Snap local player's proxy to predicted position so it doesn't
@@ -3591,8 +3646,50 @@ float() CSQC_PlayerVisual_Predraw =
 	if (self.vis_owner_entnum == player_localentnum
 	    && !self.vis_is_dead
 	    && predicted_player
-	    && csqc_prediction_valid)
+	    && csqc_prediction_valid
+	    && !PlayerVis_KillcamOwned(self))	// P4: don't snap a killcam-posed body to live prediction
+	{
 		setorigin(self, csqc_present_origin);
+		self.velocity = predicted_player.velocity;	// drive the anim LOCOMOTION path so the
+								// killcam records a RUNNING body, not a
+								// frozen idle one (vis_skip_render path)
+	}
+
+	// Hoisted: the spine deformer below reads these; the killcam branch leaves
+	// them at 0/FALSE (no movement twist), the normal branch assigns them.
+	float leg_twist = 0;
+	float backpedaling = FALSE;
+
+	// P5: the killcam owns this proxy's pose — drive render framestate DIRECTLY
+	// from the killcam-set fields (vis_anim_*, vis_anim_*_time, vis_aim_yaw,
+	// vis_pitch); no movement-based recompute / change-detect / blend.  The
+	// spine-deform + weapon-attach sections below run unchanged on this framestate.
+	if (PlayerVis_KillcamOwned(self))
+	{
+		self.angles_y        = self.vis_aim_yaw;
+		// Strafe twist: replay the RECORDED leg_twist (the killcam saved it) instead
+		// of hardcoding 0 — leg_twist drives subblendfrac (torso counter) AND the IQM
+		// spine YawBone deform (via iqm_twist below).  velocity=0 in replay so it can
+		// NOT be recomputed from movement; it must come from the buffer.
+		leg_twist            = self.vis_kc_legtwist;
+		self.subblendfrac    = bound(-1, leg_twist / 90, 1);
+		self.frame           = self.vis_anim_bottom;
+		self.frame1time      = self.vis_anim_bottom_time;
+		self.frame2          = 0;
+		self.lerpfrac        = 0;
+		self.baseframe       = self.vis_anim_top;
+		self.baseframe1time  = self.vis_anim_top_time;
+		self.baseframe2      = 0;
+		self.baselerpfrac    = 0;
+		float kbb = cvar("sv_player_basebone");
+		if (kbb <= 0) kbb = gettagindex(self, "Bip01 L Thigh");
+		self.basebone        = kbb;
+		self.subblend2frac   = self.vis_pitch / 90;
+		self.vis_prev_origin = self.origin;
+		self.vis_prev_cltime = cltime;
+	}
+	else
+	{
 
 	float dt;
 	if (self.vis_prev_cltime > 0)
@@ -3658,8 +3755,8 @@ float() CSQC_PlayerVisual_Predraw =
 
 	vector vel2d = self.velocity; vel2d_z = 0;
 	float speed2d = vlen(vel2d);
-	float leg_twist = 0;
-	float backpedaling = FALSE;
+	leg_twist = 0;
+	backpedaling = FALSE;
 	float backpedal_enter = cvar("cl_player_backpedal_enter_angle");
 	float backpedal_exit = cvar("cl_player_backpedal_exit_angle");
 	if (backpedal_enter <= 0) backpedal_enter = 150;
@@ -3707,6 +3804,7 @@ float() CSQC_PlayerVisual_Predraw =
 
 	// Counter-rotate upper body back to aim direction via subblendfrac.
 	self.subblendfrac = bound(-1, leg_twist / 90, 1);
+	self.vis_last_leg_twist = leg_twist;	// stash for the killcam to record (P5 replays it)
 
 	// Animation timer: for locomotion (RUN/CROUCH_RUN), advance by distance
 	// traveled so feet sync to the ground. For idle/jump, use regular time.
@@ -3810,6 +3908,14 @@ float() CSQC_PlayerVisual_Predraw =
 	float sb = self.vis_pitch / 90;
 	self.subblend2frac = sb;
 
+	}	// end P5 else (normal movement-driven anim path)
+
+	// Deferred first-person render skip: the local body's third-person anim was
+	// just computed (above) so the killcam recorder has live timing; skip the
+	// actual render (spine deform + addentity) now.
+	if (vis_skip_render)
+		return PREDRAW_NEXT;
+
 	// Progressive spine twist via bonecontrol (HL studio only — IQM
 	// models ignore .bonecontrolN; the skel-based deformer below
 	// replaces it for IQM).  Left as-is so the old MDLs we may load
@@ -3878,7 +3984,8 @@ float() CSQC_PlayerVisual_Predraw =
 	// time + freeze.  checkpvs is fail-safe (returns visible when PVS data is
 	// missing, e.g. CoD), so it never hides a corpse in your line of sight.
 	// r_corpses_pvscull 1 (default), r_corpses_maxdist 0 = distance off (default).
-	if (self.vis_is_dead && self.vis_death_cltime > 0)
+	if (self.vis_is_dead && self.vis_death_cltime > 0
+	    && !PlayerVis_KillcamOwned(self))	// P6: never cull a killcam-posed corpse vs the live view
 	{
 		float cull_age  = cltime - self.vis_death_cltime;
 		float cull_ddur = frameduration(self.modelindex, self.vis_anim_bottom);
@@ -3981,14 +4088,52 @@ float() CSQC_PlayerVisual_Predraw =
 		// hit detection stay consistent at the lower rate.  cl_player_skel_idle_rate
 		// 0 = always rebuild.
 		float do_rebuild = TRUE;
-		if (corpse_frozen && !fresh_skel)
+		if (self.vis_force_rebuild)
+		{
+			// One-shot forced rebuild (set by Killcam_RestoreProxies).  A settled
+			// corpse skips the rebuild (corpse_frozen below), so after the killcam the
+			// skeleton would stay frozen at the last REPLAYED STANDING frame — the
+			// "your model stays there" residue.  The restore reverts vis_anim_* to the
+			// death pose, but only a REBUILD applies it.  Force exactly one, then clear.
+			do_rebuild = TRUE;
+			self.vis_force_rebuild = 0;
+		}
+		else if (PlayerVis_KillcamOwned(self))
+			do_rebuild = TRUE;	// KILLCAM replay: always re-solve the posed skeleton.  The
+						// replay sets velocity=0 (anim reads the buffer) which would
+						// trip the idle throttle below, and the victim is a settled
+						// corpse — both would freeze the body.  This is why NONE animated.
+		else if (corpse_frozen && !fresh_skel)
 			do_rebuild = FALSE;
 		else if (!fresh_skel && !self.vis_is_dead && g_spine_idle_rate > 0
 		         && vlen(self.velocity) <= 8)
 		{
-			do_rebuild = (cltime >= self.vis_skel_next_rebuild);
-			if (do_rebuild)
-				self.vis_skel_next_rebuild = cltime + 1.0 / g_spine_idle_rate;
+			// Anti-jitter: a STILL player who is sweeping their AIM still moves
+			// the spine aim deform (torso/head/gun) every frame — throttling that
+			// to the idle rate makes it visibly step.  So only throttle when the
+			// aim is ALSO unchanged since the last build; otherwise rebuild every
+			// frame for smooth aim following.  (Wrap-aware yaw delta.)
+			float aim_moving = (fabs(self.vis_pitch - self.vis_skel_last_pitch) > 0.3);
+			if (!aim_moving)
+			{
+				float dyaw = self.vis_aim_yaw - self.vis_skel_last_aim_yaw;
+				dyaw -= floor((dyaw + 180) / 360) * 360;
+				aim_moving = (fabs(dyaw) > 0.3);
+			}
+			if (aim_moving)
+				do_rebuild = TRUE;
+			else
+			{
+				do_rebuild = (cltime >= self.vis_skel_next_rebuild);
+				if (do_rebuild)
+					self.vis_skel_next_rebuild = cltime + 1.0 / g_spine_idle_rate;
+			}
+		}
+
+		if (do_rebuild)   // remember the aim this build is for, so the next frame can
+		{                 // detect a re-aim and not throttle through it
+			self.vis_skel_last_pitch   = self.vis_pitch;
+			self.vis_skel_last_aim_yaw = self.vis_aim_yaw;
 		}
 
 		if (self.skeletonindex && do_rebuild)
@@ -4221,13 +4366,17 @@ float() CSQC_PlayerVisual_Predraw =
 					if (wbone > 0 && pbone > 0)
 					{
 						bpos = gettaginfo(self, pbone);
-						if (!PlayerVis_VectorGood(bpos) || !PlayerVis_TagBasisGood())
+						if (!PlayerVis_VectorGood(bpos) || !PlayerVis_TagBasisGood()
+						    || vlen(bpos - self.origin) > 256)	// finite-but-FAR spike (single-frame morph)
 							continue;
 						skel_set_bone_world(wep, wbone, bpos, v_forward, v_right, v_up);
 						matched = matched + 1;
 					}
 				}
 
+				wep.alpha = self.alpha;		// mirror body visibility so the p_model
+											// can't render while the body is hidden
+											// (killcam hide/show, spectate, etc.)
 				if (matched > 0)
 				{
 					addentity(wep);
@@ -4274,6 +4423,7 @@ float() CSQC_PlayerVisual_Predraw =
 const float VP_SF_POSE_CL     = 1;
 const float VP_SF_ANIM_CL     = 2;
 const float VP_SF_IDENTITY_CL = 4;
+const float VP_SF_GRAPPLE_CL  = 8;   // grapple_rope_active (+ anchor when active)
 
 // Console command: dump every bone of the first visible player_visual_proxy
 // to the console (name + index). Use the result to pick the right value
@@ -4348,6 +4498,8 @@ void() CSQC_PlayerVisual_Update =
 		float new_pitch        = readfloat();
 		float new_flags        = readfloat();
 		float new_anim_top_gen = readbyte();
+		float new_weaponstate  = readbyte();	// nettest killcam/spectate
+		float new_wep_action   = readbyte();
 
 		if (!self.vis_pred_dead_latch)
 		{
@@ -4357,6 +4509,14 @@ void() CSQC_PlayerVisual_Update =
 			self.flags            = new_flags;
 			self.vis_anim_top_gen = new_anim_top_gen;
 		}
+
+		// Remote viewmodel anim state — applies regardless of the death-pred
+		// latch.  Stamp the local clock on a new action so the spectate/killcam
+		// viewmodel computes elapsed = cltime - vis_wep_anim_start.
+		if (new_weaponstate != self.vis_weaponstate || new_wep_action != self.vis_wep_action)
+			self.vis_wep_anim_start = cltime;
+		self.vis_weaponstate = new_weaponstate;
+		self.vis_wep_action  = new_wep_action;
 	}
 
 	float identity_changed = (section_bits & VP_SF_IDENTITY_CL);
@@ -4466,6 +4626,19 @@ void() CSQC_PlayerVisual_Update =
 				mdl_path = team_blue_models[vis_model];
 			else
 				mdl_path = team_red_models[vis_model];
+		}
+	}
+
+	// Grapple rope (LAST section — must match the server writer order: POSE,
+	// ANIM, IDENTITY, GRAPPLE).  Anchor coords present only when active.
+	if (section_bits & VP_SF_GRAPPLE_CL)
+	{
+		self.grapple_rope_active = readbyte();
+		if (self.grapple_rope_active)
+		{
+			self.grapple_anchor_x = readcoord();
+			self.grapple_anchor_y = readcoord();
+			self.grapple_anchor_z = readcoord();
 		}
 	}
 
@@ -4757,6 +4930,12 @@ noref void(float isnew) CSQC_Ent_Update =
 	{
 		CSQC_PushTrigger_Update();
 		CSQC_NetStat_RecordTrigger(NET_SZ_PUSH_TRIG);
+		return;
+	}
+
+	if (ent_type == CSQC_ENT_NAV_DEBUG)
+	{
+		NavDebug_EntUpdate();
 		return;
 	}
 

@@ -3570,10 +3570,10 @@ void() PM_CheckMovingPushers =
                 // the driver's view with a fast-yawing car felt like a double/over
                 // rotation.  The driver looks freely with the mouse; passengers
                 // still get the view-rot.
-                if (yaw_delta != 0 && self.classname == "player" && !self.pm_driving)
-                {
-                    msg_entity = self;
-                    WriteByte(MSG_ONE, SVC_CGAMEPACKET);
+                if (yaw_delta != 0 && self.classname == "player" && !self.pm_driving && !self.is_bot)
+                {                                       // !is_bot: bots have no netchan — a bot on a
+                    msg_entity = self;                  // platform_carry/func_rotating would spam
+                    WriteByte(MSG_ONE, SVC_CGAMEPACKET);// "msg_entity: not a client" every move tick
                     WriteByte(MSG_ONE, CSQC_EVENT_DOOR_VIEWROT);
                     WriteShort(MSG_ONE, yaw_delta * 100);
                 }

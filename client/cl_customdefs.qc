@@ -129,6 +129,12 @@ float clframetime;
 // actual use site is CSQC_PlayerVisual_Update; see cl_player.qc for the
 // full set of vis_* fields.
 .float vis_owner_entnum;
+// Networked aim yaw + pitch (never modified by the predraw — unlike .angles_y, which
+// the predraw rotates by leg_twist).  Declared early so the remote-tracer event parse
+// (cl_bulletimpact.qc, compiled before cl_player.qc) can read them for the per-weapon
+// muzzle basis; cl_player.qc re-declares them harmlessly (same pattern as vis_owner_entnum).
+.float vis_aim_yaw;
+.float vis_pitch;
 
 // --- Full OBB hitbox detection ---
 // The bullet ray is traced against the SAME 20 per-bone oriented boxes that
@@ -205,6 +211,10 @@ void() CSQC_DumpPlayerBones;
 // Drift-trace ring buffer (cl_player.qc). Used by cl_weapons.qc which
 // compiles earlier than cl_player.qc.
 void() CL_Drift_Dump;
+
+// Nav/bot debug overlay CSQC entity handler — defined in cl_navdebug.qc (compiles
+// after cl_player.qc), dispatched from CSQC_Ent_Update in cl_player.qc.
+void() NavDebug_EntUpdate;
 
 vector() readvector =
 {

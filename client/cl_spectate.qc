@@ -71,11 +71,37 @@ float(float slot1) Spectate_SlotIsAliveTarget =
     entity vp = findchain(classname, "player_visual_proxy");
     while (vp)
     {
-        if (vp.vis_owner_entnum == slot1 && !vp.vis_is_dead)
-            return TRUE;
+        if (vp.vis_owner_entnum == slot1)
+        {
+            if (!vp.vis_is_dead)
+                return TRUE;            // alive — always spectatable
+            // Just died: linger ~1.5s so you SEE the kill, then drop — the per-frame
+            // Spectate_CheckTargetAlive auto-advances to a live player after that, so
+            // you never get stuck staring at a settled corpse.
+            if (vp.vis_death_cltime > 0 && (cltime - vp.vis_death_cltime) <= 1.5)
+                return TRUE;
+        }
         vp = vp.chain;
     }
     return FALSE;
+};
+
+// Resolve a slot's render proxy, PREFERRING the live body over a lingering corpse.
+// After a death+respawn the slot briefly has BOTH a frozen corpse and a fresh live
+// proxy; the spectate camera / viewmodel / crosshair must follow the live one, not
+// the body (the "spectating the corpse instead of the moving player" bug).
+entity(float slot1) Spectate_FindProxy =
+{
+    entity vp, any = world;
+    for (vp = findchain(classname, "player_visual_proxy"); vp; vp = vp.chain)
+    {
+        if (vp.vis_owner_entnum != slot1)
+            continue;
+        if (!vp.vis_is_dead)
+            return vp;                 // live body wins
+        any = vp;                      // corpse — keep as a fallback
+    }
+    return any;
 };
 
 float(float dir) Spectate_FindTarget =
@@ -233,6 +259,12 @@ void() Spectate_CheckTargetAlive =
 //  Camera update
 // ============================================================
 
+// First-person spectate RECOIL — the spectated player's sv_gunkick view_kick_* is
+// NOT networked, so reproduce it locally: an upward pitch impulse on their shot edge
+// that decays back, added to the spectate camera pitch.
+float spec_cam_kick_pitch;
+float spec_last_fire_action;
+
 void() Spectate_UpdateCamera =
 {
     vector target_origin, cam_offset, cam_pos, trace_end;
@@ -348,7 +380,7 @@ void() Spectate_UpdateCamera =
     // player slot (getentity GE_ORIGIN/GE_ANGLES) only updates from PVS
     // snapshots, which left the camera stuck near world origin whenever
     // we picked an out-of-sight target.
-    entity vis = findfloat(world, vis_owner_entnum, spec_target);
+    entity vis = Spectate_FindProxy(spec_target);	// prefer the live body, not a corpse
     vector target_angles;
 
     if (vis)
@@ -356,6 +388,14 @@ void() Spectate_UpdateCamera =
         target_origin   = vis.origin;
         target_angles   = vis.angles;
         target_angles_x = vis.vis_pitch;
+        // Recoil: kick the spectate camera on the spectated player's shot edge.
+        if (vis.vis_weaponstate == WS_FIRE && vis.vis_wep_action != spec_last_fire_action
+            && cvar("sv_gunkick"))
+        {
+            float gs = cvar("sv_gunkick_strength"); if (gs <= 0) gs = 1;
+            spec_cam_kick_pitch = bound(-7, spec_cam_kick_pitch - 1.5 * gs, 0);
+        }
+        spec_last_fire_action = vis.vis_wep_action;
     }
     else
     {
@@ -391,8 +431,10 @@ void() Spectate_UpdateCamera =
 
     if (spec_mode == SPEC_MODE_FIRSTPERSON)
     {
+        spec_cam_kick_pitch -= spec_cam_kick_pitch * bound(0, frametime * 9, 1);	// recoil decay
         campos = spec_follow_origin;
         camang = spec_follow_angles;
+        camang_x += spec_cam_kick_pitch;	// add the recoil kick to the rendered pitch
         setproperty(VF_ORIGIN, campos);
         setproperty(VF_ANGLES, camang);
         // Hide the spectated player's model so it doesn't block the view
@@ -465,6 +507,15 @@ float(float evtype, float scanx, float chary, float devid) Spectate_HandleInput 
 //  HUD drawing
 // ============================================================
 
+void(float speed) HUD_DrawSpeedometerValue;   // cl_hud.qc (compiled after this file)
+
+// Spectator speedometer state — the visual proxy doesn't network velocity, so we
+// derive the spectated body's speed from its origin delta over time.
+vector spec_speedo_org;
+float  spec_speedo_time;
+float  spec_speedo_target;
+float  spec_speedo_val;     // EMA-smoothed so the readout doesn't flicker per frame
+
 void() Spectate_DrawHUD =
 {
     float cx, cy;
@@ -490,9 +541,12 @@ void() Spectate_DrawHUD =
         else
             text = "You are dead";
 
-        text_w = stringwidth(text, 1, text_size);
-        drawstring([cx - text_w * 0.5 + SPEC_SHADOW, cy + SPEC_SHADOW], text, text_size, '0 0 0', 0.5, 0);
-        drawstring([cx - text_w * 0.5, cy], text, text_size, '1 1 1', 0.9, 0);
+        // Smaller + lower than centre so it doesn't sit over the crosshair area.
+        vector dc_size = [15, 15];
+        float  dc_y    = g_height * 0.62;
+        text_w = stringwidth(text, 1, dc_size);
+        drawstring([cx - text_w * 0.5 + SPEC_SHADOW, dc_y + SPEC_SHADOW], text, dc_size, '0 0 0', 0.5, 0);
+        drawstring([cx - text_w * 0.5, dc_y], text, dc_size, '1 1 1', 0.9, 0);
         return;
     }
 
@@ -508,6 +562,27 @@ void() Spectate_DrawHUD =
             float name_y = g_height - 80;
             drawstring([cx - text_w * 0.5 + SPEC_SHADOW, name_y + SPEC_SHADOW], text, sub_size, '0 0 0', 0.4, 0);
             drawstring([cx - text_w * 0.5, name_y], text, sub_size, '0.8 0.8 0.8', 0.85, 0);
+        }
+    }
+
+    // Speedometer (cl_speedometer) — the SPECTATED body's horizontal speed.
+    // Derive from the proxy origin delta (proxy carries no networked velocity).
+    if (cvar("cl_speedometer") && spec_target > 0 && spec_mode != SPEC_MODE_FREECAM)
+    {
+        entity sv = Spectate_FindProxy(spec_target);
+        if (sv)
+        {
+            float spd = 0;
+            if (spec_speedo_target == spec_target && cltime > spec_speedo_time)
+            {
+                vector d = sv.origin - spec_speedo_org; d_z = 0;
+                spd = vlen(d) / (cltime - spec_speedo_time);
+            }
+            spec_speedo_org    = sv.origin;
+            spec_speedo_time   = cltime;
+            spec_speedo_target = spec_target;
+            spec_speedo_val   += (spd - spec_speedo_val) * bound(0, frametime * 8, 1);
+            HUD_DrawSpeedometerValue(spec_speedo_val);
         }
     }
 

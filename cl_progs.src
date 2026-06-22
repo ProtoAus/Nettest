@@ -119,12 +119,14 @@ shared/sh_weapon_slotammo.qc
 client/cl_weapons.qc
 client/cl_player.qc
 client/cl_spectate.qc
+client/cl_killcam.qc
 client/cl_crosshair.qc
 client/cl_hud.qc
 client/cl_hitindicator.qc
 client/cl_killfeed.qc
 client/cl_teamtint.qc
 client/cl_debugpanel.qc
+client/cl_navdebug.qc
 client/cl_serverpanel.qc
 client/cl_env_hud.qc
 client/cl_env_explosion.qc
