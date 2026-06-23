@@ -3239,9 +3239,9 @@ string g_pbones[] =
 	"Bone13",
 	"Bone14",
 	"Bone15",
-	"Bip01 L Arm",
-	"Bip01 L Arm1",
-	"Bip01 L Arm2",
+	"Bip01 L Clavicle",
+	"Bip01 L UpperArm",
+	"Bip01 L Forearm",
 	"Bip01 L Hand",
 	"Bip01 L Finger0",
 	"Bip01 L Finger01",
@@ -3251,9 +3251,9 @@ string g_pbones[] =
 	"Bip01 L Finger11",
 	"Bip01 L Finger12",
 	"Dummy07",
-	"Bip01 R Arm",
-	"Bip01 R Arm1",
-	"Bip01 R Arm2",
+	"Bip01 R Clavicle",
+	"Bip01 R UpperArm",
+	"Bip01 R Forearm",
 	"Bip01 R Hand",
 	"Bip01 R Finger0",
 	"Bip01 R Finger01",
@@ -3293,6 +3293,8 @@ string g_pbones[] =
 
 const float PI_RAD = 3.14159265358979;
 
+
+
 float(float f) PlayerVis_FloatGood =
 {
 	return (fabs(f) < 100000);
@@ -3307,15 +3309,21 @@ float(vector v) PlayerVis_VectorGood =
 
 float() PlayerVis_TagBasisGood =
 {
+	// A rotation basis from gettaginfo is ~unit length.  Reject near-zero AND
+	// non-unit/huge bases: the finite check (< 100000) lets a ~10000x degenerate
+	// or stale basis through, which then propagates a giant-scale bone through the
+	// deform + the weapon-mirror loop.  Bound each axis to a sane [0.25, 4] scale.
+	float lf = vlen(v_forward), lr = vlen(v_right), lu = vlen(v_up);
 	if (!PlayerVis_VectorGood(v_forward)
 	    || !PlayerVis_VectorGood(v_right)
 	    || !PlayerVis_VectorGood(v_up)
-	    || vlen(v_forward) < 0.001
-	    || vlen(v_right) < 0.001
-	    || vlen(v_up) < 0.001)
+	    || lf < 0.25 || lf > 4
+	    || lr < 0.25 || lr > 4
+	    || lu < 0.25 || lu > 4)
 		return FALSE;
 	return TRUE;
 };
+
 
 float(float skel, float bone_idx) PlayerVis_LoadBoneBasis =
 {
@@ -3361,21 +3369,6 @@ float(float skel, float bone_idx) PlayerVis_LoadBoneBasis =
 	return TRUE;
 };
 
-void(float skel) PlayerVis_OrthonormalizeSkeleton =
-{
-	float n = skel_get_numbones(skel);
-	float i;
-	for (i = 1; i <= n; i++)
-	{
-		vector bone_org = skel_get_bonerel(skel, i);
-		if (!PlayerVis_VectorGood(bone_org))
-			bone_org = '0 0 0';
-		if (PlayerVis_LoadBoneBasis(skel, i))
-			skel_set_bone(skel, i, bone_org, v_forward, v_right, v_up);
-		else
-			skel_set_bone(skel, i, bone_org, '1 0 0', '0 1 0', '0 0 1');
-	}
-};
 
 // Orthonormalize a SINGLE bone.  perf: the spine deform only rotates 5 bones, so
 // only those need the IQM-blend scaling cleanup — not all ~50 (see the predraw).
@@ -3391,6 +3384,7 @@ void(float skel, float bone_idx) PlayerVis_OrthonormalizeBone =
 	else
 		skel_set_bone(skel, bone_idx, bone_org, '1 0 0', '0 1 0', '0 0 1');
 };
+
 
 void(float skel) PlayerVis_BuildPoseSkeleton =
 {
@@ -4178,16 +4172,17 @@ float() CSQC_PlayerVisual_Predraw =
 			// parent chain makes the yaw exact.  Gated: cl_player_spine_orthoparents 0
 			// reverts to clean-standing / slight-crouch-leak if it ever disturbs the
 			// legs (which hang off the pelvis).
-			if (cvar("cl_player_spine_orthoparents"))
-			{
-				if (root > 0)   PlayerVis_OrthonormalizeBone(self.skeletonindex, root);
-				if (pelvis > 0) PlayerVis_OrthonormalizeBone(self.skeletonindex, pelvis);
-			}
-
-			// perf (a): orthonormalize ONLY the 5 spine bones the deform rotates
-			// (was all ~50 every frame — the dominant idle-server cost).  The
-			// IQM-blend scaling cleanup is only needed on bones we then rotate; the
-			// rest keep skel_build's fresh per-frame pose.
+			// Player-model warp: the IQM frame-blend leaves each bone basis slightly scaled, and on
+			// a relative skeleton that compounds down the chain (deepest bones -> inf scale).  Engine
+			// Patch 43 now renormalizes EVERY bone inside PF_skel_build — the exact path
+			// PlayerVis_BuildPoseSkeleton -> skel_build / Mod_GetBoneRelations populates THIS skeleton
+			// through — so the whole skeleton already arrives clean.  We no longer scrub all ~50 bones
+			// here (that was ~0.2s/frame and drove most of the PlayerVis_Vector/Float/LoadBoneBasis
+			// profile cost); just keep the spine chain the deform reads/writes + its parents (pelvis,
+			// root) exact, so the strafe-yaw / aim-pitch stay shear-free even if a parent basis drifts.
+			// Legs/arms ride the engine renorm; the 5 deformed spine bones get a 2nd scrub post-deform.
+			PlayerVis_OrthonormalizeBone(self.skeletonindex, root);
+			PlayerVis_OrthonormalizeBone(self.skeletonindex, pelvis);
 			PlayerVis_OrthonormalizeBone(self.skeletonindex, sb0);
 			PlayerVis_OrthonormalizeBone(self.skeletonindex, sb1);
 			PlayerVis_OrthonormalizeBone(self.skeletonindex, sb2);
@@ -4240,6 +4235,10 @@ float() CSQC_PlayerVisual_Predraw =
 				PlayerVis_PitchBoneWorld(self.skeletonindex, sbn, pitch_axis, -iqm_pitch * 0.14 * pitch_upper_scale);
 			}
 
+			// (No post-deform spine scrub needed: engine Patch 46 renormalizes every
+			// skel_set_bone_world write — which is exactly how PlayerVis_YawBone/PitchBoneWorld set
+			// these bones — so they arrive unit, including the R-Hand source the gun mirror reads.)
+			
 			if (spine_debug && cltime >= self.vis_spine_debug_next)
 			{
 				print(sprintf("[spine] ent=%g model='%s' skel=%g\n",
@@ -4374,6 +4373,10 @@ float() CSQC_PlayerVisual_Predraw =
 					}
 				}
 
+				// (No gun-skeleton scrub needed: the mirror loop writes each gun bone via
+				// skel_set_bone_world, which engine Patch 46 now renormalizes — so the R-Hand source +
+				// its children (flash/gunmesh/Line02) arrive unit instead of ballooning at render.)
+				
 				wep.alpha = self.alpha;		// mirror body visibility so the p_model
 											// can't render while the body is hidden
 											// (killcam hide/show, spectate, etc.)
@@ -5006,6 +5009,12 @@ noref void(float isnew) CSQC_Ent_Update =
 	if (ent_type == CSQC_ENT_ENV_SOUND)
 	{
 		CSQC_EnvSound_Update(isnew);
+		return;
+	}
+
+	if (ent_type == CSQC_ENT_INFODECAL)
+	{
+		CSQC_InfoDecal_Update(isnew);	// GoldSrc decal projector (cl_infodecal.qc)
 		return;
 	}
 

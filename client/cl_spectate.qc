@@ -399,12 +399,13 @@ void() Spectate_UpdateCamera =
     }
     else
     {
-        // Fallback: engine slot. May be stale if target is out of PVS.
-        target_origin   = (vector)getentity(spec_target, GE_ORIGIN);
-        target_angles   = (vector)getentity(spec_target, GE_ANGLES);
-        // Undo QW pitch compression on the engine-slot path.
-        target_angles_x = 0 - target_angles_x * 3;
-        target_angles_x = bound(-90, target_angles_x, 90);
+        // No visual proxy this frame (target briefly out of PHS, or mid death->respawn).
+        // The engine player SLOT is NOT a getentity-readable entity in this mod — players
+        // render via the visual proxy — so getentity(spec_target) returns garbage (~world
+        // origin), which snapped the camera across the map AND spammed "PF_getentity:
+        // entity N is not valid".  Hold the last camera this frame instead; the proxy is
+        // PVSF_NOREMOVE so it returns within a frame or two (or Spectate auto-advances).
+        return;
     }
 
     // Add eye offset (standing player view height)

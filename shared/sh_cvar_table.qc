@@ -198,7 +198,7 @@ void() CVar_Init =
     CVar_Add("Bots", "sv_bot_target_margin","0.85",CVAR_SIDE_SV);// only swap to a new enemy if it is <this fraction of the current target's distance
     CVar_Add("Bots", "sv_bot_debug",      "0",  CVAR_SIDE_SV);  // developer: log bot fill/activity
     CVar_Add("Bots", "sv_nav_gridstep",   "96", CVAR_SIDE_SV);  // auto-grid node spacing (units)
-    CVar_Add("Bots", "sv_nav_debug",      "0",  CVAR_SIDE_SV);  // stream nav graph + bot state to clients (debug draw)
+    CVar_Add("Bots", "sv_debug_nav",      "0",  CVAR_SIDE_SV);  // stream nav graph + bot state to clients (debug draw)
     CVar_Add("Client", "cl_killcam",      "1",  CVAR_SIDE_CL);  // rewind-replay killcam on death
     CVar_Add("Client", "cl_killcam_lookback", "2.0", CVAR_SIDE_CL); // seconds rewound before the kill
     CVar_Add("Client", "cl_killcam_duration", "3.5", CVAR_SIDE_CL); // total killcam length (seconds)
@@ -546,6 +546,7 @@ void() CVar_Init =
     CVar_Add("Client", "cl_player_backpedal_enter_angle", "150", CVAR_SIDE_BOTH);
     CVar_Add("Client", "cl_player_backpedal_exit_angle",  "100", CVAR_SIDE_BOTH);
     CVar_Add("Client", "cl_player_spine_debug",       "0",     CVAR_SIDE_BOTH);
+    CVar_Add("Client", "cl_skel_debug",               "0",     CVAR_SIDE_CL);  // draw each player's bone skeleton live (bone->parent beams)
     // Length of the visual flinch reaction (CSANIM_GUT_FLINCH /
     // CSANIM_HEAD_FLINCH overrides the torso anim) after a player
     // takes damage.  CS flinch sequences are short (2 frames @ 30 fps
@@ -1353,6 +1354,11 @@ void() CVar_Init =
     CVar_Add("Client debug", "cl_debug_hitboxes",    "0", CVAR_SIDE_CL);
     CVar_Add("Client debug", "cl_debug_hbexpand",    "0", CVAR_SIDE_CL);
     CVar_Add("Client debug", "cl_debug_physprops",   "0", CVAR_SIDE_CL);
+    // Wireframe line thickness for ALL debug overlays (nav, hitboxes, impacts, bboxes,
+    // physprops, etc.).  1 (default) = cheap true 1px GL_LINES.  >1 = that many units of
+    // thickness, drawn as camera-facing quads instead (GL line width isn't reliable, so
+    // thickness reverts to real geometry — costs more, only when you ask for it).
+    CVar_Add("Client debug", "cl_debug_wire_thickness", "1", CVAR_SIDE_CL);
     // Debug: disable phys-prop extrapolation smoothing to see the raw server
     // send cadence (default 0 = extrapolation ON).  Read in cl_physprop.qc.
     CVar_Add("Client debug", "cl_physprop_noextrap", "0", CVAR_SIDE_CL);
