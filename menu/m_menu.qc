@@ -595,7 +595,7 @@ string client_config_cvars[] =
 
     // --- Graphics: Decals & Bullet Holes ---
     "cl_bulletholes",
-    "cl_bullethole_renderer",
+    "r_bullethole_renderer",
     "cl_bulletholes_max",
     "cl_bullethole_distance",
     "cl_bullethole_dedupe_scale",

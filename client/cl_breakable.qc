@@ -287,16 +287,8 @@ const float  PLAYERGIB_DRIP_COLOR          = 73;
 const float  PLAYERGIB_DRIP_COUNT          = 1;
 const float  PLAYERGIB_SPAWN_Z_SPREAD      = 18;
 const float  PLAYERGIB_LAUNCH_Z_JITTER     = 70;
-const float  PLAYERGIB_DRIP_DROP_SIZE      = 1.1;
-// In-flight TTL: max time a drop is allowed to fall before being
-// removed without ever landing.  Generous so a drop spawned high
-// above a pit still has time to reach the floor before timing out.
-const float  PLAYERGIB_DRIP_DROP_TTL       = 5.0;
-// Post-landing fade window — drop sits on the floor at full alpha
-// then linearly fades to 0 over this many seconds.  Per the spec:
-// "fade out after 3 seconds" once landed.
-const float  PLAYERGIB_DRIP_DROP_LAND_TIME = 3.0;
-const string PLAYERGIB_DRIP_DROP_SHADER    = "gfx/blood/blooddrop";
+// (drop size / TTL / land-fade / shader were the old CSQC blood-drop entity's params;
+//  the drop is now the engine particle "weapons.blooddrip" — see particles/impacts.cfg.)
 
 .float playergib_expire_time;
 .float playergib_next_drip_time;
@@ -316,11 +308,6 @@ const string PLAYERGIB_DRIP_DROP_SHADER    = "gfx/blood/blooddrop";
 .float playergib_spray_end_time;
 .float playergib_drip_end_time;
 .float playergib_drip_phase;
-
-.float blooddrop_expire_time;
-.float blooddrop_last_time;
-.float blooddrop_landed;
-.float blooddrop_landed_time;
 
 // Lazy lookup: r_particledesc is queued at end-of-frame from CSQC_Init,
 // so particle effects aren't registered until after init completes.
@@ -346,121 +333,30 @@ float() PlayerGib_GetBloodSplat =
     return playergib_bloodsplat_id;
 };
 
-float() CSQC_PlayerBloodDropPredraw =
+// Blood drops are now the engine particle "weapons.blooddrip" (particles/impacts.cfg):
+// it falls under gravity + dies on surface contact entirely in C, batched — replacing the
+// old per-drop CSQC entity that spawned an edict + ran a per-frame traceline + an immediate
+// R_BeginPolygon quad each.  Resolve the effect num once (lazy; particleeffectnum can return
+// a slot before the cfg registers, so re-try until particleeffectquery confirms it).
+float blooddrip_pe;   // cached weapons.blooddrip effect num; 0 = unresolved (re-tries)
+float() CSQC_BlooddripEffect =
 {
-    float now = cltime;
-    if (now >= self.blooddrop_expire_time)
-    {
-        remove(self);
-        return PREDRAW_NEXT;
-    }
-
-    float dt = now - self.blooddrop_last_time;
-    if (dt < 0) dt = 0;
-    if (dt > 0.05) dt = 0.05;
-    self.blooddrop_last_time = now;
-
-    if (!self.blooddrop_landed && dt > 0)
-    {
-        vector old_origin = self.origin;
-        self.velocity_z = self.velocity_z - PLAYERGIB_GRAVITY * dt;
-        vector end = self.origin + self.velocity * dt;
-
-        entity saved_ent           = trace_ent;
-        float  saved_fraction      = trace_fraction;
-        vector saved_endpos        = trace_endpos;
-        vector saved_plane_normal  = trace_plane_normal;
-        float  saved_plane_dist    = trace_plane_dist;
-        float  saved_inopen        = trace_inopen;
-        float  saved_inwater       = trace_inwater;
-
-        traceline(old_origin, end, MOVE_NOMONSTERS, self);
-        float  hit_fraction = trace_fraction;
-        vector hit_pos      = trace_endpos;
-        vector hit_normal   = trace_plane_normal;
-
-        trace_ent           = saved_ent;
-        trace_fraction      = saved_fraction;
-        trace_endpos        = saved_endpos;
-        trace_plane_normal  = saved_plane_normal;
-        trace_plane_dist    = saved_plane_dist;
-        trace_inopen        = saved_inopen;
-        trace_inwater       = saved_inwater;
-
-        if (hit_fraction < 1 && vlen(hit_normal) > 0)
-        {
-            setorigin(self, hit_pos + normalize(hit_normal) * 0.35);
-            self.velocity = '0 0 0';
-            self.blooddrop_landed = 1;
-            self.blooddrop_landed_time = now;
-            self.blooddrop_expire_time = now + PLAYERGIB_DRIP_DROP_LAND_TIME;
-        }
-        else
-        {
-            setorigin(self, end);
-        }
-    }
-
-    float alpha = 1.0;
-    float half = PLAYERGIB_DRIP_DROP_SIZE;
-    if (self.blooddrop_landed)
-    {
-        alpha = 1.0 - (now - self.blooddrop_landed_time)
-            / PLAYERGIB_DRIP_DROP_LAND_TIME;
-        half = half * 0.85;
-    }
-    if (alpha <= 0)
-    {
-        remove(self);
-        return PREDRAW_NEXT;
-    }
-
-    makevectors(getproperty(VF_ANGLES));
-    vector right = v_right * half;
-    vector up = v_up * half;
-    vector colour = '0.26 0.015 0.008';
-
-    R_BeginPolygon(PLAYERGIB_DRIP_DROP_SHADER, 0, 0);
-    R_PolygonVertex(self.origin - right - up, '0 1 0', colour, alpha);
-    R_PolygonVertex(self.origin + right - up, '1 1 0', colour, alpha);
-    R_PolygonVertex(self.origin + right + up, '1 0 0', colour, alpha);
-    R_PolygonVertex(self.origin - right + up, '0 0 0', colour, alpha);
-    R_EndPolygon();
-
-    return PREDRAW_NEXT;
+    if (blooddrip_pe != 0)
+        return blooddrip_pe;
+    blooddrip_pe = particleeffectnum("weapons.blooddrip");
+    if (blooddrip_pe != 0 && particleeffectquery(blooddrip_pe, 0) == "")
+        blooddrip_pe = 0;   // slot exists but the effect isn't registered yet — retry next call
+    return blooddrip_pe;
 };
 
-void(vector pos, vector vel) CSQC_SpawnPlayerBloodDrop =
-{
-    entity drop = spawn();
-    drop.classname = "csqc_blooddrop";
-    setorigin(drop, pos);
-    setsize(drop, '0 0 0', '0 0 0');
-    drop.movetype = MOVETYPE_NONE;
-    drop.solid = SOLID_NOT;
-    // MUST be in MASK_ENGINE — predraw fires from addentities(mask)
-    // only when (drawmask & mask) is nonzero.  Without this the
-    // R_BeginPolygon render call AND the expire / remove(self) check
-    // are both dead code: the entity sits invisibly forever (visible
-    // as a persistent r_showbboxes 1 dot at the spawn point) and the
-    // polygon is never emitted.
-    drop.drawmask = MASK_ENGINE;
-    // Seed velocity from the caller (15% of gib velocity) so the
-    // first few frames of fall trail behind the moving gib instead
-    // of dropping straight down from its origin — sells the "blood
-    // coming OFF the gib" look.  Gravity in the predraw catches up
-    // within ~200 ms.
-    drop.velocity = vel;
-    drop.predraw = CSQC_PlayerBloodDropPredraw;
-    drop.blooddrop_expire_time = cltime + PLAYERGIB_DRIP_DROP_TTL;
-    drop.blooddrop_last_time = cltime;
-    drop.blooddrop_landed = 0;
-    drop.blooddrop_landed_time = 0;
-};
-
+// Emit one blood droplet.  `veladd 1` in the block launches the particle at `vel` (gib
+// 15%+scatter, or the headshot back-cone); the block adds gravity + collision.  Both the
+// gib drip trail (CSQC_PlayerGibPredraw) and the headshot spurt call through here.
 void(vector pos, vector vel) CSQC_PlayerGibDripParticle =
 {
-    CSQC_SpawnPlayerBloodDrop(pos, vel);
+    float pe = CSQC_BlooddripEffect();
+    if (pe)
+        pointparticles(pe, pos, vel, 1);
 };
 
 // ============================================================
@@ -514,7 +410,7 @@ void() CSQC_HeadshotSpurtThink =
                    + basis_right * (random() - 0.5) * 2 * HEADSHOT_SPURT_SPREAD
                    + basis_up    * (random() - 0.5) * 2 * HEADSHOT_SPURT_SPREAD;
 
-        CSQC_SpawnPlayerBloodDrop(self.origin, vel);
+        CSQC_PlayerGibDripParticle(self.origin, vel);
     }
 
     self.headshot_spurt_remaining = self.headshot_spurt_remaining - 1;
@@ -863,7 +759,6 @@ void() CSQC_PrecacheBreakables =
 {
     precache_model("models/gibs/glassgibs.mdl");
     precache_model("models/gibs/human/fleshgibs.mdl");
-    precache_pic(PLAYERGIB_DRIP_DROP_SHADER);
     precache_sound("sounds/debris/break_fleshhl1.wav");
     precache_sound("sounds/debris/break_fleshhl2.wav");
     // Particle effect IDs are looked up lazily on first use — see

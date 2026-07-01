@@ -410,14 +410,17 @@ float(entity p) SV_PlayerHasNetchan =
 .float  bot_stuck_time;    // time of last meaningful movement
 .float  bot_strafe;        // -1/+1 strafe direction
 .float  bot_strafe_time;   // when to flip strafe
+.float  bot_jump_time;     // auto-jump-ledge cooldown (also gates the avoidance wall-steer mid-hop)
 .float  bot_los_lost_time; // time LOS to bot_enemy was first lost (0 = currently have LOS) — anti-flicker grace
+.float  bot_retarget_time; // next periodic "re-pick the nearest visible enemy" (Bot_Think)
+.float  bot_lasthurt_time; // last time this bot took damage (gates the periodic re-pick; biases toward the attacker)
 
 // IsBotEnemy is defined in sv_bots.qc (compiles after sv_weapons.qc); forward-declare
 // here so the wake-when-shot reaction in W_ApplyDamage (sv_weapons.qc) can call it.
 float(entity bot, entity t) IsBotEnemy;
 
 // nav/bot debug overlay (sv_bots.qc NavDbg_*) — one per-client SendEntity proxy that
-// streams the nav graph + per-bot state/path to that viewer (sv_nav_debug 1).
+// streams the nav graph + per-bot state/path to that viewer (sv_debug_nav 1).
 .entity nav_debug_proxy;     // the proxy entity owned by this client
 .float  navdbg_cursor;       // on proxy: graph-stream cursor (nodes sent so far)
 .float  navdbg_bottime;      // on proxy: next allowed bot-state/path push
@@ -427,6 +430,7 @@ float(entity bot, entity t) IsBotEnemy;
 .float  bot_burst_end;     // end time of the current fire BURST
 .float  bot_burst_cycle;   // end time of the burst+sidestep cycle (then start a new burst)
 .float  bot_fire_held;     // fire-button pulse state (toggle so semi-auto re-triggers)
+.float  bot_stuck_count;   // consecutive AntiStuck triggers (gate the path-thrashing repath/180s)
 
 // Count of func_buyzone brushes on the current map (0 = buy anywhere fallback).
 // Reset in worldspawn before entities spawn; incremented by each func_buyzone.

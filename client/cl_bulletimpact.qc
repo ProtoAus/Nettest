@@ -449,6 +449,10 @@ void() CSQC_DrawImpactLights =
 
     impact_scale = bound(0, cvar("cl_impact_light_scale"), 2);
 
+    // Transient combat flashes don't need cast shadows; a shadow-casting dlight
+    // re-skins every entity in its volume each frame.  See cl_combat_light_shadows.
+    float lflags = cvar("cl_combat_light_shadows") ? 0 : PFLAGS_NOSHADOW;
+
     for (i = 0; i < IMPACT_LIGHT_MAX; i++)
     {
         if (impact_light_time[i] <= 0)
@@ -465,7 +469,7 @@ void() CSQC_DrawImpactLights =
         if (impact_scale > 0 && gate)
             dynamiclight_add(impact_light_pos[i],
                              IMPACT_LIGHT_RADIUS * impact_scale * frac,
-                             '1 0.7 0.3' * frac);
+                             '1 0.7 0.3' * frac, 0, "", lflags);
     }
 
     // Explosion lights — same per-frame fade. Color skewed warm-orange
@@ -487,7 +491,7 @@ void() CSQC_DrawImpactLights =
         if (gate)
             dynamiclight_add(explosion_light_pos[i],
                              EXPLOSION_LIGHT_RADIUS * frac,
-                             '2.5 1.6 0.7' * frac);
+                             '2.5 1.6 0.7' * frac, 0, "", lflags);
     }
 };
 

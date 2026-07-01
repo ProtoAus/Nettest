@@ -20,12 +20,18 @@ const float BREAKABLE_NO_MONSTERS       = 1;
 // Spawnflag 4 — ONLY_EXPLOSION: ignored by direct gunfire, but
 //   participates in the radius-explosion damage loop via the
 //   sv_in_radius_explosion override (sh_weapon_standard.qc).
+// Spawnflag 8 — ALWAYS_SHOOTABLE: break when shot EVEN IF the brush has
+//   a targetname.  By default a named breakable is trigger-only (a pure
+//   `target`/`targetname` chain link, so it isn't shot away prematurely);
+//   this flag opts back into shootable-while-named, letting a window pane
+//   be both directly shootable AND fire/receive a `target` chain.
 // Spawnflag 256 — INSTANT_CROWBAR: any melee weapon (knife / crowbar)
 //   one-shots this brush regardless of HP.  Combines with the other
 //   flags freely.
 const float BREAKABLE_TRIGGER_ONLY      = 1;
 const float BREAKABLE_TOUCH             = 2;
 const float BREAKABLE_ONLY_EXPLOSION    = 4;
+const float BREAKABLE_ALWAYS_SHOOTABLE  = 8;
 const float BREAKABLE_INSTANT_CROWBAR   = 256;
 
 // --- Material styles (set via "style" key in map editor) ---
@@ -402,6 +408,15 @@ void() func_breakable_break =
     if (self.style == BREAKABLE_UNBREAKABLE_GLASS)
         return;
 
+    // Already broken — a self-referencing target chain (target == own
+    // targetname, or two breakables aimed at each other) re-enters here via
+    // Trigger_UseTargets -> func_breakable_use.  Guard AND mark broken
+    // *before* firing the chain so the recursion ends after each brush breaks
+    // once, instead of looping forever (runaway-loop crash).
+    if (self.breakable_broken)
+        return;
+    self.breakable_broken = TRUE;
+
     // Save center for debris spawn before hiding
     vector center = (self.absmin + self.absmax) * 0.5;
 
@@ -515,7 +530,7 @@ void() BreakableResetAll =
             //   otherwise → DAMAGE_YES
             if (e.spawnflags & (BREAKABLE_TRIGGER_ONLY | BREAKABLE_ONLY_EXPLOSION))
                 e.takedamage = DAMAGE_NO;
-            else if (e.targetname != "")
+            else if (e.targetname != "" && !(e.spawnflags & BREAKABLE_ALWAYS_SHOOTABLE))
                 e.takedamage = DAMAGE_NO;
             else if (e.style == BREAKABLE_UNBREAKABLE_GLASS)
                 e.takedamage = DAMAGE_NO;
@@ -671,7 +686,7 @@ void() func_breakable =
     // W_ImpactEffect classifies on classname, not takedamage.
     if (self.spawnflags & (BREAKABLE_TRIGGER_ONLY | BREAKABLE_ONLY_EXPLOSION))
         self.takedamage = DAMAGE_NO;
-    else if (self.targetname != "")
+    else if (self.targetname != "" && !(self.spawnflags & BREAKABLE_ALWAYS_SHOOTABLE))
         self.takedamage = DAMAGE_NO;
     else if (self.style == BREAKABLE_UNBREAKABLE_GLASS)
         self.takedamage = DAMAGE_NO;

@@ -377,7 +377,7 @@ void() settings_menu =
 		// --- Left column: Decals & Bullet Holes ---
 		settings_section([colL_x, yL], colL_w, "Decals & Bullet Holes");                                     yL += hdr_step;
 		cvar_slider_tip([colL_x, yL], [colL_w, row_h], [0, 2, 2],   "cl_bulletholes",          "Bullet Holes",     "%.0f", "Master toggle. 0=off, 1=walls only, 2=walls + props.");                              yL += row_step;
-		settings_toggle_tip("bh_renderer", [colL_x, yL], [colL_w, row_h], "Polygon Renderer", "cl_bullethole_renderer", "On=cheap polygon quad. Off=legacy adddecal (BSP-clipped, slower).");                    yL += row_step;
+		settings_toggle_tip("bh_renderer", [colL_x, yL], [colL_w, row_h], "Polygon Renderer", "r_bullethole_renderer", "On=cheap polygon quad. Off=legacy adddecal (BSP-clipped, slower).");                    yL += row_step;
 		cvar_slider_tip([colL_x, yL], [colL_w, row_h], [128, 2048, 15], "cl_bulletholes_max",   "Max Holes",        "%.0f", "Most bullet holes kept on screen. Lower = better fps.");                              yL += row_step;
 		cvar_slider_tip([colL_x, yL], [colL_w, row_h], [0, 3000, 30],   "cl_bullethole_distance","Hole Draw Distance",  "%.0f", "Distance LOD. Holes farther than this are skipped.");                            yL += row_step;
 		cvar_slider_tip([colL_x, yL], [colL_w, row_h], [0, 2, 20],      "cl_bullethole_dedupe_scale","Dedupe Scale","%.2f", "How aggressively new holes overwrite nearby old ones (0=stack, 2=aggressive).");      yL += row_step;

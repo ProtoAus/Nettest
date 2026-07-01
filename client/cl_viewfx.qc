@@ -535,6 +535,11 @@ void(entity gun) CSQC_ViewFX_ComputeOffsets =
             // this function).  Save / restore as cl_muzzleflash.qc does.
             vector saved_origin = gun.origin;
             vector saved_angles = gun.angles;
+            // The gettaginfo + makevectors below clobber the v_forward/right/up
+            // globals; the REMOTE-player spine deform (cl_player.qc) reads those
+            // globals, so leaking the sway basis out of here warps every player
+            // model.  Save now, restore at the end of this pivot branch.
+            vector saved_vf = v_forward, saved_vr = v_right, saved_vu = v_up;
             setorigin(gun, '0 0 0');
             gun.angles = '0 0 0';
             float bidx = gettagindex(gun,
@@ -587,6 +592,7 @@ void(entity gun) CSQC_ViewFX_ComputeOffsets =
             }
             setorigin(gun, saved_origin);
             gun.angles = saved_angles;
+            v_forward = saved_vf; v_right = saved_vr; v_up = saved_vu;
         }
 
         if (!pivot_done)

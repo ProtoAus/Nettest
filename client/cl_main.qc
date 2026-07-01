@@ -467,6 +467,7 @@ float(float width, float height) CSQC_UpdateViewFrameBegin =
 	g_height = height;
 	CSQC_BulletHolesStartFrame();
 	CSQC_DrawSprays();
+	CSQC_InfoDecal_DrawTrisoup();   // infodecals: live-swap dispatch on r_decal_renderer (1=trisoup / 0=adddecal)
 
 	//disable quake status bar and quake crosshair
 	setproperty(VF_DRAWENGINESBAR, 0);
@@ -623,7 +624,9 @@ void(float in_menu_backdrop) CSQC_UpdateViewSpectator =
 	CSQC_DrawDebugPickupZones();
 	CSQC_DrawServerHitboxes();
 	CSQC_DrawContinuousHitboxes();
+	NavDebug_DrawScene();	// nettest: nav-graph + links + spectated-bot path (also while spectating)
 	renderscene();
+	NavDebug_DrawText();	// nettest: bot state labels + spectated-bot panel (2D, after renderscene)
 
 	if (!in_menu_backdrop)
 	{
@@ -864,7 +867,8 @@ void() CSQC_UpdateViewAliveScene =
 	CSQC_DrawBloodDecals();
 	CSQC_Rain_Tick();
 	CSQC_DrawDebugImpacts();
-	NavDebug_DrawScene();	// nettest: bot nav-graph + links + enemy lines (server-gated on sv_nav_debug)
+	NavDebug_DrawScene();	// nettest: bot nav-graph + links + enemy lines (server-gated on sv_debug_nav)
+	CSQC_DrawSkelDebug();	// nettest: live player skeleton overlay (cl_skel_debug) for the warp diagnosis
 	CSQC_DrawDebugHitboxes();
 	CSQC_DrawDebugHitboxExpand();
 	CSQC_DrawDebugPhysProps();
@@ -1636,7 +1640,7 @@ void() CSQC_Parse_Event =
 			seye_x = readcoord(); seye_y = readcoord(); seye_z = readcoord();
 			string sname = readstring();
 			if (!Killcam_Active())	// D: no live sprays during the killcam replay
-				CSQC_SpawnSprayDecal(sid, spos, snrm, seye, sname);
+				CSQC_SpawnSprayDecal(sid, spos, snrm, seye, sname, SPRAY_QUAD_HALF, SPRAY_QUAD_HALF);	// square (unchanged)
 			break;
 		}
 		case CSQC_EVENT_SPRAY_REMOVE:

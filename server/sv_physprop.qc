@@ -711,6 +711,18 @@ float(entity playerent, float changedflags) phys_files_Send =
 	WriteByte(MSG_ENTITY, bound(0, rint(self.colormod_y * 255), 255));
 	WriteByte(MSG_ENTITY, bound(0, rint(self.colormod_z * 255), 255));
 
+	// nettest: 1 = client mirrors as SOLID_PHYSICS_TRIMESH (player collides with the generated
+	// convex hull / decomposition) when FREE_SOLID; 0 = oriented box. Derived from this prop's
+	// own solid, so the cabinet (always BOX) + weapon drops send 0 automatically. MUST be read
+	// in the SAME wire position in CSQC_PhysProp_Update (cl_physprop.qc).
+	WriteByte(MSG_ENTITY, (self.solid == SOLID_PHYSICS_TRIMESH) ? 1 : 0);
+
+	// nettest Patch 70: visual + client-trimesh-narrowphase scale (default ~1). The engine renders
+	// the CSQC mirror at self.scale and scales the predicted hull trace by it — without this the
+	// model drew at 1.0 even for a scale 0.8 prop. MUST be read at the SAME wire position in
+	// CSQC_PhysProp_Update (after istrimesh, before phase). cabinet/weapon-drops send ~1.
+	WriteCoord(MSG_ENTITY, self.scale);
+
 	// Carry-phase byte (this is the former csolid 0/1 flag, widened to a 0..3 enum —
 	// see PP_PHASE_*).  0/1 keep the old solidity meaning; 2 (GRABBING) and 3 (STEADY)
 	// distinguish the carry sub-states so the client knows when it may PREDICT the hold
@@ -898,6 +910,14 @@ void(entity player) Carry_Drop =
 		prop.carried_by        = world;
 		prop.carry_stuck_since = 0;
 		prop.gravity           = 0;   // restore normal gravity (was disabled while carried)
+		// nettest Patch 71: clamp the released velocity. The carry servo is now UNCAPPED in open space
+		// (so the collision hull tracks the client-predicted visual), which can leave a huge
+		// prop.velocity mid-swing -> a plain drop would FLING the prop. Cap the release to
+		// sv_carry_max_speed. Carry_Throw sets its (intentional) throw velocity AFTER this, so a throw
+		// is unaffected.
+		float dropcap = cvar("sv_carry_max_speed");
+		if (vlen(prop.velocity) > dropcap)
+			prop.velocity = normalize(prop.velocity) * dropcap;
 		// Stays non-solid to players (PHYSDROP_DIM) so the +attack throw velocity
 		// integrates without shoving you, then phys_files_think shoves it clear and
 		// restores player-solidity once it settles away from you (or after the
@@ -934,22 +954,28 @@ void(entity player) Carry_Drop =
 void(entity player) Carry_Throw =
 {
 	entity prop = player.carried_prop;
+	float  tf   = 0;
+	// Direct velocity set (not addforce) — predictable oomph regardless of mass; view-directed so
+	// looking up throws it up.  Inherits the player's own velocity so a running throw carries momentum.
+	// The gravity gun throws much harder than a bare-hands +use heave.
 	if (prop != world && prop.movetype == MOVETYPE_PHYSICS)
 	{
-		makevectors(player.v_angle);
+		makevectors(player.v_angle);   // sets v_forward (used after Carry_Drop; Carry_Drop won't touch it)
+		tf = (player.weapon == WEP_GRAVITYGUN)
+		   ? cvar("sv_gravgun_throw_speed") : cvar("sv_carry_throw_force");
+	}
+	// nettest Patch 71: release FIRST. Carry_Drop now clamps the residual servo velocity (drop-fling
+	// guard), so the THROW velocity must be set AFTER it — else the throw would be clamped too. Drop
+	// also stops the servo (carried_by=world) so the throw isn't overwritten next tick.
+	Carry_Drop(player);
+	if (prop != world && prop.movetype == MOVETYPE_PHYSICS)
+	{
 		physics_enable(prop, TRUE);   // wake so the throw velocity is integrated
-		// Direct velocity set (not addforce) — predictable oomph regardless of
-		// mass; view-directed so looking up throws it up.  Inherits the player's
-		// own velocity so a running throw carries momentum.  Carry_Drop below
-		// stops the servo (carried_prop=world) so this velocity isn't overwritten.
-		// The gravity gun throws much harder than a bare-hands +use heave.
-		float tf = (player.weapon == WEP_GRAVITYGUN)
-		         ? cvar("sv_gravgun_throw_speed") : cvar("sv_carry_throw_force");
 		prop.velocity = v_forward * tf + player.velocity;
+		prop.pp_prev_velocity = prop.velocity;   // re-baseline impact tracker to the throw (Carry_Drop set it to the clamped residual)
 		if (cvar("sv_debug_physprops"))
 			dprint(sprintf("[carry] throw prop=%g vel=%v\n", num_for_edict(prop), prop.velocity));
 	}
-	Carry_Drop(player);
 };
 
 // Per-component SHORTEST-PATH angle lerp — normalises each delta to [-180,180) so the
@@ -1059,6 +1085,7 @@ void(entity player) Carry_Tick =
 	vector tgt = hold;
 	float  bump;
 	float  hit_surface = FALSE;        // did the clip-slide bump a real surface? (carry-bang)
+	float  was_startsolid = FALSE;     // Patch 71: trace started embedded (resting grab / mid-carry shove-in)
 	vector hit_point   = '0 0 0';
 	vector hit_normal  = '0 0 1';
 	for (bump = 0; bump < 4; bump = bump + 1)
@@ -1074,6 +1101,8 @@ void(entity player) Carry_Tick =
 			// clear the next frames clip-slide normally.  A HELD prop is kept off
 			// surfaces by the clamp, so this only fires on the resting grab, not mid-carry.
 			cur = tgt;
+			was_startsolid = TRUE;   // Patch 71: keep the servo CAPPED here (aim is the RAW hold) so an
+			                         // embedded prop is eased out at sv_carry_max_speed, not flung.
 			break;
 		}
 		cur = trace_endpos;        // advance to the contact (or all the way if clear)
@@ -1179,9 +1208,29 @@ void(entity player) Carry_Tick =
 	float ft = frametime;
 	if (ft <= 0) ft = 0.013;
 	vector desired = delta * (1 / ft);
+	// nettest Patch 71: only CAP the servo when a wall is in the hold path (hit_surface). The
+	// clip-slide already clamped the hold to the nearest wall, so in OPEN space (!hit_surface) the
+	// full straight path to the target is clear -> UNCAP so the ODE body reaches the clip-slid hold
+	// THIS frame and tracks the client-predicted visual ~1:1 (was capped at sv_carry_max_speed, ~15.6
+	// qu/frame @ 64Hz -> the hull trailed on fast mouse swings + tunnelled on a fast pickup-swing).
+	// Tunnel-safe: !hit_surface means nothing was hit along the whole path. Still an ODE body, so it
+	// still pushes other props on contact. (Remote clients keep a ping/2 floor — server-authoritative.)
 	float  maxsp   = cvar("sv_carry_max_speed");
-	if (vlen(desired) > maxsp)
+	if ((hit_surface || was_startsolid) && vlen(desired) > maxsp)
 		desired = normalize(desired) * maxsp;
+
+	// nettest Patch 70: wall deadband — when the clip-slide clamped the hold against a surface
+	// (hit_surface) and the prop is essentially AT it (dist < band), remove the INTO-wall component
+	// of the servo so ODE RESTS the body at the wall instead of oscillating. That kills the
+	// r_showhull jitter vs the steady client-predicted visual (server now matches the clamped hold
+	// 1:1). Tangential slide-along survives; the away component (into>=0) is untouched so backing
+	// the view away grows `dist` past the band and the full servo resumes (instant un-stick).
+	if (hit_surface && dist < cvar("sv_carry_wall_deadband"))
+	{
+		float into = desired * hit_normal;   // hit_normal points OUT of the wall; into<0 = driving in
+		if (into < 0)
+			desired = desired - hit_normal * into;
+	}
 	prop.velocity = desired;
 
 	// Locked orientation: upright, facing the carrier.  Writing .angles each

@@ -10,8 +10,8 @@
 // when they can't see an enemy, and aim+fire (skill-tunable) when they can.
 //
 // Admin control follows the mod's cvar-trigger convention (SSQC has no
-// registercommand): sv_bot_minplayers (persistent fill), sv_bot_add /
-// sv_bot_kick (momentary, reset to 0), sv_bot_skill (0-100 aim/reaction).
+// registercommand): bot_minplayers (persistent fill), botadd /
+// bot_kick (momentary, reset to 0), bot_skill (0-100 aim/reaction).
 //
 // Compile order: after sv_player.qc (PlayerJoinTeam/PlayerSpawn/PlayerPreThink/
 // SV_RunClientCommand) + sv_navnodes.qc (Nav_*), before sv_main.qc (StartFrame
@@ -29,8 +29,16 @@ const float BOT_RUN     = 240;	// normal travel magnitude (× weapon speed facto
 				// but not crawling.  Verify with cl_speedometer in spectate.
 const float BOT_MELEE_RANGE = 72;	// only swing the knife once this close
 const float BOT_SPRAY_RANGE = 250;	// inside this, spray continuously instead of bursting
+const float BOT_AVOID_RADIUS  = 56;	// avoidance: peel away from other players within this range
+const float BOT_LOOKAHEAD     = 44;	// avoidance: wall lookahead trace distance ahead of the bot
+const float BOT_JUMP_LOOKAHEAD = 30;	// auto-jump: forward probe distance for a blocking ledge
+const float BOT_STEP_SKIP      = 20;	// auto-jump/avoid: raise the LOW trace floor above PM_STEPSIZE (18)
+const float BOT_JUMP_CLEAR     = 40;	// auto-jump: tallest ledge the bot will hop onto (jump apex ~45)
+const float BOT_WEDGE_DIST     = 24;	// avoidance: "wedged into another player" range (separate even an enemy; give way)
+const float BOT_RETARGET_INT   = 0.5;	// targeting: re-pick the nearest VISIBLE enemy this often, even mid-fight
+const float BOT_HURT_FOCUS     = 1.5;	// targeting: after being hit, hold off the periodic re-pick this long (let the attacker-snap stick)
 float bot_pathnodes[BOT_MAXSLOT * BOT_PATHLEN];
-float bot_dbg_filltime;	// throttle for the sv_bot_debug fill print
+float bot_dbg_filltime;	// throttle for the bot_debug fill print
 float bot_dbg_acttime;	// throttle for the per-frame bot activity print
 float bot_dbg_aimtime;	// throttle for the aim-trace debug
 
@@ -94,7 +102,7 @@ float() Bot_AutoTeam =
 
 const float BOT_SIGHT = 3000;	// max acquisition distance (was the findradius)
 
-// Acquire the nearest VISIBLE enemy inside the frontal vision cone (sv_bot_fov).
+// Acquire the nearest VISIBLE enemy inside the frontal vision cone (bot_fov).
 // Walks the players-only chain with an explicit distance gate (replaces the
 // findradius-over-all-entities scan).  The cone restricts NEW acquisition only —
 // TRACKING an already-held bot_enemy stays 360-degree (the >5s memory window in
@@ -105,7 +113,7 @@ entity(float ignorecone) Bot_FindEnemyEx =
 	vector eye = self.origin + self.view_ofs;
 
 	// Frontal cone: half-angle cosine.  fov<=0 or >=360 -> full 360 (disabled).
-	float fov = cvar("sv_bot_fov");
+	float fov = cvar("bot_fov");
 	float use_cone = (!ignorecone && fov > 0 && fov < 360);
 	float coscone = use_cone ? cos((fov * 0.5) * 0.0174532925) : -2;	// -2 = always passes the dot test
 	vector fwd = '0 0 0';
@@ -142,7 +150,7 @@ entity(entity cur) Bot_PickEnemy =
 		return best;			// no valid current -> take best (may be world)
 	if (!best || best == cur)
 		return cur;			// nothing better visible -> keep current
-	float margin = cvar("sv_bot_target_margin");
+	float margin = cvar("bot_target_margin");
 	if (margin <= 0 || margin > 1) margin = 0.85;
 	float dnew = vlen(best.origin - self.origin);
 	float dcur = vlen(cur.origin  - self.origin);
@@ -218,6 +226,20 @@ void(vector target, float speed) Bot_MoveToward =
 	input_movevalues_z = 0;
 };
 
+// Move with EXPLICIT forward/side amounts in the AIM's frame (input_angles).  Lets the
+// bot strafe / advance / back-pedal in any direction while its aim stays LOCKED on the
+// target — it FACES the enemy and moves freely in 360, instead of facing wherever it
+// walks (Bot_MoveToward steers toward a world point and faces it; that's for the
+// navigator, and it's what made combat side-steps "slightly face away").
+void(float fwdamt, float sideamt) Bot_StrafeMove =
+{
+	float factor = WeaponManifest_SpeedFactor(self.weapon);
+	if (factor <= 0) factor = 1;
+	input_movevalues_x = fwdamt  * factor;
+	input_movevalues_y = sideamt * factor;
+	input_movevalues_z = 0;
+};
+
 float(float cur, float want, float maxstep) Bot_AngleApproach1 =
 {
 	float d = want - cur;
@@ -245,7 +267,7 @@ float(float cur, float want, float ease, float cap) Bot_AngleEase =
 
 float() Bot_Skill =
 {
-	float s = cvar("sv_bot_skill");
+	float s = cvar("bot_skill");
 	if (s <= 0)   s = 50;
 	if (s > 100)  s = 100;
 	return s;
@@ -316,7 +338,12 @@ void(vector goalpos) Bot_Navigate =
 
 	if (time >= self.bot_repath_time || self.bot_path_len <= 0)
 	{
-		self.bot_repath_time = time + 0.6;
+		// Repath at 1.0s (was 0.6): the periodic full repath re-runs Nav_NearestNode
+		// on self.origin, and near a node midpoint the chosen START node can flip
+		// frame-to-frame, briefly pointing the path BACKWARD (a pointless ~180).
+		// A longer interval (the path still repaths immediately when EXHAUSTED below)
+		// reduces that jitter.  The patrol goal is stable, so this costs nothing.
+		self.bot_repath_time = time + 1.0;
 		if (Nav_FindPath(self.origin, goalpos))
 		{
 			float n = nav_result_len;
@@ -356,22 +383,57 @@ void(vector goalpos) Bot_Navigate =
 
 void() Bot_Roam =
 {
+	// Roam the WHOLE map: head to a nav node; on arrival (or a long give-up timer for
+	// an unreachable one) pick a NEW destination, sampled to be FAR and roughly AHEAD
+	// so the bot keeps crossing the map (varied coverage) WITHOUT the constant ~180s
+	// the old every-6s random reselection caused (a fresh node right behind = a U-turn).
 	if (nav_count <= 0)
 		return;
-	vector d = nav_pos[self.bot_goal_node] - self.origin; d_z = 0;
-	if (time >= self.bot_roam_time || vlen(d) < 64)
+
+	// Range-check the goal index in its OWN statement BEFORE dereferencing nav_pos[] —
+	// logicops is OFF mod-wide, so a combined `|| nav_pos[i]` would still index OOB
+	// and boundcheck-crash if the nav graph rebuilt smaller under a stale goal.
+	float need;
+	if (self.bot_goal_node < 0 || self.bot_goal_node >= nav_count)
+		need = TRUE;				// stale/uninit goal -> reselect (don't index OOB)
+	else
 	{
-		self.bot_goal_node = floor(random() * nav_count);
-		self.bot_roam_time = time + 6;
+		vector gd = nav_pos[self.bot_goal_node] - self.origin; gd_z = 0;
+		need = (vlen(gd) < 96 || time >= self.bot_roam_time);
+	}
+	if (need)
+	{
+		makevectors(self.v_angle);
+		vector fdir = v_forward; fdir_z = 0;
+		if (vlen(fdir) > 0.01) fdir = normalize(fdir);
+		// Seed best with an IN-RANGE node: the <64u gate below can skip all 6 samples
+		// (tiny / dense map), and the trailing Bot_Navigate(nav_pos[best]) must be safe.
+		float best = floor(random() * nav_count), bestscore = -1000000;
+		float t;
+		for (t = 0; t < 6; t = t + 1)
+		{
+			float cand = floor(random() * nav_count);
+			vector cd = nav_pos[cand] - self.origin; cd_z = 0;
+			float clen = vlen(cd);
+			if (clen < 64)
+				continue;		// too close -> skip
+			// FAR + forward bias: a node ahead beats one behind at similar range, but
+			// a much-farther node behind can still win, so the back of the map gets
+			// covered too — just not via a U-turn every few seconds.
+			float score = clen + (normalize(cd) * fdir) * 700;
+			if (score > bestscore) { bestscore = score; best = cand; }
+		}
+		self.bot_goal_node = best;
+		self.bot_roam_time = time + 25;		// give-up for an unreachable node (NOT a re-randomize tick)
 	}
 	Bot_Navigate(nav_pos[self.bot_goal_node]);
-	// No sprint: bots travel at their weapon-weighted run speed (sv_maxspeed ×
-	// weapon_factor, the same clamp humans get) instead of looking like they sprint.
 };
 
 void(float can_fire) Bot_Engage =
 {
 	vector epos = self.bot_enemy.origin + self.bot_enemy.view_ofs;
+	// Lead a moving target slightly — lock onto where they'll BE, not where they are.
+	epos = epos + self.bot_enemy.velocity * 0.10;
 	Bot_AimAt(epos);
 
 	makevectors(self.v_angle);
@@ -410,7 +472,6 @@ void(float can_fire) Bot_Engage =
 	{
 		self.bot_burst_end   = time + 0.3  + random() * 0.22;		// burst 0.3-0.52s (50% longer = more rounds/burst)
 		self.bot_burst_cycle = self.bot_burst_end + 0.16 + random() * 0.12;	// reposition 0.16-0.28s (short hop)
-		self.bot_strafe      = (random() < 0.5) ? -1 : 1;
 	}
 	float firing = spray || (time < self.bot_burst_end);
 
@@ -433,43 +494,46 @@ void(float can_fire) Bot_Engage =
 	else
 		self.bot_fire_time = 0;		// re-acquire reaction when not firing / off target
 
-	// MOVEMENT.
+	// MOVEMENT — ALWAYS strafe relative to the LOCKED aim, near AND far.  Bot_StrafeMove
+	// sets input_movevalues directly in the aim's frame, so the bot keeps FACING the
+	// enemy and side-steps in 360 — no more "run straight in, then sidestep facing away".
 	if (Bot_IsSniper(self.weapon) && dist > 200)
 	{
-		input_movevalues = '0 0 0';	// snipers hold to land the shot
+		input_movevalues = '0 0 0';	// snipers plant to land the shot
 		return;
 	}
-	if (dist > 380)
+
+	// Hold a strafe side for a short "lock" (~0.4-0.9s) then re-roll — flipping every
+	// frame just shuffles in place; a brief commit reads as a real dodge.
+	if (time >= self.bot_strafe_time)
 	{
-		Bot_MoveToward(self.bot_enemy.origin, BOT_RUN);	// close the gap (run, not sprint)
-		return;
+		self.bot_strafe = (random() < 0.5) ? -1 : 1;
+		self.bot_strafe_time = time + 0.4 + random() * 0.5;
 	}
-	vector sp;
+
+	// STOP while shooting at range; keep moving on CLOSE spray.  The request: moving
+	// while spraying point-blank is fine, but at burst range PLANT to land the burst
+	// (then strafe-reposition between bursts).
 	if (spray)
-	{	// close: strafe at RUN speed, flipping every ~0.25-0.5s (shorter = tighter dodge)
-		if (time >= self.bot_strafe_time)
-		{
-			self.bot_strafe = (random() < 0.5) ? -1 : 1;
-			self.bot_strafe_time = time + 0.25 + random() * 0.25;
-		}
-		makevectors(input_angles);
-		sp = self.origin + v_right * self.bot_strafe * 220;
-		if (dist < 140)
-			sp = sp - v_forward * 120;	// back off if crowded
-		Bot_MoveToward(sp, BOT_RUN);
+	{
+		// Close: strafe while firing.  Peel back if crowded, else pure strafe.
+		float sfwd = (dist < 130) ? -BOT_RUN * 0.55 : 0;
+		Bot_StrafeMove(sfwd, self.bot_strafe * BOT_RUN);
 	}
 	else if (time < self.bot_burst_end)
 	{
-		input_movevalues = '0 0 0';	// hold steady to aim the burst
+		input_movevalues = '0 0 0';	// plant to land the burst (avoidance + ledge-jump skip while planted)
 	}
 	else
-	{	// reposition between bursts: sidestep FAST (BOT_RUN, was BOT_WALK) so it
-		// visibly dodges instead of barely shuffling
-		makevectors(input_angles);
-		sp = self.origin + v_right * self.bot_strafe * 220;
-		if (dist < 160)
-			sp = sp - v_forward * 120;
-		Bot_MoveToward(sp, BOT_RUN);
+	{
+		// Between bursts: strafe-approach — close in when far, hold ideal range,
+		// peel back when crowded.
+		float fwdamt;
+		if (dist > 500)       fwdamt =  BOT_RUN * 0.6;	// far: close in WHILE strafing
+		else if (dist > 240)  fwdamt =  BOT_RUN * 0.3;	// mid: drift in, mostly strafe
+		else if (dist < 130)  fwdamt = -BOT_RUN * 0.55;	// crowded: peel back
+		else                  fwdamt =  0;		// ideal range: pure strafe
+		Bot_StrafeMove(fwdamt, self.bot_strafe * BOT_RUN);
 	}
 };
 
@@ -479,19 +543,166 @@ void() Bot_AntiStuck =
 	{
 		self.bot_lastpos = self.origin;
 		self.bot_stuck_time = time;
+		self.bot_stuck_count = 0;
 		return;
 	}
 	if (time - self.bot_stuck_time > 1.0)	// was 0.5 — halved the stuck-jump rate so a
 	{					// genuinely-wedged bot doesn't look like it's bunny-hopping
+		self.bot_stuck_count = self.bot_stuck_count + 1;
 		if (self.flags & FL_ONGROUND)
 		{
 			self.button2 = 1;
 			input_buttons = input_buttons | PM_BTN_JUMP;
 		}
-		self.bot_repath_time = 0;		// force a fresh path
-		self.bot_strafe = self.bot_strafe * -1;
+		// Only FORCE a fresh path (which can return a node behind us -> a 180) after
+		// we've been wedged for MULTIPLE ticks.  A single jump usually frees a bot,
+		// and Bot_ApplyAvoidance now steers around oncoming bots, so don't thrash the
+		// path on the first stuck tick — and no strafe flip (that was a 180 source).
+		if (self.bot_stuck_count >= 2)
+		{
+			self.bot_repath_time = 0;	// force a fresh path
+			self.bot_stuck_count = 0;
+		}
 		self.bot_stuck_time = time;
 	}
+};
+
+// Run-time avoidance: fold a LATERAL sidestep into input_movevalues so bots steer
+// around walls and oncoming bots instead of grinding into them — WITHOUT ever
+// reversing (no 180).  Composes with the movement the behaviour state already set;
+// the post-move velocity cap in Bot_RunFrame bounds the magnitude.  bot_avoid 0 off.
+void() Bot_ApplyAvoidance =
+{
+	if (input_movevalues_x == 0 && input_movevalues_y == 0)
+		return;				// not trying to move -> nothing to avoid
+	if (cvar("bot_avoid") == 0)
+		return;
+
+	makevectors(input_angles);
+	vector fwd = v_forward; fwd_z = 0;
+	if (vlen(fwd) < 0.01)
+		return;
+	fwd = normalize(fwd);
+	vector rgt = v_right;   rgt_z = 0; rgt = normalize(rgt);
+
+	float steer = 0;			// lateral push: + = right, - = left
+	float wedge_yield = 0;			// we're the give-way bot in a nose-to-nose wedge -> ease off forward
+
+	// --- other players roughly AHEAD -> peel around them (head-on bots both pass) ---
+	entity e;
+	for (e = player_chain_head; e; e = e.player_chain_next)
+	{
+		if (e == self || e.is_dead ||
+		    e.player_team == TEAM_NONE || e.player_team == TEAM_SPEC)
+			continue;
+		vector d = e.origin - self.origin; d_z = 0;
+		float dist = vlen(d);
+		if (dist < 1 || dist > BOT_AVOID_RADIUS)
+			continue;
+		// Exclude the current engage target at NORMAL range (peeling off it would fight
+		// the deliberate combat strafe Bot_Engage set), BUT still push apart a WEDGED
+		// enemy (<= BOT_WEDGE_DIST) so two bots fighting each other don't grind together.
+		if (e == self.bot_enemy && dist > BOT_WEDGE_DIST)
+			continue;
+		vector dn = normalize(d);
+		if ((dn * fwd) < 0.2)
+			continue;		// behind / beside us -> not in the way
+		float close = (BOT_AVOID_RADIUS - dist) / BOT_AVOID_RADIUS;
+		float lat = dn * rgt;		// which side the other guy is on
+		if (lat > 0.05)       steer = steer - close;	// they're on our right -> peel LEFT
+		else if (lat < -0.05) steer = steer + close;	// on our left -> peel RIGHT
+		else                  steer = steer + close;	// dead ahead -> right-hand rule (deterministic pass)
+
+		// Deterministic right-of-way: nose-to-nose AND we're the HIGHER edict -> give way
+		// (ease off forward below) so the pair doesn't deadlock in a corridor with no room
+		// to sidestep.  The lower edict (incl. a human) keeps going.
+		if (dist < BOT_WEDGE_DIST && (dn * fwd) > 0.6 && num_for_edict(self) > num_for_edict(e))
+			wedge_yield = 1;
+	}
+
+	// --- wall directly ahead -> sidestep to the open side ---
+	// Skip this WHILE mid-hop (we just triggered a ledge jump) so we don't veer off the
+	// ledge in the air — the player-separation steer above still runs.  Floor raised
+	// above step height so stairs/ledges (pmove climbs those) don't read as walls.
+	if (time >= self.bot_jump_time)
+	{
+		vector tmins = self.mins; tmins_z = self.mins_z + BOT_STEP_SKIP;
+		vector ahead = self.origin + fwd * BOT_LOOKAHEAD;
+		tracebox(self.origin, tmins, self.maxs, ahead, MOVE_NORMAL, self);
+		if (trace_fraction < 1)
+		{
+			float wlat = trace_plane_normal * rgt;		// wall normal points to open space
+			float blk  = 1 - trace_fraction;
+			if (wlat > 0.05)       steer = steer + blk;	// open to the right
+			else if (wlat < -0.05) steer = steer - blk;	// open to the left
+			else                   steer = steer + blk;	// dead-on wall -> right
+		}
+	}
+
+	if (steer != 0)
+	{
+		steer = bound(-1, steer, 1);
+		input_movevalues_y = input_movevalues_y + steer * BOT_RUN;	// pure lateral add (never reverses)
+	}
+
+	// Give way: ease our forward drive (keep the lateral steer) so the other bot passes —
+	// no reverse, so no "180" look.  Rare true 1-wide deadlocks fall to Bot_AntiStuck.
+	if (wedge_yield)
+		input_movevalues_x = input_movevalues_x * 0.25;
+};
+
+// Proactive auto-jump: when the behaviour wants to move INTO a 20-40u ledge that pmove
+// won't auto-step (taller than PM_STEPSIZE 18), hop it.  Called BEFORE avoidance so it
+// reads the INTENDED move dir (toward the goal/ledge), not the post-steer direction.
+void() Bot_TryJumpLedge =
+{
+	if (cvar("bot_avoid") == 0)
+		return;
+	if (!(self.flags & FL_ONGROUND))
+		return;				// can only hop off the ground
+	if (time < self.bot_jump_time)
+		return;				// cooldown — also lets the jump-held latch release
+	if (input_movevalues_x == 0 && input_movevalues_y == 0)
+		return;				// not trying to move
+
+	// World-space move direction from the aim-frame input.
+	makevectors(input_angles);
+	vector mv = v_forward * input_movevalues_x + v_right * input_movevalues_y;
+	mv_z = 0;
+	if (vlen(mv) < 0.01)
+		return;
+	mv = normalize(mv);
+	vector ahead = self.origin + mv * BOT_JUMP_LOOKAHEAD;
+
+	// LOW block trace: floor raised above step height so <=18u steps read as clear
+	// (pmove climbs them); only a 20-40u obstacle blocks.
+	vector lowmins = self.mins; lowmins_z = self.mins_z + BOT_STEP_SKIP;
+	tracebox(self.origin, lowmins, self.maxs, ahead, MOVE_NORMAL, self);
+	if (trace_fraction >= 1)
+		return;				// nothing blocking ahead -> no ledge to hop
+
+	// LANDING down-trace: drop the full hull onto the ledge TOP, sampled PAST the edge.
+	// dtop feet start at feet+48 (above any <=40u ledge -> not startsolid).  landh =
+	// trace_endpos_z - origin_z is the surface height above our current feet.
+	vector land = self.origin + mv * (BOT_JUMP_LOOKAHEAD + 18);
+	vector dtop = land; dtop_z = self.origin_z + BOT_JUMP_CLEAR + 8;
+	vector dbot = land; dbot_z = self.origin_z + self.mins_z;
+	tracebox(dtop, self.mins, self.maxs, dbot, MOVE_NORMAL, self);
+	if (trace_startsolid)
+		return;				// wall taller than the probe -> not a hop-able ledge
+	if (trace_fraction >= 1)
+		return;				// no surface found (railing/pillar with no stand-able top)
+	float landh = trace_endpos_z - self.origin_z;
+	if (landh < PM_STEPSIZE)
+		return;				// pmove auto-steps this -> no hop needed
+	if (landh > BOT_JUMP_CLEAR)
+		return;				// too tall to reach -> let avoidance steer around it
+	if (trace_plane_normal_z < 0.7)
+		return;				// not a walkable top
+
+	self.button2 = 1;
+	input_buttons = input_buttons | PM_BTN_JUMP;
+	self.bot_jump_time = time + 0.6;	// let the hop play out (and the latch release) before re-checking
 };
 
 // Per-bot AI tick.  self == the bot.  Sets input_* / button0 / button2 / v_angle.
@@ -534,12 +745,22 @@ void() Bot_Think =
 	if (self.bot_enemy && (self.bot_enemy.is_dead || !IsBotEnemy(self, self.bot_enemy)))
 		self.bot_enemy = world;
 
-	// re-search only when there's no enemy or it's been unseen too long; route through
-	// the margin helper so two equal-range enemies don't thrash.  While the bot can see
-	// its enemy the LOS block below refreshes bot_enemy_time, so this stays FALSE — no
-	// per-frame re-scan (or cone re-eval) during active engagement.
-	if (!self.bot_enemy || (time - self.bot_enemy_time) > 5)
+	// Re-pick the target.  FORCED when we have no / dead / stale enemy.  ALSO on a short
+	// interval (BOT_RETARGET_INT) even mid-fight, so the bot switches to a CLOSER visible
+	// in-cone enemy — the old code only re-picked every 5s, and the LOS refresh below kept
+	// that timer from ever expiring, so the bot locked onto its first target.  Bot_PickEnemy
+	// applies bot_target_margin (only swaps if meaningfully closer -> no jitter) and keeps the
+	// current target when nothing closer is visible (never drops to world).  Suppress the
+	// PERIODIC re-pick briefly after being hit (BOT_HURT_FOCUS) so the snap-to-attacker
+	// (W_ApplyDamage) isn't overridden by a closer in-cone enemy before the bot turns to face
+	// the shooter.  logicops is OFF, but every operand here is a comparison/field-read (no array).
+	float force_repick = (!self.bot_enemy || self.bot_enemy.is_dead || (time - self.bot_enemy_time) > 5);
+	float periodic_ok  = (time >= self.bot_retarget_time && (time - self.bot_lasthurt_time) > BOT_HURT_FOCUS);
+	if (force_repick || periodic_ok)
+	{
 		self.bot_enemy = Bot_PickEnemy(self.bot_enemy);
+		self.bot_retarget_time = time + BOT_RETARGET_INT;
+	}
 
 	float have_los = FALSE;
 	if (self.bot_enemy && !self.bot_enemy.is_dead)
@@ -561,7 +782,7 @@ void() Bot_Think =
 	else if (self.bot_los_lost_time == 0)
 		self.bot_los_lost_time = time;
 
-	float grace = cvar("sv_bot_los_grace");
+	float grace = cvar("bot_los_grace");
 	if (grace < 0) grace = 0; if (grace > 2) grace = 2;
 	// engage-sticky: currently see them, OR lost LOS only momentarily and the target is alive.
 	float engage_sticky = self.bot_enemy && !self.bot_enemy.is_dead &&
@@ -584,6 +805,8 @@ void() Bot_Think =
 		Bot_Roam();
 	}
 
+	Bot_TryJumpLedge();		// proactive hop over a small ledge (reads the intended move dir)
+	Bot_ApplyAvoidance();		// steer around walls + other bots (lateral, no 180)
 	Bot_AntiStuck();
 	input_timelength = frametime;
 };
@@ -591,20 +814,20 @@ void() Bot_Think =
 // ---------------------------------------------------------------------------
 // admin triggers + per-frame driver (called from SV_StartFrame)
 // ---------------------------------------------------------------------------
-float bot_add_pending;		// queued sv_bot_add count, drained one bot per frame
+float bot_add_pending;		// queued botadd count, drained one bot per frame
 void() Bot_FillTick =
 {
-	if (cvar("sv_bot_debug") && time >= bot_dbg_filltime)
+	if (cvar("bot_debug") && time >= bot_dbg_filltime)
 	{
 		bot_dbg_filltime = time + 2;
 		dprint(sprintf("^3[bot] fill: want=%g humans=%g bots=%g\n",
-			cvar("sv_bot_minplayers"), Bot_HumanCount(), Bot_Count()));
+			cvar("bot_minplayers"), Bot_HumanCount(), Bot_Count()));
 	}
 
-	float add = cvar("sv_bot_add");
+	float add = cvar("botadd");
 	if (add != 0)
 	{
-		cvar_set("sv_bot_add", "0");
+		cvar_set("botadd", "0");
 		bot_add_pending = bot_add_pending + add;
 	}
 	// Drain the add queue ONE per frame.  Spawning many bots in a single frame
@@ -618,16 +841,16 @@ void() Bot_FillTick =
 		bot_add_pending = bot_add_pending - 1;
 	}
 
-	float kick = cvar("sv_bot_kick");
+	float kick = cvar("bot_kick");
 	if (kick != 0)
 	{
-		cvar_set("sv_bot_kick", "0");
+		cvar_set("bot_kick", "0");
 		float k;
 		for (k = 0; k < kick && Bot_Count() > 0; k = k + 1)
 			Bot_KickOne();
 	}
 
-	float want = cvar("sv_bot_minplayers");
+	float want = cvar("bot_minplayers");
 	if (want > 0)
 	{
 		if (Bot_HumanCount() + Bot_Count() < want)
@@ -646,7 +869,7 @@ void() Bot_FillTick =
 };
 
 // ---------------------------------------------------------------------------
-// Debug overlay (sv_nav_debug 1): nav graph + per-bot state/path, streamed to each
+// Debug overlay (sv_debug_nav 1): nav graph + per-bot state/path, streamed to each
 // viewer via a per-client SendEntity proxy (nav_debug_proxy).  Replaces the old
 // multicast-from-StartFrame stream, which corrupted the message stream ("Illegible
 // server message") because the NQ net-preparse buffer interleaved with the bot
@@ -655,7 +878,7 @@ void() Bot_FillTick =
 // channel the player_visual_proxy / prediction proxy use.  Zero cost off: no proxy
 // spawned -> nothing streamed -> cl_navdebug caches go stale -> nothing drawn.
 // ---------------------------------------------------------------------------
-const float NAV_DBG_CHUNK   = 6;	// nodes per graph chunk (one chunk per update until complete)
+const float NAV_DBG_CHUNK   = 16;	// nodes per graph chunk (~720B worst case; FTE fragments) — fills the full graph in a few seconds
 const float NAV_DBG_MAXLINK = 16;	// links streamed per node — must cover the client NAVDBG_LINKS cap
 
 // SendEntity serializer for one nav_debug_proxy.  self = the proxy, owner = its
@@ -776,12 +999,12 @@ void(entity client) NavDbg_EnsureProxy =
 	setorigin(proxy, client.origin);
 };
 
-// Per-frame driver (called from Bot_RunFrame).  sv_nav_debug 0 => tear proxies down.
+// Per-frame driver (called from Bot_RunFrame).  sv_debug_nav 0 => tear proxies down.
 void() NavDbg_Tick =
 {
 	entity e;
 
-	if (cvar("sv_nav_debug") < 1)
+	if (cvar("sv_debug_nav") < 1)
 	{
 		for (e = world; (e = find(e, classname, "player")); )
 			if (e.nav_debug_proxy)
@@ -861,9 +1084,9 @@ void() Bot_RunFrame =
 	}
 	self = saved;
 
-	NavDbg_Tick();		// bot/nav debug overlay via per-client SendEntity (sv_nav_debug 1)
+	NavDbg_Tick();		// bot/nav debug overlay via per-client SendEntity (sv_debug_nav 1)
 
-	if (cvar("sv_bot_debug") && time >= bot_dbg_acttime)
+	if (cvar("bot_debug") && time >= bot_dbg_acttime)
 	{
 		bot_dbg_acttime = time + 1.5;
 		dprint(sprintf("^3[bot] active=%g enemy=%g firing=%g moving=%g lastwep=%g\n",

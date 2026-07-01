@@ -136,6 +136,24 @@ void(vector p_waist, vector p_tip) Rope_DrawSegment =
 };
 
 // ----------------------------------------------------------------
+//  Hand anchor — nudge the player-side rope end off the BBOX centre
+//  toward the (right) hand so the rope reads as held rather than
+//  navel-mounted.  `yaw` is the facing yaw (view yaw for the local
+//  player, model yaw for remotes); the offset is applied in that
+//  yaw's right/forward basis so it tracks the player as they turn.
+//  Tunable live via cl_grappling_rope_hand_right / _fwd / _up.
+//  (makevectors clobbers v_*, but Rope_DrawSegment doesn't read them.)
+// ----------------------------------------------------------------
+vector(vector base, float yaw) Rope_HandAnchor =
+{
+    makevectors([0, yaw, 0]);
+    return base
+         + v_right   * cvar("cl_grappling_rope_hand_right")
+         + v_forward * cvar("cl_grappling_rope_hand_fwd")
+         + '0 0 1'   * cvar("cl_grappling_rope_hand_up");
+};
+
+// ----------------------------------------------------------------
 //  Local player's rope — waist+anchor from the prediction proxy.
 //  Called per-frame from CSQC_UpdateView.
 // ----------------------------------------------------------------
@@ -143,8 +161,10 @@ void() CSQC_Rope_Draw =
 {
     if (!predicted_player || !predicted_player.grapple_rope_active)
         return;
-    Rope_DrawSegment(predicted_player.origin + predicted_player.view_ofs + '0 0 -16',
-                     predicted_player.grapple_anchor);
+    vector waist = Rope_HandAnchor(
+        predicted_player.origin + predicted_player.view_ofs + '0 0 -16',
+        view_angles_y);
+    Rope_DrawSegment(waist, predicted_player.grapple_anchor);
 };
 
 // ----------------------------------------------------------------
@@ -173,7 +193,8 @@ void() CSQC_Rope_DrawRemotes =
                 proxy.grapple_anchor_render = proxy.grapple_anchor_render
                     + (proxy.grapple_anchor - proxy.grapple_anchor_render) * k;
             }
-            Rope_DrawSegment(proxy.origin + ROPE_REMOTE_WAIST, proxy.grapple_anchor_render);
+            Rope_DrawSegment(Rope_HandAnchor(proxy.origin + ROPE_REMOTE_WAIST, proxy.angles_y),
+                             proxy.grapple_anchor_render);
         }
         else
             proxy.grapple_render_init = 0;   // reset so the next throw snaps fresh

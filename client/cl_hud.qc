@@ -75,7 +75,7 @@ float csqc_hitmarker_time;
 const float HITMARKER_DURATION = 0.25;
 const float HITMARKER_GAP = 6;     // gap from center
 const float HITMARKER_LENGTH = 4;  // line length beyond the gap
-const float HITMARKER_WIDTH = 2;   // line thickness
+// thickness is now the engine cvar gl_2dline_width (2D drawline width), not a QC layer count
 
 void() HUD_TriggerHitmarker =
 {
@@ -171,25 +171,13 @@ void() HUD_DrawHitmarker =
     g = HITMARKER_GAP;
     l = HITMARKER_LENGTH;
 
-    // Four true diagonal lines forming an X with a gap in the center
-    // Draw multiple offset lines to simulate thickness
-    float i;
-    for (i = 0; i < HITMARKER_WIDTH; i++)
-    {
-        float ofs = i - (HITMARKER_WIDTH - 1) * 0.5;
-        // Top-left
-        drawline(1, [cx - g - l + ofs, cy - g - l, 0], [cx - g + ofs, cy - g, 0], '1 1 1', alpha);
-        drawline(1, [cx - g - l, cy - g - l + ofs, 0], [cx - g, cy - g + ofs, 0], '1 1 1', alpha);
-        // Top-right
-        drawline(1, [cx + g + l + ofs, cy - g - l, 0], [cx + g + ofs, cy - g, 0], '1 1 1', alpha);
-        drawline(1, [cx + g + l, cy - g - l + ofs, 0], [cx + g, cy - g + ofs, 0], '1 1 1', alpha);
-        // Bottom-left
-        drawline(1, [cx - g - l + ofs, cy + g + l, 0], [cx - g + ofs, cy + g, 0], '1 1 1', alpha);
-        drawline(1, [cx - g - l, cy + g + l + ofs, 0], [cx - g, cy + g + ofs, 0], '1 1 1', alpha);
-        // Bottom-right
-        drawline(1, [cx + g + l + ofs, cy + g + l, 0], [cx + g + ofs, cy + g, 0], '1 1 1', alpha);
-        drawline(1, [cx + g + l, cy + g + l + ofs, 0], [cx + g, cy + g + ofs, 0], '1 1 1', alpha);
-    }
+    // Four diagonal strokes forming an X with a center gap.  Thickness now comes from the
+    // engine (gl_2dline_width applies glLineWidth to 2D drawline) instead of the old
+    // offset-stacked copies — which read as several faint reticles layered on top of each other.
+    drawline(1, [cx - g - l, cy - g - l, 0], [cx - g, cy - g, 0], '1 1 1', alpha);   // top-left
+    drawline(1, [cx + g + l, cy - g - l, 0], [cx + g, cy - g, 0], '1 1 1', alpha);   // top-right
+    drawline(1, [cx - g - l, cy + g + l, 0], [cx - g, cy + g, 0], '1 1 1', alpha);   // bottom-left
+    drawline(1, [cx + g + l, cy + g + l, 0], [cx + g, cy + g, 0], '1 1 1', alpha);   // bottom-right
 };
 
 // CSQC-native vignette — four edge strips with descending alpha towards

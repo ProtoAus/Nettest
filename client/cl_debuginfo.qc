@@ -206,13 +206,41 @@ void(vector p1, vector p2, float width, vector colour, float alpha) CSQC_DebugBe
     R_EndPolygon();
 };
 
+// Draw a wireframe line between two 3D points.  Default (cl_debug_wire_thickness <= 1):
+// submit EXACTLY two vertices so the engine flags the batch BEF_LINES and draws a real
+// GL_LINES primitive (pr_csqc.c PF_R_PolygonEnd: nv==2 -> BEF_LINES) — no camera-facing
+// quad, no orientation math, half the verts, 1 line vs 2 filled tris, ~1px.
+//   cl_debug_wire_thickness > 1: fall back to a camera-facing quad of that width via
+// CSQC_DebugBeam.  GL line width (glLineWidth) is unreliable — the CSQC batch never sets
+// it and core profiles clamp it to 1px — so real thickness has to be geometry.  The cvar
+// is read once per frame (cltime gate) so the per-edge cost is just a compare even across
+// thousands of edges.
+float dbg_wire_thick;       // cached cl_debug_wire_thickness, refreshed once per frame
+float dbg_wire_thick_time;  // cltime of the last refresh
+void(vector p1, vector p2, vector colour, float alpha) CSQC_DebugLine =
+{
+    if (cltime != dbg_wire_thick_time)
+    {
+        dbg_wire_thick_time = cltime;
+        dbg_wire_thick = cvar("cl_debug_wire_thickness");
+    }
+    if (dbg_wire_thick > 1)
+    {
+        CSQC_DebugBeam(p1, p2, dbg_wire_thick, colour, alpha);  // thick = real quad geometry
+        return;
+    }
+    R_BeginPolygon("", 0, 0);
+    R_PolygonVertex(p1, '0 0 0', colour, alpha);
+    R_PolygonVertex(p2, '0 0 0', colour, alpha);
+    R_EndPolygon();
+};
+
 // Draw all active debug impact markers. Call from CSQC_UpdateView.
 void() CSQC_DrawDebugImpacts =
 {
     float i, total, age;
     vector pos, eye, colour;
     float s = DEBUG_CROSS_SIZE;
-    float w = DEBUG_LINE_WIDTH;
 
     if (!cvar("cl_debug_impacts"))
         return;
@@ -234,14 +262,14 @@ void() CSQC_DrawDebugImpacts =
         if (age > DEBUG_IMPACT_LIFETIME - 1)
             alpha = DEBUG_IMPACT_LIFETIME - age;
 
-        // Draw 3D cross at impact point
-        CSQC_DebugBeam(pos - '1 0 0' * s, pos + '1 0 0' * s, w, colour, alpha);
-        CSQC_DebugBeam(pos - '0 1 0' * s, pos + '0 1 0' * s, w, colour, alpha);
-        CSQC_DebugBeam(pos - '0 0 1' * s, pos + '0 0 1' * s, w, colour, alpha);
+        // Draw 3D cross at impact point (thin wireframe lines)
+        CSQC_DebugLine(pos - '1 0 0' * s, pos + '1 0 0' * s, colour, alpha);
+        CSQC_DebugLine(pos - '0 1 0' * s, pos + '0 1 0' * s, colour, alpha);
+        CSQC_DebugLine(pos - '0 0 1' * s, pos + '0 0 1' * s, colour, alpha);
 
-        // Draw beam from eye position at time of firing to impact
+        // Draw line from eye position at time of firing to impact
         if (eye != '0 0 0')
-            CSQC_DebugBeam(eye, pos, w * 0.3, colour, alpha * 0.15);
+            CSQC_DebugLine(eye, pos, colour, alpha * 0.15);
 
     }
 };
@@ -1179,17 +1207,18 @@ vector(float hg) dbg_hitbox_colour =
     return '1 1 1';
 };
 
-// nettest Patch 36: debug wireframe edges draw as immediate-mode thin camera-facing
-// quads via CSQC_DebugBeam (R_BeginPolygon).  This was briefly switched to particle
+// nettest Patch 36: debug wireframe edges draw as immediate-mode lines via CSQC_DebugLine
+// — R_BeginPolygon with exactly 2 verts, which the engine flags BEF_LINES and draws as true
+// GL_LINES (pr_csqc.c:1635): cheaper than the old camera-facing quads (half the verts, no
+// per-edge orientation math) and an actual 1px wireframe.  This was briefly switched to particle
 // beams (particles/debug.cfg), but FTE 'type beam' segments come from a tiny HARDCODED
 // 2048-slot pool (MAX_BEAMSEGS, p_script.c:396) shared with weapon tracers/gauss/egon —
 // and each box edge subdivides into length/step segments, so once ~8 boxes filled the
 // pool every box above the spine silently dropped, and it fought combat FX for slots.
-// R_BeginPolygon has no such cap (32k verts/batch, ~12% used even at 4 targets) and is
-// ~0.5ms for ~1000 edges — so the perf reason for the particle switch didn't hold.
+// R_BeginPolygon has no such cap (32k verts/batch) — so the perf reason for the particle switch didn't hold.
 void(vector p1, vector p2, vector col, float alpha) dbg_hitbox_line =
 {
-    CSQC_DebugBeam(p1, p2, 0.5, col, alpha);
+    CSQC_DebugLine(p1, p2, col, alpha);   // true 1px GL_LINES wireframe (was a camera-facing quad)
 };
 
 // Draw hitbox wireframes on all visible player_visual_proxy entities.
@@ -1384,6 +1413,12 @@ void() CSQC_DrawDebugPhysDropBboxes =
     float ty = cvar("sv_physprop_weapon_trace_bbox_y");
     float tz = cvar("sv_physprop_weapon_trace_bbox_z");
 
+    // Alias models render with their pitch multiplied by r_meshpitch (-1 by default — the
+    // classic inverted-Quake-model pitch).  The rotated ODE box below must use the same
+    // convention or it won't line up with the dropped-weapon model on a sloped floor.
+    float mp = cvar("r_meshpitch");
+    if (mp == 0) mp = -1;
+
     entity w = findchain(classname, "csqc_dropped_weapon");
     while (w)
     {
@@ -1395,8 +1430,12 @@ void() CSQC_DrawDebugPhysDropBboxes =
             {
                 // ODE-tight half-extents from the server-side cvars,
                 // rotated by the drop's current .angles so the visual
-                // matches the physics body orientation.
-                makevectors(w.angles);
+                // matches the physics body orientation.  Apply r_meshpitch
+                // to the pitch so the box tracks the rendered model (which
+                // the engine pitch-inverts for alias models).
+                vector ang = w.angles;
+                ang_x = ang_x * mp;
+                makevectors(ang);
                 vector mn = [-bx, -by, -bz];
                 vector mx = [ bx,  by,  bz];
                 vector gcol = '0 1 0';

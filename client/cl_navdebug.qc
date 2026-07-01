@@ -2,27 +2,31 @@
 // ----------------------------------------------------------------------------
 // Debug visualisation for the bot navigation graph + per-bot AI state.
 //
-// Entirely server-driven: when sv_nav_debug 1, the server (sv_bots.qc) streams
+// Entirely server-driven: when sv_debug_nav 1, the server (sv_bots.qc) streams
 //   * CSQC_EVENT_NAV_GRAPH  — the nav graph in chunks (node positions + links)
 //   * CSQC_EVENT_BOT_DEBUG  — each live bot's state (origin, state, enemy, mag)
 // and this file caches + draws them.  No cvar is read client-side: if nothing is
 // streamed the caches go stale and nothing draws, so there's zero cost when off.
 //
-// 3D draws (node markers, links, enemy lines) use CSQC_DebugBeam and must run in
-// the scene pass (NavDebug_DrawScene, called next to CSQC_DrawDebugImpacts).
+// 3D draws (node markers, links, enemy lines) use CSQC_DebugLine (true GL_LINES
+// wireframe) and must run in the scene pass (NavDebug_DrawScene, next to CSQC_DrawDebugImpacts).
 // 2D labels use project() and must run after renderscene (NavDebug_DrawText).
 //
-// Compile order: after cl_debuginfo.qc (CSQC_DebugBeam) + cl_debugpanel.qc,
+// Compile order: after cl_debuginfo.qc (CSQC_DebugLine) + cl_debugpanel.qc,
 // before cl_main.qc (the parse + draw hooks).
 // ----------------------------------------------------------------------------
 
-const float NAVDBG_MAX   = 512;		// drawn-node cap (client side)
+const float NAVDBG_MAX   = 2048;	// drawn-node cap; MUST match server NAV_NODE_MAX (sv_navnodes.qc)
 const float NAVDBG_LINKS = 16;		// MUST match server NAV_LINK_MAX
 const float NAVDBG_STALE = 2.0;		// stop drawing this long after the last packet
 
-vector navdbg_pos[NAVDBG_MAX];
-float  navdbg_linkcount[NAVDBG_MAX];
-float  navdbg_link[NAVDBG_MAX * NAVDBG_LINKS];
+// auto (heap), NOT static globals: at NAVDBG_MAX=2048 these are ~30K floats; static
+// would bloat the globals table and risk the 32-bit codegen hang (cf. the auto arrays
+// in cl_rain.qc).  auto is file-scope heap + zero-init, so the navdbg_have/idx logic
+// below is unchanged.
+auto vector navdbg_pos[NAVDBG_MAX];
+auto float  navdbg_linkcount[NAVDBG_MAX];
+auto float  navdbg_link[NAVDBG_MAX * NAVDBG_LINKS];
 float  navdbg_count;			// total nodes reported by the stream header
 float  navdbg_have;			// highest node index +1 received so far
 float  navdbg_last;			// cltime of the last nav packet
@@ -151,6 +155,13 @@ void() NavPath_Parse =
 void() NavDebug_EntUpdate =
 {
 	float bits = readbyte();
+	// ANY proxy packet refreshes the graph's draw timer.  The nav graph is static so
+	// it's streamed ONCE (chunked, then the server stops re-sending it) — but the BOTS
+	// section re-streams ~2 Hz, so this keeps navdbg_last fresh and the graph keeps
+	// drawing the whole time the proxy is alive, instead of vanishing NAVDBG_STALE
+	// seconds after the initial graph send.  (Goes stale only when sv_debug_nav 0
+	// removes the proxy and the stream stops — the intended "off" detection.)
+	navdbg_last = cltime;
 	if (bits & NAVDBG_SF_GRAPH) NavDebug_Parse();
 	if (bits & NAVDBG_SF_BOTS)  BotDebug_Parse();
 	if (bits & NAVDBG_SF_PATHS) NavPath_Parse();
@@ -174,20 +185,28 @@ void() NavDebug_DrawScene =
 	{
 		float cap = navdbg_have;
 		if (cap > NAVDBG_MAX) cap = NAVDBG_MAX;
+		float  rng  = cvar("cl_navdebug_range");	// 0 = draw the WHOLE network (default)
+		vector veye = (vector)getproperty(VF_ORIGIN);
 		for (i = 0; i < cap; i = i + 1)
 		{
 			vector p = navdbg_pos[i];
-			// small 3D marker cross at each node
-			CSQC_DebugBeam(p - '5 0 0', p + '5 0 0', 2, '0.3 1 0.4', 0.7);
-			CSQC_DebugBeam(p - '0 5 0', p + '0 5 0', 2, '0.3 1 0.4', 0.7);
-			CSQC_DebugBeam(p - '0 0 6', p + '0 0 6', 2, '0.3 1 0.4', 0.7);
+			if (rng > 0 && vlen(p - veye) > rng)
+				continue;			// out of range -> skip (opt-in perf/declutter on huge graphs)
+			// small 3D marker cross at each node (thin wireframe lines)
+			CSQC_DebugLine(p - '5 0 0', p + '5 0 0', '0.3 1 0.4', 0.7);
+			CSQC_DebugLine(p - '0 5 0', p + '0 5 0', '0.3 1 0.4', 0.7);
+			CSQC_DebugLine(p - '0 0 6', p + '0 0 6', '0.3 1 0.4', 0.7);
 			// links — draw each undirected edge once (only toward higher index)
 			float lc = navdbg_linkcount[i];
 			for (k = 0; k < lc; k = k + 1)
 			{
 				float nb = navdbg_link[i * NAVDBG_LINKS + k];
 				if (nb > i && nb >= 0 && nb < cap)
-					CSQC_DebugBeam(p, navdbg_pos[nb], 1.5, '0.2 0.55 1', 0.35);
+				{
+					if (rng > 0 && vlen(navdbg_pos[nb] - veye) > rng)
+						continue;	// link target out of range
+					CSQC_DebugLine(p, navdbg_pos[nb], '0.2 0.55 1', 0.35);
+				}
 			}
 		}
 	}
@@ -200,7 +219,7 @@ void() NavDebug_DrawScene =
 			{
 				entity ep = findfloat(world, vis_owner_entnum, botdbg_enemy[i]);
 				if (ep)
-					CSQC_DebugBeam(botdbg_pos[i], ep.origin + '0 0 28', 2.5, '1 0.25 0.25', 0.5);
+					CSQC_DebugLine(botdbg_pos[i], ep.origin + '0 0 28', '1 0.25 0.25', 0.5);
 			}
 		}
 	}
@@ -228,28 +247,28 @@ void() NavDebug_DrawScene =
 					continue;			// unresolved node index
 				vector wp = navdbg_pos[node];
 				if (have_prev)
-					CSQC_DebugBeam(prev, wp, 2.5, '1 0.7 0.15', 0.75);
+					CSQC_DebugLine(prev, wp, '1 0.7 0.15', 0.75);
 				prev = wp;
 				have_prev = TRUE;
 				if (k == cur)
 				{	// current waypoint — bigger + brighter
-					CSQC_DebugBeam(wp - '10 0 0', wp + '10 0 0', 4, '1 1 0.3', 0.95);
-					CSQC_DebugBeam(wp - '0 10 0', wp + '0 10 0', 4, '1 1 0.3', 0.95);
-					CSQC_DebugBeam(wp - '0 0 14', wp + '0 0 14', 4, '1 1 0.3', 0.95);
+					CSQC_DebugLine(wp - '10 0 0', wp + '10 0 0', '1 1 0.3', 0.95);
+					CSQC_DebugLine(wp - '0 10 0', wp + '0 10 0', '1 1 0.3', 0.95);
+					CSQC_DebugLine(wp - '0 0 14', wp + '0 0 14', '1 1 0.3', 0.95);
 				}
 				else
 				{
-					CSQC_DebugBeam(wp - '5 0 0', wp + '5 0 0', 2.5, '1 0.7 0.15', 0.85);
-					CSQC_DebugBeam(wp - '0 5 0', wp + '0 5 0', 2.5, '1 0.7 0.15', 0.85);
+					CSQC_DebugLine(wp - '5 0 0', wp + '5 0 0', '1 0.7 0.15', 0.85);
+					CSQC_DebugLine(wp - '0 5 0', wp + '0 5 0', '1 0.7 0.15', 0.85);
 				}
 			}
 			float gnode = botpath_goal[j];
 			if (gnode >= 0 && gnode < navdbg_have)
 			{
 				vector gp = navdbg_pos[gnode];
-				CSQC_DebugBeam(gp - '8 0 0', gp + '8 0 0', 3, '0.8 0.3 1', 0.9);
-				CSQC_DebugBeam(gp - '0 8 0', gp + '0 8 0', 3, '0.8 0.3 1', 0.9);
-				CSQC_DebugBeam(gp - '0 0 18', gp + '0 0 18', 3, '0.8 0.3 1', 0.9);
+				CSQC_DebugLine(gp - '8 0 0', gp + '8 0 0', '0.8 0.3 1', 0.9);
+				CSQC_DebugLine(gp - '0 8 0', gp + '0 8 0', '0.8 0.3 1', 0.9);
+				CSQC_DebugLine(gp - '0 0 18', gp + '0 0 18', '0.8 0.3 1', 0.9);
 			}
 		}
 	}
@@ -262,7 +281,7 @@ void() NavDebug_DrawText =
 		return;
 
 	float prev_font = drawfont;
-	drawfont = hud_font;
+	drawfont = hud_font_mono;   // GoogleMed — crisp at its native baked sizes (8/12/16/18/24/...)
 	float i;
 	for (i = 0; i < botdbg_n; i = i + 1)
 	{
@@ -312,13 +331,52 @@ void() NavDebug_DrawText =
 				if (botpath_ent[pk] == spec_target) { pj = pk; break; }
 
 			float px = 18, py = g_height * 0.45;
-			drawstring([px, py],      sprintf("BOT #%g  %s", spec_target, NavDebug_StateName(sst)), '11 11 0', scol, 0.95, 0);
-			drawstring([px, py + 16], sprintf("target: %s", tgt), '9 9 0', '1 1 1', 0.9, 0);
-			drawstring([px, py + 28], sprintf("weapon: %s  mag %g", Weapon_DisplayName(botdbg_wep[sj]), botdbg_mag[sj]), '9 9 0', '1 1 1', 0.9, 0);
+			drawstring([px, py],      sprintf("BOT #%g  %s", spec_target, NavDebug_StateName(sst)), '12 12 0', scol, 0.95, 0);
+			drawstring([px, py + 16], sprintf("target: %s", tgt), '8 8 0', '1 1 1', 0.9, 0);
+			drawstring([px, py + 28], sprintf("weapon: %s  mag %g", Weapon_DisplayName(botdbg_wep[sj]), botdbg_mag[sj]), '8 8 0', '1 1 1', 0.9, 0);
 			if (pj >= 0 && (cltime - botpath_last) < NAVDBG_STALE)
-				drawstring([px, py + 40], sprintf("path: %g/%g  goal #%g", botpath_cur[pj], botpath_len[pj], botpath_goal[pj]), '9 9 0', '0.8 0.85 1', 0.9, 0);
+				drawstring([px, py + 40], sprintf("path: %g/%g  goal #%g", botpath_cur[pj], botpath_len[pj], botpath_goal[pj]), '8 8 0', '0.8 0.85 1', 0.9, 0);
 		}
 	}
 
 	drawfont = prev_font;
+};
+
+// Draw one skeleton (each bone -> its parent, world space via gettaginfo) for the
+// cl_skel_debug overlay.  A blown-up bone (basis scale > 4) draws RED.
+void(entity e, float skel) CSQC_DrawOneSkel =
+{
+	if (!skel)
+		return;
+	float nb = skel_get_numbones(skel);
+	float i;
+	for (i = 1; i <= nb; i = i + 1)
+	{
+		vector bp = gettaginfo(e, i);		// world-space bone pos; sets v_forward/right/up = basis
+		vector col = '0.4 1 0.6';
+		if (vlen(v_forward) > 4 || vlen(v_right) > 4 || vlen(v_up) > 4)
+			col = '1 0.2 0.2';		// giant-scale bone -> red (the warp)
+		float par = skel_get_boneparent(skel, i);
+		if (par > 0)
+			CSQC_DebugLine(bp, gettaginfo(e, par), col, 0.7);
+		else
+			CSQC_DebugLine(bp - '0 0 3', bp + '0 0 3', col, 0.7);
+	}
+};
+
+// Live skeleton overlay (cl_skel_debug 1): draw the BODY + attached-GUN skeletons of
+// every player proxy so a distortion is instantly visible.  Zero cost off.  (Lines
+// are depth-tested, so non-warped bones inside the mesh are hidden — but a giant warp
+// pokes far outside the model and shows; the GUN skeleton is drawn too.)
+void() CSQC_DrawSkelDebug =
+{
+	if (!cvar("cl_skel_debug"))
+		return;
+	entity vp;
+	for (vp = findchain(classname, "player_visual_proxy"); vp; vp = vp.chain)
+	{
+		CSQC_DrawOneSkel(vp, vp.skeletonindex);
+		if (vp.vis_weapon_ent)
+			CSQC_DrawOneSkel(vp.vis_weapon_ent, vp.vis_weapon_ent.skeletonindex);
+	}
 };

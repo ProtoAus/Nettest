@@ -773,6 +773,9 @@ void() CheckImpulses =
 	case 28:   // team menu request
 		self.team_menu_request_serial = self.team_menu_request_serial + 1;
 		break;
+	case 19:   // spray decal — routes to the spray placer (server/sv_spray.qc)
+		SV_PlayerSpray();
+		break;
 	default: break;
 	}
 	self.impulse = 0;
@@ -967,6 +970,9 @@ void() PlayerPreThink =
 	// Defuse poll — runs every server frame on every alive player; cheap
 	// single bit-test early-out when +use isn't held (see sh_wpn_cfc4.qc).
 	C4_TickDefuseInteraction(self);
+	// Momentary rotating-button poll — same per-frame held-+use pattern;
+	// drives momentary_rot_button → momentary_door (see sv_momentary.qc).
+	Momentary_TickInteraction(self);
 	makevectors(self.v_angle);
 	if (self.button2)
 		PlayerJump();
@@ -3407,10 +3413,35 @@ float() SV_ClaimFloodOK =
 	return TRUE;
 };
 
+// Spectator PVS follow (consumed in SV_RunClientCommand's is_dead branch),
+// sent by the client.  spec_track_slot = followed player (1..maxclients,
+// 0 = none); spec_view_org/_time = freecam camera origin + when it arrived.
+.float  spec_track_slot;
+.vector spec_view_org;
+.float  spec_view_time;
+
 void(string command_string) SV_ParseClientCommand =
 {
 	tokenize(command_string);
 	string cmd = argv(0);
+
+	if (cmd == "spectrack")
+	{
+		float st = stof(argv(1));
+		if (st < 0 || st > cvar("maxclients")) st = 0;
+		self.spec_track_slot = st;
+		return;
+	}
+
+	if (cmd == "specview")
+	{
+		// Freecam camera origin — park PVS here when not following a player.
+		self.spec_view_org_x = bound(-65536, stof(argv(1)), 65536);
+		self.spec_view_org_y = bound(-65536, stof(argv(2)), 65536);
+		self.spec_view_org_z = bound(-65536, stof(argv(3)), 65536);
+		self.spec_view_time  = time;
+		return;
+	}
 
 	// Rate-cap the hit-reporting stringcmds before dispatch (engine has none).
 	if (cmd == "hitclaim" || cmd == "breakclaim" || cmd == "paintprojhit"
@@ -3758,6 +3789,24 @@ void() SV_RunClientCommand =
 		input_movevalues = '0 0 0';
 		input_buttons = 0;
 		self.velocity = '0 0 0';
+		// Spectator PVS follow: park this (invisible, SOLID_NOT) edict on
+		// the player we're watching so the engine networks the PVS-culled
+		// map models around THEM, not our frozen death spot — without this
+		// every static prop / cycler / sprite / brushsync model is invisible
+		// while spectating.  Slot arrives via the client's "cmd spectrack".
+		if (self.spec_track_slot >= 1 && self.spec_track_slot <= cvar("maxclients"))
+		{
+			entity tgt = edict_num(self.spec_track_slot);
+			if (tgt != self && !wasfreed(tgt) && tgt.classname == "player" && !tgt.is_dead)
+				setorigin(self, tgt.origin);
+		}
+		else if (time - self.spec_view_time < 1.0)
+		{
+			// Freecam: no follow target — park on the client's camera origin
+			// (sent throttled via "cmd specview") so map models around the
+			// free camera get networked too.
+			setorigin(self, self.spec_view_org);
+		}
 		PM_SyncPredictionProxy(self);
 		return;
 	}

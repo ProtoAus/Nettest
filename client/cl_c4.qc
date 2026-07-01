@@ -126,12 +126,13 @@ void() CSQC_C4_DrawPlanterFlash =
     makevectors(cam_ang);
     vector vm_light = cam_pos + v_forward * 16 + v_up * -2;
 
+    float lflags = cvar("cl_combat_light_shadows") ? 0 : PFLAGS_NOSHADOW;
     dynamiclight_add(vm_light,
                      220 * intensity,
-                     '1 0.18 0.18' * intensity);
+                     '1 0.18 0.18' * intensity, 0, "", lflags);
     dynamiclight_add(predicted_player.origin + '0 0 24',
                      160 * intensity,
-                     '1 0.15 0.15' * intensity);
+                     '1 0.15 0.15' * intensity, 0, "", lflags);
 };
 
 // Per-frame dlight pulse.  Called from the CSQC view-update path.
@@ -145,6 +146,8 @@ void() CSQC_C4_DrawLights =
     if (csqc_c4_count <= 0)
         return;
 
+    float lflags = cvar("cl_combat_light_shadows") ? 0 : PFLAGS_NOSHADOW;
+
     // Walk CSQC entities by the csqc_c4 classname (set in CSQC_C4_Update).
     entity cur = nextent(world);
     while (cur)
@@ -155,7 +158,7 @@ void() CSQC_C4_DrawLights =
             {
                 // DEFUSED — steady BLUE "safe" light.  Independent of the beep
                 // pulse (the bomb stopped beeping the instant it was disarmed).
-                dynamiclight_add(cur.origin + '0 0 8', 96, '0.2 0.45 1');
+                dynamiclight_add(cur.origin + '0 0 8', 96, '0.2 0.45 1', 0, "", lflags);
             }
             else if (cur.c4_last_pulse_time > 0)
             {
@@ -168,7 +171,7 @@ void() CSQC_C4_DrawLights =
                 if (intensity > 0)
                     dynamiclight_add(cur.origin + '0 0 8',
                                      96 * intensity,
-                                     '1 0.1 0.1' * intensity);
+                                     '1 0.1 0.1' * intensity, 0, "", lflags);
             }
         }
         cur = nextent(cur);

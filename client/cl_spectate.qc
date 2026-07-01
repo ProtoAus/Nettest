@@ -181,6 +181,48 @@ void() Spectate_CycleMode =
 };
 
 // ============================================================
+//  Server PVS follow — tell the server which player we're watching so
+//  it can park our (frozen, invisible) spectator edict on them.  Map
+//  models are PVS-culled from the server edict's origin (no CSQC mirror,
+//  no force-send), so from the death spot they all vanish.  Sent on
+//  change only; 0 when not following (freecam / deathcam / alive).
+// ============================================================
+float  spec_sent_track;       // last follow slot sent (0 = none)
+vector spec_sent_view;        // last freecam origin sent
+float  spec_sent_view_time;   // cltime of that freecam send
+
+void() Spectate_SyncTrackToServer =
+{
+    float active = Spectate_IsActive() && !Spectate_InDeathCam();
+
+    // Follow modes — send the watched slot on change; the server parks our
+    // edict on that player.  0 = not following a player.
+    float slot = 0;
+    if (active
+        && (spec_mode == SPEC_MODE_FIRSTPERSON || spec_mode == SPEC_MODE_THIRDPERSON)
+        && spec_target >= 1 && spec_target <= maxclients)
+        slot = spec_target;
+
+    if (slot != spec_sent_track)
+    {
+        spec_sent_track = slot;
+        localcmd(sprintf("cmd spectrack %d\n", slot));
+    }
+
+    // Freecam — no entity to follow, so feed the server our camera origin
+    // (throttled: on a >48 u move, or every 0.4 s to stay fresh inside the
+    // server's 1 s validity window) so map models around the free camera
+    // get networked too.
+    if (active && spec_mode == SPEC_MODE_FREECAM
+        && (vlen(campos - spec_sent_view) > 48 || (cltime - spec_sent_view_time) > 0.4))
+    {
+        spec_sent_view      = campos;
+        spec_sent_view_time = cltime;
+        localcmd(sprintf("cmd specview %d %d %d\n", campos_x, campos_y, campos_z));
+    }
+};
+
+// ============================================================
 //  State management — called each frame from CSQC_UpdateView
 // ============================================================
 
@@ -227,6 +269,10 @@ void() Spectate_UpdateState =
 
     spec_was_dead = is_dead;
     spec_was_in_deathcam = in_deathcam;
+
+    // Keep the server's PVS-follow target in sync — this is what makes
+    // map models visible while spectating (Spectate_SyncTrackToServer).
+    Spectate_SyncTrackToServer();
 };
 
 // ============================================================

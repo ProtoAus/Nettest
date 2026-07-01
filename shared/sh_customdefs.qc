@@ -53,6 +53,18 @@ const float CSQC_ENT_PHYS_PROP      = 18; // ODE filing cabinet — CSQC-network
                                           // custom QC pmove → fall-through/driftlock without this).
                                           // 18 is permanently safe: PM_CSQC_PROXY_VERSION (19) only
                                           // ever bumps UPWARD, never down onto 18.
+const float CSQC_ENT_INFODECAL      = 19; // infodecal — GoldSrc decal projector. Networks the traced
+                                          // surface point + normal + { texture so the client places it
+                                          // once via the spray-decal draw (cl_infodecal.qc / cl_sprays.qc).
+const float CSQC_ENT_PRED_PROP      = 6;  // prop_static/detail with the Predicted-collision flag — a
+                                          // PVS-gated CSQC mirror (model + scaled solid) so the LOCAL
+                                          // pmove + bullet traces collide client-side (rock-solid, no
+                                          // rubber-band). Hero props only; this mirror is the d1_canals
+                                          // OOM at thousands — never flag dense clutter.
+                                          // Id 6 is the free 5..7 gap, BELOW PM_CSQC_PROXY_VERSION (20);
+                                          // the proxy version only bumps UPWARD, so 6 can never collide.
+                                          // (Using 20 DID collide with the proxy version → every connect
+                                          // desynced and Host_EndGame'd. See line-28 warning.)
 const float CSQC_ENT_NAV_DEBUG      = 40; // bot/nav debug overlay proxy (per-client SendEntity).
                                           // High id: clear of the 2-18 ids AND PM_CSQC_PROXY_VERSION's
                                           // upward growth, so the next proxy bump can't collide.

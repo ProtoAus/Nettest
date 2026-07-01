@@ -162,6 +162,8 @@ void(vector center, float radius, float accel) GravGun_PullTowards =
     if (radius <= 0 || accel <= 0)
         return;
     float iter = cvar("physics_ode_iterationsperframe"); if (iter < 1) iter = 1;
+    float rest_r = cvar("sv_gravgun_rest_radius");   // Patch 68 rest deadzone (read once, not per prop)
+    float rest_v = cvar("sv_gravgun_rest_speed");
 
     entity e = findradius(center, radius);
     while (e)
@@ -172,7 +174,14 @@ void(vector center, float radius, float accel) GravGun_PullTowards =
         {
             vector to_c = center - e.origin;
             float  dist = vlen(to_c);
-            if (dist > 1)
+            // Rest deadzone (Patch 68): a prop already gathered at the centre AND nearly stopped gets
+            // NO pull force this tick, so it isn't re-woken every frame (physics_addforce calls
+            // dBodyEnable) and ODE can auto-disable it.  Then the engine's both-disabled prop-vs-prop
+            // skip makes the settled pile cost ~0 even while the black hole is held still — the exact
+            // "stop moving it and let them rest = 30 fps" case.  Self-correcting: when the centre moves
+            // or the prop speeds up past rest_speed it leaves the deadzone and gets pulled again.
+            float settled = (rest_r > 0 && dist < rest_r && vlen(e.velocity) < rest_v);
+            if (dist > 1 && !settled)
             {
                 float m = e.mass; if (m <= 0) m = 1;
                 // F = m·a → uniform acceleration `accel` toward the point.

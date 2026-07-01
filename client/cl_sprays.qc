@@ -42,18 +42,26 @@ const float SPRAY_DECAL_OFFSET = 0.4;     // world-space bias off surface.
                                           // FLUSH against the wall instead
                                           // of floating off it.
 
-// --- adddecal-style storage (cl_spray_style 1) ---
+// --- adddecal-style storage (r_spray_renderer 0) ---
 // Parallel set of arrays for the BSP-wrapping decal path.  Each entry
 // is one active spray; on the per-frame draw pass we call adddecal()
 // for each.  Lifetime is FIFO (matches the quad path) — REMOVE event
-// from the server clears the slot.  Capped at SPRAY_ADDECAL_MAX which
-// generously exceeds sv_spraymax × player count for typical play.
-const int SPRAY_ADDECAL_MAX = 32;
+// from the server clears the slot.  EVERY spray now stores BOTH a
+// trisoup slot AND an adddecal slot (live-swap: the draw dispatcher
+// picks one per frame off r_spray_renderer), so this is sized to match
+// the trisoup capacity (SPRAY_BUCKETS * SPRAY_PER_BUCKET = 64).
+const int SPRAY_ADDECAL_MAX = 64;
 float  sp_dec_id      [SPRAY_ADDECAL_MAX];    // spray_id, 0 = free
 string sp_dec_shader  [SPRAY_ADDECAL_MAX];
 vector sp_dec_origin  [SPRAY_ADDECAL_MAX];
 vector sp_dec_normal  [SPRAY_ADDECAL_MAX];
 vector sp_dec_side    [SPRAY_ADDECAL_MAX];    // tangent / (full size), per adddecal API
+vector sp_dec_tint    [SPRAY_ADDECAL_MAX];    // surface-light rgb (cl_decal_surflight) for the adddecal path
+string sp_dec_map     [SPRAY_ADDECAL_MAX];    // the map target — to rebuild the `_lm` shader on renderer restart (r_decal_lightmap)
+
+// Live r_spray_offset: the off-surface lift the trisoup spray quads currently reflect.
+// The bake uses this (not the live cvar); CSQC_DrawSprays polls + re-shifts on change.
+float sp_baked_offset;
 
 // --- One bucket per active PNG path ---
 //
@@ -161,9 +169,16 @@ float(float bucket) CSQC_Spray_AllocSlot =
     return slot;
 };
 
+// Per-decal vertex tint (rgb) the writer stamps onto the quad — '1 1 1' (white,
+// full-bright) for player sprays, the sampled surface light for { wad decals so they
+// take the wall's lightmap brightness.  No literal initializer: a global initialised
+// with one becomes read-only in fteqcc (it's set per-spawn before WriteQuad).
+vector sp_decal_tint;
+
 // Write a quad into a specific bucket / slot.  Inlined exactly the
 // way BH_WriteQuad (cl_bulletholes.qc:222) does — per-vertex
-// xyz/st/rgba directly assigned for speed.
+// xyz/st/rgba directly assigned for speed.  rgb = sp_decal_tint (surface light /
+// white); alpha = 1 so the texture's own alpha (the { mask) drives the blend.
 void(int bucket, int slot, vector p0, vector p1, vector p2, vector p3) CSQC_Spray_WriteQuad =
 {
     int vbase = (bucket * SPRAY_PER_BUCKET + slot) * 4;
@@ -171,23 +186,23 @@ void(int bucket, int slot, vector p0, vector p1, vector p2, vector p3) CSQC_Spra
 
     sp_bucket_verts[vbase + 0].xyz[0] = p0_x; sp_bucket_verts[vbase + 0].xyz[1] = p0_y; sp_bucket_verts[vbase + 0].xyz[2] = p0_z;
     sp_bucket_verts[vbase + 0].st[0]  = 0;    sp_bucket_verts[vbase + 0].st[1]  = 1;
-    sp_bucket_verts[vbase + 0].rgba[0]= 1;    sp_bucket_verts[vbase + 0].rgba[1]= 1;
-    sp_bucket_verts[vbase + 0].rgba[2]= 1;    sp_bucket_verts[vbase + 0].rgba[3]= 1;
+    sp_bucket_verts[vbase + 0].rgba[0]= sp_decal_tint_x; sp_bucket_verts[vbase + 0].rgba[1]= sp_decal_tint_y;
+    sp_bucket_verts[vbase + 0].rgba[2]= sp_decal_tint_z; sp_bucket_verts[vbase + 0].rgba[3]= 1;
 
     sp_bucket_verts[vbase + 1].xyz[0] = p1_x; sp_bucket_verts[vbase + 1].xyz[1] = p1_y; sp_bucket_verts[vbase + 1].xyz[2] = p1_z;
     sp_bucket_verts[vbase + 1].st[0]  = 1;    sp_bucket_verts[vbase + 1].st[1]  = 1;
-    sp_bucket_verts[vbase + 1].rgba[0]= 1;    sp_bucket_verts[vbase + 1].rgba[1]= 1;
-    sp_bucket_verts[vbase + 1].rgba[2]= 1;    sp_bucket_verts[vbase + 1].rgba[3]= 1;
+    sp_bucket_verts[vbase + 1].rgba[0]= sp_decal_tint_x; sp_bucket_verts[vbase + 1].rgba[1]= sp_decal_tint_y;
+    sp_bucket_verts[vbase + 1].rgba[2]= sp_decal_tint_z; sp_bucket_verts[vbase + 1].rgba[3]= 1;
 
     sp_bucket_verts[vbase + 2].xyz[0] = p2_x; sp_bucket_verts[vbase + 2].xyz[1] = p2_y; sp_bucket_verts[vbase + 2].xyz[2] = p2_z;
     sp_bucket_verts[vbase + 2].st[0]  = 1;    sp_bucket_verts[vbase + 2].st[1]  = 0;
-    sp_bucket_verts[vbase + 2].rgba[0]= 1;    sp_bucket_verts[vbase + 2].rgba[1]= 1;
-    sp_bucket_verts[vbase + 2].rgba[2]= 1;    sp_bucket_verts[vbase + 2].rgba[3]= 1;
+    sp_bucket_verts[vbase + 2].rgba[0]= sp_decal_tint_x; sp_bucket_verts[vbase + 2].rgba[1]= sp_decal_tint_y;
+    sp_bucket_verts[vbase + 2].rgba[2]= sp_decal_tint_z; sp_bucket_verts[vbase + 2].rgba[3]= 1;
 
     sp_bucket_verts[vbase + 3].xyz[0] = p3_x; sp_bucket_verts[vbase + 3].xyz[1] = p3_y; sp_bucket_verts[vbase + 3].xyz[2] = p3_z;
     sp_bucket_verts[vbase + 3].st[0]  = 0;    sp_bucket_verts[vbase + 3].st[1]  = 0;
-    sp_bucket_verts[vbase + 3].rgba[0]= 1;    sp_bucket_verts[vbase + 3].rgba[1]= 1;
-    sp_bucket_verts[vbase + 3].rgba[2]= 1;    sp_bucket_verts[vbase + 3].rgba[3]= 1;
+    sp_bucket_verts[vbase + 3].rgba[0]= sp_decal_tint_x; sp_bucket_verts[vbase + 3].rgba[1]= sp_decal_tint_y;
+    sp_bucket_verts[vbase + 3].rgba[2]= sp_decal_tint_z; sp_bucket_verts[vbase + 3].rgba[3]= 1;
 
     // Indices are RELATIVE to the per-bucket vertex pointer passed to
     // addtrisoup_simple in CSQC_DrawSprays (`&sp_bucket_verts[base_v]`,
@@ -272,7 +287,10 @@ void(vector eye, vector forward_dir) CSQC_SpawnSpraySmoke =
 // `name` is the basename portion of cl_spray (no extension, no path).
 // FTE will auto-download gfx/sprays/<name>.png from the server if
 // the client doesn't have it locally (allow_download + allow_download_other).
-void(float spray_id, vector pos, vector normal, vector eye_origin, string name) CSQC_SpawnSprayDecal =
+// half_w/half_h = surface half-extents (tangent/U, bitangent/V) in world units.  Player
+// sprays pass SPRAY_QUAD_HALF for both (square, unchanged); infodecals pass aspect-correct
+// extents (cl_infodecal.qc) so non-square decals keep their texture proportions.
+void(float spray_id, vector pos, vector normal, vector eye_origin, string name, float half_w, float half_h) CSQC_SpawnSprayDecal =
 {
     if (cvar("cl_debug_spray"))
         print(sprintf("[spray] CSQC got name='%s' id=%g pos=%v\n",
@@ -290,7 +308,25 @@ void(float spray_id, vector pos, vector normal, vector eye_origin, string name) 
     // directive both use this full name so the engine's exact-match
     // shader lookup hits.  Without the extension, adddecal() finds
     // neither shader nor texture and the spray is silently invisible.
-    string tex = sprintf("gfx/sprays/%s.png", name);
+    // Resolve the texture.  A {-prefixed name is a GoldSrc DECAL (used by infodecal);
+    // anything else is a player-spray PNG.
+    //   - The shader NAME must NOT start with { — that's the shader-block-open token, so a
+    //     {-named shaderforname registers broken and renders the engine error texture.  Use
+    //     a safe "waddecal_<stem>" key instead (stem = the brace-free name).
+    //   - A { decal resolves to a LOOSE RGBA image, gfx/decals/<stem>.png — NOT the wad
+    //     texture.  The wad route is a dead end here: W_GetTexture can't see the decal wad on
+    //     a non-HalfLife map (texwadlump is gated to HL maps -> NULL -> white square), and the
+    //     Quake-palette salmon key at index 255 mis-triggers FTE's W_ConvertWAD3Texture
+    //     alpha==2 "blended decal" branch (flat single colour) even when it DOES resolve.  The
+    //     loose PNG (real colours + the masked pixels baked to alpha 0) sidesteps both the
+    //     gate and the palette heuristic and renders identically on every map type — the same
+    //     proven loose-RGBA route the player sprays already use.  Produce the PNGs from the
+    //     same wad/source art with tools/decals_to_png.py.
+    float is_wad     = (substring(name, 0, 1) == "{");
+    string wadstem   = is_wad ? substring(name, 1, strlen(name) - 1) : "";
+    string tex       = is_wad ? strcat("waddecal_", wadstem)
+                              : sprintf("gfx/sprays/%s.png", name);
+    string maptarget = is_wad ? sprintf("gfx/decals/%s.png", wadstem) : tex;
 
     // Register the decal shader at runtime via shaderforname().  This
     // sidesteps the "auto-generated scripts/sprays.shader file lives
@@ -321,9 +357,15 @@ void(float spray_id, vector pos, vector normal, vector eye_origin, string name) 
     //   nopicmip         — don't downsample (decals are already small)
     //   cull none        — visible from either side (spray faces the
     //                       impact normal but the player may walk past)
-    //   rgbGen / alphaGen vertex — pick up the per-vertex colour/alpha
-    //                       the trisoup writer sets so fade-out works
-    //   blendFunc straight alpha — standard PNG transparency
+    //   rgbGen / alphaGen vertex — the trisoup writer sets per-vertex colour + alpha:
+    //                       alpha is a flat 1.0 so texture.a (the { mask / the PNG alpha)
+    //                       passes through unchanged, and rgb is a per-decal TINT — white
+    //                       for player sprays (texture shows as-is) and the sampled surface
+    //                       light for { wad decals, so the decal takes the lightmap
+    //                       brightness of the wall it sits on instead of rendering
+    //                       full-bright. (texture.rgb * vertex.rgb, texture.a * vertex.a.)
+    //   blendFunc straight alpha — standard alpha transparency
+    string genlines = "        rgbGen vertex\n        alphaGen vertex\n";
     string shader_body = sprintf(
         "{\n"
         "    sort decal\n"
@@ -332,13 +374,16 @@ void(float spray_id, vector pos, vector normal, vector eye_origin, string name) 
         "    cull none\n"
         "    {\n"
         "        map %s\n"
-        "        rgbGen vertex\n"
-        "        alphaGen vertex\n"
+        "%s"
         "        blendFunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA\n"
         "    }\n"
-        "}\n", tex);
+        "}\n", maptarget, genlines);
     float shader_handle = shaderforname(tex, shader_body);
-    precache_pic(tex);
+    // Per-pixel-lightmap variant (`<tex>_lm`) for r_decal_lightmap on the adddecal path — shared
+    // Decal_LMShaderBody (cl_bulletholes.qc).  CSQC_DrawSprays picks it + white rgb when the cvar is on.
+    shaderforname(strcat(tex, "_lm"), Decal_LMShaderBody(maptarget));
+    if (!is_wad)
+        precache_pic(tex);		// loose pic; wad decal textures aren't precache_pic-able
 
     if (cvar("cl_debug_spray"))
         print(sprintf("[spray] shader='%s' handle=%g\n", tex, shader_handle));
@@ -374,70 +419,68 @@ void(float spray_id, vector pos, vector normal, vector eye_origin, string name) 
     }
     vector tangent = crossproduct(bitangent, wn);
 
-    // cl_spray_style 1: BSP-wrapping adddecal path.  Engine clips the
-    // decal against world surfaces so it follows stair steps / inside
-    // corners.  Matches cl_scorch.qc's working pattern exactly — any
-    // deviation (origin bias, alternative tangent computation) tends
-    // to make the decal silently invisible.  REQUIRES a shader script
-    // entry per PNG in scripts/effects.shader (template documented
-    // there next to `gfx/sprays/nospray.png`); without one, FTE has
-    // no shader to render the projected polygons and r_showtris is
-    // the only way to see them.
-    if (cvar("cl_spray_style") >= 1)
+    // Surface-light tint (cl_decal_surflight 1, default) — ALL sprays dim/brighten with
+    // the surface.  Computed here (before the adddecal store) so both render paths share
+    // sp_decal_tint.  0 = legacy full-bright.  Phase-3 per-pixel (engine r_decal_lightmap)
+    // overrides this to white at the adddecal call site in CSQC_DrawSprays.
+    if (cvar("cl_decal_surflight"))
     {
-        int free_slot = -1;
-        int i;
-        for (i = 0; i < SPRAY_ADDECAL_MAX; i = i + 1)
-        {
-            if (sp_dec_id[i] == 0) { free_slot = i; break; }
-        }
-        if (free_slot < 0)
-            return;   // cap hit, drop
+        float spls = cvar("cl_decal_lightscale");
+        if (spls <= 0) spls = 1.5;
+        vector splt = getlight(pos + wn * 2) * (spls / 255);
+        sp_decal_tint_x = bound(0, splt_x, 1);
+        sp_decal_tint_y = bound(0, splt_y, 1);
+        sp_decal_tint_z = bound(0, splt_z, 1);
+    }
+    else
+        sp_decal_tint = '1 1 1';
 
+    // LIVE-SWAP: populate BOTH representations for every spray.  The adddecal slot
+    // (r_spray_renderer 0) here AND the trisoup quad (r_spray_renderer 1, default,
+    // below) are both stored at placement; CSQC_DrawSprays dispatches to one per
+    // frame off the live cvar, so toggling r_spray_renderer re-renders existing
+    // sprays with no re-bake.  Each store guards its own capacity and SKIPS (does
+    // not return) when its pool is full, so one path being full never starves the
+    // other.  Mirrors the bullet-hole live-swap mechanism.
+    //
+    // adddecal path: the engine clips the decal against world surfaces (stair steps /
+    // inside corners).  `side` = the world-up-projected bitangent at reciprocal size
+    // (the image-UP axis); width tracks |side| so non-square is approximate here.
+    // Needs a static scripts/sprays.shader entry per PNG for polygonoffset to bite at
+    // full strength (the inline shaderforname offset is weaker) — else it can z-fight.
+    int free_slot = -1;
+    int di;
+    for (di = 0; di < SPRAY_ADDECAL_MAX; di = di + 1)
+    {
+        if (sp_dec_id[di] == 0) { free_slot = di; break; }
+    }
+    if (free_slot >= 0)
+    {
         sp_dec_id[free_slot]     = spray_id;
         sp_dec_shader[free_slot] = tex;
-        // Zero bias — relies on the shader's `polygonoffset 8` for
-        // z-fight defeat.  Works ONLY when the shader is loaded from
-        // a static .shader file (scripts/sprays.shader).  FTE's
-        // runtime-registered shaders (via shaderforname's inline
-        // defaultshader) don't honour polygonoffset at full strength,
-        // so even `polygonoffset 8` in the inline body still z-fights.
-        // Static scripts/sprays.shader is the working path — ship one
-        // alongside the mod, and the shaderforname call in this file
-        // will load it from disk (preferring disk over the inline
-        // defaultshader, per FTE_FORCESHADER semantics).  Mirrors the
-        // scorch pattern at scripts/effects.shader exactly.
         sp_dec_origin[free_slot] = pos;
         sp_dec_normal[free_slot] = wn;
-        // adddecal's `side` arg in FTE is the texture's T-axis (image
-        // UP direction) with reciprocal-size magnitude.  Earlier I
-        // assumed it was the S-axis (image right) and passed
-        // `crossproduct(wn, ref)` — that's a 90° off-axis vector and
-        // came out as -90° image rotation.  The world-up-projected
-        // `bitangent` we already compute for the trisoup path IS the
-        // image-up direction, so passing it gives a correct
-        // upright orientation.  The previous bitangent attempt that
-        // came out invisible was caused by an unrelated origin-bias
-        // bug (now fixed by setting decal_origin = pos with no
-        // offset); bitangent itself is the right side arg.
-        sp_dec_side[free_slot] = bitangent / (SPRAY_QUAD_HALF * 2);
-        return;
+        sp_dec_side[free_slot]   = bitangent / (half_h * 2);
+        sp_dec_tint[free_slot]   = sp_decal_tint;
+        sp_dec_map[free_slot]    = maptarget;
     }
 
-    // cl_spray_style 0: flat trisoup quad (default fallback).
-    // Quad corners around the impact point, pushed off the surface
-    // to avoid z-fight with the underlying brush.
-    vector center = pos + wn * SPRAY_DECAL_OFFSET;
-    vector p0 = center - tangent * SPRAY_QUAD_HALF - bitangent * SPRAY_QUAD_HALF;
-    vector p1 = center + tangent * SPRAY_QUAD_HALF - bitangent * SPRAY_QUAD_HALF;
-    vector p2 = center + tangent * SPRAY_QUAD_HALF + bitangent * SPRAY_QUAD_HALF;
-    vector p3 = center - tangent * SPRAY_QUAD_HALF + bitangent * SPRAY_QUAD_HALF;
+    // trisoup path (r_spray_renderer 1, default).
+    // Quad corners around the impact point, pushed off the surface to avoid z-fight.
+    // Uses sp_baked_offset (not the live cvar) so the DrawSprays poll's uniform shift
+    // keeps every trisoup spray consistent.
+    vector center = pos + wn * sp_baked_offset;
+    vector p0 = center - tangent * half_w - bitangent * half_h;
+    vector p1 = center + tangent * half_w - bitangent * half_h;
+    vector p2 = center + tangent * half_w + bitangent * half_h;
+    vector p3 = center - tangent * half_w + bitangent * half_h;
 
     float bucket = CSQC_Spray_FindBucket(tex);
     float slot   = CSQC_Spray_AllocSlot(bucket);
     if (slot < 0)
         return;   // bucket full; drop the spray rather than overflow
 
+    // (sp_decal_tint was computed up-front, before the adddecal store, so both paths share it.)
     CSQC_Spray_WriteQuad((int)bucket, (int)slot, p0, p1, p2, p3);
     sp_slot_id[((int)bucket) * SPRAY_PER_BUCKET + (int)slot] = spray_id;
 };
@@ -450,9 +493,11 @@ void(float spray_id, vector pos, vector normal, vector eye_origin, string name) 
 // bucket's free list — mirrors BH_FreeStaticSlot (cl_bulletholes.qc:304).
 void(float spray_id) CSQC_RemoveSprayDecal =
 {
-    // Try the trisoup-quad path first.
+    // Each spray stores BOTH a trisoup slot and an adddecal slot (live-swap), so
+    // clear BOTH — `found` ends the trisoup scan but the adddecal scan always runs.
     int b, s;
-    for (b = 0; b < SPRAY_BUCKETS; b = b + 1)
+    float found = 0;
+    for (b = 0; b < SPRAY_BUCKETS && !found; b = b + 1)
     {
         for (s = 0; s < SPRAY_PER_BUCKET; s = s + 1)
         {
@@ -467,12 +512,12 @@ void(float spray_id) CSQC_RemoveSprayDecal =
                 sp_slot_id[idx] = 0;
                 sp_bucket_free[b * SPRAY_PER_BUCKET + sp_bucket_free_count[b]] = s;
                 sp_bucket_free_count[b] = sp_bucket_free_count[b] + 1;
-                return;
+                found = 1;
+                break;
             }
         }
     }
 
-    // Fall through to the adddecal path.
     int i;
     for (i = 0; i < SPRAY_ADDECAL_MAX; i = i + 1)
     {
@@ -480,7 +525,7 @@ void(float spray_id) CSQC_RemoveSprayDecal =
         {
             sp_dec_id[i]     = 0;
             sp_dec_shader[i] = "";
-            return;
+            break;
         }
     }
 };
@@ -488,44 +533,93 @@ void(float spray_id) CSQC_RemoveSprayDecal =
 // Per-frame submission.  Called from the existing CSQC predraw /
 // HUD pass that already submits bullethole trisoup buffers (see
 // CSQC_BulletHolesStartFrame at cl_bulletholes.qc:902).
-void() CSQC_DrawSprays =
+
+// Live r_spray_offset: shift the trisoup spray quads along their surface normals by
+// `delta` (recovered per-quad via Decal_ShiftQuadVerts, cl_bulletholes.qc).
+void(float delta) CSQC_Spray_ShiftQuads =
 {
-    // --- trisoup-quad path (cl_spray_style 0) ---
-    // Each active quad contributes 12 indices (4 triangles — double-
-    // sided).  See CSQC_Spray_WriteQuad for the winding layout.
-    float spray_dbg = cvar("cl_debug_spray");   // hoisted out of the per-bucket loop
-    int b;
+    int b, s;
     for (b = 0; b < SPRAY_BUCKETS; b = b + 1)
     {
-        if (sp_bucket_count[b] <= 0) continue;
-        if (sp_bucket_tex[b] == "")  continue;
-        int base_v = b * SPRAY_PER_BUCKET * 4;
-        int base_i = b * SPRAY_PER_BUCKET * 12;
-        if (spray_dbg >= 2)
-            print(sprintf("[spray] submit b=%g tex='%s' cnt=%g v0=%g i0=%g\n",
-                          (float)b, sp_bucket_tex[b],
-                          (float)sp_bucket_count[b],
-                          (float)base_v, (float)base_i));
-        addtrisoup_simple(sp_bucket_tex[b], 0,
-                          &sp_bucket_verts[base_v],
-                          &sp_bucket_idx[base_i],
-                          sp_bucket_count[b] * 12);
+        if (sp_bucket_tex[b] == "") continue;
+        for (s = 0; s < sp_bucket_count[b]; s = s + 1)
+            Decal_ShiftQuadVerts(&sp_bucket_verts[(b * SPRAY_PER_BUCKET + s) * 4], delta);
+    }
+};
+
+void() CSQC_DrawSprays =
+{
+    // LIVE-SWAP dispatch: both representations are stored per spray; this picks one
+    // per frame off r_spray_renderer (1 = trisoup default, 0 = adddecal).  Polled
+    // here so a mid-game toggle re-renders every existing spray next frame.
+    float trisoup = cvar("r_spray_renderer") != 0;
+
+    // Live r_spray_offset: re-shift the trisoup quads when it changes.  Ungated (runs in
+    // both renderer modes) so the trisoup offset stays correct even while in adddecal mode.
+    float sp_want_off = cvar("r_spray_offset");
+    if (sp_want_off < 0) sp_want_off = 0;   // negative would lift into the wall
+    if (sp_want_off != sp_baked_offset)
+    {
+        CSQC_Spray_ShiftQuads(sp_want_off - sp_baked_offset);
+        sp_baked_offset = sp_want_off;
     }
 
-    // --- adddecal path (cl_spray_style 1) ---
-    // One adddecal() per active spray per frame.  Engine clips against
-    // the world model so the result wraps geometry.  Cost scales with
-    // the number of active sprays, capped at SPRAY_ADDECAL_MAX.
+    if (trisoup)
+    {
+        // --- trisoup-quad path (r_spray_renderer 1) ---
+        // Each active quad contributes 12 indices (4 triangles — double-sided).
+        float spray_dbg = cvar("cl_debug_spray");   // hoisted out of the per-bucket loop
+        int b;
+        for (b = 0; b < SPRAY_BUCKETS; b = b + 1)
+        {
+            if (sp_bucket_count[b] <= 0) continue;
+            if (sp_bucket_tex[b] == "")  continue;
+            int base_v = b * SPRAY_PER_BUCKET * 4;
+            int base_i = b * SPRAY_PER_BUCKET * 12;
+            if (spray_dbg >= 2)
+                print(sprintf("[spray] submit b=%g tex='%s' cnt=%g v0=%g i0=%g\n",
+                              (float)b, sp_bucket_tex[b],
+                              (float)sp_bucket_count[b],
+                              (float)base_v, (float)base_i));
+            addtrisoup_simple(sp_bucket_tex[b], 0,
+                              &sp_bucket_verts[base_v],
+                              &sp_bucket_idx[base_i],
+                              sp_bucket_count[b] * 12);
+        }
+    }
+    else
+    {
+        // --- adddecal path (r_spray_renderer 0) ---
+        // One adddecal() per active spray per frame.  Engine clips against the world
+        // model so the result wraps geometry.  Cost scales with the active spray count.
+        // r_decal_lightmap: use the `_lm` program variant + WHITE rgb (the world lightmap lights
+        // it per-pixel); else the plain shader + the surface-light tint (cl_decal_surflight).
+        float sp_lm = cvar("r_decal_lightmap");
+        int i;
+        for (i = 0; i < SPRAY_ADDECAL_MAX; i = i + 1)
+        {
+            if (sp_dec_id[i] == 0) continue;
+            if (sp_lm)
+                adddecal(strcat(sp_dec_shader[i], "_lm"),
+                         sp_dec_origin[i], sp_dec_normal[i], sp_dec_side[i],
+                         '1 1 1', 1.0);
+            else
+                adddecal(sp_dec_shader[i],
+                         sp_dec_origin[i], sp_dec_normal[i], sp_dec_side[i],
+                         sp_dec_tint[i], 1.0);
+        }
+    }
+};
+
+// Re-register the per-pixel-lightmap spray shaders after a renderer restart (vid_restart purges
+// shaderforname shaders; without this, active sprays' `_lm` shader would fall back to the engine
+// default adddecal body = checkerboard).  Called from CSQC_RendererRestarted (cl_infodecal.qc).
+void() CSQC_Spray_ReregisterShaders =
+{
     int i;
     for (i = 0; i < SPRAY_ADDECAL_MAX; i = i + 1)
-    {
-        if (sp_dec_id[i] == 0) continue;
-        adddecal(sp_dec_shader[i],
-                 sp_dec_origin[i],
-                 sp_dec_normal[i],
-                 sp_dec_side[i],
-                 '1 1 1', 1.0);
-    }
+        if (sp_dec_id[i] != 0 && sp_dec_map[i] != "")
+            shaderforname(strcat(sp_dec_shader[i], "_lm"), Decal_LMShaderBody(sp_dec_map[i]));
 };
 
 // Scan gfx/sprays/*.png and (re)write scripts/sprays.shader with a
@@ -612,4 +706,5 @@ void() CSQC_ClearSprays =
         sp_dec_id[i]     = 0;
         sp_dec_shader[i] = "";
     }
+    sp_baked_offset = 0;   // next post-clear poll lifts fresh sprays from 0 to the cvar
 };

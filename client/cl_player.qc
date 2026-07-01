@@ -2448,7 +2448,7 @@ float interp_lookup_ok;
 vector(float slot, float render_time) CSQC_LookupInterpedOrigin =
 {
 	interp_lookup_ok = 0;
-	if (slot >= INTERP_MAX_PLAYERS)
+	if (slot < 0 || slot >= INTERP_MAX_PLAYERS)   // both halves are comparisons (no array touch), safe without short-circuit
 		return '0 0 0';
 	if (g_interp_count[slot] < 2)
 		return '0 0 0';
@@ -2624,7 +2624,12 @@ void() CSQC_ExtrapolateRemotePlayers =
 	while (proxy)
 	{
 		float owner = proxy.vis_owner_entnum;
-		if (owner <= 0 || owner == player_localentnum)
+		// owner is num_for_edict(self.owner) — a RAW server edict slot, NOT clamped
+		// to maxclients.  After a listen-server reboot + spawnclient() bots the edict
+		// layout shifts so bot owner entnums exceed 32 (INTERP_MAX_PLAYERS), which
+		// makes slot = owner-1 index past the size-32 interp arrays below and crashes
+		// the progs boundcheck.  Bound it to a valid player slot here.
+		if (owner <= 0 || owner > INTERP_MAX_PLAYERS || owner == player_localentnum)
 		{
 			proxy = proxy.chain;
 			continue;
@@ -2711,7 +2716,15 @@ void() CSQC_ExtrapolateRemotePlayers =
 		// without engine-side snapshot reset, so we have to pin the basis
 		// ourselves.
 		float slot = owner - 1;
-		if (slot < 0 || slot >= INTERP_MAX_PLAYERS || g_interp_count[slot] < 1)
+		// `#pragma flag enable logicops` is OFF mod-wide, so fteqcc does NOT
+		// short-circuit ||.  The range test must be a SEPARATE statement from the
+		// array read — a combined `slot >= MAX || g_interp_count[slot] < 1` still
+		// evaluates g_interp_count[slot] at an out-of-range slot and boundcheck-crashes.
+		if (slot < 0 || slot >= INTERP_MAX_PLAYERS)
+		{
+			base_origin = proxy.origin;   // out-of-range owner: no buffer
+		}
+		else if (g_interp_count[slot] < 1)
 		{
 			base_origin = proxy.origin;   // fallback: no buffer yet
 		}
@@ -3514,6 +3527,7 @@ float g_spine_cv_time;
 float g_spine_deform, g_spine_twist_scale, g_spine_twist_max, g_spine_twist_waist;
 float g_spine_twist_upper, g_spine_pitch_scale, g_spine_pitch_upper, g_spine_pitch_max;
 float g_spine_idle_rate;    // cl_player_skel_idle_rate: rebuild Hz for STILL players (0 = every frame)
+float g_skel_blendnorm;     // r_skel_blendnormalize (engine): 1 = engine renormalizes every blended bone (Patch 43), so the QC spine scrub below is redundant.
 .float vis_spine_sb0, vis_spine_sb1, vis_spine_sb2, vis_spine_sb3, vis_spine_sbn;
 .float vis_spine_pelvis;    // parent of sb0 — used to yaw the strafe-twist around world-up
 .float vis_spine_root;      // Bip01 root — orthonormalized with the pelvis so the spine's
@@ -3530,6 +3544,7 @@ float g_spine_idle_rate;    // cl_player_skel_idle_rate: rebuild Hz for STILL pl
 // every proxy in a frame, so cache them + the view origin once per frame.
 float  g_corpse_cull_time;
 float  g_corpse_pvscull;
+float  g_player_pvscull;        // live-player render cull (r_players_pvscull)
 float  g_corpse_maxdist_sq;
 vector g_corpse_vieworg;
 
@@ -3539,6 +3554,7 @@ void() PlayerVis_RefreshCorpseCull =
         return;
     g_corpse_cull_time  = cltime;
     g_corpse_pvscull    = cvar("r_corpses_pvscull");
+    g_player_pvscull    = cvar("r_players_pvscull");
     float md            = cvar("r_corpses_maxdist");
     g_corpse_maxdist_sq = (md > 0) ? md * md : 0;
     g_corpse_vieworg    = (vector)getproperty(VF_ORIGIN);
@@ -3560,6 +3576,7 @@ void() PlayerVis_RefreshSpineCvars =
 	g_spine_pitch_max    = cvar("cl_player_spine_pitch_max");
 	if (g_spine_pitch_max <= 0) g_spine_pitch_max = 35;
 	g_spine_idle_rate    = cvar("cl_player_skel_idle_rate");
+	g_skel_blendnorm     = cvar("r_skel_blendnormalize");
 };
 
 // Forward decls — defined in cl_killcam.qc (compiled after this file).
@@ -3999,6 +4016,26 @@ float() CSQC_PlayerVisual_Predraw =
 		}
 	}
 
+	// nettest perf: LIVE-player render cull — mirror the corpse cull for LIVING proxies
+	// outside the view's PVS, so a 16-bot firefight (or a free spectator cam panning a big
+	// map) doesn't pay the IQM spine deform + the engine skinning floor for bodies behind
+	// walls.  Placed right before the spine deform so a culled body skips BOTH the bone
+	// work AND the submit.  checkpvs from g_corpse_vieworg (= the spectator cam when
+	// spectating) is fail-safe — it never hides a body in your line of sight.  NEVER cull:
+	// a killcam-posed proxy, the local player's own body (its pose feeds the killcam
+	// recorder), or the spectated target.  The anim STATE keeps updating in
+	// CSQC_PlayerVisual_Update, so a body re-entering PVS rebuilds the correct pose
+	// immediately — no stale freeze.
+	if (!self.vis_is_dead
+	    && !PlayerVis_KillcamOwned(self)
+	    && self.vis_owner_entnum != player_localentnum
+	    && self.vis_owner_entnum != spec_target)
+	{
+		PlayerVis_RefreshCorpseCull();       // caches g_player_pvscull + the view origin once/frame
+		if (g_player_pvscull && !checkpvs(g_corpse_vieworg, self))
+			return PREDRAW_NEXT;
+	}
+
 	PlayerVis_RefreshSpineCvars();           // perf: read the 8 spine cvars once/frame
 	float twist_scale       = g_spine_twist_scale;
 	float twist_max         = g_spine_twist_max;
@@ -4180,14 +4217,20 @@ float() CSQC_PlayerVisual_Predraw =
 			// here (that was ~0.2s/frame and drove most of the PlayerVis_Vector/Float/LoadBoneBasis
 			// profile cost); just keep the spine chain the deform reads/writes + its parents (pelvis,
 			// root) exact, so the strafe-yaw / aim-pitch stay shear-free even if a parent basis drifts.
-			// Legs/arms ride the engine renorm; the 5 deformed spine bones get a 2nd scrub post-deform.
-			PlayerVis_OrthonormalizeBone(self.skeletonindex, root);
-			PlayerVis_OrthonormalizeBone(self.skeletonindex, pelvis);
-			PlayerVis_OrthonormalizeBone(self.skeletonindex, sb0);
-			PlayerVis_OrthonormalizeBone(self.skeletonindex, sb1);
-			PlayerVis_OrthonormalizeBone(self.skeletonindex, sb2);
-			PlayerVis_OrthonormalizeBone(self.skeletonindex, sb3);
-			PlayerVis_OrthonormalizeBone(self.skeletonindex, sbn);
+			// Legs/arms ride the engine renorm.  When it is ON (r_skel_blendnormalize 1,
+			// the default — Patch 43) the parents already arrive orthonormal, so this scrub
+			// is pure redundancy and we skip it.  Keep it only as the FALLBACK for
+			// r_skel_blendnormalize 0 (a model with intentional non-unit bone scale).
+			if (!g_skel_blendnorm)
+			{
+				PlayerVis_OrthonormalizeBone(self.skeletonindex, root);
+				PlayerVis_OrthonormalizeBone(self.skeletonindex, pelvis);
+				PlayerVis_OrthonormalizeBone(self.skeletonindex, sb0);
+				PlayerVis_OrthonormalizeBone(self.skeletonindex, sb1);
+				PlayerVis_OrthonormalizeBone(self.skeletonindex, sb2);
+				PlayerVis_OrthonormalizeBone(self.skeletonindex, sb3);
+				PlayerVis_OrthonormalizeBone(self.skeletonindex, sbn);
+			}
 
 			// Body-twist fractions match the old HL controllers (1.0/0.5/0.25/0.125
 			// — bigger near the waist).  Use leg_twist, not fCorrect (which the
@@ -5021,6 +5064,12 @@ noref void(float isnew) CSQC_Ent_Update =
 	if (ent_type == CSQC_ENT_PHYS_PROP)
 	{
 		CSQC_PhysProp_Update(isnew);
+		return;
+	}
+
+	if (ent_type == CSQC_ENT_PRED_PROP)
+	{
+		CSQC_PredProp_Update(isnew);	// predicted-collision prop mirror (cl_physprop.qc)
 		return;
 	}
 

@@ -189,16 +189,18 @@ void() CVar_Init =
     g_cvar_count = 0;
 
     // ---------- Bots / Navigation ----------
-    CVar_Add("Bots", "sv_bot_minplayers", "0",  CVAR_SIDE_SV);  // fill total players up to N with bots (0 = off)
-    CVar_Add("Bots", "sv_bot_add",        "0",  CVAR_SIDE_SV);  // momentary: add this many bots, then resets to 0
-    CVar_Add("Bots", "sv_bot_kick",       "0",  CVAR_SIDE_SV);  // momentary: kick this many bots, then resets to 0
-    CVar_Add("Bots", "sv_bot_skill",      "50", CVAR_SIDE_SV);  // 0-100: reaction time + aim turn-rate
-    CVar_Add("Bots", "sv_bot_fov",        "150",CVAR_SIDE_SV);  // frontal ACQUISITION cone, full angle deg (<=0 or >=360 = 360/off); tracking stays 360
-    CVar_Add("Bots", "sv_bot_los_grace",  "0.35",CVAR_SIDE_SV); // keep engaging this long (s) after a momentary LOS break (anti-flicker)
-    CVar_Add("Bots", "sv_bot_target_margin","0.85",CVAR_SIDE_SV);// only swap to a new enemy if it is <this fraction of the current target's distance
-    CVar_Add("Bots", "sv_bot_debug",      "0",  CVAR_SIDE_SV);  // developer: log bot fill/activity
+    CVar_Add("Bots", "bot_minplayers",    "0",  CVAR_SIDE_SV);  // fill total players up to N with bots (0 = off)
+    CVar_Add("Bots", "botadd",            "0",  CVAR_SIDE_SV);  // momentary: add this many bots, then resets to 0
+    CVar_Add("Bots", "bot_kick",          "0",  CVAR_SIDE_SV);  // momentary: kick this many bots, then resets to 0
+    CVar_Add("Bots", "bot_skill",         "50", CVAR_SIDE_SV);  // 0-100: reaction time + aim turn-rate
+    CVar_Add("Bots", "bot_fov",           "150",CVAR_SIDE_SV);  // frontal ACQUISITION cone, full angle deg (<=0 or >=360 = 360/off); tracking stays 360
+    CVar_Add("Bots", "bot_los_grace",     "0.35",CVAR_SIDE_SV); // keep engaging this long (s) after a momentary LOS break (anti-flicker)
+    CVar_Add("Bots", "bot_target_margin", "0.85",CVAR_SIDE_SV); // only swap to a new enemy if it is <this fraction of the current target's distance
+    CVar_Add("Bots", "bot_debug",         "0",  CVAR_SIDE_SV);  // developer: log bot fill/activity
+    CVar_Add("Bots", "bot_avoid",         "1",  CVAR_SIDE_SV);  // bots sidestep walls + each other (run-time lookahead trace + separation)
     CVar_Add("Bots", "sv_nav_gridstep",   "96", CVAR_SIDE_SV);  // auto-grid node spacing (units)
     CVar_Add("Bots", "sv_debug_nav",      "0",  CVAR_SIDE_SV);  // stream nav graph + bot state to clients (debug draw)
+    CVar_Add("Bots", "cl_navdebug_range", "0",  CVAR_SIDE_CL);  // sv_debug_nav draw: only nav nodes within this many units of the camera (0 = whole network)
     CVar_Add("Client", "cl_killcam",      "1",  CVAR_SIDE_CL);  // rewind-replay killcam on death
     CVar_Add("Client", "cl_killcam_lookback", "2.0", CVAR_SIDE_CL); // seconds rewound before the kill
     CVar_Add("Client", "cl_killcam_duration", "3.5", CVAR_SIDE_CL); // total killcam length (seconds)
@@ -298,6 +300,13 @@ void() CVar_Init =
     // dial — lower = denser strands per unit, higher = stretched.
     CVar_Add("Client", "cl_grappling_rope_width",      "1.5",   CVAR_SIDE_CL);
     CVar_Add("Client", "cl_grappling_rope_tile",       "16",    CVAR_SIDE_CL);
+    // Waist-anchor offset — nudges the player-side rope end off the BBOX
+    // centre toward the (right) hand so it reads as held, not navel-mounted.
+    // Applied in facing-yaw space (view yaw for the local player, model yaw
+    // for remotes): right = lateral, fwd = toward facing, up = vertical.
+    CVar_Add("Client", "cl_grappling_rope_hand_right", "6",     CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_grappling_rope_hand_fwd",   "2",     CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_grappling_rope_hand_up",    "0",     CVAR_SIDE_CL);
 
     CVar_Add("Client", "cl_viewmodelweight",           "0",     CVAR_SIDE_CL);
     CVar_Add("Client", "cl_viewmodelweight_threshold", "200",   CVAR_SIDE_CL);
@@ -596,6 +605,13 @@ void() CVar_Init =
     CVar_Add("Client", "cl_impact_light",         "1",     CVAR_SIDE_CL);
     CVar_Add("Client", "cl_impact_light_scale",   "1.0",   CVAR_SIDE_CL);
     CVar_Add("Client", "cl_impact_light_offset",  "8",     CVAR_SIDE_CL); // units the impact dlight stands off the wall along its normal (0 = flush; pull back so the wall face lights up)
+    // Realtime shadows on transient combat lights (bullet impacts, explosions, C4
+    // flashes).  0 = NOSHADOW (default): these sub-second flashes don't need cast
+    // shadows, and a shadow-casting dlight makes the engine re-skin every entity in
+    // its volume — the per-frame render-pass multiplier under sustained fire.  1 =
+    // restore shadows (fine on a quiet server).  Muzzle flash / flashlight are
+    // always NOSHADOW regardless.
+    CVar_Add("Client", "cl_combat_light_shadows", "0",     CVAR_SIDE_CL);
     // Shell-ejection visual gate.  Server still sends the multicast and
     // local prediction still spawns nothing — both paths short-circuit
     // inside the CSQC SpawnCasing helpers, no gameplay effect.
@@ -717,7 +733,11 @@ void() CVar_Init =
     // Brushmodel-owned holes (func_door, func_breakable, etc.) ignore
     // this and always use the polygon path; adddecal can't reproject
     // onto a moving submodel.
-    CVar_Add("Client", "cl_bullethole_renderer",  "1",     CVAR_SIDE_CL);
+    CVar_Add("Client", "r_bullethole_renderer",   "1",     CVAR_SIDE_CL);
+    // Off-surface lift (qu) baked into a tri-soup bullet hole. Live: changing it
+    // re-shifts existing holes (CSQC_BulletHolesStartFrame poll). polygonoffset does
+    // the z-fight defeat so this can be small.
+    CVar_Add("Client", "r_bullethole_offset",     "0.4",   CVAR_SIDE_CL);
     // Source-style edge clipping for renderer 1.  When 1 (default), the
     // decal quad is clipped at spawn time against the hit BSP triangle's
     // 3 edges so it conforms to the surface boundary instead of
@@ -1167,6 +1187,14 @@ void() CVar_Init =
     //     set ~1500-2000 on very open maps if corpse skinning still dominates.
     CVar_Add("Client", "r_corpses_pvscull",       "1",     CVAR_SIDE_CL);
     CVar_Add("Client", "r_corpses_maxdist",       "0",     CVAR_SIDE_CL);
+    // Live-player render cull — the same idea for LIVING player proxies (the 16-bot
+    // firefight / free-spectator-cam floor). An off-screen / behind-wall living body
+    // still costs the full IQM spine deform + ~50-bone skin every frame with no engine
+    // pre-cull. checkpvs from the view origin (the spectator cam when spectating) drops
+    // it. Fail-safe (never hides a body in your line of sight, no pop-in) and a near-no-op
+    // in first person (your networked proxies are already in your PVS). NEVER culls the
+    // spectated target or a killcam-posed proxy.
+    CVar_Add("Client", "r_players_pvscull",       "1",     CVAR_SIDE_CL);
     // Mirror the viewmodel horizontally for left-handed weapon view.
     // XOR'd against the per-weapon `weapon_viewmodel_flip` default so a
     // model that is already left-handed in its source data flips back
@@ -1852,25 +1880,54 @@ void() CVar_Init =
     //                        a REMOVE event before the new one spawns.  Hard
     //                        upper bound of 16 enforced server-side.
     CVar_Add("Client", "cl_spray",                 "nospray",       CVAR_SIDE_CL);
-    //   cl_spray_style — 0 = flat double-sided textured quad
-    //                      (trisoup, cheap, no edge clipping; the
-    //                      spray clips into mid-air at brush corners
-    //                      but renders correctly regardless of which
-    //                      side the wall faces).  Works for any PNG
-    //                      without needing a shader entry.
-    //                    1 = adddecal() — engine BSP-wrapping decal,
-    //                      matches scorch / bullet-hole behaviour and
-    //                      survives stair-steps and corners.  Costs
-    //                      one adddecal() call per spray per frame.
-    //                      REQUIRES a shader script entry per PNG
-    //                      (see scripts/effects.shader near
-    //                      `gfx/sprays/nospray.png` for the template);
-    //                      without one, the spray is invisible.
-    //   Read at spawn time per spray; toggling mid-game doesn't
-    //   restyle existing sprays.
-    CVar_Add("Client", "cl_spray_style",           "0",             CVAR_SIDE_CL);
+    //   r_spray_renderer — standardised with r_bullethole_renderer / r_decal_renderer:
+    //     1 = tri-soup quad (default) — cheap, no edge clipping; the spray clips into
+    //         mid-air at brush corners but renders from either side regardless of which
+    //         way the wall faces.  Works for any PNG without a shader entry.
+    //     0 = adddecal() — engine BSP-wrapping decal (matches scorch / bullet holes,
+    //         survives stair-steps and corners), one adddecal() call per spray per frame.
+    //         REQUIRES a shader script entry per PNG (scripts/effects.shader near
+    //         `gfx/sprays/nospray.png`); without one the spray is invisible.
+    //   Polled per-frame at draw, so toggling re-renders existing sprays LIVE (both
+    //   representations are stored at placement; the draw dispatcher picks one).
+    CVar_Add("Client", "r_spray_renderer",         "1",             CVAR_SIDE_CL);
+    // Off-surface lift (qu) baked into a tri-soup spray. Live: changing it re-shifts
+    // existing sprays (CSQC_DrawSprays poll).
+    CVar_Add("Client", "r_spray_offset",           "0.4",           CVAR_SIDE_CL);
     CVar_Add("Server", "sv_sprayfrequency",        "10",            CVAR_SIDE_SV);
     CVar_Add("Server", "sv_spraymax",              "3",             CVAR_SIDE_SV);
+    // Global multiplier on every infodecal's size (final size = entity "scale" key * this).
+    CVar_Add("Client", "cl_infodecal_scale",       "1.0",           CVAR_SIDE_CL);
+    // Infodecal renderer (cl_infodecal.qc), standardised with r_bullethole_renderer /
+    // r_spray_renderer:
+    //   1 = tri-soup projector (default) — surface-clipped, attaches to the wall.
+    //   0 = engine adddecal() — wraps convex world edges, re-projected per frame.
+    // Polled per-frame at draw, so toggling re-renders existing infodecals LIVE (both
+    // representations are stored at placement; the draw dispatcher picks one).
+    CVar_Add("Client", "r_decal_renderer",         "1",             CVAR_SIDE_CL);
+    // World-space lift of a tri-soup infodecal off its surface, in qu.  The shader's
+    // polygonoffset 8 does the real z-fight defeat, so this can be tiny for a flush look.
+    // Live: changing it re-shifts existing infodecals (CSQC_InfoDecal_DrawTrisoup poll).
+    CVar_Add("Client", "r_decal_offset",           "0.1",           CVAR_SIDE_CL);
+    // ===== DECAL CVARS — quick reference =====================================
+    //  GLOBAL (affect ALL decals — bullet holes + sprays + infodecals):
+    //    cl_decal_surflight   1 = tint by surface light (getlight) / 0 = full-bright
+    //    cl_decal_lightscale  surface-tint brightness scale
+    //    r_decal_lightmap     per-pixel surface lightmap on adddecal decals (ENGINE cvar;
+    //                         only the adddecal path = r_*_renderer 0)
+    //  PER-TYPE  renderer (1 = tri-soup default / 0 = adddecal) + offset (off-surface lift, qu):
+    //    bullet holes:  r_bullethole_renderer / r_bullethole_offset   (+ cl_bulletholes*; cl_decal_opacity = BH alpha)
+    //    sprays:        r_spray_renderer      / r_spray_offset         (+ cl_spray = image name)
+    //    infodecals:    r_decal_renderer      / r_decal_offset         ("decal" here = the infodecal entity; + cl_infodecal_scale)
+    // =========================================================================
+    // 1 (default) = bullet holes + sprays sample the surface lightmap brightness at
+    // placement (getlight, scaled by cl_decal_lightscale) so they dim/brighten with the
+    // surface, like infodecals.  0 = legacy full-bright.  (Per-pixel gradient = the
+    // engine r_decal_lightmap on the adddecal path.)
+    CVar_Add("Client", "cl_decal_surflight",       "1",             CVAR_SIDE_CL);
+    // Scales the surface-light tint sample (getlight * this/255) for all decals.  ~1.5
+    // ≈ the lightmap overbright getlight() omits; lower if decals look too bright.
+    CVar_Add("Client", "cl_decal_lightscale",      "1.5",           CVAR_SIDE_CL);
 
     CVar_AddUI("Server", "sv_autohop",                   "0",      CVAR_SIDE_SV,
         CVAR_UI_TOGGLE, CVAR_TAB_SERVER | CVAR_TAB_CREATE_GAME, "Autohop",
@@ -2156,6 +2213,40 @@ void() CVar_Init =
     CVar_AddUI("ODE physics", "physics_ode_worldquickstep_iterations", "40", CVAR_SIDE_SV,
         CVAR_UI_SCALAR, CVAR_TAB_ODE | CVAR_TAB_CREATE_PHYS, "ODE QuickStep Iter",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 1, 200);
+    // Patch 65-68: prop collision + ODE sim shape, server.cfg-editable. sv_prop_collision/_decomp
+    // build the player-collision geometry at model load (SERVERINFO, engine-owned); physics_ode_*
+    // pick the ODE rigid-body shape (1=low-poly hull default, use_decomp 1=concave soup) + the
+    // settled-prop dCollide skip. The engine/plugin own the real cvars; these rows just register the
+    // defaults + emit them to server.cfg so admins can tune them per server start.
+    CVar_AddSaved("ODE physics", "sv_prop_collision",             "3",   CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "sv_prop_decomp",                "2",   CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "sv_prop_decomp_concavity",      "0.06",CVAR_SIDE_SV);  // runtime-ACD (sv_prop_decomp 1) concavity threshold, fraction of model extent (clamped 0.01-0.5)
+    CVar_AddSaved("ODE physics", "physics_ode_trimesh_from_hull", "1",   CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "physics_ode_use_decomp",        "0",   CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "physics_ode_restingskip",       "1",   CVAR_SIDE_SV);
+    // The remaining ODE solver / contact / auto-disable knobs, exposed at the plugin's own defaults
+    // (the plugin owns the live cvars; these rows just emit them to server.cfg for admins). Most
+    // should stay default: lowering movelimit/iterations -> tunneling, raising contact_erp ->
+    // instability; world_* -1 = "use ODE built-in". Tune at your own risk.
+    CVar_AddSaved("ODE physics", "physics_ode_movelimit",                      "0.5",   CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "physics_ode_spinlimit",                      "10000", CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "physics_ode_maxspeed",                       "0",     CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "physics_ode_quadtree_depth",                 "5",     CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "physics_ode_autodisable_steps",              "10",    CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "physics_ode_autodisable_time",               "0",     CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "physics_ode_autodisable_threshold_linear",   "0.2",   CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "physics_ode_autodisable_threshold_angular",  "0.3",   CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "physics_ode_autodisable_threshold_samples",  "5",     CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "physics_ode_contact_mu",                     "1",     CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "physics_ode_contact_erp",                    "0.96",  CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "physics_ode_contact_cfm",                    "0",     CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "physics_ode_world_damping",                  "1",     CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "physics_ode_world_damping_linear",           "-1",    CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "physics_ode_world_damping_linear_threshold", "-1",    CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "physics_ode_world_damping_angular",          "-1",    CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "physics_ode_world_damping_angular_threshold","-1",    CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "physics_ode_world_erp",                      "-1",    CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "physics_ode_world_cfm",                      "-1",    CVAR_SIDE_SV);
     CVar_AddUI("ODE physics", "sv_phys_drops",                  "1",    CVAR_SIDE_SV,
         CVAR_UI_TOGGLE, CVAR_TAB_ODE, "",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
@@ -2250,6 +2341,7 @@ void() CVar_Init =
     CVar_AddSaved("ODE physics", "sv_carry_max_speed",   "1000", CVAR_SIDE_SV);
     CVar_AddSaved("ODE physics", "sv_carry_drop_dist",   "80",   CVAR_SIDE_SV);
     CVar_AddSaved("ODE physics", "sv_carry_stuck_time",  "0.35", CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "sv_carry_wall_deadband","2",   CVAR_SIDE_SV);  // Patch 70: kill the into-wall carry servo within this many qu of a contacted wall so a held prop RESTS at the wall (no r_showhull jitter vs the visual)
     CVar_AddSaved("ODE physics", "sv_carry_grab_dist",   "96",   CVAR_SIDE_SV);
     CVar_AddSaved("ODE physics", "sv_carry_grab_time",   "0.25", CVAR_SIDE_SV);  // pull-in animation duration on grab (0 = instant/snap)
     CVar_AddSaved("ODE physics", "sv_carry_throw_force", "300",  CVAR_SIDE_SV);  // throw speed (qu/s), velocity-set (+ player velocity)
@@ -2274,6 +2366,8 @@ void() CVar_Init =
     CVar_AddSaved("ODE physics", "sv_gravgun_pull_accel", "2500", CVAR_SIDE_SV);  // qu/s² toward the point (mass-scaled force)
     CVar_AddSaved("ODE physics", "sv_gravgun_blast_speed","700",  CVAR_SIDE_SV);  // release fling velocity outward
     CVar_AddSaved("ODE physics", "sv_gravgun_throw_speed","1200", CVAR_SIDE_SV);  // +attack throw velocity (aggressive)
+    CVar_AddSaved("ODE physics", "sv_gravgun_rest_radius", "48",  CVAR_SIDE_SV);  // Patch 68: a gathered prop within this of the pull centre AND below rest_speed gets NO pull force, so ODE auto-disables it and the settled pile costs ~0 even while held. 0 = off.
+    CVar_AddSaved("ODE physics", "sv_gravgun_rest_speed",  "40",  CVAR_SIDE_SV);  // Patch 68: speed (qu/s) below which a centred prop counts as settled for the rest deadzone above
     // Source/HL2 entity-lump props (server/sv_props.qc). enable = master switch for
     // every prop_* classname; physics = ODE rigid bodies + +use carry (set 0 for
     // NON-COLLIDABLE visual-only props — lighter/stabler on prop-dense Source maps,
@@ -2428,6 +2522,10 @@ void(string path) CVar_WriteServerCfg =
     fputs(f, "\n// ---------- Engine ----------\n");
     fputs(f, "set sv_maxrate 0\n");
     fputs(f, "set sv_maxdrate 0\n");
+    // QW setmodel does NOT copy the model bbox to the entity unless these are set, so IQM/MD3
+    // props would get the degenerate +-16 fallback cube (player walks INTO the model).
+    fputs(f, "set sv_gameplayfix_setmodelsize_qw 1\n");
+    fputs(f, "set sv_gameplayfix_setmodelrealbox 1\n");
 
     string current = "";
     float i;

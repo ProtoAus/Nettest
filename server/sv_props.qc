@@ -57,8 +57,21 @@ float() Props_SetupModel =
 		return FALSE;
 	}
 
+	// FTE's QW setmodel does NOT copy the model's bounding box to the entity by default:
+	// for QuakeWorld progs it leaves self.mins/maxs at ZERO (pr_cmds.c PF_setmodel gates the
+	// size transfer on `progstype != PROG_QW || sv_gameplayfix_setmodelsize_qw`). That made
+	// the degenerate guard below fire and shrink a full IQM/MD3 prop to the +-16 fallback
+	// cube -- the tiny broadphase box that let the player walk INTO the model in every
+	// sv_prop_collision mode. Enable the real-box transfer so setmodel hands us the TRUE
+	// model bounds (131x250x122 for the van, not +-16). The mod setsizes its own entities
+	// explicitly, so this global is safe.
+	cvar_set("sv_gameplayfix_setmodelsize_qw", "1");
+	cvar_set("sv_gameplayfix_setmodelrealbox", "1");
+
 	precache_model(self.model);
-	setmodel(self, self.model);      // sets self.mins/maxs from the model bounds
+	setmodel(self, self.model);      // now copies the real model bounds -> self.mins/maxs
+	if (cvar("sv_debug_physprops"))
+		dprint(sprintf("%s: '%s' model bbox %v .. %v\n", self.classname, self.model, self.mins, self.maxs));
 
 	// GoldSrc/Source .mdl studiomodels carry NO usable hull: these props are
 	// actually GoldSrc v10 .mdl (magic IDST, ver 10), loaded by the engine's
@@ -118,14 +131,90 @@ float() Props_SetupModel =
 // on both client and server (a SOLID_BBOX server box would be axis-aligned and
 // mispredict against the oriented client mirror).
 // ---------------------------------------------------------------------------
-void() Props_SpawnStatic =
+// Solidity spawnflags (apply to every prop_* class routing through here).
+const float PROP_NOTSOLID   = 1;   // force no collision (overrides the per-class default)
+const float PROP_FORCESOLID = 2;   // force collision ON (overrides a non-solid class default)
+const float PROP_FORCEBOX   = 4;   // force the cheap oriented box even for an IQM/MD3 model
+const float PROP_PREDICTED  = 8;   // CSQC-mirror so the LOCAL pmove collides (rock-solid; hero props only)
+
+// Mesh formats that expose the engine's NativeTrace (mod_alias) can collide as their
+// actual TRIANGLE MESH (SOLID_PHYSICS_TRIMESH, world.c:1073) instead of a box.
+// GoldSrc/Source .mdl load as mod_halflife (no NativeTrace) and MUST stay on the box.
+// We can't tell GoldSrc .mdl from native Quake .mdl by extension, so only the
+// unambiguous mesh formats opt in — which is exactly the user's IQM nature props, and
+// NEVER the Source-map .mdl clutter (those keep the cheap box → Source maps stay safe).
+float(string m) Prop_IsTrimeshModel =
+{
+	float n = strlen(m);
+	if (n < 4)
+		return FALSE;
+	string ext = substring(m, n - 4, 4);
+	return (ext == ".iqm" || ext == ".md3");
+};
+
+// ---------------------------------------------------------------------------
+// Predicted-collision mirror (PROP_PREDICTED flag).  A lean PVS-gated CSQC
+// entity (CSQC_ENT_PRED_PROP) carrying the model + scaled SOLID so the LOCAL
+// predicted pmove + CSQC bullet traces collide CLIENT-side — no rubber-band.
+// Wire layout MUST match CSQC_PredProp_Update (cl_physprop.qc) byte-for-byte.
+// Hero props only — at thousands this is the d1_canals mirror-flood OOM.
+// ---------------------------------------------------------------------------
+float(entity playerent, float changedflags) predprop_Send =
+{
+	WriteByte (MSG_ENTITY, CSQC_ENT_PRED_PROP);
+	WriteShort(MSG_ENTITY, self.modelindex);
+	WriteCoord(MSG_ENTITY, self.origin_x);
+	WriteCoord(MSG_ENTITY, self.origin_y);
+	WriteCoord(MSG_ENTITY, self.origin_z);
+	WriteCoord(MSG_ENTITY, self.angles_x);
+	WriteCoord(MSG_ENTITY, self.angles_y);
+	WriteCoord(MSG_ENTITY, self.angles_z);
+	WriteCoord(MSG_ENTITY, self.mins_x);   // already scaled (setsize in Props_SpawnStatic)
+	WriteCoord(MSG_ENTITY, self.mins_y);
+	WriteCoord(MSG_ENTITY, self.mins_z);
+	WriteCoord(MSG_ENTITY, self.maxs_x);
+	WriteCoord(MSG_ENTITY, self.maxs_y);
+	WriteCoord(MSG_ENTITY, self.maxs_z);
+	WriteByte (MSG_ENTITY, (self.solid == SOLID_PHYSICS_TRIMESH) ? 1 : 0);   // 1 = mesh, 0 = box
+	WriteCoord(MSG_ENTITY, self.scale);    // drives the client trimesh narrowphase scale + render
+	WriteByte (MSG_ENTITY, self.skin);
+	WriteByte (MSG_ENTITY, bound(0, rint(self.colormod_x * 255), 255));
+	WriteByte (MSG_ENTITY, bound(0, rint(self.colormod_y * 255), 255));
+	WriteByte (MSG_ENTITY, bound(0, rint(self.colormod_z * 255), 255));
+	WriteByte (MSG_ENTITY, bound(0, rint(self.alpha * 255), 255));   // 0 → client treats as opaque
+	return TRUE;
+};
+
+// nonsolid_default: prop_detail passes TRUE (Source decorative detail props are
+// non-solid); prop_static / prop_dynamic pass FALSE (oriented collision box,
+// matching Source-map static props + the rotated-OBB client trace).
+void(float nonsolid_default) Props_SpawnStatic =
 {
 	if (!Props_SetupModel())
 		return;
 
 	self.movetype = MOVETYPE_NONE;          // static — no ODE integration (won't fall)
-	self.solid    = SOLID_PHYSICS_BOX;      // oriented box via World_OBBTrace, matches the client mirror
-	setsize(self, self.mins, self.maxs);   // box = model bounds
+
+	// Per-class default, overridable by either spawnflag.
+	float nonsolid = nonsolid_default;
+	if (self.spawnflags & PROP_FORCESOLID) nonsolid = FALSE;
+	if (self.spawnflags & PROP_NOTSOLID)   nonsolid = TRUE;
+	if (nonsolid)
+		self.solid = SOLID_NOT;
+	else if (!(self.spawnflags & PROP_FORCEBOX) && Prop_IsTrimeshModel(self.model))
+		self.solid = SOLID_PHYSICS_TRIMESH;   // IQM/MD3 → per-triangle collision (engine NativeTrace; server-only, like the box)
+	else
+		self.solid = SOLID_PHYSICS_BOX;       // GoldSrc/Source .mdl (or Force Box) → oriented box via World_OBBTrace
+	// Collision bbox scales with the visual `scale` (default 1).  For BOX props the
+	// OBB reads only mins/maxs, so this fully scales their collision; for TRIMESH it
+	// scales the broadphase/PVS bbox (the per-triangle narrowphase scale lives in the
+	// engine — World_ClipMoveToEntity, ENGINE_PATCHES Patch 50).
+	float sc = self.scale;
+	if (sc <= 0) sc = 1;
+	setsize(self, self.mins * sc, self.maxs * sc);
+	if (cvar("sv_debug_physprops"))
+		dprint(sprintf("%s: '%s' collision bbox (scale %g) %v .. %v\n",
+		               self.classname, self.model, sc, self.mins, self.maxs));
 
 	// A fresh entity's colormod is '0 0 0' (= black on the client); default to full
 	// brightness when ApplyRenderKeys didn't set a tint.
@@ -144,13 +233,24 @@ void() Props_SpawnStatic =
 	// client-side-collides them (the server SOLID_PHYSICS_BOX still blocks bullets,
 	// grenades and every non-predicted move); a minor rubber-band on decorative
 	// clutter is well worth not flooding the wire.  prop_physics keep their mirror.
+
+	// Predicted collision (opt-in, PROP_PREDICTED — hero props only): mirror this prop
+	// to CSQC so the LOCAL predicted pmove + bullet traces collide client-side → no
+	// rubber-band.  PVS-gated (no PVSF_NOREMOVE): a static prop is never carried off
+	// screen and you only collide when near (= in PVS).  This replaces the standard
+	// engine render-net with the CSQC mirror (CSQC_PredProp_Update renders it).
+	if ((self.spawnflags & PROP_PREDICTED) && self.solid != SOLID_NOT)
+	{
+		self.SendEntity = predprop_Send;
+		self.SendFlags  = 1;
+	}
 };
 
-void() prop_static           = { Props_SpawnStatic(); };
-void() prop_static_override  = { Props_SpawnStatic(); };
-void() prop_detail           = { Props_SpawnStatic(); };
-void() prop_dynamic          = { Props_SpawnStatic(); };
-void() prop_dynamic_override = { Props_SpawnStatic(); };
+void() prop_static           = { Props_SpawnStatic(FALSE); };  // solid oriented box (default)
+void() prop_static_override  = { Props_SpawnStatic(FALSE); };
+void() prop_detail           = { Props_SpawnStatic(TRUE);  };  // non-solid decorative (Source detail prop)
+void() prop_dynamic          = { Props_SpawnStatic(FALSE); };
+void() prop_dynamic_override = { Props_SpawnStatic(FALSE); };
 
 // ---------------------------------------------------------------------------
 // Physics props: ODE rigid box + +use carry — same recipe as the filing
@@ -169,7 +269,11 @@ void() Props_SpawnPhysics =
 	// body creation), so a prop-dense Source map now simulates hundreds of bodies — the
 	// likely instability/RAM source while map-testing. This keeps the model visible
 	// (essentially a non-solid prop_static) but removes all the physics cost.
-	if (!cvar("sv_props_physics"))
+	// PROP_NOTSOLID (spawnflag) OR sv_props_physics 0 -> NON-COLLIDABLE visual-only prop: no ODE
+	// rigid body, no CSQC solid mirror, no +use carry. Each physics prop otherwise creates ONE
+	// live ODE body, so a prop-dense Source map simulates hundreds of bodies. This keeps the model
+	// visible (essentially a non-solid prop_static) but removes all the physics cost.
+	if (!cvar("sv_props_physics") || (self.spawnflags & PROP_NOTSOLID))
 	{
 		self.movetype = MOVETYPE_NONE;
 		self.solid    = SOLID_NOT;
@@ -178,8 +282,21 @@ void() Props_SpawnPhysics =
 		return;
 	}
 
-	setsize(self, self.mins, self.maxs);   // box = model bounds
-	self.solid = SOLID_PHYSICS_BOX;
+	// nettest Patch 70: scale the broadphase AABB by the visual scale (like Props_SpawnStatic) so a
+	// scaled prop's box + the NETWORKED mins/maxs (phys_files_Send sends self.mins/maxs -> the CSQC
+	// mirror's box + the ODE box geom) match the scaled model/hull. Was raw bounds -> loose for
+	// scale<1, broken for scale>1.
+	float ppsc = self.scale; if (ppsc <= 0) ppsc = 1;
+	setsize(self, self.mins * ppsc, self.maxs * ppsc);   // broadphase AABB = scaled model bounds (narrowphase = hull/mesh)
+
+	// IQM/MD3 -> SOLID_PHYSICS_TRIMESH so the player collides with the generated convex HULL /
+	// ACD decomposition (World_HullTrace, sv_prop_collision 2/3) like prop_static; GoldSrc/Source
+	// .mdl (or the Force-Box flag) -> oriented box. ODE builds a body for either solid type
+	// (com_phys_ode.c) so the prop still falls + tumbles; barrels/cans are TRIMESH+ODE proof.
+	if (!(self.spawnflags & PROP_FORCEBOX) && Prop_IsTrimeshModel(self.model))
+		self.solid = SOLID_PHYSICS_TRIMESH;
+	else
+		self.solid = SOLID_PHYSICS_BOX;
 
 	if (self.colormod == '0 0 0')
 		self.colormod = '1 1 1' * cvar("sv_carry_lightscale");

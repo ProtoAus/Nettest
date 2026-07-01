@@ -111,12 +111,14 @@ server/sv_env_beam.qc
 server/sv_func_rain.qc
 server/sv_env_laser.qc
 server/sv_trigger_changetarget.qc
+server/sv_trigger_copyvalue.qc
 server/sv_info_landmark.qc
 server/sv_trigger_transition.qc
 server/sv_trigger_changelevel.qc
 server/sv_path_corner.qc
 server/sv_path_track.qc
 server/sv_platform_carry.qc
+server/sv_momentary.qc
 server/sv_func_train.qc
 server/sv_func_tracktrain.qc
 server/sv_func_trackautochange.qc
@@ -135,6 +137,7 @@ server/sv_teleport.qc
 server/sv_ladder.qc
 server/sv_cameras.qc
 server/sv_spray.qc
+server/sv_infodecal.qc
 shared/sh_pmove.qc
 server/sv_grapple.qc
 server/sv_player.qc

@@ -738,6 +738,8 @@ void(float isnew) CSQC_PhysProp_Update =
     cmod_x           = readbyte() * (1.0 / 255.0);
     cmod_y           = readbyte() * (1.0 / 255.0);
     cmod_z           = readbyte() * (1.0 / 255.0);
+    float  istrimesh = readbyte();   // 1 = mirror as SOLID_PHYSICS_TRIMESH (hull) when free; 0 = box. MUST match phys_files_Send wire order.
+    float  sc        = readcoord();  // Patch 70: visual + narrowphase scale. MUST match phys_files_Send (after istrimesh, before phase).
     float  phase     = readbyte();   // PP_PHASE_* (was the csolid 0/1 byte)
     float  carrier   = readbyte();   // carrier edict (0 = free)
     float  hold_dist = readcoord();  // networked hold params (remote clients lack the server cvars)
@@ -746,9 +748,30 @@ void(float isnew) CSQC_PhysProp_Update =
     // classname drives Impact_ClassifyLocal → metal spark + no bullet decal.
     self.classname = "phys_files";
     setmodelindex(self, mdlindex);
+    // Patch 70: engine renders the mirror model at self.scale + scales the predicted hull/box trace
+    // by it (the scaled narrowphase, like the server) — set BEFORE setsize/setorigin link below.
+    self.scale = (sc > 0) ? sc : 1;
+
+    // angles + solid MUST be set BEFORE setsize/setorigin: those link the entity
+    // (World_LinkEdict), which only computes the ROTATED broadphase AABB (engine Patch
+    // 53/59) when solid is a PHYSICS_BOX/TRIMESH, and with THIS frame's angles.  Setting
+    // them afterward left the broadphase un-rotated / one frame stale for a tumbling box.
+    self.angles    = ang;
+    // SOLID_PHYSICS_BOX ONLY for PP_PHASE_FREE_SOLID → the local QC pmove + CSQC bullet
+    // traces collide with the box, which the engine OBB patch (world.c World_OBBTrace)
+    // rotates by the streamed angles, so you walk on / shoot the real ORIENTED shape
+    // smoothly at any tilt.  SOLID_NOT while carried (GRABBING/STEADY) or in the just-
+    // dropped passthrough phase (NONSOLID, server non-solid via PHYSDROP_DIM) so
+    // client+server agree and the carrier doesn't shove it.
+    // nettest: when FREE_SOLID, an IQM/MD3 physics prop (istrimesh) mirrors as SOLID_PHYSICS_TRIMESH
+    // so the local pmove + CSQC bullets predict the SAME generated hull / decomposition the server
+    // uses (PM_HullTrace == World_HullTrace) -> no rubber-band; .mdl stays the oriented box.
+    if (phase == PP_PHASE_FREE_SOLID)
+        self.solid = istrimesh ? SOLID_PHYSICS_TRIMESH : SOLID_PHYSICS_BOX;
+    else
+        self.solid = SOLID_NOT;
     setsize(self, emins, emaxs);     // broadphase AABB (the cube when free); narrowphase = mesh
     setorigin(self, org);
-    self.angles    = ang;
     self.velocity  = vel;
     self.avelocity = avel;
     self.colormod  = cmod;
@@ -759,14 +782,6 @@ void(float isnew) CSQC_PhysProp_Update =
     self.pp_carrier   = carrier;
     self.pp_hold_dist = hold_dist;
     self.pp_hold_z    = hold_z;
-
-    // SOLID_PHYSICS_BOX ONLY for PP_PHASE_FREE_SOLID → the local QC pmove + CSQC bullet
-    // traces collide with the box, which the engine OBB patch (world.c World_OBBTrace)
-    // rotates by the streamed angles, so you walk on / shoot the real ORIENTED shape
-    // smoothly at any tilt.  SOLID_NOT while carried (GRABBING/STEADY) or in the just-
-    // dropped passthrough phase (NONSOLID, server non-solid via PHYSDROP_DIM) so
-    // client+server agree and the carrier doesn't shove it.
-    self.solid = (phase == PP_PHASE_FREE_SOLID) ? SOLID_PHYSICS_BOX : SOLID_NOT;
 
     // Anchor the extrapolator at this authoritative snapshot.
     self.pp_snap_origin = org;
@@ -785,4 +800,51 @@ void(float isnew) CSQC_PhysProp_Update =
         self.predraw = CSQC_PhysProp_Predraw;
     else
         self.predraw = __NULL__;
+};
+
+// ============================================================
+//  Predicted-collision prop mirror  (CSQC_ENT_PRED_PROP)
+//  ----------------------------------------------------------
+//  A prop_static / prop_detail flagged "Predicted collision".  Rebuilds the
+//  model + a LOCAL solid so the client's predicted pmove + CSQC bullet traces
+//  collide client-side (no rubber-band).  Static: no extrapolation / predraw.
+//  Wire layout MUST match predprop_Send (sv_props.qc) byte-for-byte.
+// ============================================================
+void(float isnew) CSQC_PredProp_Update =
+{
+    float  mdlindex  = readshort();
+    vector org       = readvector();
+    vector ang       = readvector();
+    vector emins     = readvector();
+    vector emaxs     = readvector();
+    float  istrimesh = readbyte();
+    float  sc        = readcoord();
+    float  skn       = readbyte();
+    vector cmod;
+    cmod_x           = readbyte() * (1.0 / 255.0);
+    cmod_y           = readbyte() * (1.0 / 255.0);
+    cmod_z           = readbyte() * (1.0 / 255.0);
+    float  alf       = readbyte() * (1.0 / 255.0);
+
+    self.classname = "prop_predicted";
+    setmodelindex(self, mdlindex);
+    self.scale     = (sc > 0) ? sc : 1;   // engine reads xv->scale for the scaled trimesh narrowphase + render
+    self.skin      = skn;
+    self.colormod  = cmod;
+    self.alpha     = (alf > 0) ? alf : 1; // 0 (unset) → opaque
+    self.angles    = ang;
+    self.movetype  = MOVETYPE_NONE;       // origin is wire-authoritative
+    self.drawmask  = MASK_ENGINE;         // engine renders the CSQC entity
+
+    // Local solid → the predicted CSQC pmove + CSQC bullet traces collide.  TRIMESH for
+    // IQM (the client has the mesh + NativeTrace, scaled by the engine via .scale); else
+    // the oriented box (engine OBB patch rotates it by the streamed .angles).  MUST be set
+    // BEFORE setsize/setorigin: those link the entity (World_LinkEdict), which only computes
+    // the ROTATED broadphase AABB (engine Patch 53/59) when solid is a PHYSICS_BOX/TRIMESH.
+    // With solid still SOLID_NOT at link time a ROTATED prop kept the UN-ROTATED AABB, so the
+    // client prediction fell through the rotated hull OUTSIDE it and the server (which links
+    // with solid set) snapped the player back.
+    self.solid = istrimesh ? SOLID_PHYSICS_TRIMESH : SOLID_PHYSICS_BOX;
+    setsize(self, emins, emaxs);          // scaled bbox (broadphase + PVS); trimesh narrowphase = mesh × scale
+    setorigin(self, org);
 };

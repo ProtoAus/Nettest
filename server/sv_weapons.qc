@@ -1523,13 +1523,30 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
     }
 
     // Shot a bot with no / stale enemy: wake it to the attacker.  This bypasses the
-    // frontal acquisition cone (sv_bot_fov) — being hit is legitimate knowledge of
+    // frontal acquisition cone (bot_fov) — being hit is legitimate knowledge of
     // where the shot came from, so a flanked bot turns to fight instead of staying blind.
     if (target.classname == "player" && target.is_bot
         && attacker && attacker != target && IsBotEnemy(target, attacker))
     {
-        if (!target.bot_enemy || target.bot_enemy.is_dead
-            || (time - target.bot_enemy_time) > 5)
+        target.bot_lasthurt_time = time;    // recently shot -> bias toward the attacker (gates the bot's periodic re-pick)
+
+        // Snap to the attacker = the NEAREST current threat.  Adopt it when we have no valid
+        // target, OR the current one is stale/unseen, OR we can't currently SEE the current
+        // target, OR the attacker is simply CLOSER (across multiple shooters this converges to
+        // the nearest, and it won't thrash between equidistant foes).  logicops is OFF here, so
+        // each test is its own statement and bot_enemy.origin is read only after the validity
+        // checks.  Still bypasses the FOV cone — being hit is legitimate knowledge of the threat.
+        float take_attacker = FALSE;
+        if (!target.bot_enemy || target.bot_enemy.is_dead || !IsBotEnemy(target, target.bot_enemy))
+            take_attacker = TRUE;                       // no valid current target
+        else if ((time - target.bot_enemy_time) > 5)
+            take_attacker = TRUE;                       // current target stale (unseen >5s)
+        else if (target.bot_los_lost_time != 0)
+            take_attacker = TRUE;                       // can't see the current target -> the shooter is the live threat
+        else if (vlen(attacker.origin - target.origin) < vlen(target.bot_enemy.origin - target.origin))
+            take_attacker = TRUE;                       // attacker is closer than the current target
+
+        if (take_attacker)
         {
             target.bot_enemy         = attacker;
             target.bot_enemy_time    = time;            // open the 360 tracking window
@@ -3291,7 +3308,18 @@ void() W_WeaponFrame =
     // sv_trust_clienthits>=1 they'd never shoot.  Always let a bot fire its
     // weapon server-side (autonomous path) — same as the grenade/C4/gravgun
     // entry points below.
+    // Melee weapons run the swing SERVER-side so a hit on a physics prop reaches
+    // PhysProp_TryPushFromTrace (SSQC-only) and actually shoves it — otherwise the swing
+    // only runs in client prediction and the hitclaim path damages players but never pushes
+    // props.  W_MeleeStrike already masks its hit sound off the predicting attacker and defers
+    // player damage to the hitclaim, so running it server-side adds no double FX/damage.
     float wep_bypasses_cs_notify = (self.is_bot
+                                 || self.weapon == WEP_MELEE
+                                 || self.weapon == WEP_KNIFE
+                                 || self.weapon == WEP_HLCROWBAR
+                                 || self.weapon == WEP_WRENCH
+                                 || self.weapon == WEP_KATANA
+                                 || self.weapon == WEP_BUTTERFLY
                                  || self.weapon == WEP_HLGRENADE
                                  || self.weapon == WEP_CSHEGRENADE
                                  || self.weapon == WEP_CSFLASHBANG
