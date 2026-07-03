@@ -1,0 +1,14 @@
+# Normalize line endings so QuakeC source stays LF regardless of each dev's
+# core.autocrlf setting (prevents whole-file CRLF churn in diffs).
+* text=auto
+
+*.qc  text eol=lf
+*.src text eol=lf
+*.qh  text eol=lf
+*.cfg text eol=lf
+*.ini text eol=lf
+*.md  text eol=lf
+
+*.bat text eol=crlf
+
+*.exe binary
