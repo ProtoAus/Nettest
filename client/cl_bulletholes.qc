@@ -87,11 +87,14 @@ entity bh_pq_head;         // per-quad list head (see .bh_pq_next)
 entity bh_pq_tail;
 float  bh_count;
 float  bh_frame_count;     // per-frame spawn cap
-// Per-shot decal counter — incremented by CSQC_SpawnBulletHole and
-// reset at the top of each penetrating-hitscan loop via
-// CSQC_BulletHoles_ResetShot.  Capped by cl_bulletholes_per_shot
-// (0 = unlimited; 1 = entry decal only, no penetration exits).
-float  bh_per_shot_count;
+// Per-shot decal cap, scoped by the shot's action_id (every impact of a shot carries it) via a
+// small ring — indexed by (action mod BH_SHOTRING), so several overlapping (sprayed) shots each
+// count their OWN nearest-N decals.  Replaces the old single global counter, which was reset at
+// FIRE time but checked at the DEFERRED spawn time: a later shot's reset then freed an earlier
+// shot's still-parked EXIT decal onto the wall behind.  See CSQC_BulletHole_CapAllows.
+const float BH_SHOTRING = 16;
+float  bh_shot_action[BH_SHOTRING];   // action_id owning each ring slot (0 = default, matches action 0 harmlessly)
+float  bh_shot_count [BH_SHOTRING];   // holes already placed for that shot
 // Shotgun blast bypass — set by CSQC_PredictedShotgunImpact around its
 // pellet loop so cl_bulletholes_per_shot doesn't clip the spray.  See
 // the spawn-site comment for the rationale.
@@ -242,6 +245,21 @@ string bh_mat_path_glass[5];
 // material decal paths above).
 const float BH_SPLAT_COUNT = 9;
 string bh_splat_path[9];
+
+// World/BSP bullet-hole art — one of these four gfx/impacts/impactN.png is picked at random
+// per world hit (replaces the old single gfx/bullethole).  Small + random 90-deg rotation.
+// Size via the cl_bullethole_impact_size cvar (full units across, default 6).  Precached in
+// CSQC_BulletHolesInit; `_lm` variants registered in CSQC_BulletHole_ReregisterShaders.
+const float BH_IMPACT_COUNT = 4;
+string bh_impact_path[4];
+
+// World/BSP WOOD art — gfx/impacts/woodN.png, picked at random when a world/plain-brush hit lands
+// on a surface tagged "wood" in scripts/surfaceprops.txt (impact_mat == IMPACT_MAT_WOOD).  Same
+// world-hit path + sizing (cl_bullethole_impact_size) as bh_impact_path, but the art is radially
+// symmetric splinter bursts (no baked shadow) so it takes a full random 90-deg rotation.  Breakable
+// func_breakable wood keeps its own gfx/decals/impacts/wood set (bh_mat_path_wood, BH_PickMaterialDecal).
+const float BH_WORLD_WOOD_COUNT = 4;
+string bh_world_wood_path[4];
 
 // File-scope I/O slots for BH_ClipQuadToHitTri / BH_Sample4 / BH_WriteQuadUV.
 // Passing UVs + triangle verts + surface normal as function args overflows
@@ -960,6 +978,10 @@ void() CSQC_BulletHole_ReregisterShaders =
         if (bh_mat_path_glass[i] != "") shaderforname(strcat(bh_mat_path_glass[i], "_lm"), Decal_LMShaderBody(bh_mat_path_glass[i]));
     for (i = 0; i < BH_SPLAT_COUNT;     i = i + 1)
         if (bh_splat_path[i]     != "") shaderforname(strcat(bh_splat_path[i],     "_lm"), Decal_LMShaderBody(bh_splat_path[i]));
+    for (i = 0; i < BH_IMPACT_COUNT;    i = i + 1)
+        if (bh_impact_path[i]    != "") shaderforname(strcat(bh_impact_path[i],    "_lm"), Decal_LMShaderBody(bh_impact_path[i]));
+    for (i = 0; i < BH_WORLD_WOOD_COUNT; i = i + 1)
+        if (bh_world_wood_path[i] != "") shaderforname(strcat(bh_world_wood_path[i], "_lm"), Decal_LMShaderBody(bh_world_wood_path[i]));
 };
 
 // --- Init (call from CSQC init) ---
@@ -993,6 +1015,14 @@ void() CSQC_BulletHolesInit =
     // 9-PNG set drives both effects via random per-spawn pick.
     for (i = 0; i < BH_SPLAT_COUNT; i++)
         bh_splat_path[i] = precache_pic(sprintf("gfx/impacts/paintball/splat%g", i + 1));
+
+    // World/BSP bullet-hole variants — random per hit (see CSQC_SpawnBulletHole).
+    for (i = 0; i < BH_IMPACT_COUNT; i++)
+        bh_impact_path[i] = precache_pic(sprintf("gfx/impacts/impact%g", i + 1));
+
+    // World/BSP WOOD variants — used on wood-tagged world surfaces (see CSQC_SpawnBulletHole).
+    for (i = 0; i < BH_WORLD_WOOD_COUNT; i++)
+        bh_world_wood_path[i] = precache_pic(sprintf("gfx/impacts/wood%g", i + 1));
 
     precache_model("models/props/barrel.iqm");
     precache_model("models/props/can.mdl");
@@ -1630,12 +1660,41 @@ void() CSQC_BulletHolesStartFrame =
 // Reset hook — call at the top of the penetrating-hitscan loop in
 // sh_weapon_standard.qc so the per-shot counter applies to that one
 // shot only.  Zero-cost when cl_bulletholes_per_shot is 0.
+// DEPRECATED no-op: the per-shot cap is now scoped by action_id (CSQC_BulletHole_CapAllows),
+// which self-resets per shot regardless of the deferred impact queue — so the fire-time reset
+// this used to do (the cause of the cross-shot decal leak) is gone.  Kept as a no-op so the
+// existing call sites in sh_weapon_*.qc need no change.
 void() CSQC_BulletHoles_ResetShot =
 {
-    bh_per_shot_count = 0;
 };
 
-void(vector hit_pos, vector hit_normal, entity hit_target, float impact_mat) CSQC_SpawnBulletHole =
+// Per-shot bullet-hole cap, keyed by the shot's action_id (which EVERY impact of a shot carries,
+// entry + penetration exits alike).  Robust to the deferred impact QUEUE draining shots out of
+// order: each shot counts against its OWN ring slot, so a slow-arriving exit decal from an
+// earlier shot can't leak past its cap onto the wall behind, and it can't steal a later shot's
+// slot.  Returns TRUE (consuming one) when a hole is allowed under cl_bulletholes_per_shot.
+float(float action) CSQC_BulletHole_CapAllows =
+{
+    if (bh_shotgun_blast)
+        return TRUE;                    // shotgun blast = one trigger pull, whole pellet spread shows
+    float cap = cvar("cl_bulletholes_per_shot");
+    if (cap <= 0)
+        return TRUE;                    // 0 = unlimited
+    if (action < 0)
+        return TRUE;                    // remote impacts carry no per-shot id (-1) — isolated, not capped here
+    float slot = action - (floor(action / BH_SHOTRING) * BH_SHOTRING);   // 0..BH_SHOTRING-1
+    if (bh_shot_action[slot] != action)
+    {
+        bh_shot_action[slot] = action;  // a new shot landed in this slot -> fresh count
+        bh_shot_count[slot]  = 0;
+    }
+    if (bh_shot_count[slot] >= cap)
+        return FALSE;                   // this shot already placed `cap` holes
+    bh_shot_count[slot] = bh_shot_count[slot] + 1;
+    return TRUE;
+};
+
+void(vector hit_pos, vector hit_normal, entity hit_target, float impact_mat, float action) CSQC_SpawnBulletHole =
 {
     entity hole;
     vector hole_normal, hole_angles, hole_origin;
@@ -1693,22 +1752,12 @@ void(vector hit_pos, vector hit_normal, entity hit_target, float impact_mat) CSQ
     if (bh_frame_count >= BULLETHOLE_MAX_PER_FRAME)
         return;
 
-    // Per-shot cap (cl_bulletholes_per_shot).  Bullets that penetrate
-    // can spawn entry + exit decals up to 4 hits = 8 decals each; this
-    // gate lets the user trim that.  0 keeps the old behaviour.
-    //
-    // Shotgun bypass: shotgun blasts are a single trigger pull but emit
-    // N pellets, each conceptually part of the SAME shot.  The user
-    // expects "per shot" to mean "per trigger pull" — capping the visible
-    // holes here would clip most of the spray.  CSQC_PredictedShotgunImpact
-    // sets bh_shotgun_blast = 1 around its pellet loop so the per-shot
-    // cap is bypassed inside that loop only.
-    float per_shot_cap = cvar("cl_bulletholes_per_shot");
-    if (!bh_shotgun_blast
-        && per_shot_cap > 0
-        && bh_per_shot_count >= per_shot_cap)
+    // Per-shot cap (cl_bulletholes_per_shot) — scoped by the shot's action_id so overlapping
+    // (sprayed) shots each keep their own nearest-N decals regardless of the deferred impact
+    // queue's drain order.  Placed AFTER the sky/solid/PVS rejects above so a rejected exit-hit
+    // doesn't consume a slot.  Shotgun blasts + the unlimited/remote cases bypass (see the fn).
+    if (!CSQC_BulletHole_CapAllows(action))
         return;
-    bh_per_shot_count += 1;
 
     if (vlen(hit_normal) <= 0)
         return;
@@ -1777,6 +1826,30 @@ void(vector hit_pos, vector hit_normal, entity hit_target, float impact_mat) CSQ
         }
     }
 
+    // Default world/plain-brush hit (no material decal from BH_PickMaterialDecal): a RANDOM one of
+    // the four gfx/impacts/impactN, sized by cl_bullethole_impact_size (full units across, default
+    // 6).  Wood-tagged world surfaces (impact_mat == IMPACT_MAT_WOOD, from scripts/surfaceprops.txt)
+    // use gfx/impacts/woodN instead — same world-hit path + sizing, different art.
+    // is_impact_default / is_world_wood drive the rotation choice below.
+    float is_impact_default = 0;
+    float is_world_wood = 0;
+    if (!hole.bh_shader_path)
+    {
+        float impfull = cvar("cl_bullethole_impact_size");
+        if (impfull <= 0) impfull = 6;
+        hole.bh_half_size = impfull * 0.5;
+        if (impact_mat == IMPACT_MAT_WOOD)
+        {
+            hole.bh_shader_path = bh_world_wood_path[(int)floor(random() * BH_WORLD_WOOD_COUNT)];
+            is_world_wood = 1;
+        }
+        else
+        {
+            hole.bh_shader_path = bh_impact_path[(int)floor(random() * BH_IMPACT_COUNT)];
+            is_impact_default = 1;
+        }
+    }
+
     // Orient decal to face outward from the surface.
     hole_normal = normalize(hit_normal) * -1;
     hole_angles = vectoangles(hole_normal);
@@ -1794,7 +1867,16 @@ void(vector hit_pos, vector hit_normal, entity hit_target, float impact_mat) CSQ
     //   conc — locked to 0 (no rotation; the art has directional
     //          shading the rotated copies were inverting)
     //   else — full 4-way pick
-    if (impact_mat == IMPACT_MAT_WOOD)
+    //   impact1-4 (world default) — fixed orientation (the art has baked directional shadow).
+    //          Steps go clockwise (rot 1 = 90-deg right); the art reads 90-deg-right at rot 0,
+    //          so rot 3 (270 = 90-deg left) brings it upright.  Random texture pick per hit.
+    //   wood1-4 (world wood) — same 90-deg-right baked offset as impact1-4, so rot 3 (270 = 90-deg
+    //          left) brings it upright.  Locked; random texture pick per hit.
+    if (is_impact_default)
+        hole.bh_quad_rot = 3;
+    else if (is_world_wood)
+        hole.bh_quad_rot = 3;
+    else if (impact_mat == IMPACT_MAT_WOOD)
         hole.bh_quad_rot = floor(random() * 2) * 2;
     else if (impact_mat == IMPACT_MAT_DEFAULT)
         hole.bh_quad_rot = 0;
@@ -2165,5 +2247,5 @@ void() CSQC_SpawnTraceBulletHole =
         else if (bm == 1 || bm == 5)   mat = IMPACT_MAT_WOOD;
         else if (bm == 2 || bm == 6)   mat = IMPACT_MAT_METAL;
     }
-    CSQC_SpawnBulletHole(trace_endpos, trace_plane_normal, trace_ent, mat);
+    CSQC_SpawnBulletHole(trace_endpos, trace_plane_normal, trace_ent, mat, -1);   // one-off trace decal — no per-shot grouping
 };

@@ -2861,6 +2861,7 @@ void() PutClientInServer =
 
 	player_chain_add(self);
 	Prog_Load(self);	// nettest progression: load persistent XP/level (async, GUID-keyed)
+	EnvSun_StuffPlayer(self);	// crepuscular god-ray cvars (clears r_sun_colour if this map has no env_sun)
 	PlayerBeginTeamSelection();
 };
 
@@ -3613,6 +3614,23 @@ void(string command_string) SV_ParseClientCommand =
 			phys_files_spawn_infront(self);
 		else
 			sprint(self, PRINT_HIGH, "spawnfiles requires mp_cheats 1\n");
+		return;
+	}
+
+	// nettest: worst-case physics stress. `spawnflood <N>` rains N barrels into a
+	// grid pile in front of you (default 50). Fire the gravity-gun black hole at the
+	// pile and A/B `physics_box3d_threads 1` vs `4` to see the Box3D multicore win.
+	if (cmd == "spawnflood")
+	{
+		if (cvar("mp_cheats"))
+		{
+			float flood_n = stof(argv(1));
+			if (flood_n <= 0)
+				flood_n = 50;
+			phys_flood_spawn(self, flood_n);
+		}
+		else
+			sprint(self, PRINT_HIGH, "spawnflood requires mp_cheats 1\n");
 		return;
 	}
 

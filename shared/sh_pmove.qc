@@ -323,6 +323,20 @@ string(float idx) FS_SoundName =
     return "sounds/player/step1.wav";   // safe fallback on out-of-range idx
 };
 
+// Map a surfaceprops footstep-set name (Surf_FootstepName) to a FS_SOUND_* set.  Only "metal"
+// and the generic step set exist today; adding a set = new wavs + a FS_SOUND_*_BASE/COUNT + a
+// case here + the material's footstep token in scripts/surfaceprops.txt.
+float(string setname) PM_FootstepBase =
+{
+    if (setname == "metal") return FS_SOUND_METAL_BASE;
+    return FS_SOUND_STEP_BASE;
+};
+float(string setname) PM_FootstepCount =
+{
+    if (setname == "metal") return FS_SOUND_METAL_COUNT;
+    return FS_SOUND_STEP_COUNT;
+};
+
 // ============================================================================
 //  8.  PM_Trace  –  tracebox wrapper using the shared hull
 // ============================================================================
@@ -1640,6 +1654,9 @@ void PM_CategorizePosition()
     // Capture the entity directly below the player NOW, before the groundsnap
     // quadrant traces below clobber trace_ent — PM_UpdateStepSound reads it to
     // play metal footsteps when standing on the phys_files cabinet.
+    // (The floor SURFACE for footstep material is sampled with a fresh downward
+    //  traceline at step time in PM_UpdateStepSound, not stashed here — sampling
+    //  from a point in the air was unreliable, see that function.)
     self.pm_ground_ent = trace_ent;
 
     // Ground-snap suppress — force airborne under three conditions:
@@ -4561,10 +4578,20 @@ void() PM_UpdateStepSound =
             interval = 0.40;
             vol      = 0.50;
         }
-        snd_idx = FS_SOUND_STEP_BASE + floor(random() * FS_SOUND_STEP_COUNT);
-        // Standing on a metal phys prop → metal footsteps instead.  pm_ground_ent was
-        // captured in PM_CategorizePosition; the cabinet/barrel/can keep their classname
-        // both server-side (sv_physprop.qc) and as the CSQC mirror, so SSQC + CSQC agree.
+        // Per-surface footstep set — resolve the ground material NOW (only on a step, a few/sec)
+        // from the ACTUAL floor surface.  Q1 BSP traces carry no surface name, so trace straight
+        // down to the floor and look the texture up AT the contact point (this matches the
+        // cl_debug_surface "Ground" readout exactly).  The old origin+gdir*20 sample sat ~4u ABOVE
+        // the floor, in the air, where getsurfacenearpoint could latch onto a nearby NON-floor
+        // surface (a metal pipe/trim/grate/prop face near foot level) → spurious metal footsteps.
+        // gdir isn't in scope here, so recompute it (mirrors PM_CategorizePosition).
+        vector gdir = self.gravshift_active ? self.gravitydir : '0 0 -1';
+        traceline(pm_origin, pm_origin + gdir * 8192, MOVE_NOMONSTERS, self);
+        string fset = Surf_FootstepName(Surf_MaterialAtPoint(trace_ent, trace_endpos));
+        snd_idx = PM_FootstepBase(fset) + floor(random() * PM_FootstepCount(fset));
+        // Standing on a metal phys prop → metal footsteps instead (overrides the surface below).
+        // pm_ground_ent was captured in PM_CategorizePosition; the cabinet/barrel/can keep their
+        // classname both server-side (sv_physprop.qc) and as the CSQC mirror, so SSQC + CSQC agree.
         // (Dropped weapons are intentionally excluded — too small to stand on.)
         if (self.pm_ground_ent.classname == "phys_files"
             || self.pm_ground_ent.classname == "phys_barrel"

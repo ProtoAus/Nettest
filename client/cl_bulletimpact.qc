@@ -8,7 +8,7 @@
 // ============================================================
 
 // Forward declarations (defined in cl_bulletholes.qc)
-void(vector hit_pos, vector hit_normal, entity hit_target, float impact_mat) CSQC_SpawnBulletHole;
+void(vector hit_pos, vector hit_normal, entity hit_target, float impact_mat, float action) CSQC_SpawnBulletHole;
 void(entity owner_ent) CSQC_BulletHolesRemoveByOwner;
 
 // Forward declaration (defined in cl_rain.qc — compiles after this file).
@@ -236,7 +236,10 @@ float(entity e) CL_IsMetalPhysObj =
 
 float(entity hit) Impact_ClassifyLocal =
 {
-    if (!hit) return IMPACT_MAT_DEFAULT;
+    // hit == world (edict 0, falsy in QC) OR a genuine miss: resolve the hit surface's TEXTURE
+    // -> material (from the hit POINT trace_endpos — Q1 traces carry no surface) so the shooter's
+    // predicted effect matches the server-sent one for everyone else.
+    if (!hit) return Surf_ImpactMat(Surf_MaterialAtPoint(hit, trace_endpos));
     // All player hits use the lethal spark-splash variant — promoted from
     // headshot/killing-blow only so every body shot reads with the same
     // visceral look. Server uses IMPACT_MAT_FLESH_LETHAL for player hits
@@ -268,7 +271,8 @@ float(entity hit) Impact_ClassifyLocal =
     if (m == 1 || m == 5)        return IMPACT_MAT_WOOD;
     if (m == 2 || m == 6)        return IMPACT_MAT_METAL;
     if (m == 3)                  return IMPACT_MAT_FLESH;
-    return IMPACT_MAT_DEFAULT;
+    // Untagged brush (func_wall/door, sentinel material): fall back to the surface TEXTURE (point).
+    return Surf_ImpactMat(Surf_MaterialAtPoint(hit, trace_endpos));
 };
 
 // Remove a client-side fake projectile entity
@@ -976,7 +980,7 @@ void(vector pos, vector normal, float mat, float metalphys, float action, entity
     // Static world (ent==world) always gets the hole; a breakable that shattered
     // mid-flight (wasfreed) is skipped so the decal doesn't orphan.
     if (Impact_ShouldSpawnHole(mat) && (ent == world || !wasfreed(ent)))
-        CSQC_SpawnBulletHole(pos, normal, ent, mat);
+        CSQC_SpawnBulletHole(pos, normal, ent, mat, action);   // action_id scopes the per-shot decal cap
 
     if (play_ric)
     {
@@ -1182,7 +1186,7 @@ void(vector pos, vector normal) CSQC_BulletImpactSilent =
     // cl_impact_light_offset lift still applies inside CSQC_AddImpactLight.
     CSQC_AddImpactLight(pos, normal);
     if (Impact_ShouldSpawnHole(mat))
-        CSQC_SpawnBulletHole(pos, normal, trace_ent, mat);
+        CSQC_SpawnBulletHole(pos, normal, trace_ent, mat, -1);   // melee: single hit, no per-shot grouping
 };
 
 // Forward decl — defined in cl_tracers.qc, compiled later.
@@ -1207,7 +1211,7 @@ float() Killcam_Active;	// cl_killcam.qc (compiled later) — mask remote FX dur
 vector(float weapon_id) CSQC_WeaponMuzzleOffsetVec;	// cl_weapons.qc (compiled later)
 float csqc_remote_muz_seq;	// decrementing unique action-id for remote muzzle-flash dedup
 
-void(vector pos, vector normal, float mat, entity target, float shooter_entnum, float is_entry) CSQC_BulletImpactRemote =
+void(vector pos, vector normal, float mat, entity target, float shooter_entnum, float is_entry, float action) CSQC_BulletImpactRemote =
 {
     if (Killcam_Active())	// don't bleed live-player impact/tracer FX into the killcam
         return;
@@ -1299,11 +1303,12 @@ void(vector pos, vector normal, float mat, entity target, float shooter_entnum, 
     if (has_shooter && cvar("cl_tracer") > 0 && cvar("cl_tracer_impact_delay") != 0)
         arrival = cltime + vlen(pos - shooter_eye) / tspeed;
 
-    // mat = server-classified material (glass/metal/wood — accurate).  action -1
-    // = no per-shot debris cap (each remote impact is its own networked event).
+    // mat = server-classified material (glass/metal/wood — accurate).  `action` = the
+    // shooter+shot key from the wire, so the per-shot bullet-hole cap (and the debris cap)
+    // scope a remote penetrating shot's entry+exit just like a local one.
     // play_ric = is_entry: the penetration EXIT (is_entry=0) still spawns its decal/
     // particles but plays NO ricochet ping — the entry already pinged, and a 2nd ping
     // was the "doubled sound" (a pointsound, so the CHAN_WEAPON mute couldn't catch it,
     // and it bleeds into the death-cam delay where Killcam_Active() is false).
-    CSQC_EnqueueImpact(pos, normal, mat, 0, -1, target, 0, is_entry, arrival);
+    CSQC_EnqueueImpact(pos, normal, mat, 0, action, target, 0, is_entry, arrival);
 };

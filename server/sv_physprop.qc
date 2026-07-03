@@ -124,6 +124,11 @@ void() PhysProp_VoidWatchdog =
 void() phys_barrel_precache =
 {
 	precache_model("models/props/barrel.iqm");
+	// Properly-made MP barrels (each ships a .acd convex-decomposition sidecar); spawnbarrel +
+	// spawnflood pick one at random via PhysBarrel_RandomModel().  MUST be precached before setmodel.
+	precache_model("models/mega/containers/metal_barrel_mp_1.iqm");
+	precache_model("models/mega/containers/metal_barrel_mp_2.iqm");
+	precache_model("models/mega/containers/metal_barrel_mp_3.iqm");
 	precache_model("models/props/can.mdl");   // no can.iqm in models/props/ yet
 	// Carriable filecabinet — precache the HL-studio .mdl always, plus the IQM
 	// if one has been dropped in. The IQM (mod_alias) is preferred at spawn: it
@@ -222,6 +227,18 @@ void(entity b, float obj_mass, float obj_friction) PhysObj_Setup =
 // barrel/can/cabinet spawners above their definition can wire it as .think.
 void() PhysObj_Think;
 
+// Pick one of the three properly-made MP barrel models at random (each ships a .acd
+// convex-decomposition sidecar). if/else, not a static array, per fteqcc quirks.
+string() PhysBarrel_RandomModel =
+{
+	float pick = floor(random() * 3);
+	if (pick <= 0)
+		return "models/mega/containers/metal_barrel_mp_1.iqm";
+	if (pick == 1)
+		return "models/mega/containers/metal_barrel_mp_2.iqm";
+	return "models/mega/containers/metal_barrel_mp_3.iqm";
+};
+
 void(entity owner) phys_barrel_spawn_infront =
 {
 	entity b;
@@ -252,7 +269,7 @@ void(entity owner) phys_barrel_spawn_infront =
 
 	b = spawn();
 	b.classname = "phys_barrel";
-	setmodel(b, "models/props/barrel.iqm");
+	setmodel(b, PhysBarrel_RandomModel());
 
 	// Load-confirmation dprint — names the file FTE actually committed to and
 	// the engine's modelindex slot, so any "is this really the file I edited?"
@@ -289,6 +306,68 @@ void(entity owner) phys_barrel_spawn_infront =
 
 	if (cvar("sv_debug_physprops"))
 		dprint(sprintf("[physprop] barrel spawned at %v\n", b.origin));
+};
+
+// nettest: worst-case physics stress test. Rains `count` barrels down in a grid
+// in front of the player so they pile on each other + the world (the O(n^2) prop
+// pile that stresses the physics backend). Pair with the gravity-gun black hole
+// and compare `physics_box3d_threads 1` vs `4` for the Box3D multicore win.
+void(entity owner, float count) phys_flood_spawn =
+{
+	entity b;
+	vector fwd, base, ground;
+	float i, gx, gy, gz, within, per_layer, cols, spacing, dist;
+
+	cols = 5;
+	spacing = 72;			// > the ±32 AABB so props don't spawn interpenetrating
+	dist = 160;
+	per_layer = cols * cols;
+
+	if (count < 1) count = 1;
+	if (count > 400) count = 400;	// safety cap (400 barrels is already a brutal pile)
+
+	makevectors(owner.v_angle);
+	fwd = v_forward;
+	fwd_z = 0;
+	fwd = normalize(fwd);
+
+	base = owner.origin + fwd * dist;
+	traceline(base + '0 0 256', base - '0 0 4096', MOVE_NORMAL, owner);
+	if (trace_fraction >= 1.0)
+	{
+		sprint(owner, PRINT_HIGH, "spawnflood: no ground found in front\n");
+		return;
+	}
+	ground = trace_endpos;
+
+	i = 0;
+	while (i < count)
+	{
+		gz = floor(i / per_layer);			// stacked layer
+		within = i - gz * per_layer;
+		gy = floor(within / cols);			// row
+		gx = within - gy * cols;			// column
+
+		b = spawn();
+		b.classname = "phys_barrel";
+		setmodel(b, PhysBarrel_RandomModel());
+		setsize(b, '-32 -32 -32', '32 32 32');
+		setorigin(b, ground
+			+ '1 0 0' * ((gx - (cols - 1) * 0.5) * spacing)
+			+ '0 1 0' * ((gy - (cols - 1) * 0.5) * spacing)
+			+ '0 0 1' * (0 - b.mins_z + 48 + gz * spacing));
+		b.angles = '0 0 0';
+		b.solid = SOLID_PHYSICS_TRIMESH;
+		b.po_fx_enabled    = TRUE;
+		b.po_sleep_enabled = TRUE;
+		b.po_stuck_grace   = 5;
+		PhysObj_Setup(b, cvar("sv_physprop_mass"), cvar("sv_physprop_friction"));
+		b.think     = PhysObj_Think;
+		b.nextthink = time + 0.05;
+
+		i = i + 1;
+	}
+	sprint(owner, PRINT_HIGH, sprintf("spawnflood: spawned %g props\n", count));
 };
 
 void(entity owner) phys_can_spawn_infront =

@@ -4,6 +4,7 @@ shared/sh_customdefs.qc
 shared/sh_cvar_table.qc
 shared/sh_weapon_manifest.qc
 shared/sh_weapons.qc
+shared/sh_surfaceprops.qc
 shared/sh_player_sini.qc
 shared/sh_player_anims.qc
 client/cl_customdefs.qc

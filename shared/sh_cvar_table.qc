@@ -738,6 +738,9 @@ void() CVar_Init =
     // re-shifts existing holes (CSQC_BulletHolesStartFrame poll). polygonoffset does
     // the z-fight defeat so this can be small.
     CVar_Add("Client", "r_bullethole_offset",     "0.4",   CVAR_SIDE_CL);
+    // World/BSP bullet-hole decal size (full units across) for the random gfx/impacts/impactN
+    // art. Read per hit at spawn; affects NEW holes (tune it + shoot fresh holes, no rebuild).
+    CVar_Add("Client", "cl_bullethole_impact_size", "6",    CVAR_SIDE_CL);
     // Source-style edge clipping for renderer 1.  When 1 (default), the
     // decal quad is clipped at spawn time against the hit BSP triangle's
     // 3 edges so it conforms to the surface boundary instead of
@@ -1400,6 +1403,7 @@ void() CVar_Init =
     CVar_Add("Client debug", "cl_debug_weapon",      "0", CVAR_SIDE_CL);
     CVar_Add("Client debug", "cl_debug_move",        "0", CVAR_SIDE_CL);
     CVar_Add("Client debug", "cl_debug_game",        "0", CVAR_SIDE_CL);
+    CVar_Add("Client debug", "cl_debug_surface",     "0", CVAR_SIDE_CL);   // live material readout: look-at + underfoot (surfaceprops tuning)
     CVar_Add("Client debug", "cl_debug_playermodel", "0", CVAR_SIDE_CL);
     CVar_Add("Client debug", "cl_debug_smoothing",   "0", CVAR_SIDE_CL);
     CVar_Add("Client debug", "cl_debug_spikes",      "0", CVAR_SIDE_CL);

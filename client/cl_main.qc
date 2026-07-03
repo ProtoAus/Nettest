@@ -228,6 +228,7 @@ noref void(float apiver, string enginename, float enginever) CSQC_Init =
 	CSQC_PrecacheShells();
 	CSQC_PrecacheBreakables();
 	CSQC_BulletHolesInit();
+	Surf_LoadMaterials();       // scripts/surfaceprops.txt -> texture material table (sh_surfaceprops.qc)
 	CSQC_TracersInit();
 	CSQC_Rope_Init();
 	CSQC_Scorch_Precache();
@@ -258,6 +259,8 @@ noref void(float apiver, string enginename, float enginever) CSQC_Init =
 	registercommand("radio");
 	registercommand("buymenu");
 	registercommand("impactdebris");
+	registercommand("surf_material");        // print the material under the crosshair (surfaceprops tuning)
+	registercommand("surf_reloadmaterials"); // reload scripts/surfaceprops.txt live
 	// Grapple press-and-hold aliases.  Bound via `bind <key> "+grapple"`:
 	// the engine fires `+grapple` on key down and `-grapple` on key up,
 	// which our aliases translate into the engage/release impulse pair
@@ -1136,6 +1139,23 @@ float(string cmd) CSQC_ConsoleCommand =
 	tokenize(cmd);
 	switch(argv(0))
 	{
+		case "surf_material":
+		{
+			// Trace from the view and report the texture -> material under the crosshair.
+			vector vorg = getproperty(VF_ORIGIN);
+			makevectors(getproperty(VF_CL_VIEWANGLES));
+			traceline(vorg, vorg + v_forward * 8192, MOVE_NOMONSTERS, world);
+			string tn = Surf_TexAtPoint(trace_ent, trace_endpos);   // Q1: resolve from the hit point
+			float  mi = Surf_MaterialFor(tn);
+			print(sprintf("surf: tex=\"%s\" -> material=%s  (impact_mat=%g footstep=\"%s\")\n",
+				tn, Surf_MatName(mi), Surf_ImpactMat(mi), Surf_FootstepName(mi)));
+			return TRUE;
+		}
+		case "surf_reloadmaterials":
+			Surf_LoadMaterials();
+			print(sprintf("surfaceprops reloaded: %g materials, %g patterns\n",
+				sp_mat_count, sp_pat_count));
+			return TRUE;
 		case "sv_defaultprimary":
 			CSQC_SetDefaultWeaponAlias("sv_defaultprimary", "sv_default_primary");
 			return TRUE;
@@ -1428,7 +1448,7 @@ float(float evtype, float scanx, float chary, float devid) CSQC_InputEvent =
 // POINTSOUND is a string → rough average. Use for the debug bandwidth HUD.
 float(float ev) _net_event_bytes =
 {
-	if (ev == CSQC_EVENT_IMPACT)          return 22;  // svc+ev+pos[3 coord]+normal[3 byte]+mat byte+target entnum (short)+shooter entnum (byte)+is_entry (byte)
+	if (ev == CSQC_EVENT_IMPACT)          return 23;  // svc+ev+pos[3 coord]+normal[3 byte]+mat byte+target entnum (short)+shooter entnum (byte)+is_entry (byte)+action (byte)
 	if (ev == CSQC_EVENT_SHELL)           return 39;
 	if (ev == CSQC_EVENT_MAGDROP)         return 27;
 	if (ev == CSQC_EVENT_POINTSOUND)      return 34;
@@ -1524,7 +1544,13 @@ void() CSQC_Parse_Event =
 			// is_entry: 1 = entry/primary impact (draw the tracer), 0 = penetration
 			// EXIT (decal only — drawing it too gave the "two tracer lines" double).
 			float rem_entry = readbyte();
-			CSQC_BulletImpactRemote(pos, normal, rem_mat, rem_target, rem_shooter, rem_entry);
+			// Shooter's per-shot action id (byte, wrapped) — combined with the shooter entnum
+			// into a per-shot KEY so the bullet-hole cap (cl_bulletholes_per_shot) scopes a
+			// REMOTE penetrating shot's entry+exit decals just like a local one (else a bot's
+			// wallbang shows entry+exit).  >=0 so it's not the uncapped -1 sentinel.
+			float rem_action = readbyte();
+			float rem_key    = rem_shooter * 256 + rem_action;
+			CSQC_BulletImpactRemote(pos, normal, rem_mat, rem_target, rem_shooter, rem_entry, rem_key);
 			break;
 		}
 		case CSQC_EVENT_SHELL:

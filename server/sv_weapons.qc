@@ -842,7 +842,11 @@ float(entity hit) W_ClassifyImpactMaterial =
     if (hit && ((hit.classname == "phys_barrel" || hit.classname == "phys_can")
         || (hit.weapon && (hit.movetype == MOVETYPE_PHYSICS || hit.weapon_physdrop_sleeping))))
         return IMPACT_MAT_METAL_NODECAL;
-    return IMPACT_MAT_DEFAULT;
+    // World / untagged brush: resolve the hit surface's TEXTURE -> material.  Q1 BSP traces carry
+    // no surface (trace_surfacename is empty), so look the texture up from the hit POINT
+    // (trace_endpos, still the fire trace's endpoint here) on the hit brush model.  Falls back to
+    // IMPACT_MAT_DEFAULT when nothing resolves.
+    return Surf_ImpactMat(Surf_MaterialAtPoint(hit, trace_endpos));
 };
 
 // Send bullet impact effect to all players EXCEPT the shooter.
@@ -881,6 +885,7 @@ void(vector pos) W_ImpactEffect =
             // Players never exceed maxclients so a byte is enough.
             WriteByte(MSG_ONE, num_for_edict(self));
             WriteByte(MSG_ONE, 1);   // is_entry=1: the primary/entry impact draws the tracer
+            WriteByte(MSG_ONE, self.wep_action_id);   // shooter's per-shot action id (byte) -> remote per-shot decal cap
         }
         p = p.player_chain_next;
     }
@@ -918,6 +923,7 @@ void(vector pos, vector normal) W_ImpactEffectAll =
             WriteByte(MSG_ONE, num_for_edict(self));         // shooter entnum for tracer start
             WriteByte(MSG_ONE, 0);   // is_entry=0: penetration EXIT — decal only, NO tracer (the
                                      // entry already drew it; an exit tracer = the doubled line)
+            WriteByte(MSG_ONE, self.wep_action_id);   // shooter's per-shot action id (byte) -> remote per-shot decal cap
         }
         p = p.player_chain_next;
     }
@@ -952,6 +958,7 @@ void(vector pos, vector normal, float mat) W_ImpactEffectAllMat =
             WriteShort(MSG_ONE, num_for_edict(trace_ent));   // target entnum for decal attach
             WriteByte(MSG_ONE, num_for_edict(self));         // shooter entnum for tracer start
             WriteByte(MSG_ONE, 1);   // is_entry=1: explicit-material primary hit (player/flesh) — tracer
+            WriteByte(MSG_ONE, self.wep_action_id);   // shooter's per-shot action id (byte) -> remote per-shot decal cap
         }
         p = p.player_chain_next;
     }

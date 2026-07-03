@@ -4,6 +4,7 @@ shared/sh_customdefs.qc
 shared/sh_cvar_table.qc
 shared/sh_weapon_manifest.qc
 shared/sh_weapons.qc
+shared/sh_surfaceprops.qc
 shared/sh_player_sini.qc
 shared/sh_player_anims.qc
 shared/sh_weapon_logic.qc
@@ -103,6 +104,8 @@ server/sv_conveyor.qc
 server/sv_trigger_hurt.qc
 server/sv_trigger_gravity.qc
 server/sv_env_fog.qc
+server/sv_env_sun.qc
+server/sv_fogvolume.qc
 server/sv_env_hud.qc
 server/sv_env_explosion.qc
 server/sv_ambient_generic.qc

@@ -1462,6 +1462,7 @@ void() worldspawn =
 	// flags, cycling RNG state) needs an explicit clear here.
 	Camera_ResetState();
 	Nav_Reset();		// nettest bots: clear the nav graph before this map's info_node entities spawn
+	Surf_LoadMaterials();	// scripts/surfaceprops.txt -> texture material table (sh_surfaceprops.qc)
 
 	// Backdrop latch — the menu backdrop launchers (m_main / m_menu) set
 	// sv_backdrop_pending 1 immediately before `map <menumap>`. Consume it
@@ -1508,12 +1509,29 @@ void() worldspawn =
 	localcmd("sv_maxrate 0\n");
 	localcmd("sv_maxdrate 0\n");
 
-	// Load the ODE physics plugin before precache_everything() so that
+	// Load the rigid-body physics plugin before precache_everything() so that
 	// phys_barrel_precache()'s physics_supported(TRUE) call sees it.
 	// data/default.cfg used to handle this, but that file is client-only
 	// now, so dedicated servers rely on this localcmd instead.
 	// plug_load is idempotent — loading a plugin already loaded is a no-op.
-	localcmd("plug_load ode\n");
+	//
+	// nettest: the backend is selectable. Box3D (the new multicore backend,
+	// fteplug_box3d) is the default; set `sv_physics_engine ode` in server.cfg to
+	// use the original ODE backend instead. Only ONE physics plugin can be active
+	// at a time (whichever registers first wins). default.cfg / ftesrv.cfg still
+	// `plug_load ode` at startup, so we must plug_close the OTHER backend first,
+	// else the desired one's RegisterPhysicsEngine fails with "already active".
+	// This runs at server init before any physics body exists, so closing is safe.
+	if (cvar_string("sv_physics_engine") == "ode")
+	{
+		localcmd("plug_close box3d\n");
+		localcmd("plug_load ode\n");
+	}
+	else
+	{
+		localcmd("plug_close ode\n");
+		localcmd("plug_load box3d\n");
+	}
 	localcmd("alias roundrestart \"sv_roundrestart 1\"\n");
 	localcmd("alias roundreset \"sv_roundrestart 1\"\n");
 	localcmd("alias resetround \"sv_roundrestart 1\"\n");

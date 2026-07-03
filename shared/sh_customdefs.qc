@@ -2,6 +2,15 @@
 #pragma target fte_5768
 #define printf(x, ...) print(sprintf(x, __VA_ARGS__))
 
+// Engine global: texture NAME of the surface hit by the last traceline/tracebox.
+// The engine populates it on BOTH client and server (pr_csqc.c:2928 / pr_cmds.c),
+// but the auto-generated cl_defs.qc / sv_defs.qc omit it (dumped as "ssqc-only"),
+// so declare it here in a shared unit that both builds compile.  Read immediately
+// after the trace you care about (a later trace overwrites it).  Used by the
+// surface-material system (sh_surfaceprops.qc). Q1 surfaceflags aren't set, so the
+// texture name is the key.
+string trace_surfacename;
+
 // Gravity Shift (gravity gun): 1 while this player's gravity is redirected.
 // Declared here (earliest shared include) so both sh_pmove.qc and the gravgun
 // weapon file can see it.  See GravShift_UpdateActivation in sh_pmove.qc.

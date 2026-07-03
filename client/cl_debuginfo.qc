@@ -1961,6 +1961,59 @@ float(float x, float y) CSQC_DrawDebugDrift =
 };
 
 // ============================================================
+//  cl_debug_surface — surface material under the crosshair + underfoot
+// ============================================================
+
+float(float x, float y) CSQC_DrawDebugSurface =
+{
+    y = dbg_text(x, y, "--- SURFACE ---", '0.3 1 0.6');
+
+    // What the crosshair points at.
+    vector vorg = getproperty(VF_ORIGIN);
+    makevectors(getproperty(VF_CL_VIEWANGLES));
+    traceline(vorg, vorg + v_forward * 8192, MOVE_NOMONSTERS, predicted_player);
+    string look_tex = Surf_TexAtPoint(trace_ent, trace_endpos);   // Q1: resolve from the hit point
+    float  look_mat = Surf_MaterialFor(look_tex);
+
+    // What the player is standing on.
+    string gnd_tex = "";
+    float  gnd_mat = -1;
+    if (predicted_player)
+    {
+        vector po = predicted_player.origin;
+        traceline(po, po - '0 0 128', MOVE_NOMONSTERS, predicted_player);
+        gnd_tex = Surf_TexAtPoint(trace_ent, trace_endpos);
+        gnd_mat = Surf_MaterialFor(gnd_tex);
+    }
+
+    y = dbg_line(x, y, "Look tex",   (look_tex == "") ? "(none)" : look_tex, DBG_VALUE_COL);
+    y = dbg_line(x, y, "Look mat",   sprintf("%s  (impact %g, footstep %s)", Surf_MatName(look_mat),
+                    Surf_ImpactMat(look_mat), (Surf_FootstepName(look_mat) == "") ? "generic" : Surf_FootstepName(look_mat)), DBG_GOOD_COL);
+    y = dbg_line(x, y, "Ground tex", (gnd_tex == "") ? "(none)" : gnd_tex, DBG_VALUE_COL);
+    y = dbg_line(x, y, "Ground mat", sprintf("%s  (impact %g, footstep %s)", Surf_MatName(gnd_mat),
+                    Surf_ImpactMat(gnd_mat), (Surf_FootstepName(gnd_mat) == "") ? "generic" : Surf_FootstepName(gnd_mat)), DBG_GOOD_COL);
+
+    // The ACTUAL footstep set PM_UpdateStepSound plays — computed the SAME way it is (down-trace to
+    // the floor surface, then the metal phys-prop override).  This line == what you hear, so if it
+    // ever reads "metal" on a concrete/wood floor the Ground tex above names the offending surface.
+    string foot = "n/a";
+    if (predicted_player)
+    {
+        vector fg = predicted_player.gravshift_active ? predicted_player.gravitydir : '0 0 -1';
+        traceline(predicted_player.origin, predicted_player.origin + fg * 8192, MOVE_NOMONSTERS, predicted_player);
+        string ffset = Surf_FootstepName(Surf_MaterialAtPoint(trace_ent, trace_endpos));
+        entity ge = predicted_player.pm_ground_ent;
+        if (ge.classname == "phys_files" || ge.classname == "phys_barrel" || ge.classname == "phys_can")
+            foot = "metal (phys prop)";
+        else
+            foot = strcat((ffset == "") ? "generic" : ffset, " (surface)");
+    }
+    y = dbg_line(x, y, "Foot set", foot, DBG_GOOD_COL);
+
+    return y + 6;
+};
+
+// ============================================================
 //  Master debug panel draw — called from CSQC_UpdateView
 // ============================================================
 
@@ -1986,6 +2039,8 @@ void() CSQC_DrawDebugPanels =
         y = CSQC_DrawDebugMove(x, y);
     if (cvar("cl_debug_game"))
         y = CSQC_DrawDebugGame(x, y);
+    if (cvar("cl_debug_surface"))
+        y = CSQC_DrawDebugSurface(x, y);
     if (cvar("cl_debug_smoothing"))
         y = CSQC_DrawDebugSmoothing(x, y);
     if (cvar("cl_debug_playermodel"))
