@@ -1,3 +1,7 @@
+# --- Generated engine defs (regenerate with fteqcc -pr_dumpplatform; not build inputs) ---
+ftedefs/
+genericdefs/
+
 # --- Local engine / build symlinks (not part of the mod source) ---
 fteqw
 fteqw/

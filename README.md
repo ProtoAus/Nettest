@@ -41,6 +41,25 @@ compiled output and are not part of this repo.
 
 ---
 
+## How it all fits together
+
+Nettest is one of **three separate pieces** — this repo is only the first:
+
+1. **The mod (this repo, `ProtoAus/Nettest`)** — QuakeC source. Compiles to `qwprogs.dat`,
+   `csprogs.dat`, and `menu.dat`.
+2. **The engine ([`ProtoAus/ftequakers`](https://github.com/ProtoAus/ftequakers))** — a patched FTEQW
+   fork, in C; ships as `fteqw64.exe`. Nettest relies on its patches (prop-collision hulls, fog volumes,
+   god rays, map-format & networking fixes), so use a build from that fork rather than stock FTEQW —
+   grab it from that repo's **Releases**.
+3. **The commercial game assets** — many maps, models, and sounds come from Counter-Strike, Half-Life,
+   and Call of Duty. **They are not in this repo and are not redistributed.** The mod mounts your own
+   installed copies at runtime (via `fs_addons.txt`), so you play by *owning those games*.
+
+The source lives here; the engine is a separate download; the copyrighted assets stay on the player's
+machine. Only original content is ever shipped by this project.
+
+---
+
 ## Repository layout
 
 ```
@@ -50,17 +69,21 @@ src/
 ├── sv_progs.src            Server manifest   → ../qwprogs.dat
 ├── cl_progs.src            Client manifest   → ../csprogs.dat
 ├── m_progs.src             Menu manifest     → ../menu.dat
-├── *_defs.qc               Engine builtin/global/field definitions
+├── *_defs.qc               Engine builtin defs (generated, but kept — hand-edited pragma headers)
 ├── server/                 Server-side QuakeC (rounds, weapons, bots, entities, physics…)
 ├── client/                 Client-side QuakeC / CSQC (HUD, prediction, effects, killcam…)
 ├── shared/                 Compiled into BOTH server & client (movement, weapons, materials…)
 │   └── weapons/            Per-weapon definitions (sh_wpn_*.qc)
-├── menu/                   Menu QuakeC (main menu, server browser, create-server, team select…)
-├── ftedefs/ genericdefs/   Engine builtin stubs
+└── menu/                   Menu QuakeC (main menu, server browser, create-server, team select…)
 ```
 
 Each `*_progs.src` file lists, in order, the `.qc` files that make up that program; its first line is the
 output `.dat` path (which points at `../`, i.e. the gamedir).
+
+The `*_defs.qc` files are engine-generated (`fteqcc -pr_dumpplatform`) but kept in the repo because they
+carry hand-edited pragma headers — re-apply those if you regenerate them. The bulkier `ftedefs/` /
+`genericdefs/` reference dumps are generated the same way but are **not** committed (they are not build
+inputs).
 
 ---
 
@@ -106,27 +129,35 @@ clients — the `csprogs.dat` hash changes) to pick up new programs.
 
 ---
 
-## Running
+## Installing & running
 
 Nettest runs as a gamedir named `nettest/` under an FTEQW install:
 
-1. Install an FTEQW engine build (see [Engine](#engine) below).
-2. Place this mod's gamedir (the compiled `qwprogs.dat`, `csprogs.dat`, `menu.dat` plus the assets) as
-   `nettest/` inside the engine directory.
-3. Launch the client:
-   ```
-   fteqw64.exe -game nettest
-   ```
-   Use the in-game **Create Server** menu to host, or connect to a server from the browser. To host from
-   the command line, add `+map <mapname>` (optionally with a server config via `+exec`).
+1. **Get the engine** — download a build from the
+   [ProtoAus/ftequakers](https://github.com/ProtoAus/ftequakers) **Releases** (stock FTEQW may be missing
+   required patches).
+2. **Add the gamedir** — place the mod (compiled `qwprogs.dat` / `csprogs.dat` / `menu.dat` + the
+   project's original assets + configs) as `nettest/` next to the engine.
+3. **Own the games it mounts** — Nettest pulls its Counter-Strike / Half-Life / Call-of-Duty maps,
+   models, and sounds from your *own* installed copies (mounted via `fs_addons.txt`); those assets are
+   never shipped with the mod.
+4. **Launch** — `fteqw64.exe -game nettest`. Use the in-game **Create Server** menu to host, or connect
+   from the browser; to host from the command line add `+map <mapname>` (optionally `+exec` a server
+   config).
 
 ---
 
-## Engine
+## Assets & releases
 
-Nettest is developed against a **patched FTEQW fork, [ProtoAus/ftequakers](https://github.com/ProtoAus/ftequakers)**.
-A number of mod features rely on engine patches that are not in stock FTEQW (e.g. prop-collision hulls,
-fog volumes, god rays, and various map-format and networking fixes). For a guaranteed-compatible engine,
-use a build from that fork's releases rather than a stock FTEQW download.
+This repository is **source-only by design.** The full gamedir is large (~1 GB) and much of it —
+Counter-Strike / Half-Life / Call-of-Duty maps, models, and sounds — is third-party content that can't be
+redistributed. So the split is:
 
-The mod itself is pure QuakeC — no engine code lives in this repository.
+- **In this repo:** only QuakeC source (plus the pinned compiler). No assets.
+- **In a release:** the compiled `.dat` programs, the project's **original** assets, and the configs —
+  enough to run once you supply the commercial game assets (see *Installing & running*, step 3). Nothing
+  copyrighted is bundled.
+- **The engine** ships separately from the
+  [ftequakers](https://github.com/ProtoAus/ftequakers) repo — get `fteqw64.exe` from its Releases.
+
+The mod itself is pure QuakeC; no engine code lives in this repository.
