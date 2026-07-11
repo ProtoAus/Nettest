@@ -945,7 +945,7 @@ void() PlayerPreThink =
 	// suppresses the fire button and sends `cmd throwprop` (see CSQC_Input_Frame
 	// + the throwprop handler).  Defensively clear button0 here too so no weapon
 	// auto-fires even if a client leaves the bit set.
-	if (self.carried_prop != world)
+	if (self.carried_prop != world || self.carried_ragdoll != world)
 		self.button0 = 0;
 	W_WeaponFrame();
 	// Grapple press-and-hold edge detect — rising edge of PM_BTN_GRAPPLE
@@ -961,6 +961,9 @@ void() PlayerPreThink =
 	// (slides on walls, auto-drops when jammed; +attack throws). No-op when
 	// carried_prop is world.
 	Carry_Tick(self);
+	// nettest gravity-gun ragdoll carry — velocity-servo the held corpse's pelvis toward the hold point
+	// (limbs dangle; +attack throws via throwprop).  No-op unless carried_ragdoll is set.
+	Ragdoll_CarryTick(self);
 	// Gravity gun — +attack2 (held) rising/falling edge spins up / blasts the
 	// black-hole; PullTick yanks all phys props toward the gather point each
 	// frame while spinning.  No-op unless WEP_GRAVITYGUN is equipped + spinning.
@@ -1155,6 +1158,10 @@ const float VP_SF_GRAPPLE  = 8;  // grapple_rope_active (+ anchor when active) �
 .float vps_last_health;
 .float vps_last_bodygroup;
 .float vps_last_life_serial;
+// nettest server ragdoll: 1 = a server-side corpse_ragdoll is active for this corpse, so the client
+// hides this proxy's animated mesh (the ragdoll renders in its place).  A plain live field written at
+// the end of the VP_SF_IDENTITY section (Sync doesn't run on a corpse — sv_ragdoll.qc sets it + dirties).
+.float vps_hide_ragdoll;
 .float vis_last_pose_resync;
 
 // Marks a proxy as a corpse (orphaned by Player_VisualProxy_DetachAsCorpse,
@@ -1230,6 +1237,8 @@ float(entity playerent, float changedflags) Player_Visual_SendEntity =
 		// Mirrors the CSQC reader (vis_bodygroup / vis_life_serial).
 		WriteByte(MSG_ENTITY, self.vps_last_bodygroup);
 		WriteByte(MSG_ENTITY, self.vps_last_life_serial);
+		// nettest server ragdoll: hide-mesh flag (matched read at the END of the CSQC IDENTITY reader).
+		WriteByte(MSG_ENTITY, self.vps_hide_ragdoll);
 	}
 
 	// Grapple rope (broadcast so everyone sees the rope, not just the owner).
@@ -1635,6 +1644,19 @@ float(entity playerent, float changedflags) PM_PredictionProxy_SendEntity =
 		WriteByte (MSG_ENTITY, self.pm_carrying);
 		// func_vehicle: replicated driving flag (drives the pmove driver-lock + fire-block)
 		WriteByte (MSG_ENTITY, self.pm_driving);
+		// prop_car: replicated in-car flag (pmove input-zero + fire-block + third-person camera)
+		WriteByte (MSG_ENTITY, self.pm_incar);
+		// prop_car: the driven car's origin + velocity so CSQC extrapolates a render-smooth chase cam
+		// (the follow cam anchored to the tick-pinned player "stepped").  Only when actually in a car.
+		if (self.pm_incar)
+		{
+			WriteCoord(MSG_ENTITY, self.car_driving.origin_x);
+			WriteCoord(MSG_ENTITY, self.car_driving.origin_y);
+			WriteCoord(MSG_ENTITY, self.car_driving.origin_z);
+			WriteCoord(MSG_ENTITY, self.car_driving.velocity_x);
+			WriteCoord(MSG_ENTITY, self.car_driving.velocity_y);
+			WriteCoord(MSG_ENTITY, self.car_driving.velocity_z);
+		}
 	}
 
 	if (changedflags & PM_SF_WEAPON_STATE)
@@ -1810,7 +1832,8 @@ void(entity player) PM_SyncPredictionProxy =
 	    proxy.codstamina_punished != player.codstamina_punished ||
 	    proxy.pm_fire_suppress_until != player.pm_fire_suppress_until ||
 	    proxy.pm_carrying != player.pm_carrying ||
-	    proxy.pm_driving != player.pm_driving)
+	    proxy.pm_driving != player.pm_driving ||
+	    proxy.pm_incar != player.pm_incar)
 		bits |= PM_SF_MOVEMENT;
 
 	// Detect weapon-state changes
@@ -1914,6 +1937,7 @@ void(entity player) PM_SyncPredictionProxy =
 	proxy.pm_fire_suppress_until  = player.pm_fire_suppress_until;
 	proxy.pm_carrying             = player.pm_carrying;
 	proxy.pm_driving              = player.pm_driving;
+	proxy.pm_incar                = player.pm_incar;
 
 	proxy.slot_primary     = player.slot_primary;
 	proxy.slot_secondary   = player.slot_secondary;
@@ -2861,7 +2885,7 @@ void() PutClientInServer =
 
 	player_chain_add(self);
 	Prog_Load(self);	// nettest progression: load persistent XP/level (async, GUID-keyed)
-	EnvSun_StuffPlayer(self);	// crepuscular god-ray cvars (clears r_sun_colour if this map has no env_sun)
+	EnvSun_StuffPlayer(self);	// sun-direction cvars for r_shadows 2 (also keeps r_sun_colour blanked; god rays removed)
 	PlayerBeginTeamSelection();
 };
 
@@ -2935,7 +2959,14 @@ void() info_player_start =
 
 void(float elapsedtime) SV_PausedTic =
 {
-	// if (elapsedtime > 2) setpause(0);
+	// The menu backdrop is a decorative listen server that MUST keep ticking (rbe physics settle dropped
+	// weapons, camera cycles) even though the menu is up.  FTE auto-pauses a listen server when the menu is
+	// open with no spawned player (the backdrop client is parked on TEAM_NONE) — the maxclients 2 /
+	// deathmatch 1 hack in Menu_StartBackdrop does NOT suppress it.  Unpause the backdrop on sight so the
+	// rbe (Box3D/ODE) world keeps stepping and drops reach their rest/sleep latch.  Real games
+	// (sv_backdrop 0) keep the intended menu pause.
+	if (cvar("sv_backdrop"))
+		setpause(0);
 };
 
 // Hitclaim tracking fields (last_damaged_target, last_damaged_time)
@@ -3634,13 +3665,38 @@ void(string command_string) SV_ParseClientCommand =
 		return;
 	}
 
+	// nettest: server-side ragdoll test spawner — fling a standalone leet ragdoll from your aim.
+	// (Distinct name from the CSQC `throwragdoll` dev spawner so the two don't collide.)
+	if (cmd == "throwragdollsv")
+	{
+		if (cvar("mp_cheats"))
+			Ragdoll_SpawnTest(self);
+		else
+			sprint(self, PRINT_HIGH, "throwragdollsv requires mp_cheats 1\n");
+		return;
+	}
+
+	// Clear all corpse ragdolls (test dolls have no corpse owner, so nothing else retires them).
+	if (cmd == "killragdollssv")
+	{
+		if (cvar("mp_cheats"))
+			Ragdoll_SweepAll();
+		else
+			sprint(self, PRINT_HIGH, "killragdollssv requires mp_cheats 1\n");
+		return;
+	}
+
 	// HL2 carry: +attack while holding a prop throws it (the client suppresses
 	// the actual fire and sends this instead of a `cs` client-shot).
 	if (cmd == "throwprop")
 	{
-		if (self.carried_prop != world)
+		// nettest: a held corpse ragdoll throws the same way (Ragdoll_CarryThrow), sharing the fire2 anim.
+		if (self.carried_prop != world || self.carried_ragdoll != world)
 		{
-			Carry_Throw(self);
+			if (self.carried_ragdoll != world)
+				Ragdoll_CarryThrow(self);
+			else
+				Carry_Throw(self);
 			// Gravity gun: play "fire2" on the throw (the display frame shows
 			// fire2 in WS_FIRE while not carrying — Carry_Throw just cleared
 			// pm_carrying).  Other carriers (bare-hands +use) have no viewmodel.
@@ -3846,6 +3902,12 @@ void() SV_RunClientCommand =
 	{
 		self.veh_in_fwd  = input_movevalues_x;
 		self.veh_in_side = input_movevalues_y;
+	}
+	if (self.pm_incar)
+	{
+		self.car_in_fwd   = input_movevalues_x;
+		self.car_in_side  = input_movevalues_y;
+		self.car_in_brake = (input_buttons & PM_BTN_JUMP) ? 1 : 0;   // Space = handbrake / drift
 	}
 
 	PM_PlayerMove();

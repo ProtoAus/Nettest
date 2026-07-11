@@ -595,7 +595,7 @@ string client_config_cvars[] =
 
     // --- Graphics: Decals & Bullet Holes ---
     "cl_bulletholes",
-    "r_bullethole_renderer",
+    "r_decal_renderer",              // unified decal renderer (was r_bullethole_renderer)
     "cl_bulletholes_max",
     "cl_bullethole_distance",
     "cl_bullethole_dedupe_scale",
@@ -609,6 +609,10 @@ string client_config_cvars[] =
     "cl_ejectmag",
 
     // --- Graphics: Lighting ---
+    // Model shadows (0=off 1=blob 2=sun fake shadows).  r_shadow_playershadows is
+    // deliberately NOT persisted: default.cfg reseeds it to 1 every boot, so a
+    // diagnostic console 0 can never get frozen into settings.cfg.
+    "r_shadows",
     "cl_muzzleflash_light",
     "cl_muzzleflash_light_scale",
     // Dynamic-light mode (RTLight vs lightmap rebuild) — persisted so a user's

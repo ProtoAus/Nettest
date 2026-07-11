@@ -191,7 +191,7 @@ void() CVar_Init =
     // ---------- Bots / Navigation ----------
     CVar_Add("Bots", "bot_minplayers",    "0",  CVAR_SIDE_SV);  // fill total players up to N with bots (0 = off)
     CVar_Add("Bots", "botadd",            "0",  CVAR_SIDE_SV);  // momentary: add this many bots, then resets to 0
-    CVar_Add("Bots", "bot_kick",          "0",  CVAR_SIDE_SV);  // momentary: kick this many bots, then resets to 0
+    CVar_Add("Bots", "botkick",           "0",  CVAR_SIDE_SV);  // momentary: kick this many bots, then resets to 0
     CVar_Add("Bots", "bot_skill",         "50", CVAR_SIDE_SV);  // 0-100: reaction time + aim turn-rate
     CVar_Add("Bots", "bot_fov",           "150",CVAR_SIDE_SV);  // frontal ACQUISITION cone, full angle deg (<=0 or >=360 = 360/off); tracking stays 360
     CVar_Add("Bots", "bot_los_grace",     "0.35",CVAR_SIDE_SV); // keep engaging this long (s) after a momentary LOS break (anti-flicker)
@@ -201,6 +201,44 @@ void() CVar_Init =
     CVar_Add("Bots", "sv_nav_gridstep",   "96", CVAR_SIDE_SV);  // auto-grid node spacing (units)
     CVar_Add("Bots", "sv_debug_nav",      "0",  CVAR_SIDE_SV);  // stream nav graph + bot state to clients (debug draw)
     CVar_Add("Bots", "cl_navdebug_range", "0",  CVAR_SIDE_CL);  // sv_debug_nav draw: only nav nodes within this many units of the camera (0 = whole network)
+
+    // --- Vehicles (prop_car / func_car raycast physics) — a per-car FGD key of 0 falls back to these ---
+    CVar_Add("Vehicles", "sv_debug_car",             "0",     CVAR_SIDE_SV);  // draw the car physics overlay (box/wheels/steer/velocity)
+    CVar_Add("Vehicles", "sv_car_debug_dist",        "2500",  CVAR_SIDE_SV);  // overlay only draws cars within this of the viewer (0 = unlimited); nearest 16 max
+    CVar_Add("Vehicles", "sv_car_mass",              "1200",  CVAR_SIDE_SV);
+    CVar_Add("Vehicles", "sv_car_accel",             "5000",  CVAR_SIDE_SV);  // throttle ACCELERATION (u/s²); engine force = accel × mass (was sv_car_engine_force)
+    CVar_Add("Vehicles", "sv_car_brake_decel",       "9000",  CVAR_SIDE_SV);  // brake DECELERATION (u/s²) — holding S while rolling forward stops you
+    CVar_Add("Vehicles", "sv_car_reverse_frac",      "0.4",   CVAR_SIDE_SV);  // reverse strength as a fraction of drive force (S once stopped)
+    CVar_Add("Vehicles", "sv_car_max_speed",         "900",   CVAR_SIDE_SV);
+    CVar_Add("Vehicles", "sv_car_ride_sag",          "1.2",   CVAR_SIDE_SV);  // rest SINK in units (bigger = softer / rides higher); spring k = mass·g/(wheels·sag) (was sv_car_susp_k)
+    CVar_Add("Vehicles", "sv_car_damping",           "0.6",   CVAR_SIDE_SV);  // suspension damping RATIO (1 = critical / no bounce; <1 = bouncier). 0.6 ≈ near-critical (was sv_car_susp_c)
+    CVar_Add("Vehicles", "sv_car_susp_rest",         "10",    CVAR_SIDE_SV);  // wheel rest extension below the mount (ride height)
+    CVar_Add("Vehicles", "sv_car_susp_travel",       "12",    CVAR_SIDE_SV);  // extra travel before bottoming
+    CVar_Add("Vehicles", "sv_car_wheel_radius",      "8",     CVAR_SIDE_SV);
+    CVar_Add("Vehicles", "sv_car_wheel_sink",        "18",    CVAR_SIDE_SV);  // raise the box floor + wheel mounts so the model rests on its wheels — dial until the tyres touch
+    CVar_Add("Vehicles", "sv_car_grip",              "1",     CVAR_SIDE_SV);  // tire lateral grip (× per-wheel load); lower = more drift / less turn-scrub
+    CVar_Add("Vehicles", "sv_car_drift_grip",        "0.35",  CVAR_SIDE_SV);  // REAR grip scale while drifting/handbraking — lower = looser drift
+    CVar_Add("Vehicles", "sv_car_grip_response",     "0.5",   CVAR_SIDE_SV);  // share of lateral slip cancelled per tick (0..1); 1 = stiff/wobbly, lower = softer/driftier + stable
+    CVar_Add("Vehicles", "sv_car_handbrake_decel",   "9000",  CVAR_SIDE_SV);  // HOLD Space brake deceleration (u/s²) — stop quickly
+    CVar_Add("Vehicles", "sv_car_park_decel",        "600",   CVAR_SIDE_SV);  // driverless coast-to-stop deceleration (u/s²) after you hop out
+    CVar_Add("Vehicles", "sv_car_drift_tap_time",    "0.2",   CVAR_SIDE_SV);  // Space held under this = a TAP (latches a drift)
+    CVar_Add("Vehicles", "sv_car_drift_min_speed",   "250",   CVAR_SIDE_SV);  // min speed to TAP-start a drift
+    CVar_Add("Vehicles", "sv_car_drift_exit",        "40",    CVAR_SIDE_SV);  // lateral speed the latched drift ends at (slide resolved)
+    CVar_Add("Vehicles", "sv_car_box_yaw",           "0",     CVAR_SIDE_SV);  // live GLOBAL collision-box yaw (0/90/180/270) added to each car's box_yaw — dial until the box matches the model
+    CVar_Add("Vehicles", "sv_car_steer_max",         "25",    CVAR_SIDE_SV);  // front-wheel steer angle (deg); lower = gentler turns, less speed scrub
+    CVar_Add("Vehicles", "sv_car_steer_rate",        "120",   CVAR_SIDE_SV);
+    CVar_Add("Vehicles", "sv_car_yaw_assist",        "150",   CVAR_SIDE_SV);  // low-speed turn-in-place help (deg/s²); steer at a standstill to pivot; 0 = off
+    CVar_Add("Vehicles", "sv_car_yaw_damp",          "8",     CVAR_SIDE_SV);  // yaw spin damping RATE (1/s) — stops a parked/shot car pirouetting; 0 = off (never fights the pivot/turns)
+    CVar_Add("Vehicles", "sv_car_seat_up",           "24",    CVAR_SIDE_SV);
+    CVar_Add("Vehicles", "sv_car_hit_force",         "4",     CVAR_SIDE_SV);  // bullet/melee push multiplier on a car
+    CVar_Add("Vehicles", "sv_car_occupied_push_scale","0.4",  CVAR_SIDE_SV);  // push scale while a driver is seated
+    CVar_Add("Vehicles", "sv_car_force_iterscale",   "0",     CVAR_SIDE_SV);  // 0 = normal ×iter; -1 disables; >0 scales all car forces
+    CVar_Add("Vehicles", "sv_car_model_yaw",         "0",     CVAR_SIDE_SV);  // live GLOBAL drive-forward yaw offset added to every car's model_yaw (for dialing)
+    CVar_Add("Vehicles", "sv_car_carry_dist",        "120",   CVAR_SIDE_SV);  // gravity-gun hold distance for a CAR (bigger than props so the big body sits clear in front)
+    CVar_Add("Vehicles", "sv_car_carry_z",           "50",    CVAR_SIDE_SV);  // gravity-gun hold height for a CAR (lift it off the ground so it's flippable)
+    CVar_Add("Vehicles", "cl_car_cam_dist",          "160",   CVAR_SIDE_CL);  // third-person chase distance
+    CVar_Add("Vehicles", "cl_car_cam_height",        "64",    CVAR_SIDE_CL);
+
     CVar_Add("Client", "cl_killcam",      "1",  CVAR_SIDE_CL);  // rewind-replay killcam on death
     CVar_Add("Client", "cl_killcam_lookback", "2.0", CVAR_SIDE_CL); // seconds rewound before the kill
     CVar_Add("Client", "cl_killcam_duration", "3.5", CVAR_SIDE_CL); // total killcam length (seconds)
@@ -211,6 +249,7 @@ void() CVar_Init =
     CVar_Add("Client", "cl_killcam_fade",     "1",   CVAR_SIDE_CL); // killcam cinematic fade in/out
     CVar_Add("Client", "cl_killcam_scanlines","1",   CVAR_SIDE_CL); // killcam CRT scanline overlay
     CVar_Add("Client", "cl_killcam_debug",    "0",   CVAR_SIDE_CL); // killcam on-screen readout: which camera source (green SERVER TRACK = server killcam filling an out-of-PVS gap) + server frame count
+    CVar_Add("Client", "cl_killcam_hideragdolls", "0", CVAR_SIDE_CL); // driven by CSQC each frame (1 while a killcam replay is active) — the engine skips rendering server ragdolls so the present-time flop doesn't show over the rewound scene
 
     // ---------- Engine ----------
     // FTE pre-registers these — registercvar() here is a harmless
@@ -725,6 +764,53 @@ void() CVar_Init =
     CVar_Add("Client", "cl_impact_debris_count",    "4",   CVAR_SIDE_CL);
     CVar_Add("Client", "cl_impact_debris_force",    "110", CVAR_SIDE_CL);
     CVar_Add("Client", "cl_impact_debris_per_shot", "1",   CVAR_SIDE_CL);
+    // Bullet wall-bang EXIT dust smoke (CSQC_BulletExitSmoke, cl_bulletimpact.qc):
+    //   cl_impact_exitsmoke        master toggle (puffs where a penetrating shot leaves a surface)
+    //   cl_impact_exitsmoke_count  puffs per exit (each leaves faster + thicker)
+    CVar_Add("Client", "cl_impact_exitsmoke",       "1",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_impact_exitsmoke_count", "4",   CVAR_SIDE_CL);
+    // Impact debris CHIPS (CSQC_SpawnImpactChips, cl_bulletimpact.qc): small material-
+    // matched IQM chips (models/gibs/impact/) that bounce, settle, and fade out.
+    // TWO spawn sites: EXIT (fast, thrown along the bullet's exit line where the exit
+    // smoke plays) and ENTRY (every impact: slow spall back out of the wall along the
+    // surface normal in a wide random cone).  Each has its own force/count; per-shot
+    // caps are separate per side so a wallbang shows both bursts.
+    //   cl_impact_chips            master toggle
+    //   cl_impact_chips_mode       0 = CSQC entities (default; full control: scale/life
+    //                              cvars, per-chip geomset pick, last-0.8s fade)
+    //                              1 = engine model-particles (weapons.impactchips_* in
+    //                              particles/impacts.cfg; sim in C, cheaper at high counts;
+    //                              count/force cvars still apply, but life/scale are baked
+    //                              in the cfg — tune there + `reloadweapons`; fade is
+    //                              linear over the whole life)
+    //   cl_impact_chips_count      chips per EXIT burst
+    //   cl_impact_chips_force      EXIT launch speed along the bullet's exit direction
+    //   cl_impact_chips_entry      entry-side spall toggle (chips on EVERY impact)
+    //   cl_impact_chips_entry_count  chips per ENTRY burst
+    //   cl_impact_chips_entry_force  ENTRY launch speed (slow; scatter scales with it)
+    //   cl_impact_chips_per_shot   bursts per shot PER SIDE (caps shotgun/multi-pen)
+    //   cl_impact_chips_walltex    entity mode (_mode 0) only: chips WEAR THE WALL —
+    //                              the struck surface's texture is sampled at the hit
+    //                              point and applied to the chip via .forceshader.
+    //                              Falls back to the painted chip texture when the
+    //                              wall has no loose textures/<name>.png or in _mode 1
+    //                              (model-particles have no per-spawn material hook).
+    //   cl_impact_chips_life       seconds a chip lies around before its fade-out
+    //   cl_impact_chips_scale_min/max  random per-chip .scale (assets authored 10x;
+    //                              0.16-0.4 = chunky-but-plausible, user-tuned 2x up
+    //                              from the original 0.08-0.2)
+    CVar_Add("Client", "cl_impact_chips",           "1",    CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_impact_chips_mode",      "0",    CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_impact_chips_count",     "2",    CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_impact_chips_force",     "260",  CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_impact_chips_entry",       "1",  CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_impact_chips_entry_count", "2",  CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_impact_chips_entry_force", "70", CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_impact_chips_per_shot",  "1",    CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_impact_chips_walltex",   "1",    CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_impact_chips_life",      "10",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_impact_chips_scale_min", "0.16", CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_impact_chips_scale_max", "0.4",  CVAR_SIDE_CL);
     // Bullet-hole renderer path (read by cl_bulletholes.qc):
     //   1 = polygon-quad (default, fast — ~5-8x cheaper than adddecal,
     //       no decal corner-wrap on convex surfaces).
@@ -733,11 +819,8 @@ void() CVar_Init =
     // Brushmodel-owned holes (func_door, func_breakable, etc.) ignore
     // this and always use the polygon path; adddecal can't reproject
     // onto a moving submodel.
-    CVar_Add("Client", "r_bullethole_renderer",   "1",     CVAR_SIDE_CL);
-    // Off-surface lift (qu) baked into a tri-soup bullet hole. Live: changing it
-    // re-shifts existing holes (CSQC_BulletHolesStartFrame poll). polygonoffset does
-    // the z-fight defeat so this can be small.
-    CVar_Add("Client", "r_bullethole_offset",     "0.4",   CVAR_SIDE_CL);
+    // r_bullethole_renderer REMOVED — unified into r_decal_renderer (ONE decal renderer for bulletholes/sprays/infodecals/blood).
+    // r_bullethole_offset REMOVED — unified into r_decal_offset (one off-surface lift for all decals).
     // World/BSP bullet-hole decal size (full units across) for the random gfx/impacts/impactN
     // art. Read per hit at spawn; affects NEW holes (tune it + shoot fresh holes, no rebuild).
     CVar_Add("Client", "cl_bullethole_impact_size", "6",    CVAR_SIDE_CL);
@@ -851,6 +934,25 @@ void() CVar_Init =
     // render is one addtrisoup_simple per texture either way.  Mirrors
     // cl_bullethole_clip_geom; set 0 to see the raw axis-aligned quads.
     CVar_Add("Client", "cl_blood_decals_clip",        "1",   CVAR_SIDE_CL);
+    // Blob shadows (cl_blobshadow.qc): batched soft dark quads projected under models
+    // (players/props/ragdolls) along the active gravity dir.  EXPERIMENT — default off;
+    // auto-disabled while the engine's r_shadows >= 1 is active (no double shadows).
+    CVar_Add("Client", "cl_blobshadows",         "0",    CVAR_SIDE_CL);  // 1 = draw blob shadows
+    CVar_Add("Client", "cl_blobshadow_scale",    "1.0",  CVAR_SIDE_CL);  // blob size multiplier (bbox-derived base)
+    CVar_Add("Client", "cl_blobshadow_alpha",    "0.5",  CVAR_SIDE_CL);  // max darkness (scaled by local light + height fade)
+    CVar_Add("Client", "cl_blobshadow_maxdist",  "256",  CVAR_SIDE_CL);  // trace length: above this height no blob
+    CVar_Add("Client", "cl_blobshadow_sunskew",  "0",    CVAR_SIDE_CL);  // skew blobs away from each entity's dominant light (0..1)
+    // Light-aware fake-shadow direction (cl_maplights.qc): with r_shadows 2, steer
+    // r_shadows_throwdirection each frame toward the weighted blend of nearby map
+    // lights, smoothed — shadows swing as you walk past lamps.  SUNLESS MAPS ONLY:
+    // on env_sun maps the stuffed sun direction is authoritative and swing hard-disables.
+    CVar_Add("Client", "cl_lightshadow_swing",     "0",   CVAR_SIDE_CL);  // 1 = swing the r_shadows-2 direction by map lights (sunless maps)
+    CVar_Add("Client", "cl_lightshadow_smooth",    "0.3", CVAR_SIDE_CL);  // direction smoothing time (seconds)
+    CVar_Add("Client", "cl_lightshadow_sunweight", "2",   CVAR_SIDE_CL);  // sun term weight (~= a 200 lamp at 141qu; 0 = lamps only)
+    // *** DEPRECATED — do not enable (see cl_maplights.qc): per-CASTER fake shadows
+    // (engine multi-fakeshadow atlas, r_shadows_fakecount > 1).  Static props can't
+    // register, so they inherit the player's throw angle.  Kept dormant for reference.
+    CVar_Add("Client", "cl_lightshadow_perlight",  "0",   CVAR_SIDE_CL);  // DEPRECATED: 1 = drive per-caster shadow slots
     // Max simultaneous blood splats (FIFO — oldest evicted past the cap).  Now
     // that decals are baked to a trisoup batch (cheap per-frame), this can go
     // well above the old 96.  Clamped to the compile-time buffer ceiling
@@ -1486,6 +1588,11 @@ void() CVar_Init =
     CVar_Add("Multiplayer", "mp_deadbody_sink_depth", "64",  CVAR_SIDE_SV); // COD despawn: units a corpse sinks into the ground
     CVar_Add("Multiplayer", "mp_deadbody_sink_time",  "1.0", CVAR_SIDE_SV); // seconds the sink takes (0 = instant removal)
     CVar_Add("Multiplayer", "sv_killcam",             "1",   CVAR_SIDE_SV); // server records every player's camera track + unicasts the killer's to the victim on death (fills the killcam's out-of-PVS approach gap; 0 = client-buffer killcam only)
+    // Server-side authoritative death ragdolls (sv_ragdoll.qc) — everyone sees the flop, bullets shove them.
+    CVar_Add("Multiplayer", "sv_ragdoll_enable",        "1",   CVAR_SIDE_SV); // 1 = spawn a server-simulated ragdoll on weapon/FF kills (replaces the client-side cosmetic one)
+    CVar_Add("Multiplayer", "sv_ragdoll_death_impulse", "220", CVAR_SIDE_SV); // knockback (u/s) along the shot dir seeded into the limbs at death
+    CVar_Add("Multiplayer", "sv_ragdoll_hit_force",     "3",   CVAR_SIDE_SV); // bullet shove = shot_dir * damage * this (whole-doll)
+    CVar_Add("Multiplayer", "sv_ragdoll_throwspeed",    "700", CVAR_SIDE_SV); // `cmd throwragdollsv` test-spawner launch speed (mp_cheats)
     // Server-console trigger cvars — set to non-zero from the server
     // console (or via rcon) to invoke a one-shot cleanup pass.  The
     // server StartFrame (sv_main.qc) detects the non-zero value, runs
@@ -1567,6 +1674,12 @@ void() CVar_Init =
     CVar_AddUI("Multiplayer", "mp_disabledoors",      "0",  CVAR_SIDE_SV,
         CVAR_UI_TOGGLE, CVAR_TAB_MULTI, "",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
+
+    // func_door / func_door_rotating proximity auto-open.  0 (default) = doors open ONLY on +use /
+    // target-chain / damage — never on walk-near (and no every-frame direction reversal that the
+    // per-frame proximity re-fire caused).  1 = restore the legacy proximity trigger.  Read at door
+    // spawn (map load), so a map restart is needed for a change to take effect.
+    CVar_Add("Server", "sv_door_proximity", "0", CVAR_SIDE_SV);
 
     // ---------- Economy / buy menu (mp_cash*) ----------
     // CS-style cash.  Server-authoritative — the client greys out
@@ -1894,35 +2007,34 @@ void() CVar_Init =
     //         `gfx/sprays/nospray.png`); without one the spray is invisible.
     //   Polled per-frame at draw, so toggling re-renders existing sprays LIVE (both
     //   representations are stored at placement; the draw dispatcher picks one).
-    CVar_Add("Client", "r_spray_renderer",         "1",             CVAR_SIDE_CL);
-    // Off-surface lift (qu) baked into a tri-soup spray. Live: changing it re-shifts
-    // existing sprays (CSQC_DrawSprays poll).
-    CVar_Add("Client", "r_spray_offset",           "0.4",           CVAR_SIDE_CL);
+    // r_spray_renderer REMOVED — unified into r_decal_renderer.
+    // r_spray_offset REMOVED — unified into r_decal_offset.
     CVar_Add("Server", "sv_sprayfrequency",        "10",            CVAR_SIDE_SV);
     CVar_Add("Server", "sv_spraymax",              "3",             CVAR_SIDE_SV);
     // Global multiplier on every infodecal's size (final size = entity "scale" key * this).
     CVar_Add("Client", "cl_infodecal_scale",       "1.0",           CVAR_SIDE_CL);
-    // Infodecal renderer (cl_infodecal.qc), standardised with r_bullethole_renderer /
-    // r_spray_renderer:
-    //   1 = tri-soup projector (default) — surface-clipped, attaches to the wall.
-    //   0 = engine adddecal() — wraps convex world edges, re-projected per frame.
-    // Polled per-frame at draw, so toggling re-renders existing infodecals LIVE (both
-    // representations are stored at placement; the draw dispatcher picks one).
-    CVar_Add("Client", "r_decal_renderer",         "1",             CVAR_SIDE_CL);
-    // World-space lift of a tri-soup infodecal off its surface, in qu.  The shader's
-    // polygonoffset 8 does the real z-fight defeat, so this can be tiny for a flush look.
-    // Live: changing it re-shifts existing infodecals (CSQC_InfoDecal_DrawTrisoup poll).
-    CVar_Add("Client", "r_decal_offset",           "0.1",           CVAR_SIDE_CL);
+    // UNIFIED decal renderer — ONE cvar for ALL decal systems (bullet holes, sprays, infodecals, blood).
+    // Polled per-frame at draw, so toggling re-renders everything LIVE:
+    //   2 = PERSISTENT LIT (default) — clip ONCE + cache in the engine, re-emit cheaply every frame, keeps
+    //       the per-pixel lightmap (fastest; engine Patch 79 adddecal_static).  Blood joins here too.
+    //   1 = tri-soup projector — surface-clipped baked quad, no per-pixel lightmap.
+    //   0 = engine adddecal() — wraps convex world edges, re-projected per frame (slowest).  Blood has no
+    //       adddecal path, so mode 0 leaves blood on tri-soup.
+    CVar_Add("Client", "r_decal_renderer",         "2",             CVAR_SIDE_CL);
+    // UNIFIED off-surface lift (qu) of a TRI-SOUP decal (mode 1) for ALL decal systems — one cvar (was
+    // r_bullethole_offset / r_spray_offset / r_decal_offset).  Mode 2 (persistent, default) ignores it and
+    // uses the shader's polygonoffset 8, so this only matters in mode 1.  Live: re-shifts existing quads.
+    CVar_Add("Client", "r_decal_offset",           "0.4",           CVAR_SIDE_CL);
     // ===== DECAL CVARS — quick reference =====================================
-    //  GLOBAL (affect ALL decals — bullet holes + sprays + infodecals):
+    //  r_decal_renderer  = THE renderer for ALL decals (bullet holes + sprays + infodecals + blood):
+    //                      2 persistent-lit (default) / 1 tri-soup / 0 adddecal.  (Was 3 separate cvars.)
+    //  r_decal_offset    = tri-soup (mode 1) off-surface lift for ALL decals.  (Was 3 separate cvars.)
+    //  GLOBAL:
+    //    r_decal_lightmap     per-pixel surface lightmap (persistent + adddecal paths; blood follows it too)
     //    cl_decal_surflight   1 = tint by surface light (getlight) / 0 = full-bright
     //    cl_decal_lightscale  surface-tint brightness scale
-    //    r_decal_lightmap     per-pixel surface lightmap on adddecal decals (ENGINE cvar;
-    //                         only the adddecal path = r_*_renderer 0)
-    //  PER-TYPE  renderer (1 = tri-soup default / 0 = adddecal) + offset (off-surface lift, qu):
-    //    bullet holes:  r_bullethole_renderer / r_bullethole_offset   (+ cl_bulletholes*; cl_decal_opacity = BH alpha)
-    //    sprays:        r_spray_renderer      / r_spray_offset         (+ cl_spray = image name)
-    //    infodecals:    r_decal_renderer      / r_decal_offset         ("decal" here = the infodecal entity; + cl_infodecal_scale)
+    //  PER-TYPE extras: cl_bulletholes* + cl_decal_opacity (BH alpha); cl_spray (image); cl_infodecal_scale;
+    //    cl_blood_decals* + cl_blood_decals_brightness (blood tint).
     // =========================================================================
     // 1 (default) = bullet holes + sprays sample the surface lightmap brightness at
     // placement (getlight, scaled by cl_decal_lightscale) so they dim/brighten with the
@@ -1935,6 +2047,14 @@ void() CVar_Init =
 
     CVar_AddUI("Server", "sv_autohop",                   "0",      CVAR_SIDE_SV,
         CVAR_UI_TOGGLE, CVAR_TAB_SERVER | CVAR_TAB_CREATE_GAME, "Autohop",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
+    // sv_deastrafing: replicate the undocumented Source 1/2 airstrafe penalty
+    // (absent in GoldSrc/CS1.6) — while airborne and rising slowly (0<vz<=140),
+    // air acceleration is cut to 25%.  1 = Source-accurate (default), 0 = full
+    // GoldSrc-style airstrafe.  Networked to all clients via serverinfo so
+    // prediction matches; toggling live updates everyone with no reconnect.
+    CVar_AddUI("Server", "sv_deastrafing",               "1",      CVAR_SIDE_SV,
+        CVAR_UI_TOGGLE, CVAR_TAB_SERVER | CVAR_TAB_CREATE_GAME, "De-Astrafing (Source airstrafe)",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
     // sv_jumpstyle: 0 = GoldSrc-strict (must release jump while standing on
     // ground before the next +jump counts — kills the press-at-landing
@@ -2311,6 +2431,9 @@ void() CVar_Init =
     CVar_AddUI("ODE physics", "sv_physprop_friction",           "1.0", CVAR_SIDE_SV,
         CVAR_UI_SCALAR, CVAR_TAB_ODE | CVAR_TAB_CREATE_PHYS, "Friction",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
+    CVar_Add("ODE physics", "sv_physprop_flood_per_frame",      "1",   CVAR_SIDE_SV);  // spawnflood: props spawned per SERVER FRAME (1 = clean trickle + self-throttles to server health; raise for a faster dump)
+    CVar_Add("ODE physics", "sv_physprop_stream_hz",            "8",   CVAR_SIDE_SV);  // free phys-prop CSQC mirror stream rate while MOVING (Hz). 8 = smooth + low bandwidth (client INTERPOLATES between snapshots). 0 = every tick (~64). Lower = cheaper big floods.
+    CVar_Add("ODE physics", "sv_physprop_flood_dist",           "200", CVAR_SIDE_SV);  // spawnflood: forward distance of the pile from the player (near edge = dist-144 clears the player hull so barrels don't spawn ON you).
     // Unified phys-object core (PhysObj_Setup / PhysObj_Think): per-object mass
     // overrides + shared bounce + shared sleep/wake thresholds. The barrel uses
     // sv_physprop_mass (20); the can + weapons get their own mass; sleep_* gate the
@@ -2372,6 +2495,7 @@ void() CVar_Init =
     CVar_AddSaved("ODE physics", "sv_gravgun_throw_speed","1200", CVAR_SIDE_SV);  // +attack throw velocity (aggressive)
     CVar_AddSaved("ODE physics", "sv_gravgun_rest_radius", "48",  CVAR_SIDE_SV);  // Patch 68: a gathered prop within this of the pull centre AND below rest_speed gets NO pull force, so ODE auto-disables it and the settled pile costs ~0 even while held. 0 = off.
     CVar_AddSaved("ODE physics", "sv_gravgun_rest_speed",  "40",  CVAR_SIDE_SV);  // Patch 68: speed (qu/s) below which a centred prop counts as settled for the rest deadzone above
+    CVar_AddSaved("ODE physics", "sv_gravgun_ragdoll_pull_speed", "600", CVAR_SIDE_SV);  // black-hole (+attack2) pull-servo cap for corpse ragdolls (pelvis toward the gather point)
     // Source/HL2 entity-lump props (server/sv_props.qc). enable = master switch for
     // every prop_* classname; physics = ODE rigid bodies + +use carry (set 0 for
     // NON-COLLIDABLE visual-only props — lighter/stabler on prop-dense Source maps,

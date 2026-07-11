@@ -31,7 +31,7 @@ compiled output and are not part of this repo.
 - **Multi-format maps** — runs Quake, GoldSrc/Half-Life, Source (VBSP), and Call-of-Duty (IBSP) BSPs via
   the engine, with mapper entities for triggers, doors, trains, buy zones, bomb sites, weather, and more.
 - **Client effects** — surface-aware bullet impacts and decals baked to persistent tri-soup meshes, blood,
-  sprays, tracers, shells, weather, god rays (`env_sun`) and fog volumes (`func_fogvolume`); plus a
+  sprays, tracers, shells, weather, sun-aligned model shadows (`env_sun`) and fog volumes (`func_fogvolume`); plus a
   rewind **killcam** and free-roam **spectator**. Per-texture materials drive impact FX and footsteps
   (`shared/sh_surfaceprops.qc` + `scripts/surfaceprops.txt`).
 - **HUD & menus** — buy menu, crosshair, ammo/health/armor, killfeed, hit indicators, team select,
@@ -49,7 +49,7 @@ Nettest is one of **three separate pieces** — this repo is only the first:
    `csprogs.dat`, and `menu.dat`.
 2. **The engine ([`ProtoAus/ftequakers`](https://github.com/ProtoAus/ftequakers))** — a patched FTEQW
    fork, in C; ships as `fteqw64.exe`. Nettest relies on its patches (prop-collision hulls, fog volumes,
-   god rays, map-format & networking fixes), so use a build from that fork rather than stock FTEQW —
+   fake model shadows, map-format & networking fixes), so use a build from that fork rather than stock FTEQW —
    grab it from that repo's **Releases**.
 3. **The commercial game assets** — many maps, models, and sounds come from Counter-Strike, Half-Life,
    and Call of Duty. **They are not in this repo and are not redistributed.** The mod mounts your own

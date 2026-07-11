@@ -1,8 +1,28 @@
 
 void() CSQC_Ent_Remove =
 {
+	// Blob shadows: free any persistent baked blob this entity owns (settled physics
+	// props park one when their predraw unhooks).  Early-outs when pp_blob_slot == 0,
+	// so this is free for every other entity class.
+	BlobShadow_FreeStatic(self);
+
 	if (self.classname == "player_visual_proxy")
 	{
+		// nettest death ragdoll: DON'T free the ragdoll inline — CSQC_Ent_Remove runs mid network-parse,
+		// and destroying rbe bodies + remove() there crashes; even a deferred drain at CSQC_UpdateView
+		// start still faulted (re-entrant with the render).  Detach it (stop drawing) and schedule its
+		// own think — thinks fire in World_Physics_Frame (post-rbe-step, outside the render), the safe
+		// phase; CSQC_RagdollFreeThink does the cleardoll -> skel_delete -> remove next physics tick.
+		entity rd = self.vis_ragdoll_ent;
+		if (rd)
+		{
+			rd.predraw   = __NULL__;
+			rd.drawmask  = 0;			// stop rendering it immediately
+			rd.think     = CSQC_RagdollFreeThink;
+			rd.nextthink = time;			// fires next physics tick (World_Physics_Frame)
+			self.vis_ragdoll_ent = world;
+		}
+
 		entity wep = self.vis_weapon_ent;
 		if (wep)
 		{
@@ -228,6 +248,7 @@ noref void(float apiver, string enginename, float enginever) CSQC_Init =
 	CSQC_PrecacheShells();
 	CSQC_PrecacheBreakables();
 	CSQC_BulletHolesInit();
+	CSQC_BlobShadow_ReregisterShaders();   // blob-shadow shader (also re-registered on vid_restart)
 	Surf_LoadMaterials();       // scripts/surfaceprops.txt -> texture material table (sh_surfaceprops.qc)
 	CSQC_TracersInit();
 	CSQC_Rope_Init();
@@ -261,6 +282,9 @@ noref void(float apiver, string enginename, float enginever) CSQC_Init =
 	registercommand("impactdebris");
 	registercommand("surf_material");        // print the material under the crosshair (surfaceprops tuning)
 	registercommand("surf_reloadmaterials"); // reload scripts/surfaceprops.txt live
+	registercommand("spawnragdoll");         // client-side Box3D ragdoll test (cl_ragdoll.qc)
+	registercommand("throwragdoll");         // launch a ragdoll in the aim direction (cl_ragdoll_throwspeed)
+	registercommand("killragdolls");
 	// Grapple press-and-hold aliases.  Bound via `bind <key> "+grapple"`:
 	// the engine fires `+grapple` on key down and `-grapple` on key up,
 	// which our aliases translate into the engage/release impulse pair
@@ -302,6 +326,7 @@ noref void() CSQC_WorldLoaded =
 	CSQC_EnsureWorldSolid();
 	CSQC_ResetPredictionState();
 	Smooth_Reset();
+	MapLights_Load();      // parse the BSP entity lump -> light table (light-aware shadows)
 	CSQC_ClearSprays();
 	CSQC_RegenerateSpraysShader();
 	CSQC_EnvHud_Reset();
@@ -464,11 +489,14 @@ float(float width, float height) CSQC_UpdateViewFrameBegin =
 	// nothing is pending; checks two cltime gates and returns.
 	Radio_TickSequence();
 	CSQC_Spray_PollCvar();
+	MapLights_SwingThrowDir();   // light-aware r_shadows-2 direction (cl_lightshadow_swing, sunless maps only)
+	MapLights_DriveCasterShadows(); // per-CASTER fake-shadow slots (cl_lightshadow_perlight + r_shadows_fakecount>1)
 	//clear and update our global screen resolution vars
 	clearscene();
 	g_width = width;
 	g_height = height;
 	CSQC_BulletHolesStartFrame();
+	BlobShadow_FrameReset();        // blob shadows: poll cvars, drop last frame's dynamic suffix
 	CSQC_DrawSprays();
 	CSQC_InfoDecal_DrawTrisoup();   // infodecals: live-swap dispatch on r_decal_renderer (1=trisoup / 0=adddecal)
 
@@ -623,11 +651,14 @@ void(float in_menu_backdrop) CSQC_UpdateViewSpectator =
 	CSQC_DrawDebugHitboxes();
 	CSQC_DrawDebugHitboxExpand();
 	CSQC_DrawDebugPhysProps();
+	CSQC_DrawDebugCar();	// prop_car/func_car physics overlay (box + wheel rays + steer + velocity; sv_debug_car)
 	CSQC_DrawDebugPhysDropBboxes();
 	CSQC_DrawDebugPickupZones();
 	CSQC_DrawServerHitboxes();
 	CSQC_DrawContinuousHitboxes();
 	NavDebug_DrawScene();	// nettest: nav-graph + links + spectated-bot path (also while spectating)
+	BlobShadow_FrameSubmit();	// blob shadows: this branch's addentities ran the emits — submit here too,
+					// or every blob (incl. static prop blobs) vanishes while dead/spectating
 	renderscene();
 	NavDebug_DrawText();	// nettest: bot state labels + spectated-bot panel (2D, after renderscene)
 
@@ -786,6 +817,47 @@ float() CSQC_UpdateViewAliveCamera =
 		setproperty(VF_ANGLES, camang);
 	}
 
+	// prop_car third-person chase — overrides the camera while driving. We orbit behind the
+	// free-look view (camang = input_angles), not the car's facing.  LOCK the camera to the DRIVEN
+	// CAR's own CSQC mirror entity, using the EXACT same origin + clock + extrapolation that
+	// CSQC_PhysProp_Predraw renders the car model with (pp_snap_origin + velocity·elapsed on cltime).
+	// The old code extrapolated a SEPARATE proxy copy (cl_car_cam_org) on a DIFFERENT clock (time),
+	// so the model slid against the camera → jitter.  Anchoring to the same source makes the car sit
+	// rock-steady in the frame like func_vehicle.  Fallbacks: proxy extrapolation, then the seat.
+	if (predicted_player && predicted_player.pm_incar)
+	{
+		makevectors(camang);
+		float cdist = cvar("cl_car_cam_dist");   if (cdist <= 0) cdist = 160;
+		float chgt  = cvar("cl_car_cam_height"); if (chgt <= 0) chgt = 64;
+		vector canchor = predicted_player.origin;
+		// find the car mirror nearest the seat (we're inside it) — it renders as classname "phys_files"
+		entity cmirror = world, cme = world;  float cbestd = 120;
+		while ((cme = find(cme, classname, "phys_files")))
+		{
+			float cmd = vlen(cme.pp_snap_origin - predicted_player.origin);
+			if (cmd < cbestd) { cbestd = cmd; cmirror = cme; }
+		}
+		if (cmirror != world)
+		{
+			// Anchor to the SAME 2-snapshot interpolated origin the car model renders at
+			// (CSQC_PhysProp_Predraw), so the model + chase cam stay glued at any stream rate.
+			float cf = PhysProp_InterpFrac(cmirror);
+			canchor = cmirror.pp_snap_origin_prev + (cmirror.pp_snap_origin - cmirror.pp_snap_origin_prev) * cf;
+		}
+		else if (cl_car_cam_org != '0 0 0')
+		{
+			float cdt = time - cl_car_cam_time;  if (cdt < 0) cdt = 0;  if (cdt > 0.25) cdt = 0.25;
+			canchor = cl_car_cam_org + cl_car_cam_vel * cdt;
+		}
+		vector cbase = canchor + '0 0 1' * chgt;
+		vector cpos  = cbase - v_forward * cdist;
+		traceline(cbase, cpos, TRUE, world);
+		if (trace_fraction < 1)
+			cpos = trace_endpos + trace_plane_normal * 4;
+		setproperty(VF_ORIGIN, cpos);
+		setproperty(VF_ANGLES, camang);
+	}
+
 	return in_team_select;
 };
 
@@ -868,6 +940,7 @@ void() CSQC_UpdateViewAliveScene =
 	CSQC_DrawSmokeClouds();
 	CSQC_DrawScorchDecals();
 	CSQC_DrawBloodDecals();
+	BlobShadow_FrameSubmit();       // blob shadows: ONE draw call for everything emitted this frame
 	CSQC_Rain_Tick();
 	CSQC_DrawDebugImpacts();
 	NavDebug_DrawScene();	// nettest: bot nav-graph + links + enemy lines (server-gated on sv_debug_nav)
@@ -875,6 +948,7 @@ void() CSQC_UpdateViewAliveScene =
 	CSQC_DrawDebugHitboxes();
 	CSQC_DrawDebugHitboxExpand();
 	CSQC_DrawDebugPhysProps();
+	CSQC_DrawDebugCar();	// prop_car/func_car physics overlay (box + wheel rays + steer + velocity; sv_debug_car)
 	CSQC_DrawDebugPhysDropBboxes();
 	CSQC_DrawDebugPickupZones();
 	CSQC_DrawServerHitboxes();
@@ -970,6 +1044,14 @@ void(float width, float height, float menushown) CSQC_UpdateView =
 	float spike_t_env = 0;
 	float spike_t_scene = 0;
 	float spike_t_hud = 0;
+
+	// (nettest death ragdolls are now freed by their own CSQC_RagdollFreeThink, scheduled in
+	// CSQC_Ent_Remove — a drain here proved re-entrant with the render and still crashed.)
+
+	// nettest server ragdoll: hide the present-time server ragdolls (packet entities the engine renders)
+	// while a killcam replay reconstructs the rewound-alive scene.  The engine reads this cvar in
+	// CL_LinkPacketEntities and skips them; mirrors the CSQC ragdoll's own Killcam_Active() hide.
+	cvar_set("cl_killcam_hideragdolls", Killcam_Active() ? "1" : "0");
 
 	spike_debug = cvar("cl_debug_spikes");
 	if (spike_debug)
@@ -1155,6 +1237,15 @@ float(string cmd) CSQC_ConsoleCommand =
 			Surf_LoadMaterials();
 			print(sprintf("surfaceprops reloaded: %g materials, %g patterns\n",
 				sp_mat_count, sp_pat_count));
+			return TRUE;
+		case "spawnragdoll":	// client-side Box3D ragdoll test (explicit skel_ragupdate, self-diagnosing)
+			CSQC_SpawnRagdollTest();
+			return TRUE;
+		case "throwragdoll":	// launch a ragdoll in the aim direction (cl_ragdoll_throwspeed)
+			CSQC_ThrowRagdollTest();
+			return TRUE;
+		case "killragdolls":
+			CSQC_KillRagdolls();
 			return TRUE;
 		case "sv_defaultprimary":
 			CSQC_SetDefaultWeaponAlias("sv_defaultprimary", "sv_default_primary");
@@ -1666,7 +1757,24 @@ void() CSQC_Parse_Event =
 			seye_x = readcoord(); seye_y = readcoord(); seye_z = readcoord();
 			string sname = readstring();
 			if (!Killcam_Active())	// D: no live sprays during the killcam replay
-				CSQC_SpawnSprayDecal(sid, spos, snrm, seye, sname, SPRAY_QUAD_HALF, SPRAY_QUAD_HALF);	// square (unchanged)
+			{
+				// Aspect-correct extents from the spray PNG (mirrors the infodecal path,
+				// cl_infodecal.qc) so non-square sprays keep their proportions instead of
+				// being squeezed into a square.  Falls back to square if not yet loaded.
+				float  spr_hw = SPRAY_QUAD_HALF;
+				float  spr_hh = SPRAY_QUAD_HALF;
+				string spr_pic = sprintf("gfx/sprays/%s.png", sname);
+				precache_pic(spr_pic);
+				vector spr_sz = drawgetimagesize(spr_pic);
+				if (spr_sz_x > 0 && spr_sz_y > 0)
+				{
+					if (spr_sz_x >= spr_sz_y)
+						spr_hh = SPRAY_QUAD_HALF * (spr_sz_y / spr_sz_x);	// landscape
+					else
+						spr_hw = SPRAY_QUAD_HALF * (spr_sz_x / spr_sz_y);	// portrait
+				}
+				CSQC_SpawnSprayDecal(sid, spos, snrm, seye, sname, spr_hw, spr_hh);
+			}
 			break;
 		}
 		case CSQC_EVENT_SPRAY_REMOVE:
