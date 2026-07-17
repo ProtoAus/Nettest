@@ -205,6 +205,8 @@ void() Tune_PanelInit =
     Tune_Add("Engine sound",            "cl_car_sound",          TUNE_CL, "",              1,   0,  1,    TUNE_TAB_FX);
     Tune_Add("Engine sound volume",     "cl_car_sound_volume",   TUNE_CL, "",              0.05,0,  1,    TUNE_TAB_FX);
     Tune_Add("Engine gear pitch step",  "cl_car_sound_gearstep", TUNE_CL, "",              1,   0,  30,   TUNE_TAB_FX);
+    Tune_Add("Standing rev level",      "cl_car_sound_revfloor", TUNE_CL, "",              0.02,0,  1,    TUNE_TAB_FX);
+    Tune_Add("Coasting engine volume",  "cl_car_sound_coastvol", TUNE_CL, "",              0.05,0,  1,    TUNE_TAB_FX);
     Tune_Add("Impact FX + slide",       "sv_car_impact_fx",      TUNE_SV, "",              1,   0,  1,    TUNE_TAB_FX);
     Tune_Add("Impact min speed",        "sv_car_impact_min_speed",TUNE_SV,"",              10,  0,  2000, TUNE_TAB_FX);
     Tune_Add("Impact cooldown",         "sv_car_impact_cooldown",TUNE_SV, "",              0.05,0,  2,    TUNE_TAB_FX);
@@ -241,6 +243,8 @@ void() Tune_PanelInit =
     Tune_SetDesc("cl_car_wheel_radius",       "VISUAL tyre size (renders + sits the tyre on the ground). Match it to the physics ride height for a clean look.");
     Tune_SetDesc("cl_car_sound_maxspeed",     "Override the audio redline speed. 0 = auto-track the car's real sv_car_max_speed (recommended).");
     Tune_SetDesc("cl_car_sound_gearstep",     "How much higher each gear sounds on an up-shift (% pitch per gear). 0 = default (5). Raise if gears sound too similar; clamped to 30%.");
+    Tune_SetDesc("cl_car_sound_revfloor",     "Rev level the THROTTLE alone reaches at ZERO speed - i.e. the note a standing start BEGINS on. Low (0.28) = launches start low and build with speed. High (0.8) = sounds mid-speed the moment you touch W.");
+    Tune_SetDesc("cl_car_sound_coastvol",     "Engine volume when you're OFF the throttle (gliding/idle), vs full power. A downshift while coasting DOES raise the revs (engine braking is real) - this stops it also going LOUD, since no power is going in. 1 = old behaviour.");
     Tune_SetDesc("sv_car_impact_fx",          "Master toggle: when the car hits the world it SLIDES along the wall (keeps along-wall speed) and plays a metal impact/scrape + sparks + smoke. 0 = off (stops dead, no FX).");
     Tune_SetDesc("sv_car_impact_min_speed",   "How hard a wall hit must be to register (min speed AND one-tick speed drop, u/s). Lower = more sensitive.");
     Tune_SetDesc("sv_car_impact_cooldown",    "Minimum seconds between hard-hit clang sounds so a bounce doesn't machine-gun.");

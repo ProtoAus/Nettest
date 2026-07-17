@@ -117,6 +117,19 @@ void() CSQC_CarSound_Frame =
     if (gears < 1) gears = 4;
     float gearstep = cvar("cl_car_sound_gearstep");   // percent of native pitch each gear steps UP
     if (gearstep <= 0) gearstep = 5;
+    // Standing-rev ceiling: how far the THROTTLE alone may lift the revs at ZERO speed (see the
+    // THROTTLE FLOOR below).  Was hardcoded 0.8 = the pedal slammed the revs to 80% the instant you
+    // touched it from a standstill — a=0.8*3=2.4 lands on the rev_mid/rev_high anchor pair, so a
+    // standing start sounded like it was already at mid speed instead of building from idle.
+    float revfloor = cvar("cl_car_sound_revfloor");
+    if (revfloor <= 0) revfloor = 0.28;
+    if (revfloor > 1)  revfloor = 1;
+    // Engine volume at ZERO throttle (coasting / idle) as a fraction of the powered volume — the
+    // LOAD half of "loudness = revs x load".  1 = no coast ducking (the old revs-only curve, where a
+    // no-throttle downshift blared at ~full volume).
+    float coastvol = cvar("cl_car_sound_coastvol");
+    if (coastvol <= 0) coastvol = 0.5;
+    if (coastvol > 1)  coastvol = 1;
 
     float incar = 0;
     if (predicted_player)
@@ -266,9 +279,15 @@ void() CSQC_CarSound_Frame =
             }
             // THROTTLE FLOOR: the pedal revs the engine WITHIN the current gear (a standing rev, a launch)
             // without advancing the SPEED-derived gear index — so it no longer freezes the gearbox.
+            // The ceiling is cl_car_sound_revfloor (0.28), NOT the old hardcoded 0.8: this is a FLOOR on
+            // audio01, so at zero speed it IS the note you hear, and 0.8 put a standing start straight onto
+            // the rev_mid/rev_high anchors (a=2.4) — the car sounded mid-speed before it had moved.  At 0.28
+            // (a=0.84 => idle/rev_low pair) a launch starts low, and the SPEED-derived gfrac overtakes the
+            // floor almost immediately (~77 u/s at 4 gears / 1100 max) and climbs to redline across 1st gear,
+            // so the pedal only colours a genuinely stationary rev instead of masking the whole build-up.
             if (islocal)
             {
-                float revcap = carsnd_env * 0.8;
+                float revcap = carsnd_env * revfloor;
                 if (revcap > audio01) audio01 = revcap;
             }
             // gear tracking with HYSTERESIS (mirror of the server's): clunk only on
@@ -317,9 +336,21 @@ void() CSQC_CarSound_Frame =
         // A (the lower anchor) is pitched UP as t rises; B arrives pitched
         // DOWN and relaxes to native as t reaches it.  At the pinned redline
         // channel B strains a few extra % for the flat-out top note.
-        // loudness rises with revs (a real engine at idle is far quieter than at
-        // full throttle): ~55% of master at idle up to 100% at redline.
-        float loud = master * (0.55 + 0.45 * audio01) * shiftduck;
+        //
+        // LOUDNESS = revs x LOAD.  The old curve was `0.55 + 0.45*audio01` — revs ALONE — which
+        // conflated "spinning fast" with "making power".  A no-throttle DOWNSHIFT jumps the sawtooth
+        // to the TOP of the lower gear (~redline — physically CORRECT: engine braking really does
+        // spin the engine up at the same road speed), and the volume followed it to ~100%.  So
+        // gliding with your hands off the keys BLARED on every downshift.  A real engine on the
+        // OVERRUN is spinning fast but making no power and is much quieter than the same revs
+        // pulling — so scale by the throttle envelope: cl_car_sound_coastvol at zero throttle up to
+        // 1.0 at full.  This deliberately quietens idle + coasting too (both are genuinely quiet in
+        // a real car).  Remote cars carry no throttle on the wire (speed-only), so they keep the
+        // old load-free curve rather than being wrongly ducked to coast volume while flat out.
+        float load = 1;
+        if (islocal)
+            load = coastvol + (1 - coastvol) * carsnd_env;
+        float loud = master * (0.55 + 0.45 * audio01) * load * shiftduck;
         float volA = loud * cos(t * CAR_SND_HALFPI);
         float volB = loud * sin(t * CAR_SND_HALFPI);
         // PER-GEAR PITCH PEDESTAL: the within-gear sawtooth (audio01) resets to the
