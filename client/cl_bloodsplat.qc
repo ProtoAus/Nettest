@@ -85,6 +85,9 @@ entity bs_tail;
 // actually differs from this (change-detection).  Seeded in Blood_BakeTrisoup
 // (not at declaration — fteqcc const-global-initializer trap).
 .float  bs_last_alpha;
+// r_decal_renderer 2 (PERSISTENT LIT): engine persistent-decal handle. 0=none, -1=off-surface.
+// Blood is world-static so every splat can be persisted; the fade drives updatedecal (no re-clip).
+.float  bs_handle;
 float   bs_count;
 
 // Baked-trisoup batch (cl_bloodtrisoup.qc, compiled AFTER cl_bulletholes.qc
@@ -97,6 +100,12 @@ void(entity bs) Blood_FreeTrisoupSlot;
 void(float abs_slot, float alpha) Blood_SetSlotAlpha;
 void() Blood_DrawTrisoup;
 void() Blood_ResetTrisoup;
+// r_decal_renderer 2 persistent-lit blood — bodies in cl_bloodtrisoup.qc (compiled after cl_bulletholes.qc
+// so Decal_LMShaderBody is in scope), forward-declared here for the draw/remove paths below.
+void(entity bs, float bl_alpha) Blood_CreatePersistent;
+void() Blood_ReregisterShaders;
+void() Blood_PollOffset;                         // live r_decal_offset re-shift of the baked trisoup
+void(entity bs, float bl_alpha) Blood_DrawAdddecal;   // mode-0 per-frame adddecal draw
 
 void() CSQC_Bloodsplat_Precache =
 {
@@ -107,6 +116,10 @@ void() CSQC_Bloodsplat_Precache =
     precache_pic(BLOOD_SHADER_5);
     precache_pic(BLOOD_SHADER_6);
     precache_pic(BLOOD_SHADER_7);
+    // r_decal_renderer 2: register the plain + `_lm` blood decal shaders at INIT too (not only on
+    // CSQC_RendererRestarted) so the first splat's adddecal_static can resolve the `_lm` name (which has no
+    // PNG on disk) — else engine-default body → checkerboard.  Mirrors CSQC_BulletHolesInit's registration.
+    Blood_ReregisterShaders();
 };
 
 void(entity bs) CSQC_BloodsplatRemove =
@@ -122,6 +135,7 @@ void(entity bs) CSQC_BloodsplatRemove =
     // Release the baked trisoup slot before freeing the entity (no-op for
     // splats whose bake failed / never ran — bs_slot stays at -1).
     Blood_FreeTrisoupSlot(bs);
+    if (bs.bs_handle > 0) removedecal(bs.bs_handle);   // r_decal_renderer 2: free the engine persistent decal (single choke: expiry + cap evict + wipe)
     remove(bs);
     bs_count = bs_count - 1;
 };
@@ -361,6 +375,11 @@ void() CSQC_DrawBloodDecals =
     entity next_bs;
     float  age, alpha;
     float  persistent = cvar("cl_blood_persistent");
+    float  bl_mode = cvar("r_decal_renderer");   // UNIFIED decal renderer (2 = persistent-lit; engine draws blood)
+
+    // Live r_decal_offset: delta-shift the baked trisoup quads when it changes (like sprays / bullet
+    // holes).  Only the trisoup buffer (modes 0/1) sits at an offset; mode 2 uses engine polygonoffset.
+    Blood_PollOffset();
 
     while (bs)
     {
@@ -386,22 +405,54 @@ void() CSQC_DrawBloodDecals =
                             / (BLOOD_FADE_END - BLOOD_FADE_START);
         }
 
-        // Rewrite the 4 baked vertex alphas ONLY when alpha actually changed
-        // since last frame (change-detection).  During the 25 s opaque hold and
-        // in persistent mode alpha is a constant 1.0 already baked into the
-        // verts, so this skips the write entirely; it fires only across the 5 s
-        // fade (and once to restore 1.0 if persistent is toggled on mid-fade).
-        // Skips splats that failed to bake (bs_slot == -1).
-        if (bs.bs_slot >= 0 && alpha != bs.bs_last_alpha)
+        if (bl_mode == 2)
         {
-            Blood_SetSlotAlpha(bs.bs_slot, alpha);
+            // PERSISTENT LIT (r_decal_renderer 2): the engine clips each splat ONCE + re-emits it cheaply
+            // (keeps the per-pixel lightmap).  Create the handle once; drive the FADE via updatedecal on the
+            // SAME change-detection edge (zero calls during the 25 s hold, ~1/splat/frame only in the 5 s fade).
+            if (bs.bs_handle == 0)
+                Blood_CreatePersistent(bs, alpha);
+            else if (bs.bs_handle > 0 && alpha != bs.bs_last_alpha)
+            {
+                float bb = cvar("cl_blood_decals_brightness");
+                if (bb <= 0) bb = 0.4;
+                updatedecal(bs.bs_handle, [bb, bb, bb], alpha);
+            }
             bs.bs_last_alpha = alpha;
+        }
+        else
+        {
+            // Modes 0 + 1 — both drop any persistent handle left over from mode 2 first (else it keeps
+            // being emitted by the engine on top of this frame's draw).
+            if (bs.bs_handle != 0)
+            {
+                if (bs.bs_handle > 0) removedecal(bs.bs_handle);
+                bs.bs_handle = 0;
+            }
+
+            if (bl_mode == 0)
+            {
+                // r_decal_renderer 0 — legacy per-frame adddecal (like bullet holes / sprays in mode 0).
+                // No baked-alpha rewrite; adddecal carries the live fade alpha directly.
+                Blood_DrawAdddecal(bs, alpha);
+            }
+            else
+            {
+                // r_decal_renderer 1 — trisoup baked-vertex-alpha rewrite (change-detected).  During the
+                // 25 s opaque hold / cl_blood_persistent mode alpha is a constant 1.0 already baked into the
+                // verts, so this skips the write entirely; it fires only across the 5 s fade.
+                if (bs.bs_slot >= 0 && alpha != bs.bs_last_alpha)
+                {
+                    Blood_SetSlotAlpha(bs.bs_slot, alpha);
+                    bs.bs_last_alpha = alpha;
+                }
+            }
         }
 
         bs = next_bs;
     }
 
-    // One addtrisoup_simple per non-empty texture — replaces the old
-    // per-decal adddecal storm.
-    Blood_DrawTrisoup();
+    // Trisoup submit — mode 1 ONLY.  Mode 0 draws per-splat via adddecal above; mode 2 = engine-emitted.
+    if (bl_mode == 1)
+        Blood_DrawTrisoup();
 };

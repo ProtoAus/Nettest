@@ -1629,6 +1629,10 @@ void() CSQC_AddPredictedViewmodel =
     // are NOT hidden — the user needs to see the gun animate up/down.
     if (CSQC_CodScope_HidesViewmodel())
         return;
+    // Driving a prop_car / func_car — the player is hidden in third-person; the on-screen
+    // gun would float in front of the chase cam.  Hide it (pm_incar is replicated to CSQC).
+    if (predicted_player.pm_incar)
+        return;
 
     mdl = predicted_player.weapon_viewmodel;
     if (mdl == "")
@@ -1689,7 +1693,10 @@ void() CSQC_AddPredictedViewmodel =
     float vm_flip = predicted_player.weapon_viewmodel_flip;
     if (cvar("cl_lefthand"))
         vm_flip = !vm_flip;
-    float vm_renderflags = RF_VIEWMODEL | RF_DEPTHHACK;
+    // RF_NOSHADOW: the first-person viewmodel must never cast into the fake-shadow
+    // maps (r_shadows 2) — the floating gun silhouette gives away nothing but looks
+    // broken; the BODY shadow comes from the player proxy instead.
+    float vm_renderflags = RF_VIEWMODEL | RF_DEPTHHACK | RF_NOSHADOW;
     if (vm_flip)
         vm_renderflags |= RF_XFLIP;
     csqc_viewmodel_ent.renderflags  = vm_renderflags;

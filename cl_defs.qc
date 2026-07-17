@@ -1660,8 +1660,17 @@ void(float lno, float fld, __variant value) dynamiclight_set = #373; /*
 string(float efnum, float body) particleeffectquery = #374; /*
 		Retrieves either the name or the body of the effect with the given number. The effect body is regenerated from internal state, and can be changed before being reapplied via the localcmd builtin. */
 
-void(string shadername, vector origin, vector up, vector side, vector rgb, float alpha) adddecal = #375; /*
-		Adds a temporary clipped decal shader to the scene, centered at the given point with given orientation. Will be drawn by the next renderscene call, and freed by the next clearscene call. */
+void(string shadername, vector origin, vector up, vector side, vector rgb, float alpha, optional float aspect) adddecal = #375; /*
+		Adds a temporary clipped decal shader to the scene, centered at the given point with given orientation. Will be drawn by the next renderscene call, and freed by the next clearscene call.
+		nettest: optional aspect = width/height (default 1 = square). >1 widens the decal (landscape), <1 narrows it (portrait), so a non-square texture keeps its proportions. */
+
+//nettest: PERSISTENT lit decals — clip ONCE + cache (with per-pixel lightmap), re-rendered cheaply every frame (Source/Momentum style).
+float(string shadername, vector origin, vector up, vector side, vector rgb, float alpha, optional float aspect, optional float lifetime) adddecal_static = #0:adddecal_static; /*
+		Like adddecal, but the clipped geometry PERSISTS: it re-renders every frame with NO per-frame BSP re-clip.
+		Returns a handle for removedecal/updatedecal, or -1 on failure (off-surface / no world -> fall back to adddecal).
+		lifetime 0 = permanent (until removedecal or map change); >0 = auto-expire after that many seconds. */
+void(float handle) removedecal = #0:removedecal; /* nettest: free a persistent decal created by adddecal_static. */
+void(float handle, vector rgb, float alpha) updatedecal = #0:updatedecal; /* nettest: rewrite a persistent decal's rgb+alpha cheaply (fade) with NO re-clip. */
 
 void(entity e, string skinfilename, optional string skindata) setcustomskin = #376; /* Part of FTE_QC_CUSTOMSKINS
 		Sets an entity's skin overrides to a new skin object. Releases the entities old skin (refcounted). */

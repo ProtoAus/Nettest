@@ -222,6 +222,9 @@ float() Weapon_LowerBlocksFire =
     // (+attack is repurposed as the throw in Carry_Tick).
     if (self.pm_carrying)
         return 1;
+    // Driving a prop_car / func_car — both hands on the wheel, weapon lowered + firing blocked.
+    if (self.pm_incar)
+        return 1;
     // (Driving a func_vehicle does NOT block fire — drive-by shooting is allowed.)
 #ifdef CSQC
     if (self.pm_on_ladder_cached
@@ -257,6 +260,7 @@ float  pm_waterlevel;     // 0 = dry, 1 = feet, 2 = waist, 3 = eyes
 float  pm_watertype;      // CONTENT_* of deepest touched water
 vector pm_groundnormal;
 float  pm_frametime;
+float  deastrafing;       // sv_deastrafing: Source-engine airstrafe penalty (air-accel x0.25 while rising 0<vz<=140). Read once per step in PM_ReadMovevars.
 vector pm_forward;
 vector pm_right;
 float  pm_on_ladder;      // TRUE if player overlaps a ladder trigger this step
@@ -341,8 +345,33 @@ float(string setname) PM_FootstepCount =
 //  8.  PM_Trace  –  tracebox wrapper using the shared hull
 // ============================================================================
 
+// Gravity-shifted hull: the shift direction is CARDINAL-snapped (see the arbiter latch), so
+// the axis-aligned trace hull can be EXACT — swap the hull's TALL axis onto the gravity axis
+// and keep the ±16 cross-section.  The hulls are origin-centered and symmetric (PM_MINS_z is
+// -h/2, PM_MAXS_z +h/2; duck ±h/4 — set up that way in PM_ReadMovevars), so mins = -maxs and
+// BOTH signs of an axis share one box: upside-down (+Z) uses the plain standing hull.
+// The player keeps FULL standing height on walls and ceilings, and can duck there too.
+vector(float ducked) PM_GravHullMaxs =
+{
+    float half = ducked ? PM_DUCK_MAXS_z : PM_MAXS_z;
+    if (self.gravitydir_x != 0)
+        return [half, 16, 16];
+    if (self.gravitydir_y != 0)
+        return [16, half, 16];
+    return [16, 16, half];
+};
+
 vector PM_CurrentMaxs()
 {
+    if (self.gravshift_active)
+    {
+        // Transitional fallback: the full swapped hull didn't fit where the shift engaged
+        // (it can GROW along a new axis) — collide as a ±16 cube (a strict subset of every
+        // hull variant, so it always fits) until GravShift_Apply clears the flag.
+        if (self.gravshift_hull_cube)
+            return '16 16 16';
+        return PM_GravHullMaxs(self.flags & FL_DUCKING);
+    }
     if (self.flags & FL_DUCKING)
         return PM_DUCK_MAXS;
 
@@ -351,6 +380,12 @@ vector PM_CurrentMaxs()
 
 vector PM_CurrentMins()
 {
+    if (self.gravshift_active)
+    {
+        if (self.gravshift_hull_cube)
+            return '-16 -16 -16';
+        return '0 0 0' - PM_GravHullMaxs(self.flags & FL_DUCKING);
+    }
     if (self.flags & FL_DUCKING)
         return PM_DUCK_MINS;
 
@@ -554,12 +589,26 @@ float PM_SplineFraction(float value, float scale)
 void PM_SyncHull()
 {
 #if defined(SSQC) || defined(CSQC)
-    if (self.flags & FL_DUCKING)
-        SetHitboxSize(self, PM_DUCK_MINS, PM_DUCK_MAXS);
-    else
-        SetHitboxSize(self, PM_MINS, PM_MAXS);
+    // PM_CurrentMins/Maxs already picks the cube (gravity-shifted) or the duck/stand hull,
+    // so a duck/unduck while shifted keeps the cube instead of clobbering it.
+    SetHitboxSize(self, PM_CurrentMins(), PM_CurrentMaxs());
 #endif
 }
+
+// ---- Gravity-aware eye offset ----
+// The eye height is authored as a SCALAR (pm_eye_h, units above origin) by the duck code;
+// this composes the actual .view_ofs along the gravity "up", so EVERY `origin + view_ofs`
+// eye computation in the mod — camera, weapon fire origins, bots, +use, prop carry — is
+// gravity-correct with no per-site changes.  Identity when not shifted ('0 0 1' * h ==
+// the old Z-only vector, bit-identical), and the composed value rides the existing player
+// proxy serialization to remote clients unchanged.
+void() PM_ComposeEyeOfs =
+{
+    if (!self.pm_eye_h)   // first touch: adopt the spawn/legacy Z value
+        self.pm_eye_h = self.view_ofs_z ? self.view_ofs_z : PM_VIEW_OFS_z;
+    vector eup = self.gravshift_active ? ('0 0 0' - self.gravitydir) : '0 0 1';
+    self.view_ofs = eup * self.pm_eye_h;
+};
 
 void PM_UnDuck()
 {
@@ -580,7 +629,19 @@ void PM_UnDuck()
     // MOVE_NORMAL (Full) so a physics prop overhead — the filing cabinet — blocks
     // standing up instead of being ignored, which let the player un-duck up into it
     // and get stuck.  (Also blocks standing up directly under another player.)
-    if (!PM_TestPositionExtFull(new_origin, PM_MINS, PM_MAXS))
+    // Gravity Shift: test with the axis-swapped STANDING hull, not the world-Z one.
+    vector smins, smaxs;
+    if (self.gravshift_active)
+    {
+        smaxs = PM_GravHullMaxs(FALSE);
+        smins = '0 0 0' - smaxs;
+    }
+    else
+    {
+        smins = PM_MINS;
+        smaxs = PM_MAXS;
+    }
+    if (!PM_TestPositionExtFull(new_origin, smins, smaxs))
         return;
 
     pm_origin = new_origin;
@@ -588,6 +649,7 @@ void PM_UnDuck()
     self.pm_in_duck = FALSE;
     self.pm_duck_msec = 0;
     self.view_ofs = PM_VIEW_OFS;
+    self.pm_eye_h = PM_VIEW_OFS_z;
 
     PM_SyncHull();
     PM_CategorizePosition();
@@ -637,6 +699,7 @@ void PM_CheckDuck()
     if ((buttons_pressed & PM_BTN_DUCK)
         && !(self.flags & FL_DUCKING)
         && pm_onground
+        && !self.gravshift_active      // slide entry is world-Z (lift + horizontal speed); skip on walls
         && self.pm_movetype != PM_MOVETYPE_NOCLIP
         && PM_ReadMovevar("sv_sliding", 0)
         && PM_ReadMovevar("sv_slidingcrouch", 0)
@@ -656,6 +719,7 @@ void PM_CheckDuck()
                 self.pm_in_duck = FALSE;
                 self.pm_duck_msec = 0;
                 self.view_ofs = PM_DUCK_VIEW_OFS;
+                self.pm_eye_h = PM_DUCK_VIEW_OFS_z;
                 PM_SyncHull();
                 pm_onground = FALSE;
                 return;
@@ -668,6 +732,7 @@ void PM_CheckDuck()
     if (!duck_down && !self.pm_in_duck && !(self.flags & FL_DUCKING))
     {
         self.view_ofs = PM_VIEW_OFS;
+        self.pm_eye_h = PM_VIEW_OFS_z;
         return;
     }
 
@@ -693,6 +758,7 @@ void PM_CheckDuck()
                 self.flags |= FL_DUCKING;
                 self.pm_in_duck = FALSE;
                 self.view_ofs = PM_DUCK_VIEW_OFS;
+                self.pm_eye_h = PM_DUCK_VIEW_OFS_z;
 
                 // On ground: shift origin down so feet stay planted at the same
                 // world position (mirrors GoldSrc origin -= duck_mins - stand_mins).
@@ -730,13 +796,15 @@ void PM_CheckDuck()
                 // collapses back to the original (PM_DUCK_VIEW_OFS_z - PM_DUCK_MINS_z)
                 // when PM_MINS_z is 0.
                 duck_fraction = PM_SplineFraction(duck_time, 1 / PM_DUCK_TIME);
-                self.view_ofs_z = PM_VIEW_OFS_z * (1 - duck_fraction)
-                                + (PM_DUCK_VIEW_OFS_z + PM_MINS_z - PM_DUCK_MINS_z) * duck_fraction;
+                self.pm_eye_h = PM_VIEW_OFS_z * (1 - duck_fraction)
+                              + (PM_DUCK_VIEW_OFS_z + PM_MINS_z - PM_DUCK_MINS_z) * duck_fraction;
+                self.view_ofs_z = self.pm_eye_h;
             }
         }
         else if (self.flags & FL_DUCKING)
         {
             self.view_ofs = PM_DUCK_VIEW_OFS;
+            self.pm_eye_h = PM_DUCK_VIEW_OFS_z;
         }
 
         return;
@@ -1026,8 +1094,15 @@ float PM_StepSlideMove(float in_air)
     vector  org;
     float   blocked;
     float   stepsize;
-    float   dx, dy;
+    vector  d;
     float   down_dist_sq, up_dist_sq;
+
+    // Gravity basis: gup = "up" (opposite gravity), gdir = "down".  When not gravity-shifted
+    // these are '0 0 1' / '0 0 -1', so every op below reduces EXACTLY to the classic world-Z
+    // stepping.  When shifted, "step up/down" and "how much ground we covered" are measured
+    // along/perpendicular to the new gravity, so stairs work on walls and ceilings.
+    vector gdir = self.gravshift_active ? self.gravitydir : '0 0 -1';
+    vector gup  = '0 0 0' - gdir;
 
     original_origin   = pm_origin;
     original_velocity = pm_velocity;
@@ -1044,14 +1119,14 @@ float PM_StepSlideMove(float in_air)
         if (!(blocked & PM_BLOCKED_STEP))
             return blocked;
 
-        org = (original_velocity_z < 0) ? pm_origin : original_origin;
-        PM_Trace(org, org - '0 0 1' * PM_STEPSIZE);
-        if (trace_fraction == 1 || trace_plane_normal_z < PM_MIN_STEP_NORMAL)
+        org = ((original_velocity * gup) < 0) ? pm_origin : original_origin;
+        PM_Trace(org, org + gdir * PM_STEPSIZE);
+        if (trace_fraction == 1 || (trace_plane_normal * gup) < PM_MIN_STEP_NORMAL)
             return blocked;
 
-        // Match pmove.c: shrink the upward retry by how far below us the
+        // Match pmove.c: shrink the upward retry by how far below us (along gravity) the
         // supporting floor actually is.
-        stepsize = PM_STEPSIZE - (org_z - trace_endpos_z);
+        stepsize = PM_STEPSIZE - ((org - trace_endpos) * gup);
         if (stepsize < 4)
             return blocked;
     }
@@ -1068,22 +1143,23 @@ float PM_StepSlideMove(float in_air)
     pm_origin   = original_origin;
     pm_velocity = original_velocity;
 
-    // step up
-    PM_Trace(pm_origin, pm_origin + '0 0 1' * stepsize);
+    // step up (against gravity)
+    PM_Trace(pm_origin, pm_origin + gup * stepsize);
     if (trace_startsolid && (blocked & PM_BLOCKED_STEP))
     {
         // Hull is flush with a wall face (NudgePosition grid-snapped us
         // onto the brush boundary).  Back off 0.125 units against our
         // movement direction and retry so the trace clears the seam.
         vector nudged = pm_origin - normalize(original_velocity) * 0.125;
-        PM_Trace(nudged, nudged + '0 0 1' * stepsize);
+        PM_Trace(nudged, nudged + gup * stepsize);
     }
     if (!trace_startsolid && !trace_allsolid)
         pm_origin = trace_endpos;
 
-    // in-air downward velocity zero (pmove.c does this before the elevated slide)
-    if (in_air && original_velocity_z < 0)
-        pm_velocity_z = 0;
+    // in-air downward velocity zero (pmove.c does this before the elevated slide) — clear
+    // the gravity-axis component only.
+    if (in_air && (original_velocity * gup) < 0)
+        pm_velocity -= gup * (pm_velocity * gup);
 
     // slide at the elevated height
     PM_SlideMove();
@@ -1098,8 +1174,8 @@ float PM_StepSlideMove(float in_air)
         return blocked;
     }
 
-    // step back down
-    PM_Trace(pm_origin, pm_origin - '0 0 1' * stepsize);
+    // step back down (along gravity)
+    PM_Trace(pm_origin, pm_origin + gdir * stepsize);
     // Revert if step-down landed us inside a solid entity (e.g. another
     // player's hull).  Without this we'd stay 18u elevated and re-enter
     // the same state every frame.
@@ -1107,10 +1183,10 @@ float PM_StepSlideMove(float in_air)
     {
         pm_origin     = down_origin;
         pm_velocity   = down_velocity;
-        pm_velocity_z = 0;
+        pm_velocity  -= gup * (pm_velocity * gup);
         return blocked;
     }
-    if (trace_fraction != 1 && trace_plane_normal_z < PM_MIN_STEP_NORMAL)
+    if (trace_fraction != 1 && (trace_plane_normal * gup) < PM_MIN_STEP_NORMAL)
     {
         // landed on a wall, not a floor – fall back to the flat path
         pm_origin   = down_origin;
@@ -1120,22 +1196,20 @@ float PM_StepSlideMove(float in_air)
     if (!trace_startsolid && !trace_allsolid)
         pm_origin = trace_endpos;
 
-    // reject if step landed us lower than we started (stepped into a dip)
-    if (pm_origin_z < original_origin_z)
+    // reject if step landed us lower than we started (stepped into a dip, along gravity)
+    if (((pm_origin - original_origin) * gup) < 0)
     {
         pm_origin   = down_origin;
         pm_velocity = down_velocity;
         return blocked;
     }
 
-    // --- 5. compare horizontal coverage of flat vs step paths ---
-    dx = down_origin_x - original_origin_x;
-    dy = down_origin_y - original_origin_y;
-    down_dist_sq = dx*dx + dy*dy;
+    // --- 5. compare coverage in the plane PERPENDICULAR to gravity ---
+    d = down_origin - original_origin;  d -= gup * (d * gup);
+    down_dist_sq = d * d;
 
-    dx = pm_origin_x - original_origin_x;
-    dy = pm_origin_y - original_origin_y;
-    up_dist_sq = dx*dx + dy*dy;
+    d = pm_origin - original_origin;    d -= gup * (d * gup);
+    up_dist_sq = d * d;
 
     if (down_dist_sq > up_dist_sq)
     {
@@ -1145,17 +1219,17 @@ float PM_StepSlideMove(float in_air)
         return blocked;
     }
 
-    // --- 6. step path was better: keep step position + step velocity,
-    //        but borrow z-velocity from the flat slide (pmove.c convention) ---
-    pm_velocity_z = down_velocity_z;
+    // --- 6. step path was better: keep step position + step velocity, but borrow the
+    //        gravity-axis velocity from the flat slide (pmove.c convention) ---
+    pm_velocity = pm_velocity - gup * (pm_velocity * gup) + gup * (down_velocity * gup);
 
-    // mid-air step penalty: lose a bit of horizontal speed proportional to
-    // how high we stepped (pmove.c)
+    // mid-air step penalty: lose a bit of IN-PLANE speed proportional to how high we
+    // stepped (along gravity) (pmove.c)
     if (!pm_onground && pm_waterlevel < 2 && (blocked & PM_BLOCKED_STEP))
     {
-        float scale = 1 - 0.01 * (pm_origin_z - original_origin_z);
-        pm_velocity_x *= scale;
-        pm_velocity_y *= scale;
+        float scale = 1 - 0.01 * ((pm_origin - original_origin) * gup);
+        vector vg = gup * (pm_velocity * gup);   // gravity-axis part (unchanged)
+        pm_velocity = vg + (pm_velocity - vg) * scale;
     }
 
     return blocked;
@@ -1582,7 +1656,16 @@ float PM_AirMove()
     else
     {
         // airborne – uses the separate air-acceleration value (GoldSrc-style)
-        PM_AirAccelerate(wishdir, wishspeed, mv_airaccelerate);
+        // sv_deastrafing: the undocumented Source 1/2 airstrafe penalty (absent
+        // in GoldSrc/CS1.6).  While airborne and rising slowly (0 < vz <= 140)
+        // Source forces the player's surface friction to 0.25, cutting air-accel
+        // to a quarter.  We only reach this branch when airborne (== Source's
+        // failed downward ground-trace gate); above 140 ("rapid") or while
+        // falling it stays full, exactly as in Source.
+        if (deastrafing && pm_velocity_z > 0 && pm_velocity_z <= 140)
+            PM_AirAccelerate(wishdir, wishspeed, mv_airaccelerate * 0.25);
+        else
+            PM_AirAccelerate(wishdir, wishspeed, mv_airaccelerate);
 
         // gravity — along self.gravitydir while gravity-shifting (gravity gun),
         // otherwise the normal scalar -Z.  (gravitydir '0 0 -1' == the old line.)
@@ -1632,7 +1715,9 @@ void PM_CategorizePosition()
         {
             pm_waterlevel = 2;
 
-            wpt_z = pm_origin_z + self.view_ofs_z;
+            // Full-vector eye point: view_ofs is composed along gravity-"up" while
+            // shifted (x/y are 0 otherwise, so this is identical when not shifted).
+            wpt   = pm_origin + self.view_ofs;
             cont  = pointcontents(wpt);
             if (cont <= CONTENT_WATER)
                 pm_waterlevel = 3;
@@ -1702,13 +1787,13 @@ void PM_CategorizePosition()
             vector full_mins = PM_CurrentMins();
             vector full_maxs = PM_CurrentMaxs();
             vector qmins, qmaxs;
-            vector gcheck_end = pm_origin - '0 0 2';
+            vector gcheck_end = pm_origin + gdir * 2;
 
             // -x, -y quadrant
             qmins = full_mins;
             qmaxs = [min(0, full_maxs_x), min(0, full_maxs_y), full_maxs_z];
             PM_TraceHull(pm_origin, qmins, qmaxs, gcheck_end);
-            if (trace_fraction < 1 && trace_plane_normal_z >= PM_MIN_STEP_NORMAL)
+            if (trace_fraction < 1 && (trace_plane_normal * gup) >= PM_MIN_STEP_NORMAL)
                 found_ground = TRUE;
 
             if (!found_ground)
@@ -1717,7 +1802,7 @@ void PM_CategorizePosition()
                 qmins = [max(0, full_mins_x), max(0, full_mins_y), full_mins_z];
                 qmaxs = full_maxs;
                 PM_TraceHull(pm_origin, qmins, qmaxs, gcheck_end);
-                if (trace_fraction < 1 && trace_plane_normal_z >= PM_MIN_STEP_NORMAL)
+                if (trace_fraction < 1 && (trace_plane_normal * gup) >= PM_MIN_STEP_NORMAL)
                     found_ground = TRUE;
             }
 
@@ -1727,7 +1812,7 @@ void PM_CategorizePosition()
                 qmins = [full_mins_x, max(0, full_mins_y), full_mins_z];
                 qmaxs = [min(0, full_maxs_x), full_maxs_y, full_maxs_z];
                 PM_TraceHull(pm_origin, qmins, qmaxs, gcheck_end);
-                if (trace_fraction < 1 && trace_plane_normal_z >= PM_MIN_STEP_NORMAL)
+                if (trace_fraction < 1 && (trace_plane_normal * gup) >= PM_MIN_STEP_NORMAL)
                     found_ground = TRUE;
             }
 
@@ -1737,7 +1822,7 @@ void PM_CategorizePosition()
                 qmins = [max(0, full_mins_x), full_mins_y, full_mins_z];
                 qmaxs = [full_maxs_x, min(0, full_maxs_y), full_maxs_z];
                 PM_TraceHull(pm_origin, qmins, qmaxs, gcheck_end);
-                if (trace_fraction < 1 && trace_plane_normal_z >= PM_MIN_STEP_NORMAL)
+                if (trace_fraction < 1 && (trace_plane_normal * gup) >= PM_MIN_STEP_NORMAL)
                     found_ground = TRUE;
             }
         }
@@ -1766,6 +1851,15 @@ void PM_CheckJump()
     float jump_down;
 
     jump_down = input_buttons & PM_BTN_JUMP;
+
+    // In a car the jump button is the HANDBRAKE (captured server-side as car_in_brake BEFORE PM_PlayerMove),
+    // so it must NOT fire a real jump or drain stamina.  The driver is frozen (MOVETYPE_NONE) so nothing
+    // visibly jumps, but PM_CheckJump would still run the stamina cost — gate it out on both sides.
+    if (self.pm_incar)
+    {
+        self.pm_jump_held = jump_down;   // keep the latch coherent so exiting doesn't buffer a jump
+        return;
+    }
 
     // flying players jump via PM_FlyMove
     if (self.pm_movetype == PM_MOVETYPE_FLY)
@@ -1809,8 +1903,9 @@ void PM_CheckJump()
         else
             eject_dir = -pm_ladder_normal;  // wall ahead – reverse
 
-        pm_velocity               = eject_dir * 270;
-        pm_velocity_z             = 0;    // GoldSrc: purely horizontal, gravity takes over
+        vector lgup = '0 0 0' - (self.gravshift_active ? self.gravitydir : '0 0 -1');
+        pm_velocity   = eject_dir * 270;
+        pm_velocity  -= lgup * (pm_velocity * lgup);   // GoldSrc: no push along gravity; gravity takes over
         pm_onground               = FALSE;
         self.pm_jump_held         = TRUE;
         self.pm_ladder_detach_time = 0.1;
@@ -1831,12 +1926,9 @@ void PM_CheckJump()
     // in water – do a water-jump
     if (pm_waterlevel >= 2)
     {
-        if (pm_watertype == CONTENT_WATER)
-            pm_velocity_z = 100;
-        else if (pm_watertype == CONTENT_SLIME)
-            pm_velocity_z = 80;
-        else
-            pm_velocity_z = 50;
+        vector wgup = '0 0 0' - (self.gravshift_active ? self.gravitydir : '0 0 -1');
+        float wj = (pm_watertype == CONTENT_WATER) ? 100 : (pm_watertype == CONTENT_SLIME ? 80 : 50);
+        pm_velocity = pm_velocity - wgup * (pm_velocity * wgup) + wgup * wj;   // hop out along "up"
 
         pm_onground = FALSE;
         return;
@@ -2646,6 +2738,18 @@ void PM_ReadMovevars()
     mv_airaccelerate     = PM_ReadMovevar("sv_airaccelerate", 150);
 #endif
     if (!mv_airaccelerate)    mv_airaccelerate     = mv_accelerate;
+
+    // sv_deastrafing (default 1): the Source-engine airstrafe penalty (see the
+    // air branch of PM_AirMove).  It's a default-ON toggle, so read it DIRECTLY
+    // with a fallback of 1 — NOT via PM_ReadMovevar / the movevar cache, which
+    // collapse an explicit 0 back to the fallback (PM_ReadMovevarUncached) and
+    // would resurrect `sv_deastrafing 0` to 1 on clients.  Matches the mod's
+    // other default-on reads (sv_gunkick, mp_noblock).
+#ifdef CSQC
+    deastrafing = (serverkeyfloat("sv_deastrafing", 1) != 0);
+#else
+    deastrafing = (cvar("sv_deastrafing") != 0);
+#endif
 
 #ifdef CSQC
     mv_wateraccelerate   = pm_mv_cache_wateraccelerate;
@@ -4872,6 +4976,7 @@ void PM_PlayerMoveStep()
     }
 
     PM_CheckDuck();
+    PM_ComposeEyeOfs();   // rotate the duck-animated eye height along gravity-"up"
     PM_CheckLadder();
 
     // check for wall-launched water jump (waist-deep)
@@ -5331,21 +5436,78 @@ void() PM_NoblockRestore =
 // Each player (server) and the predicted local player (client) reads the global dir
 // into self.gravitydir, so everyone falls/walks the same way and every client's view
 // tilts to match.  Runs at the top of PM_PlayerMove, before the move uses gravitydir.
+// Apply the resolved global gravity dir to THIS player (runs identically on server + client
+// predict).  Flips self.gravshift_active and re-sizes the collision hull on the edge: a
+// symmetric CUBE while shifted (so it collides sanely in any gravity direction), the normal
+// tall hull otherwise.  Growing back to the tall hull is guarded so we never get stuck inside
+// a low ceiling we wall-walked under.
+void(vector ndir) GravShift_Apply =
+{
+    if (ndir != '0 0 0')
+    {
+        float  was = self.gravshift_active;
+        vector od  = self.gravitydir;
+        self.gravitydir       = ndir;
+        self.gravshift_active = 1;
+        // Fit-test the full axis-swapped hull on engage / direction change (it can GROW
+        // along a new axis, e.g. tall-Z -> tall-X in a narrow corridor).  While in the
+        // cube fallback, keep retrying so the player grows to full height as soon as
+        // there's room.
+        if (!was || od != ndir || self.gravshift_hull_cube)
+        {
+            self.gravshift_hull_cube = 0;
+            tracebox(self.origin, PM_CurrentMins(), PM_CurrentMaxs(), self.origin, MOVE_NORMAL, self);
+            if (trace_startsolid)
+                self.gravshift_hull_cube = 1;
+            PM_SyncHull();
+            PM_ComposeEyeOfs();          // eye flips to the new "up" the same tick
+        }
+    }
+    else if (self.gravshift_active)
+    {
+        self.gravshift_active = 0;         // PM_CurrentMins/Maxs now report the normal hull
+        tracebox(self.origin, PM_CurrentMins(), PM_CurrentMaxs(), self.origin, MOVE_NORMAL, self);
+        if (trace_startsolid)
+            self.gravshift_active = 1;      // no room to restore yet -> keep the shifted hull, retry
+        else
+        {
+            self.gravitydir          = '0 0 -1';
+            self.gravshift_hull_cube = 0;
+            PM_SyncHull();                  // -> tall/duck hull
+            PM_ComposeEyeOfs();             // eye back to world-up
+        }
+    }
+};
+
 void() GravShift_UpdateActivation =
 {
 #ifdef SSQC
     // SERVER: one owner drives the global dir — latch their look-dir on the press,
     // clear on release.  Auto-clear a stale owner (disconnect / stopped sending).
-    float want = (self.weapon == WEP_GRAVITYGUN && (input_buttons & PM_BTN_GRAVSHIFT) && !self.is_dead) ? 1 : 0;
+    // Auto-clear the toggle when not holding the gravgun or while dead, so the shift never
+    // auto-resumes on weapon re-select or respawn (impulse 7 must be pressed again).
+    if (self.weapon != WEP_GRAVITYGUN || self.is_dead)
+        self.gravshift_toggle = 0;
+    float want = (self.weapon == WEP_GRAVITYGUN && self.gravshift_toggle && !self.is_dead) ? 1 : 0;
     if (want)
     {
         if (gravshift_owner == world)       // claim ownership + latch the faced dir
         {
             vector dir;
             makevectors(input_angles);
-            dir   = v_forward;
-            dir_z = 0;                       // horizontal -> fall toward the wall faced
-            dir   = normalize(dir);
+            dir = normalize(v_forward);      // full look dir, incl. up (invert)
+            // Snap to the nearest of the 6 CARDINAL axes.  Everything downstream —
+            // movement, props, model rotation, view tilt, and above all the axis-swapped
+            // player hull — is exact for cardinal gravity, so the player keeps FULL
+            // standing height on walls/ceilings instead of the old approximate cube.
+            vector adir;
+            adir_x = fabs(dir_x);  adir_y = fabs(dir_y);  adir_z = fabs(dir_z);
+            if (adir_x >= adir_y && adir_x >= adir_z)
+                dir = [(dir_x < 0) ? -1 : 1, 0, 0];
+            else if (adir_y >= adir_z)
+                dir = [0, (dir_y < 0) ? -1 : 1, 0];
+            else
+                dir = [0, 0, (dir_z < 0) ? -1 : 1];
             if (dir != '0 0 0')
             {
                 gravshift_owner     = self;
@@ -5369,30 +5531,11 @@ void() GravShift_UpdateActivation =
     // at StartFrame, NOT here — a localcmd serverinfo issued mid-client-command
     // processing corrupts the message stream.  The arbiter just sets the global.)
     // Apply the global dir to THIS player (everyone in the server shifts).
-    if (gravshift_world_dir != '0 0 0')
-    {
-        self.gravitydir       = gravshift_world_dir;
-        self.gravshift_active = 1;
-    }
-    else if (self.gravshift_active)
-    {
-        self.gravshift_active = 0;
-        self.gravitydir       = '0 0 -1';
-    }
+    GravShift_Apply(gravshift_world_dir);
 #else
     // CLIENT: read the broadcast global dir and apply to the predicted player so its
     // movement (and the engine's gravitydir view tilt) matches the server.
-    vector ndir = stov(serverkey("gravdir"));
-    if (ndir != '0 0 0')
-    {
-        self.gravitydir       = ndir;
-        self.gravshift_active = 1;
-    }
-    else if (self.gravshift_active)
-    {
-        self.gravshift_active = 0;
-        self.gravitydir       = '0 0 -1';
-    }
+    GravShift_Apply(stov(serverkey("gravdir")));
 #endif
 };
 
@@ -5431,6 +5574,22 @@ void PM_PlayerMove()
         // back via the proxy, recovering from any desync without a reconnect.
         if (self.driving == world)
             self.pm_driving = FALSE;
+        else
+            input_movevalues = '0 0 0';
+    }
+#endif
+
+    // prop_car: zero the driver's walk input so the hidden body stays pinned to the seat.
+    // CRITICAL: SERVER-ONLY (exactly like the pm_driving lock above).  If the CLIENT also
+    // zeroed input_movevalues, its *sent* usercmd would carry 0 movement, so the server's
+    // throttle capture (sv_player.qc) would read fwd=0 every tick and the car would never
+    // drive.  The client keeps sending real WASD; the driver's predicted walk is invisible
+    // (alpha -1, camera follows the car mirror) and the server seat-pin corrects it.
+#ifdef SSQC
+    if (self.pm_incar)
+    {
+        if (self.car_driving == world)
+            self.pm_incar = FALSE;
         else
             input_movevalues = '0 0 0';
     }

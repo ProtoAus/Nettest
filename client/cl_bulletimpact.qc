@@ -73,6 +73,7 @@ float debris_effect_rock;   // stone chunks  (mode 0)
 float debris_effect_dirt;   // dirt chunks   (mode 1)
 float debris_effect_dust;   // expanding dust cloud (shared)
 float debris_effect_spark;  // hot sparks    (shared)
+float exitsmoke_effect;     // bullet wall-bang EXIT dust puff (weapons.exitsmoke)
 // Per-shot debris-burst counter, capped by cl_impact_debris_per_shot — keeps
 // shotgun pellet loops / penetration from multiplying the debris.  Scoped to a
 // single trigger pull by debris_last_action_id below (NOT CSQC_Impact_ResetShot,
@@ -434,6 +435,7 @@ void(vector pos) CSQC_SpawnExplodeSprite =
     setmodel(spr, "gfx/fexplo.spr");
     spr.drawmask  = MASK_ENGINE;
     spr.effects   = EF_ADDITIVE;
+    spr.renderflags = RF_NOSHADOW;   // an explosion FLASH casting a shadow reads absurd (r_shadows 2)
     spr.frame     = 0;
     spr.think     = CSQC_ExplodeSpriteThink;
     spr.nextthink = time + 0.05;
@@ -453,8 +455,11 @@ void() CSQC_DrawImpactLights =
 
     impact_scale = bound(0, cvar("cl_impact_light_scale"), 2);
 
-    // Transient combat flashes don't need cast shadows; a shadow-casting dlight
-    // re-skins every entity in its volume each frame.  See cl_combat_light_shadows.
+    // A shadow-casting dlight re-projects every entity in its volume each frame.
+    // Impact flashes are 0.06s flickers, so their cast shadows are pure noise that
+    // reads as "the impact smoke casts a shadow" — force them OFF regardless of the
+    // cvar (see the impact loop below).  cl_combat_light_shadows still governs the
+    // steadier EXPLOSION lights via lflags.
     float lflags = cvar("cl_combat_light_shadows") ? 0 : PFLAGS_NOSHADOW;
 
     for (i = 0; i < IMPACT_LIGHT_MAX; i++)
@@ -473,7 +478,7 @@ void() CSQC_DrawImpactLights =
         if (impact_scale > 0 && gate)
             dynamiclight_add(impact_light_pos[i],
                              IMPACT_LIGHT_RADIUS * impact_scale * frac,
-                             '1 0.7 0.3' * frac, 0, "", lflags);
+                             '1 0.7 0.3' * frac, 0, "", PFLAGS_NOSHADOW);  // never cast (0.06s flicker = noise)
     }
 
     // Explosion lights — same per-frame fade. Color skewed warm-orange
@@ -921,6 +926,368 @@ void(vector pos, vector normal) CSQC_SpawnImpactDebris =
         pointparticles(debris_effect_spark, pos, dir, 1);
 };
 
+// Bullet wall-bang EXIT dust smoke — spawned where a PENETRATING shot LEAVES the
+// far face (never on entries; the caller gates on a non-zero exit_dir + non-flesh).
+// `dir` is the bullet's SHOT LINE out the far face (eye->exit), so puffs spray along
+// the actual exit angle — an angled shot sprays out at that angle, not perpendicular
+// to the wall.  Escalates VELOCITY (dir magnitude, via the effect's `veladd 1`) AND
+// SIZE (per-puff particle count — a denser plume reads as bigger) across N puffs, each
+// staggered further out; the weapons.exitsmoke recipe owns the spin/expand/fade.
+void(vector pos, vector dir) CSQC_BulletExitSmoke =
+{
+    if (!cvar("cl_impact_exitsmoke"))
+        return;
+
+    vector d = normalize(dir);
+    if (d == '0 0 0')
+        return;
+
+    exitsmoke_effect = Debris_Resolve(exitsmoke_effect, "weapons.exitsmoke");
+    if (exitsmoke_effect == 0)
+        return;
+
+    float n = cvar("cl_impact_exitsmoke_count");
+    if (n <= 0) n = 4;
+
+    float i;
+    for (i = 0; i < n; i = i + 1)
+    {
+        float speed = 25 + (i / n) * 85;          // each successive puff LEAVES FASTER
+        float dens  = 1 + i;                       // ...and THICKER/BIGGER (denser plume)
+        vector ppos = pos + d * (2 + i * 1.5);     // staggered outward ALONG the shot line
+        pointparticles(exitsmoke_effect, ppos, d * speed, dens);
+    }
+};
+
+// ============================================================================
+//  Penetration-exit debris CHIPS — small material-matched IQM chips thrown out
+//  the far face alongside the exit smoke (models/gibs/<mat>/<mat>_debris.iqm,
+//  9 geomset variants per set, authored 5x + near-uniform so the random .scale
+//  — not the bake — decides in-game size).
+//  Purely cosmetic client entities: MOVETYPE_BOUNCE like the breakable gibs,
+//  then a predraw alpha fade + remove (no gib in the mod fades — chips do).
+//  classname "csqc_debris" so the round-restart sweep (CSQC_ShellsWipeAll)
+//  clears them with the shells/gibs for free.
+// ============================================================================
+
+.float chip_expire;             // time this chip finishes fading + removes
+float chips_last_action_id;     // per-shot cap scope (mirrors debris_last_action_id)
+float chips_per_shot_count;
+float chip_models_loaded;       // lazy one-shot precache guard (CSQC_LoadDebrisModels pattern)
+
+void() CSQC_LoadImpactChipModels =
+{
+    if (chip_models_loaded)
+        return;
+    precache_model("models/gibs/wood/wood_debris.iqm");
+    precache_model("models/gibs/rock/rock_debris.iqm");
+    precache_model("models/gibs/glass/glass_debris.iqm");
+    precache_model("models/gibs/metal/metal_debris.iqm");
+    chip_models_loaded = TRUE;
+};
+
+// Material -> chip set.  Flesh never reaches here (caller gate); anything that
+// isn't wood/glass/metal reads as masonry -> rock chips.
+string(float mat) Chip_ModelForMat =
+{
+    if (mat == IMPACT_MAT_WOOD)  return "models/gibs/wood/wood_debris.iqm";
+    if (mat == IMPACT_MAT_GLASS) return "models/gibs/glass/glass_debris.iqm";
+    if (mat == IMPACT_MAT_METAL || mat == IMPACT_MAT_METAL_NODECAL)
+        return "models/gibs/metal/metal_debris.iqm";
+    return "models/gibs/rock/rock_debris.iqm";
+};
+
+// PARTICLE MODE (cl_impact_chips_mode 1): per-material engine effects
+// (weapons.impactchips_* in particles/impacts.cfg — the 9 variants are baked
+// as separate <mat>_debris1..9.iqm files there, since model-particles can't
+// pick geomsets).  Lazily resolved like the other impact effects.
+float chipfx_wood;
+float chipfx_rock;
+float chipfx_glass;
+float chipfx_metal;
+float chipfx_wood_entry;    // entry-side spall variants (slower, wide-cone configs)
+float chipfx_rock_entry;
+float chipfx_glass_entry;
+float chipfx_metal_entry;
+
+float(float mat, float entry) ChipFx_ForMat =
+{
+    if (mat == IMPACT_MAT_WOOD)
+    {
+        if (entry)
+        {
+            chipfx_wood_entry = Debris_Resolve(chipfx_wood_entry, "weapons.impactchips_wood_entry");
+            return chipfx_wood_entry;
+        }
+        chipfx_wood = Debris_Resolve(chipfx_wood, "weapons.impactchips_wood");
+        return chipfx_wood;
+    }
+    if (mat == IMPACT_MAT_GLASS)
+    {
+        if (entry)
+        {
+            chipfx_glass_entry = Debris_Resolve(chipfx_glass_entry, "weapons.impactchips_glass_entry");
+            return chipfx_glass_entry;
+        }
+        chipfx_glass = Debris_Resolve(chipfx_glass, "weapons.impactchips_glass");
+        return chipfx_glass;
+    }
+    if (mat == IMPACT_MAT_METAL || mat == IMPACT_MAT_METAL_NODECAL)
+    {
+        if (entry)
+        {
+            chipfx_metal_entry = Debris_Resolve(chipfx_metal_entry, "weapons.impactchips_metal_entry");
+            return chipfx_metal_entry;
+        }
+        chipfx_metal = Debris_Resolve(chipfx_metal, "weapons.impactchips_metal");
+        return chipfx_metal;
+    }
+    if (entry)
+    {
+        chipfx_rock_entry = Debris_Resolve(chipfx_rock_entry, "weapons.impactchips_rock_entry");
+        return chipfx_rock_entry;
+    }
+    chipfx_rock = Debris_Resolve(chipfx_rock, "weapons.impactchips_rock");
+    return chipfx_rock;
+};
+
+// ---------------------------------------------------------------------------
+// WALL-TEXTURE chips (cl_impact_chips_walltex, entity mode only): sample the
+// struck surface's texture name at the TRUE hit point and dress the chip in it
+// via `.forceshader` — ONE shader handle overrides every surface on the model
+// (gl_alias.c picks e->forcedshader over the skin), and it composes with the
+// setcustomskin geomset pick (independent visedict fields), so the chosen
+// variant mesh simply renders with the wall's texture.
+//
+// The shader is registered per texture as "chipwall_<name>" — the mod's first
+// `rgbgen lightingdiffuse` body (model lighting) + `alphagen entity` +
+// blendFunc so the predraw fade keeps working (a custom forceshader does NOT
+// inherit the default skin path's implicit entity-alpha handling).
+// shaderforname is idempotent and re-called on every burst, so a vid_restart
+// re-registers automatically (the P79 dangling-shader lesson).
+//
+// Availability gate: the loose textures/<name>.png must exist (fopen reads
+// through the whole VFS incl. pk3 — the whichpack-misses-loose-files trap; the
+// WAD pipeline ships every mod wall texture flat).  Missing image (mounted-map
+// content etc.) -> return 0 -> the painted chip texture, never a checkerboard.
+// Results are memoized in a tiny ring (getsurfacetexture returns a TEMPSTRING,
+// so cache entries are strzone'd).
+// ---------------------------------------------------------------------------
+
+const float CHIPWALL_CACHE = 24;
+string chipwall_names[24];      // literal dim MUST equal CHIPWALL_CACHE
+float  chipwall_ok[24];
+float  chipwall_count;
+
+float(string tex) Chip_WallTexUsable =
+{
+    float seen = chipwall_count;
+    if (seen > CHIPWALL_CACHE) seen = CHIPWALL_CACHE;
+    float i;
+    for (i = 0; i < seen; i = i + 1)
+        if (chipwall_names[i] == tex)
+            return chipwall_ok[i];
+
+    float fh = fopen(strcat("textures/", tex, ".png"), FILE_READ);
+    float ok = 0;
+    if (fh >= 0)
+    {
+        ok = 1;
+        fclose(fh);
+    }
+
+    float slot = chipwall_count - floor(chipwall_count / CHIPWALL_CACHE) * CHIPWALL_CACHE;
+    if (chipwall_names[slot] != "")
+        strunzone(chipwall_names[slot]);
+    chipwall_names[slot] = strzone(tex);
+    chipwall_ok[slot]    = ok;
+    chipwall_count       = chipwall_count + 1;
+    return ok;
+};
+
+// Returns a shader handle to force onto the chips, or 0 = use the painted set.
+float(entity e, vector p) Chip_WallShader =
+{
+    if (e != world && wasfreed(e))     // breakable shattered mid-flight -> sample the world behind it
+        e = world;
+    string tex = Surf_TexAtPoint(e, p);   // TEMPSTRING — consume before the pool churns
+    if (tex == "")
+        return 0;
+    if (!Chip_WallTexUsable(tex))
+        return 0;
+
+    // GoldSrc '{'-masked textures: a shader NAME must not start with '{' (the
+    // block-open token — the spray/infodecal lesson); key on the stem and
+    // alphatest the masked pixels.  With alphagen entity the fade drops below
+    // the GE128 test halfway through — an early pop-out, acceptable for spall.
+    float masked  = (substring(tex, 0, 1) == "{");
+    string stem   = masked ? substring(tex, 1, strlen(tex) - 1) : tex;
+    string mask_l = masked ? "\t\talphaFunc GE128\n" : "";
+
+    string body = sprintf(
+        "{\n\t{\n%s\t\trgbgen lightingdiffuse\n\t\talphagen entity\n\t\tblendFunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA\n\t\tmap \"textures/%s.png\"\n\t}\n}",
+        mask_l, tex);
+    return shaderforname(strcat("chipwall_", stem), body);
+};
+
+// Per-frame: fade the chip's last 0.8s to transparent, then remove.  Never sets
+// alpha to exactly 0 (FTE treats 0 as "unset" = opaque); left > 0 is guaranteed
+// on the fade branch and the entity is removed the frame it expires.
+// MUST return PREDRAW_AUTOADD on the visible path — PREDRAW_NEXT means "skip
+// drawing entirely" (for removed/explicitly-addentity'd ents) and left the
+// chips simulated but invisible.
+float() CSQC_ImpactChipPredraw =
+{
+    float left = self.chip_expire - time;
+    if (left <= 0)
+    {
+        remove(self);
+        return PREDRAW_NEXT;
+    }
+    if (left < 0.8)
+        self.alpha = left / 0.8;
+    return PREDRAW_AUTOADD;    // engine addentity(self)'s the chip for us
+};
+
+// Entry-side per-shot cap state — SEPARATE from the exit counters so a wallbang
+// shows BOTH its entry burst and its exit burst (a shared counter would let
+// whichever fires first consume the other's cap).
+float entry_chips_last_action_id;
+float entry_chips_per_shot_count;
+
+// Throw a burst of chips.  Two flavours sharing one spawner:
+//   EXIT  (entry=FALSE): `dir` = the bullet's shot line out the far face (same
+//         vector the exit smoke sprays along) — fast, fairly straight.
+//   ENTRY (entry=TRUE):  `dir` = the struck surface's normal — slow SPALL back
+//         out of the wall in a much wider random cone ("comes back at you").
+// Per-shot capped per SIDE (shotguns/multi-wall penetrations don't multiply;
+// remote impacts pass action == -1 = one burst per event).
+// `wallshader` (entity mode): non-zero = a chipwall_* shader handle sampled from
+// the struck surface — forced onto each chip so it "wears the wall"; 0 = painted.
+void(vector pos, vector dir, float mat, float action, float entry, float wallshader) CSQC_SpawnImpactChips =
+{
+    float allow = 1;
+    if (action != -1)
+    {
+        float cap = cvar("cl_impact_chips_per_shot");
+        if (entry)
+        {
+            if (action != entry_chips_last_action_id)
+            {
+                entry_chips_last_action_id = action;
+                entry_chips_per_shot_count = 0;
+            }
+            allow = (cap <= 0 || entry_chips_per_shot_count < cap);
+            if (allow)
+                entry_chips_per_shot_count = entry_chips_per_shot_count + 1;
+        }
+        else
+        {
+            if (action != chips_last_action_id)
+            {
+                chips_last_action_id = action;
+                chips_per_shot_count = 0;
+            }
+            allow = (cap <= 0 || chips_per_shot_count < cap);
+            if (allow)
+                chips_per_shot_count = chips_per_shot_count + 1;
+        }
+    }
+    if (!allow)
+        return;
+
+    vector d = normalize(dir);
+    if (d == '0 0 0')
+        return;
+
+    // per-side tuning: entry = slow + wide, exit = fast + fairly straight
+    float force;
+    float n;
+    if (entry)
+    {
+        force = cvar("cl_impact_chips_entry_force");
+        if (force <= 0) force = 70;
+        n = cvar("cl_impact_chips_entry_count");
+    }
+    else
+    {
+        force = cvar("cl_impact_chips_force");
+        if (force <= 0) force = 260;
+        n = cvar("cl_impact_chips_count");
+    }
+    if (n <= 0) n = 2;
+
+    // MODE 1: engine model-particles — the chips become temp-entities simulated
+    // in C (hardcoded gravity/bounce/rest + linear fade; see particles/impacts.cfg).
+    // dir carries the launch speed (effect veladd 1); the count arg = burst size;
+    // the _entry effect variants carry the wider scatter in their config.
+    // Falls through to the entity path if the effect config isn't loaded.
+    if (cvar("cl_impact_chips_mode") == 1)
+    {
+        float fx = ChipFx_ForMat(mat, entry);
+        if (fx != 0)
+        {
+            pointparticles(fx, pos, d * force, n);
+            return;
+        }
+    }
+
+    CSQC_LoadImpactChipModels();
+    string mdl = Chip_ModelForMat(mat);
+
+    float life = cvar("cl_impact_chips_life");
+    if (life <= 0) life = 10;
+    float smin = cvar("cl_impact_chips_scale_min");
+    float smax = cvar("cl_impact_chips_scale_max");
+    if (smin <= 0) smin = 0.16;
+    if (smax < smin) smax = smin;
+
+    float i;
+    for (i = 0; i < n; i = i + 1)
+    {
+        entity chip = spawn();
+        chip.classname = "csqc_debris";           // swept by CSQC_ShellsWipeAll on round restart
+        setmodel(chip, mdl);
+        // pick one of the 9 authored variants (geomsets baked by iqmtool; 0-BASED —
+        // id 0 is also the engine default, so an unpicked chip still shows variant 0)
+        setcustomskin(chip, "", strcat("geomset 0 ", ftos(floor(random() * 9)), "\n"));
+        if (wallshader > 0)
+            chip.forceshader = wallshader;   // wear the wall's texture (composes with the geomset pick)
+        setsize(chip, '0 0 0', '0 0 0');
+        setorigin(chip, pos);
+
+        chip.scale     = smin + random() * (smax - smin);
+        chip.movetype  = MOVETYPE_BOUNCE;
+        chip.solid     = SOLID_NOT;
+        chip.drawmask  = MASK_ENGINE;
+        chip.renderflags = cvar("cl_debris_shadows") ? 0 : RF_NOSHADOW;  // cast into the r_shadows-2 map
+                               // (one tiny extra depth draw per chip).  NOTE: cl_impact_chips_mode 1
+                               // (particle-model path) stays shadowless — engine model-particles default RF_NOSHADOW.
+        chip.alpha     = 1;
+        if (entry)
+        {
+            // spall: weak launch out of the wall, scatter LARGE relative to the
+            // speed (lateral jitter greater than the base speed itself = wide cone)
+            chip.velocity  = d * (force * (0.5 + random() * 0.8));
+            chip.velocity_x += (random() - 0.5) * force * 1.2;
+            chip.velocity_y += (random() - 0.5) * force * 1.2;
+            chip.velocity_z += 30 + random() * 40;
+        }
+        else
+        {
+            // exit: fast along the shot line, slight jitter, small up-bias arc
+            chip.velocity  = d * (force * (0.7 + random() * 0.6));
+            chip.velocity_x += (random() - 0.5) * 60;
+            chip.velocity_y += (random() - 0.5) * 60;
+            chip.velocity_z += 40 + random() * 50;
+        }
+        chip.avelocity = [random() * 600, random() * 600, random() * 600];
+
+        chip.chip_expire = time + life + random() * 3;   // stagger so a burst doesn't blink out together
+        chip.predraw     = CSQC_ImpactChipPredraw;
+    }
+};
+
 // ============================================================================
 //  Tracer-synced delayed impact cosmetics
 // ----------------------------------------------------------------------------
@@ -945,19 +1312,46 @@ float  pend_water[PEND_MAX];
 float  pend_play_ric[PEND_MAX];
 float  pend_arrival[PEND_MAX];
 float  pend_active[PEND_MAX];
+vector pend_exit_dir[PEND_MAX];  // non-zero = penetration exit; also the shot dir the smoke sprays along
 
 // Fire the VISIBLE impact cosmetics at `pos`.  Extracted verbatim from the old
 // inline CSQC_BulletImpact body so the look is identical — only the call timing
 // changes.  `ent` is re-validated (wasfreed) before a breakable decal attaches.
-void(vector pos, vector normal, float mat, float metalphys, float action, entity ent, float play_ric) CSQC_FireImpactCosmetics =
+void(vector pos, vector normal, float mat, float metalphys, float action, entity ent, float play_ric, vector exit_dir) CSQC_FireImpactCosmetics =
 {
     float r;
     vector offset_pos = pos + normal * Impact_ParticleOffset();
 
     Impact_SpawnParticles(offset_pos, normal, mat);
 
+    // Wall-texture chips: sample the struck surface ONCE per impact event, at the
+    // TRUE hit point (pre-offset — getsurfacenearpoint wants a point ON the wall).
+    // Entity mode only; 0 = painted chip textures (also the mode-1/missing-image path).
+    float chip_wallshader = 0;
+    if (cvar("cl_impact_chips") && cvar("cl_impact_chips_walltex")
+        && cvar("cl_impact_chips_mode") != 1
+        && mat != IMPACT_MAT_FLESH && mat != IMPACT_MAT_FLESH_LETHAL)
+        chip_wallshader = Chip_WallShader(ent, pos);
+
+    // Wall-bang EXIT: escalating dust smoke out the far face.  Only on the
+    // penetration-exit impact (non-zero exit_dir = the shot line), not through flesh (that's blood).
+    if (exit_dir != '0 0 0' && mat != IMPACT_MAT_FLESH && mat != IMPACT_MAT_FLESH_LETHAL)
+    {
+        CSQC_BulletExitSmoke(offset_pos, exit_dir);
+        // nettest: material-matched debris chips thrown out the exit alongside the smoke
+        if (cvar("cl_impact_chips"))
+            CSQC_SpawnImpactChips(offset_pos, exit_dir, mat, action, FALSE, chip_wallshader);
+    }
+
     if (!metalphys && mat != IMPACT_MAT_FLESH && mat != IMPACT_MAT_FLESH_LETHAL)
     {
+        // nettest: ENTRY-side chip spall — slow, wide-cone chips back out of the wall
+        // on every impact.  Gated to NON-exit events (exit_dir zero) so the exit hole
+        // doesn't stack spall on top of its own fast exit burst; the entry impact of a
+        // wallbang is its own event and still sprays.  Own per-shot cap inside.
+        if (exit_dir == '0 0 0' && cvar("cl_impact_chips") && cvar("cl_impact_chips_entry"))
+            CSQC_SpawnImpactChips(offset_pos, normal, mat, action, TRUE, chip_wallshader);
+
         float allow_debris = 1;
         if (action != -1)   // -1 = no per-shot cap (remote impacts: each its own event)
         {
@@ -1000,12 +1394,12 @@ void(vector pos, vector normal, float mat, float metalphys, float action, entity
 
 // Park an impact to fire at `arrival` — or fire it NOW if there's no meaningful
 // delay (tracers/delay off, or point-blank).
-void(vector pos, vector normal, float mat, float metalphys, float action, entity ent, float water, float play_ric, float arrival) CSQC_EnqueueImpact =
+void(vector pos, vector normal, float mat, float metalphys, float action, entity ent, float water, float play_ric, float arrival, vector exit_dir) CSQC_EnqueueImpact =
 {
     if (arrival <= cltime + 0.002)
     {
         if (water) CSQC_Rain_SpawnBulletWaterSplash(pos);
-        else       CSQC_FireImpactCosmetics(pos, normal, mat, metalphys, action, ent, play_ric);
+        else       CSQC_FireImpactCosmetics(pos, normal, mat, metalphys, action, ent, play_ric, exit_dir);
         return;
     }
     float i; float slot = -1;
@@ -1019,7 +1413,7 @@ void(vector pos, vector normal, float mat, float metalphys, float action, entity
             if (pend_arrival[i] < pend_arrival[slot]) slot = i;
         if (pend_water[slot]) CSQC_Rain_SpawnBulletWaterSplash(pend_pos[slot]);
         else CSQC_FireImpactCosmetics(pend_pos[slot], pend_normal[slot], pend_mat[slot],
-                                      pend_metalphys[slot], pend_action[slot], pend_ent[slot], pend_play_ric[slot]);
+                                      pend_metalphys[slot], pend_action[slot], pend_ent[slot], pend_play_ric[slot], pend_exit_dir[slot]);
     }
     pend_active[slot]    = 1;
     pend_pos[slot]       = pos;
@@ -1031,6 +1425,7 @@ void(vector pos, vector normal, float mat, float metalphys, float action, entity
     pend_water[slot]     = water;
     pend_play_ric[slot]  = play_ric;
     pend_arrival[slot]   = arrival;
+    pend_exit_dir[slot]  = exit_dir;
 };
 
 // Per-frame drain — called next to CSQC_DrawImpactLights.  Fires any parked
@@ -1047,14 +1442,14 @@ void() CSQC_ProcessPendingImpacts =
             CSQC_Rain_SpawnBulletWaterSplash(pend_pos[i]);
         else
             CSQC_FireImpactCosmetics(pend_pos[i], pend_normal[i], pend_mat[i],
-                                     pend_metalphys[i], pend_action[i], pend_ent[i], pend_play_ric[i]);
+                                     pend_metalphys[i], pend_action[i], pend_ent[i], pend_play_ric[i], pend_exit_dir[i]);
     }
 };
 
 // Full bullet impact: particles + light + ricochet sound
 // Called from hitscan prediction (CSQC_PredictedImpact / ShotgunImpact)
 
-void(vector pos, vector normal, float damage) CSQC_BulletImpact =
+void(vector pos, vector normal, float damage, float is_exit) CSQC_BulletImpact =
 {
     vector offset_pos;
     float r;
@@ -1080,7 +1475,7 @@ void(vector pos, vector normal, float damage) CSQC_BulletImpact =
     if (pointcontents(pos) == CONTENT_WATER)
     {
         vector surf = Impact_FindWaterSurface(eye, pos);
-        CSQC_EnqueueImpact(surf, normal, 0, 0, self.wep_action_id, world, 1, 0, arrival);
+        CSQC_EnqueueImpact(surf, normal, 0, 0, self.wep_action_id, world, 1, 0, arrival, '0 0 0');
         impact_was_water = 1;
     }
 
@@ -1124,8 +1519,11 @@ void(vector pos, vector normal, float damage) CSQC_BulletImpact =
         if (bh_shotgun_blast)
             bh_shotgun_ric_played = 1;
     }
+    // Exit smoke sprays along the shot line out the far face (pos == exit_pos here); '0 0 0'
+    // on entries so the cosmetics sink never emits exit smoke on an entry impact.
+    vector exit_dir = is_exit ? normalize(pos - eye) : '0 0 0';
     CSQC_EnqueueImpact(pos, normal, mat, is_metalphys, self.wep_action_id,
-                       trace_ent, 0, play_ric, arrival);
+                       trace_ent, 0, play_ric, arrival, exit_dir);
 
     // Predicted breakable material thump. Gate on brush_health > 0 so we
     // identify live breakables regardless of their material style — style
@@ -1310,5 +1708,9 @@ void(vector pos, vector normal, float mat, entity target, float shooter_entnum, 
     // particles but plays NO ricochet ping — the entry already pinged, and a 2nd ping
     // was the "doubled sound" (a pointsound, so the CHAN_WEAPON mute couldn't catch it,
     // and it bleeds into the death-cam delay where Killcam_Active() is false).
-    CSQC_EnqueueImpact(pos, normal, mat, 0, action, target, 0, is_entry, arrival);
+    // Exit smoke sprays along the shot line from the shooter's eye through the exit; '0 0 0' on
+    // entries.  Fall back to the surface normal if the shooter entity wasn't resolved this frame.
+    vector exit_dir = is_entry ? '0 0 0'
+                    : ((shooter_eye != pos) ? normalize(pos - shooter_eye) : normal);
+    CSQC_EnqueueImpact(pos, normal, mat, 0, action, target, 0, is_entry, arrival, exit_dir);
 };

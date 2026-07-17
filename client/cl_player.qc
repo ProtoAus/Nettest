@@ -54,6 +54,9 @@ float  sv_confirmed_jump_groundstick_off_until;
 float  sv_confirmed_grapple_rope_active;
 float  sv_confirmed_pm_carrying;        // HL2 carry lowered-weapon flag (mirrors grapple)
 float  sv_confirmed_pm_driving;         // func_vehicle driving flag (drives the pmove driver-lock)
+float  sv_confirmed_pm_incar;           // prop_car in-car flag (pmove input-zero + camera + fire-block)
+vector cl_car_cam_org, cl_car_cam_vel;  // driven car origin/velocity (from the proxy) for the chase-cam anchor
+float  cl_car_cam_time;                 // client `time` when cl_car_cam_org was last received (extrapolation base)
 vector sv_confirmed_grapple_anchor;
 // Actively-pulling flag — gates the categorize ground-snap suppress
 // so the suppress only fires during the pull phase, not during hook
@@ -575,6 +578,7 @@ void(entity src) CSQC_StoreConfirmedStateFromEntity =
 	sv_confirmed_grapple_rope_active  = src.grapple_rope_active;
 	sv_confirmed_pm_carrying          = src.pm_carrying;
 	sv_confirmed_pm_driving           = src.pm_driving;
+	sv_confirmed_pm_incar             = src.pm_incar;
 	sv_confirmed_grapple_anchor       = src.grapple_anchor;
 	sv_confirmed_grapple_attached     = src.grapple_attached;
 	sv_confirmed_grapple_held_last    = src.pm_grapple_held_last;
@@ -686,6 +690,7 @@ void() CSQC_ResetToConfirmedMoveState =
 	self.grapple_rope_active     = sv_confirmed_grapple_rope_active;
 	self.pm_carrying             = sv_confirmed_pm_carrying;
 	self.pm_driving              = sv_confirmed_pm_driving;
+	self.pm_incar                = sv_confirmed_pm_incar;
 	self.grapple_anchor          = sv_confirmed_grapple_anchor;
 	self.grapple_attached        = sv_confirmed_grapple_attached;
 	self.pm_grapple_held_last    = sv_confirmed_grapple_held_last;
@@ -2800,6 +2805,11 @@ float csqc_carry_throw_lockout; // keep fire suppressed after a throw until +att
 // predicted slide sound (above, after CSQC_PredictCurrentCommand) fires exactly
 // once on the 0->1 engage edge and re-arms when the slide ends.
 float csqc_slide_snd_prev;
+
+// Live throttle intent for the car engine-sound driver (cl_vehicle_sound.qc):
+// forward movevalue captured each input frame while driving, so the engine can
+// REV while the car is stationary (input never reaches CSQC any other way).
+float cl_car_throttle_in;
 void() CSQC_Input_Frame =
 {
 	localplayer = CSQC_GetEngineLocalPlayer();
@@ -2816,6 +2826,12 @@ void() CSQC_Input_Frame =
 	csqc_dbg_last_inputframe_time = cltime;
 	CSQC_LatchLiveInputFromCommand();
 	input_buttons = csqc_live_buttons;   // write custom bits before buffer captures them
+
+	// Stash the driver's live throttle for the engine-sound driver (rev-in-place).
+	if (predicted_player && predicted_player.pm_incar)
+		cl_car_throttle_in = input_movevalues_x;
+	else
+		cl_car_throttle_in = 0;
 
 	// HL2 carry: while holding a prop, +attack THROWS it instead of firing.
 	// Suppress the fire button HERE — before the command is buffered + predicted
@@ -3605,6 +3621,12 @@ float() CSQC_PlayerVisual_Predraw =
 		return PREDRAW_NEXT;
 	}
 
+	// Seated car driver: suppress the standing body here — it's drawn as a seated model glued to the
+	// interpolated car (Car_DrawDriver, cl_physprop.qc), so there's no double and no server-tick jitter,
+	// and it shows in first person too.  Killcam still poses the standing body (rare edge).
+	if (Car_IsDriverSlot(self.vis_owner_entnum) && !PlayerVis_KillcamOwned(self))
+		return PREDRAW_NEXT;
+
 	// Hide the visual proxy when we shouldn't see it:
 	// 1. Own body in first person (not chase cam, not spectating, not death cam)
 	// 2. Spectated player's body in first-person spectate mode
@@ -3924,8 +3946,23 @@ float() CSQC_PlayerVisual_Predraw =
 	// Deferred first-person render skip: the local body's third-person anim was
 	// just computed (above) so the killcam recorder has live timing; skip the
 	// actual render (spine deform + addentity) now.
+	// EXCEPT with shadows active: draw the body flagged RF_EXTERNALMODEL — the
+	// engine hides it from the main first-person view but still includes it in
+	// the fake-shadow depth passes (they run with externalview=true) and in
+	// mirrors, so you get a REAL first-person body shadow (+ a blob underfoot).
+	float vis_fp_shadowbody = FALSE;
 	if (vis_skip_render)
-		return PREDRAW_NEXT;
+	{
+		float fp_want = 0;
+		if (cvar("r_shadows"))
+			fp_want = 1;
+		if (cvar("cl_blobshadows"))
+			fp_want = 1;
+		if (fp_want)
+			vis_fp_shadowbody = TRUE;
+		else
+			return PREDRAW_NEXT;
+	}
 
 	// Progressive spine twist via bonecontrol (HL studio only — IQM
 	// models ignore .bonecontrolN; the skel-based deformer below
@@ -3983,6 +4020,26 @@ float() CSQC_PlayerVisual_Predraw =
 		if (self.vis_is_dead)
 			self.vis_death_cltime = cltime;
 		self.vis_skel_was_dead = self.vis_is_dead;
+	}
+
+	// nettest DEATH RAGDOLL (server-side): when a server corpse_ragdoll is active for this corpse
+	// (vis_has_server_ragdoll, networked from the proxy IDENTITY section), HIDE this proxy's animated
+	// mesh + held weapon so only the flopping ragdoll renders (no double-draw).
+	//   EXCEPTION: during a killcam replay Killcam_Replay re-poses this proxy to its ALIVE pose (and the
+	//   present-time ragdoll is culled) — so when the killcam owns it this frame DON'T hide it, render the
+	//   rewound body instead.  After the replay ends PlayerVis_KillcamOwned goes false and the mesh hides
+	//   again while the ragdoll shows.
+	if (self.vis_has_server_ragdoll && !PlayerVis_KillcamOwned(self))
+	{
+		self.alpha = -1;                                    // hide the corpse mesh
+		if (self.vis_weapon_ent)
+			self.vis_weapon_ent.alpha = -1;                 // and its held-weapon model
+		// The server corpse_ragdoll is an ENGINE-rendered packet entity with no CSQC
+		// predraw, so nothing else emits a ground blob for this body — emit one here at
+		// the proxy's origin (the death spot; the doll settles near it) so the dead
+		// body keeps a shadow instead of losing it the frame the player dies.
+		BlobShadow_Emit(self);
+		return PREDRAW_NEXT;
 	}
 
 	// perf: corpse render cull — the only QC lever on the engine scene floor
@@ -4337,6 +4394,14 @@ float() CSQC_PlayerVisual_Predraw =
 		self.angles = vectoangles(gs_fwd, gs_up);
 	}
 
+	// First-person shadow body: invisible in the main view, casts + mirrors only.
+	// MUST be cleared on the normal path — proxies are reused across states.
+	if (vis_fp_shadowbody)
+		self.renderflags |= RF_EXTERNALMODEL;
+	else
+		self.renderflags &= ~RF_EXTERNALMODEL;
+
+	BlobShadow_Emit(self);   // ground blob under players/corpses (culled paths returned above)
 	addentity(self);
 
 	// --- Weapon attachment (p_model) ---
@@ -4423,6 +4488,12 @@ float() CSQC_PlayerVisual_Predraw =
 				wep.alpha = self.alpha;		// mirror body visibility so the p_model
 											// can't render while the body is hidden
 											// (killcam hide/show, spectate, etc.)
+				// First-person shadow body: the held rifle follows the body's
+				// invisible-but-casting state (else it would render visibly).
+				if (vis_fp_shadowbody)
+					wep.renderflags |= RF_EXTERNALMODEL;
+				else
+					wep.renderflags &= ~RF_EXTERNALMODEL;
 				if (matched > 0)
 				{
 					addentity(wep);
@@ -4507,6 +4578,19 @@ void() CSQC_DumpPlayerBones =
 	}
 	print(sprintf("[bones] current sv_player_basebone = %g\n",
 		cvar("sv_player_basebone")));
+};
+
+// The proxy's ONE setcustomskin call: geomset selects (body variant +
+// backpack) plus the body-paint 'replace' lines (cl_paint.qc — camo /
+// paintball splats).  Everything skin-related MUST funnel through here:
+// two competing setcustomskin calls on the same entity would clobber
+// each other (last writer wins, whole skin replaced).
+void(entity proxy) PlayerVis_ApplySkin =
+{
+	float backpack_submodel = (proxy.vis_bodygroup & 1) ? 2 : 1;
+	string sk = sprintf("geomset 0 2\ngeomset 2 %g\n", backpack_submodel);
+	sk = strcat(sk, Paint_SkinLines(proxy));
+	setcustomskin(proxy, "", sk);
 };
 
 void() CSQC_PlayerVisual_Update =
@@ -4614,6 +4698,8 @@ void() CSQC_PlayerVisual_Update =
 		// Hitclaims include this so a stale corpse/old-life proxy
 		// cannot damage the newly respawned player in the same slot.
 		self.vis_life_serial = readbyte();
+		// nettest server ragdoll: hide-mesh flag (matched write at the END of the server IDENTITY section).
+		self.vis_has_server_ragdoll = readbyte();
 
 		// Rollback clear: if the server snapshot says alive, our
 		// predicted-death was wrong (target had armor / regen / FF /
@@ -4641,38 +4727,11 @@ void() CSQC_PlayerVisual_Update =
 			}
 		}
 
-		if (team_model_byte == 255)
-		{
-			mdl_path = "models/player/sini.mdl";
-			// "Sini" override doesn't carry team info — leave vis_team
-			// at whatever it was (server should still also send this in
-			// the next non-override IDENTITY tick if team changed).
-		}
-		else if (team_model_byte == 254)
-		{
-			mdl_path = "models/player/chickenman/chickenman.iqm";
-			// Same team-independent sentinel pattern as sini.
-		}
-		else if (team_model_byte == 253)
-		{
-			mdl_path = "models/player/numberk/numberK.iqm";
-			// Same team-independent sentinel pattern as sini / chickenman.
-		}
-		else if (team_model_byte == 252)
-		{
-			mdl_path = "models/player/kilmer/kilmer.iqm";
-			// Same team-independent sentinel pattern as sini / chickenman / numberK.
-		}
-		else
-		{
-			float new_team   = floor(team_model_byte / 4) + 1;
-			float vis_model  = team_model_byte % 4;
-			self.vis_team    = new_team;   // expose for CSQC_TryPredictDeath FF gate
-			if (new_team == TEAM_BLUE)
-				mdl_path = team_blue_models[vis_model];
-			else
-				mdl_path = team_red_models[vis_model];
-		}
+		// Path resolution is shared with the seated car-driver render — SH_ModelPathForTeamByte
+		// (sh_customdefs.qc).  Team sentinels (252-255) leave vis_team as-is; team models set it.
+		mdl_path = SH_ModelPathForTeamByte(team_model_byte);
+		if (team_model_byte < 252)
+			self.vis_team = floor(team_model_byte / 4) + 1;   // expose for CSQC_TryPredictDeath FF gate
 	}
 
 	// Grapple rope (LAST section — must match the server writer order: POSE,
@@ -4746,10 +4805,11 @@ void() CSQC_PlayerVisual_Update =
 	//
 	// Skipped when bodygroup is identical to last applied AND model didn't
 	// change — setcustomskin parses the string each call, no point churning.
+	// (The skin body now also carries the body-paint replace lines — see
+	// PlayerVis_ApplySkin below; paint events re-call it via Paint_RefreshProxy.)
 	if (model_changed || (identity_changed && self.vis_bodygroup != self.vis_last_applied_bodygroup))
 	{
-		float backpack_submodel = (self.vis_bodygroup & 1) ? 2 : 1;
-		setcustomskin(self, "", sprintf("geomset 0 2\ngeomset 2 %g\n", backpack_submodel));
+		PlayerVis_ApplySkin(self);
 		self.vis_last_applied_bodygroup = self.vis_bodygroup;
 	}
 
@@ -4937,6 +4997,7 @@ void(float old_type, float new_type) CSQC_Ent_CleanupTypeChange =
 	self.drawmask = 0;
 
 	self.vis_is_dead = 0;
+	self.vis_has_server_ragdoll = 0;
 	self.vis_server_is_dead = 0;
 	self.vis_pred_dead_latch = 0;
 	self.vis_pred_dead_at_time = 0;
@@ -4982,6 +5043,12 @@ noref void(float isnew) CSQC_Ent_Update =
 	if (ent_type == CSQC_ENT_NAV_DEBUG)
 	{
 		NavDebug_EntUpdate();
+		return;
+	}
+
+	if (ent_type == CSQC_ENT_CAR)
+	{
+		CarDbg_EntUpdate();     // prop_car/func_car physics debug overlay stream (sv_debug_car)
 		return;
 	}
 
@@ -5063,6 +5130,7 @@ noref void(float isnew) CSQC_Ent_Update =
 
 	if (ent_type == CSQC_ENT_PHYS_PROP)
 	{
+		CSQC_NetStat_RecordProp();   // bandwidth panel: count this phys-prop mirror update (the flood category)
 		CSQC_PhysProp_Update(isnew);
 		return;
 	}
@@ -5167,6 +5235,16 @@ noref void(float isnew) CSQC_Ent_Update =
 		self.pm_carrying             = readbyte();
 		// func_vehicle driving flag — matches the SSQC writer tail.
 		self.pm_driving              = readbyte();
+		// prop_car in-car flag — matches the SSQC writer tail (wire order is critical).
+		self.pm_incar                = readbyte();
+		// prop_car chase-cam anchor: the driven car's origin+velocity, ONLY present when pm_incar
+		// (matches the conditional SSQC writer).  cl_main.qc velocity-extrapolates it for a smooth cam.
+		if (self.pm_incar)
+		{
+			cl_car_cam_org_x = readcoord(); cl_car_cam_org_y = readcoord(); cl_car_cam_org_z = readcoord();
+			cl_car_cam_vel_x = readcoord(); cl_car_cam_vel_y = readcoord(); cl_car_cam_vel_z = readcoord();
+			cl_car_cam_time  = time;
+		}
 	}
 
 	if (changedflags & PM_SF_WEAPON_STATE)

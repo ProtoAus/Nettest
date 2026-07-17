@@ -26,9 +26,15 @@
 //  fresh joiners) AND from EnvSun_StuffAll at spawn (covers the map-
 //  cycle case where players are already present when env_sun spawns).
 //
-//  Keys:
-//    "sundir"   direction toward the sun, "X Y Z" (engine default "0.2 0.5 0.8").
-//               If unset, derived from the entity's "angles" (aim it at the sun).
+//  Keys (first one set wins):
+//    "sundir"   explicit direction TOWARD the sun, "X Y Z".
+//    "mangle"   "YAW PITCH ROLL" — IDENTICAL to worldspawn's ericw-tools "_sun_mangle", so you
+//               type the SAME numbers here that the lightmap was baked with and the dynamic sun
+//               lands in the same place.  See EnvSun_DirFromMangle for the exact conversion.
+//    "angles"   treated EXACTLY like "mangle" (see below) — a sun has no other meaningful
+//               facing, and agreeing with the lightmap is the entity's whole purpose.
+//    (none)     the ericw LIGHT default sun, mangle "230 -65 0" → toward-sun
+//               "0.271654 0.323744 0.906308" (azimuth 50°, elevation 65°).
 //
 
 // Mapper key - declared so the BSP entity-block parser populates it.
@@ -39,6 +45,32 @@
 // Globals - set by env_sun spawn, read by EnvSun_StuffPlayer.
 float  env_sun_active;
 vector env_sun_dir;      // normalized direction toward the sun
+
+// ---------------------------------------------------------------------------
+// mangle -> direction TOWARD the sun, using ericw-tools LIGHT's EXACT convention, so an
+// env_sun "mangle"/"angles" of "230 -65 0" lands the dynamic sun where worldspawn's
+// "_sun_mangle" "230 -65 0" baked the lightmap.  THREE things differ from Quake angles, and
+// getting any of them wrong flips the sun (this was the bug — see below):
+//   1. ORDER is "YAW PITCH ROLL", NOT Quake's "PITCH YAW ROLL".
+//   2. Z uses +sin(pitch); Quake's AngleVectors/makevectors uses -sin(pitch).
+//   3. The resulting vector is the direction the LIGHT TRAVELS, not the direction to the sun —
+//      hence ericw's default "0 -90 0" => (0,0,-1) = straight DOWN = sun overhead.  Negate it.
+// ericw light/entities.cc vec_from_mangle():
+//      v = (cos(yaw)*cos(pitch), sin(yaw)*cos(pitch), sin(pitch))
+// THE OLD BUG: this file did `makevectors(self.angles); env_sun_dir = v_forward;`, i.e. it read
+// "230 -65 0" as pitch=230/yaw=-65 with -sin and no negation -> "-0.271654 0.582563 0.766045"
+// (azimuth 115°, elevation 50°) instead of "0.271654 0.323744 0.906308" (azimuth 50°, elevation
+// 65°) — a 65° azimuth error with a flipped X, so dynamic shadows disagreed with the baked
+// lightmap.  That same wrong vector had been copied into every default (cfg/fgd/engine).
+vector(vector m) EnvSun_DirFromMangle =
+{
+    float myaw   = m_x * 0.0174532925;   // m_x = YAW   (NOT pitch)
+    float mpitch = m_y * 0.0174532925;   // m_y = PITCH
+    // direction the sunlight TRAVELS (ericw vec_from_mangle)
+    vector travel = [cos(myaw) * cos(mpitch), sin(myaw) * cos(mpitch), sin(mpitch)];
+    if (travel == '0 0 0') return '0.271654 0.323744 0.906308';   // degenerate guard
+    return normalize(travel * -1);                                 // -> TOWARD the sun
+};
 
 // Build the cvar-set command string from the cached sun state.
 // r_sun_dir feeds the QC consumers (cl_maplights.qc sun weight/fallback,
@@ -67,13 +99,17 @@ string() EnvSun_BuildShadowDirCommand =
 
 // Push the sun config to one client.  ALWAYS clears r_sun_colour first
 // (archived cvar, no map-load reset - see header; rays must stay dead).
-// r_shadows_throwdirection gets the same clear-first treatment: reset to the
-// engine-default straight-down on every map so a sunless map doesn't keep the
-// previous map's tilted fake shadows (stuffed `set` persists for the session).
+// r_sun_dir + r_shadows_throwdirection get the same clear-first treatment: reset to
+// an ANGLED default sun on every map (not straight down) so a sunless map doesn't keep
+// the previous map's tilted fake shadows (stuffed `set` persists for the session).  The
+// default matches the ericw-tools LIGHT sun that bakes the lightmap (worldspawn
+// "_sun_mangle" "230 -65 0" -> toward-sun "0.271654 0.323744 0.906308"), so dynamic
+// shadows fall the same way as the baked static lighting; throw = the negated toward-sun.
+// (A top-down sun grazed vertical walls -> coplanar func_ brushes shimmered; the tilt fixes it.)
 void(entity p) EnvSun_StuffPlayer =
 {
     if (!p || bot_adding || clienttype(p) != CLIENTTYPE_REAL) return;	// bots have no netchan (engine-truth guard; bot_adding covers the spawnclient window)
-    stuffcmd(p, "set r_sun_colour \"0 0 0\";set r_shadows_throwdirection \"0 0 -1\";set _map_sun_active 0\n");   // rays dead + shadows top-down + no sun by default this map
+    stuffcmd(p, "set r_sun_colour \"0 0 0\";set r_sun_dir \"0.271654 0.323744 0.906308\";set r_shadows_throwdirection \"-0.271654 -0.323744 -0.906308\";set _map_sun_active 0\n");   // rays dead + ericw default sun (_sun_mangle "230 -65 0") + no env_sun this map
     if (!env_sun_active) return;
     stuffcmd(p, EnvSun_BuildCommand());            // sun dir for the QC shadow consumers
     stuffcmd(p, EnvSun_BuildShadowDirCommand());   // fake shadows (r_shadows 2) fall away from it
@@ -95,23 +131,26 @@ Defines the map's sun DIRECTION: fake model shadows (r_shadows 2) fall away
 from it, and the QC shadow/blob code weights toward it.  No visual by itself
 (the crepuscular god-ray effect was removed).
 
-"sundir"  direction toward the sun "X Y Z" (default "0.2 0.5 0.8"); else from "angles"
+"mangle"  "YAW PITCH ROLL" — the SAME convention + numbers as worldspawn's ericw "_sun_mangle",
+          so the dynamic sun matches the baked lightmap.  Default "230 -65 0".
+"angles"  read exactly like "mangle" (a sun has no other meaningful facing).
+"sundir"  explicit toward-the-sun vector "X Y Z"; overrides mangle/angles if set.
 */
 void() env_sun =
 {
     env_sun_active = 1;
 
-    // Direction toward the sun.  Prefer an explicit sundir; else aim via the
-    // entity's angles; else the engine's default up-ish direction.
+    // Direction toward the sun.  Explicit sundir wins; else mangle/angles (BOTH read with the
+    // ericw "_sun_mangle" convention so the mapper types the SAME numbers as worldspawn); else
+    // the ericw LIGHT default sun.
     if (self.sundir != '0 0 0')
         env_sun_dir = normalize(self.sundir);
+    else if (self.mangle != '0 0 0')
+        env_sun_dir = EnvSun_DirFromMangle(self.mangle);
     else if (self.angles != '0 0 0')
-    {
-        makevectors(self.angles);
-        env_sun_dir = v_forward;
-    }
+        env_sun_dir = EnvSun_DirFromMangle(self.angles);   // same convention as mangle — see the helper
     else
-        env_sun_dir = normalize('0.2 0.5 0.8');
+        env_sun_dir = '0.271654 0.323744 0.906308';   // ericw LIGHT default sun (_sun_mangle "230 -65 0")
 
     EnvSun_StuffAll();
 

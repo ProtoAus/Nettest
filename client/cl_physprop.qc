@@ -28,23 +28,61 @@
 // model precache list has been pulled into the engine model table.
 // Doing it at CSQC_Init returned a CSQC-local slot that didn't match
 // the server's network-shared one.
-float pp_idx_phys_barrel;
-float pp_idx_phys_can;
+// Barrels and cans are picked at RANDOM from a set of models per spawn
+// (PhysBarrel_RandomModel / PhysCan_RandomModel, sv_physprop.qc), so each type needs its
+// whole set resolved — matching ONE path can never identify them.
+//
+// This used to resolve "models/props/barrel.iqm" and "models/props/can.mdl", neither of which
+// exists: both came back 0, so every `!= 0` guard below was permanently false and the CSQC
+// ray-vs-cylinder hit-test for barrels and cans was SILENTLY DEAD (real barrels carry
+// metal_barrel_mp_* indices, which nothing matched).  Shots at a barrel/can fell through to the
+// generic path with no cylinder test, no per-type material and no fake trace-target.
+float pp_idx_barrel_1, pp_idx_barrel_2, pp_idx_barrel_3;
+float pp_idx_can_1, pp_idx_can_2, pp_idx_can_3, pp_idx_can_4, pp_idx_can_5;
 float pp_idx_phys_files;
 float pp_idx_resolved;
 
 void() CSQC_PhysProp_ResolveIndexes =
 {
     if (pp_idx_resolved) return;
-    pp_idx_phys_barrel = (float)getmodelindex("models/props/barrel.iqm");
-    pp_idx_phys_can    = (float)getmodelindex("models/props/can.mdl");
-    // Filecabinet uses the IQM when present (else the .mdl box) — resolve both
-    // and keep whichever the server precached. The bullet hit-test is a rotated
-    // oriented-box (see CSQC_PhysProp_RayBox), accurate even when it tips.
+    // MUST match PhysBarrel_RandomModel / PhysCan_RandomModel + phys_barrel_precache
+    // (sv_physprop.qc) — a model missing from the precache list resolves 0 and is simply
+    // never matched, which is safe (the type just falls back to the generic hit path).
+    pp_idx_barrel_1 = (float)getmodelindex("models/mega/containers/metal_barrel_mp_1.iqm");
+    pp_idx_barrel_2 = (float)getmodelindex("models/mega/containers/metal_barrel_mp_2.iqm");
+    pp_idx_barrel_3 = (float)getmodelindex("models/mega/containers/metal_barrel_mp_3.iqm");
+    pp_idx_can_1    = (float)getmodelindex("models/mega/props/tin_can_mp_1_rusty.iqm");
+    pp_idx_can_2    = (float)getmodelindex("models/mega/props/tin_can_mp_1_rusty_1.iqm");
+    pp_idx_can_3    = (float)getmodelindex("models/bunkers/canned_food_3.iqm");
+    pp_idx_can_4    = (float)getmodelindex("models/bunkers/canned_food_4.iqm");
+    pp_idx_can_5    = (float)getmodelindex("models/bunkers/canned_food_5.iqm");
+    // Filecabinet is a single IQM (the legacy .mdl fallback is gone — it never existed on disk).
+    // Its bullet hit-test is a rotated oriented-box (see CSQC_PhysProp_RayBox), accurate when it tips.
     pp_idx_phys_files  = (float)getmodelindex("models/props/filecabinet/filecabinet.iqm");
-    if (pp_idx_phys_files == 0)
-        pp_idx_phys_files = (float)getmodelindex("models/props/filecabinet.mdl");
     pp_idx_resolved = 1;
+};
+
+// Is this modelindex one of the barrel / can set?  A real model never has index 0, so the
+// midx==0 test also covers "that model wasn't precached" without needing per-slot != 0 guards.
+// (Nested ifs, not an || chain: logicops is OFF mod-wide so every operand would evaluate.)
+float(float midx) PhysProp_IsBarrelIdx =
+{
+    if (midx == 0) return FALSE;
+    if (midx == pp_idx_barrel_1) return TRUE;
+    if (midx == pp_idx_barrel_2) return TRUE;
+    if (midx == pp_idx_barrel_3) return TRUE;
+    return FALSE;
+};
+
+float(float midx) PhysProp_IsCanIdx =
+{
+    if (midx == 0) return FALSE;
+    if (midx == pp_idx_can_1) return TRUE;
+    if (midx == pp_idx_can_2) return TRUE;
+    if (midx == pp_idx_can_3) return TRUE;
+    if (midx == pp_idx_can_4) return TRUE;
+    if (midx == pp_idx_can_5) return TRUE;
+    return FALSE;
 };
 
 // One persistent fake-target entity per prop type.  Bullet impact code
@@ -315,23 +353,29 @@ float(vector ro_world, vector dir_unit, float dirlen,
 // so phantom hits in empty AABB volume don't fire either.
 vector(float midx) CSQC_PhysProp_CylForType =
 {
-    if (pp_idx_phys_barrel != 0 && midx == pp_idx_phys_barrel) return '16 23.6 0';
-    if (pp_idx_phys_can    != 0 && midx == pp_idx_phys_can)    return '13 13 0';
+    if (PhysProp_IsBarrelIdx(midx)) return '16 23.6 0';
+    if (PhysProp_IsCanIdx(midx))    return '13 13 0';
     return '0 0 0';
 };
 
 entity(float midx) CSQC_PhysProp_FakeForType =
 {
-    if (pp_idx_phys_barrel != 0 && midx == pp_idx_phys_barrel) return pp_fake_barrel;
-    if (pp_idx_phys_can    != 0 && midx == pp_idx_phys_can)    return pp_fake_can;
-    if (pp_idx_phys_files  != 0 && midx == pp_idx_phys_files)  return pp_fake_files;
+    if (PhysProp_IsBarrelIdx(midx)) return pp_fake_barrel;
+    if (PhysProp_IsCanIdx(midx))    return pp_fake_can;
+    if (pp_idx_phys_files != 0)
+        if (midx == pp_idx_phys_files) return pp_fake_files;
     return world;
 };
 
 void(vector trace_src, vector trace_end) CSQC_PhysProp_OverrideTrace =
 {
     CSQC_PhysProp_ResolveIndexes();
-    if (pp_idx_phys_barrel == 0 && pp_idx_phys_can == 0 && pp_idx_phys_files == 0) return;
+    // Nothing of any known type precached on this map → no override to do.  (Barrel/can are now
+    // model SETS, so this tests the first of each rather than a single index.)
+    if (!pp_idx_barrel_1)
+        if (!pp_idx_can_1)
+            if (!pp_idx_phys_files)
+                return;
     CSQC_PhysProp_EnsureFakeEnts();
 
     vector dir = trace_end - trace_src;
@@ -462,7 +506,10 @@ void(vector p1, vector p2, vector col, float alpha) dbg_hitbox_line;
 // real hull.  Green, to stand apart from the orange barrel/can cylinders.
 void(entity e, vector col) CSQC_DrawPhysOBB =
 {
-    makevectors(e.angles);   // raw angles — matches World_OBBTrace (no mesh-pitch flip)
+    // Alias mesh-pitch/roll basis (r_meshpitch/r_meshroll) so the box tracks a TUMBLING prop the
+    // same way the model renders + World_OBBTrace collides — raw angles diverged mid-tumble.  No-op
+    // for an upright prop (pitch/roll 0), so upright cabinets/barrels are unchanged.
+    makevectors([e.angles_x * cvar("r_meshpitch"), e.angles_y, e.angles_z * cvar("r_meshroll")]);
     vector ax0 = v_forward;
     vector ax1 = v_right * -1;   // right-hand flip, matching World_OBBTrace
     vector ax2 = v_up;
@@ -488,7 +535,8 @@ void(entity e, vector col) CSQC_DrawPhysOBB =
 
 void() CSQC_DrawDebugPhysProps =
 {
-    if (!cvar("cl_debug_physprops")) return;
+    float show_obb = cvar("cl_debug_physprops");
+    if (!show_obb) return;
 
     // Cabinet (and any phys_files) OBBs — the CSQC mirrors are real csqc edicts, so
     // findchain sees them.  Colour = state:
@@ -503,20 +551,28 @@ void() CSQC_DrawDebugPhysProps =
     {
         if (e.drawmask)
         {
-            vector ocol;
-            if (e.solid == SOLID_NOT)
-                ocol = '1 0.85 0';
-            else if (vlen(e.velocity) < 0.5 && vlen(e.avelocity) < 0.5)
-                ocol = '0 0.6 1';
-            else
-                ocol = '0 1 0';
-            CSQC_DrawPhysOBB(e, ocol);
+            if (show_obb)
+            {
+                vector ocol;
+                if (e.solid == SOLID_NOT)
+                    ocol = '1 0.85 0';
+                else if (vlen(e.velocity) < 0.5 && vlen(e.avelocity) < 0.5)
+                    ocol = '0 0.6 1';
+                else
+                    ocol = '0 1 0';
+                CSQC_DrawPhysOBB(e, ocol);
+            }
         }
         e = e.chain;
     }
 
+    // Legacy getentity() cylinder path (engine-replicated props) — now dead for the CSQC-mirror
+    // barrels/cans; only runs for the OBB toggle, never for the new cyl overlay.
+    if (!show_obb) return;
     CSQC_PhysProp_ResolveIndexes();
-    if (pp_idx_phys_barrel == 0 && pp_idx_phys_can == 0) return;
+    if (!pp_idx_barrel_1)
+        if (!pp_idx_can_1)
+            return;
 
     float maxents = (float)getentity(0, GE_MAXENTS);
     if (maxents <= 0) return;
@@ -601,16 +657,53 @@ void() CSQC_DrawDebugPhysProps =
 .vector pp_snap_origin;
 .vector pp_snap_angles;
 .float  pp_snap_time;
+.vector pp_snap_origin_prev;   // 2-snapshot interpolation: the PREVIOUS authoritative snapshot
+.vector pp_snap_angles_prev;
+.float  pp_snap_time_prev;
 
 // Carry state (from the wire) + client-prediction bookkeeping.
 .float  pp_phase;          // PP_PHASE_* (was the csolid byte)
 .float  pp_carrier;        // carrier edict (0 = free); == player_localentnum ⇒ predict locally
+.float  pp_is_car;         // 1 = this mirror is a prop_car/func_car (engine-sound driver)
+.entity pp_car_next;       // car chain link (g_car_chain_head) — every per-frame car loop walks THIS, not
+                           //   find(classname "phys_files"), which walks every prop.  NOT .chain (scratch).
+.float  pp_car_linked;     // 1 = currently on the car chain (Update fires per snapshot; this de-dupes the link)
 .float  pp_hold_dist;      // networked sv_carry_hold_dist (remote clients have no server cvar)
 .float  pp_hold_z;         // networked sv_carry_hold_z
 .float  pp_was_predicting; // 1 if last frame drove this prop from the local view (drives the drop fade)
 .vector pp_pred_origin;    // last client-predicted feet origin (the "predicted hand" pose)
 .vector pp_err_offset;     // predicted − authoritative at the handoff edge; decays to 0
 .float  pp_err_cltime;     // cltime the error offset was seeded (0 = none pending)
+
+// Visual spinning-wheel state for prop_car mirrors (networked on the is-car branch; spin integrated locally).
+.float  pp_car_steer;      // front-wheel steer angle (deg)
+.float  pp_car_wheelidx;   // wheel model network index (0 = none / baked wheels)
+.float  pp_car_myaw;       // per-car model_yaw (deg)
+.float  pp_car_base;       // resolved wheelbase (fwd spacing), networked so visual wheels match physics
+.float  pp_car_track;      // resolved track (L-R spacing)
+.float  pp_car_drop;       // resolved wheel drop below the box bottom
+.float  pp_car_fwd;        // resolved fore/aft wheel offset (wheel_fwd key + sv_car_wheel_fwd)
+.float  pp_car_rest;       // resolved ride_height — caps the visual droop like the physics
+.float  pp_car_travel;     // resolved compression_travel
+.float  pp_car_maxspd;     // engine-sound scale: physics redline speed (sv_car_max_speed) — audio gears match physics
+.float  pp_car_gears;      // engine-sound: virtual gear count (sv_car_gears)
+.float  pp_car_shift;      // engine-sound: shift-cut window seconds (sv_car_shift_time) — drives the rev dip
+.entity pp_wheel0, pp_wheel1, pp_wheel2, pp_wheel3;   // 4 cached wheel render entities
+.float  pp_wheel_spin;     // accumulated roll angle (deg), shared by all 4 wheels
+.float  pp_wheel_time;     // cltime of the last spin integration
+
+// Seated driver render (networked on the is-car branch when a driver is present + sv_car_show_driver).
+.float  pp_car_drv_ent;    // driver player slot (0 = none); matched against a proxy's vis_owner_entnum to suppress the standing body
+.float  pp_car_drv_model;  // driver team_model_byte (decoded via SH_ModelPathForTeamByte)
+.float  pp_car_drv_skin;   // driver skin index
+.float  pp_car_drv_up, pp_car_drv_fwd, pp_car_drv_side;   // resolved seat offsets (u)
+.entity pp_driver;         // cached seated-driver render entity
+.float  pp_driver_bound;   // last-bound team_model_byte + 1 (0 = unbound) — rebind on change
+
+// Tailpipe exhaust state (client-derived from the streamed velocity; works for remote cars too).
+.float  pp_exhaust_time;    // cltime of the last exhaust integration
+.float  pp_exhaust_prevfwd; // last frame's forward speed (for client-derived acceleration)
+.float  pp_exhaust_accum;   // fractional puff accumulator (emit 1 puff per whole unit)
 
 // Replay of Carry_Tick's hold-point resolve (sv_physprop.qc), run CLIENT-SIDE against
 // the local predicted eye + view so the held prop tracks the crosshair with ZERO ping
@@ -650,6 +743,443 @@ vector(entity prop) PhysProp_PredictedHoldCenter =
     return cur;   // slid hold centre
 };
 
+// Adaptive 2-snapshot interpolation frac: render ONE measured inter-snapshot interval in the past
+// so the prop lerps prev→cur over exactly that interval — smooth at ANY stream rate (delay = the
+// real interval, so 20/32/64 Hz all interpolate correctly; no velocity overshoot → no snap-back).
+float(entity e) PhysProp_InterpFrac =
+{
+    float dt = e.pp_snap_time - e.pp_snap_time_prev;
+    if (dt <= 0.0001)
+        return 1;                                       // first snapshot / no prev → sit on cur
+    float f = (cltime - dt - e.pp_snap_time_prev) / dt; // render time = cltime - dt (one interval back)
+    if (f < 0) f = 0;
+    if (f > 1) f = 1;
+    return f;
+};
+
+// Smoothed render ORIGIN.  In the normal case this is the 2-snapshot interpolation above; but on the
+// TAIL — when the render clock has run PAST the newest snapshot because the next 64-tick packet is even
+// slightly late (the render-vs-tick beat, worse at high speed) — it COASTS along the streamed velocity
+// instead of clamping to cur and FREEZING-then-jumping (that freeze was the fast-car stutter).  The coast
+// is bounded by cl_physprop_extrap_max so a lost packet can't run away, and the correction when the real
+// packet lands is only velocity×(sub-tick jitter) — invisible vs a whole frozen frame.  For a slow/resting
+// prop velocity≈0 so this is a no-op (unchanged behaviour).  Used by BOTH the car predraw and the chase-cam
+// anchor (cl_main.qc) so the model and camera stay glued — never one extrapolating while the other freezes.
+vector(entity e) PhysProp_InterpOrigin =
+{
+    float dt = e.pp_snap_time - e.pp_snap_time_prev;
+    if (dt <= 0.0001)
+        return e.pp_snap_origin;                         // first snapshot / no prev → sit on cur
+    float target = cltime - dt;                          // render one interval in the past
+    float f = (target - e.pp_snap_time_prev) / dt;
+    if (f < 0) f = 0;
+    if (f <= 1)
+        return e.pp_snap_origin_prev + (e.pp_snap_origin - e.pp_snap_origin_prev) * f;
+    // tail: coast on the streamed velocity for up to cl_physprop_extrap_max instead of freezing at cur.
+    float extra = target - e.pp_snap_time;
+    float cap = cvar("cl_physprop_extrap_max"); if (cap <= 0) cap = 0.05;
+    if (extra > cap) extra = cap;
+    return e.pp_snap_origin + e.velocity * extra;
+};
+
+// Shortest-arc per-component angle lerp (handles 0/360 wrap) — client copy of Carry_AnglesLerp.
+vector(vector a, vector b, float f) PhysProp_AnglesLerp =
+{
+    vector r;
+    float d;
+    d = b_x - a_x; d = d - 360 * floor((d + 180) / 360); r_x = a_x + d * f;
+    d = b_y - a_y; d = d - 360 * floor((d + 180) / 360); r_y = a_y + d * f;
+    d = b_z - a_z; d = d - 360 * floor((d + 180) / 360); r_z = a_z + d * f;
+    return r;
+};
+
+// ============================================================
+//  prop_car spinning/steering wheels — 4 cached render entities glued to the interpolated chassis.
+//  Position replicates Car_WheelLocal + Car_PhysStep (sh_vehicle_phys.qc, server-only); spin is
+//  integrated locally from the streamed velocity; steer comes from the networked car_steer byte.
+// ============================================================
+
+// Client copy of Car_WheelLocal's AUTO path (per-wheel override strings aren't networked — the outrun
+// car uses none).  Returns the wheel mount in the chassis (forward,right,up) basis. 0=FL 1=FR 2=RL 3=RR.
+vector(entity car, float i) Car_WheelMountLocal =
+{
+    float hx = car.pp_car_base * 0.5, hy = car.pp_car_track * 0.5;   // networked = the physics spacing (wheel_base key honoured)
+    float fwd, rgt;
+    if      (i == 0) { fwd =  hx; rgt = -hy; }
+    else if (i == 1) { fwd =  hx; rgt =  hy; }
+    else if (i == 2) { fwd = -hx; rgt = -hy; }
+    else             { fwd = -hx; rgt =  hy; }
+    return [fwd, rgt, car.mins_z - car.pp_car_drop];   // z = box bottom - drop (matches Car_WheelLocal)
+};
+
+// ---------------------------------------------------------------------------
+// Per-frame cvar cache for the CAR RENDER path (Car_DrawWheels / _DrawDriver / _DrawExhaust).
+// Refreshed once per frame from CSQC_UpdateViewFrameBegin (cl_main.qc), same pattern as
+// bh_cache_* (cl_bulletholes.qc) and PlayerVis_RefreshCorpseCull (cl_player.qc).
+//
+// These were read with cvar() PER CAR PER FRAME — and cl_car_wheel_steer was read inside the
+// 4-wheel loop, so twice more again.  ~10 string-hash lookups per car per frame for values
+// that change only when someone types in the console (or drags the F3 tuning panel).
+// ---------------------------------------------------------------------------
+float carc_meshpitch, carc_meshroll, carc_model_yaw;
+float carc_wheel_radius, carc_wheel_spin, carc_wheel_z, carc_wheel_fwd, carc_wheel_steer;
+float carc_wheels_on;
+
+void() Car_RefreshCvarCache =
+{
+    carc_meshpitch    = cvar("r_meshpitch");  if (carc_meshpitch == 0) carc_meshpitch = -1;
+    carc_meshroll     = cvar("r_meshroll");   if (carc_meshroll  == 0) carc_meshroll  =  1;
+    carc_model_yaw    = cvar("sv_car_model_yaw");
+    carc_wheel_radius = cvar("cl_car_wheel_radius"); if (carc_wheel_radius <= 0) carc_wheel_radius = 12.64;
+    carc_wheel_spin   = cvar("cl_car_wheel_spin");
+    carc_wheel_z      = cvar("cl_car_wheel_z");
+    carc_wheel_fwd    = cvar("cl_car_wheel_fwd");
+    carc_wheel_steer  = cvar("cl_car_wheel_steer");
+    carc_wheels_on    = cvar("cl_car_wheels");
+};
+
+void(entity car) Car_DrawWheels =
+{
+    if (!carc_wheels_on)           return;
+    if (car.pp_car_wheelidx <= 0)  return;   // no wheelmodel key = wheels baked into the chassis
+
+    // Lazy-spawn + cache 4 wheel render ents (weapon-attach pattern, cl_player.qc).
+    if (!car.pp_wheel0)
+    {
+        car.pp_wheel0 = spawn();  car.pp_wheel1 = spawn();
+        car.pp_wheel2 = spawn();  car.pp_wheel3 = spawn();
+        car.pp_wheel0.classname = car.pp_wheel1.classname =
+        car.pp_wheel2.classname = car.pp_wheel3.classname = "car_wheel";
+    }
+    if (car.pp_wheel1.modelindex != car.pp_car_wheelidx)   // (re)bind on first use / change (a RIGHT wheel gates it)
+    {
+        setmodelindex(car.pp_wheel1, car.pp_car_wheelidx);   // FR (right)
+        setmodelindex(car.pp_wheel3, car.pp_car_wheelidx);   // RR (right)
+        // LEFT wheels use the mirrored "<name>_l.iqm" so the rim faces OUTWARD on that side.
+        string rp = modelnameforindex(car.pp_car_wheelidx);
+        float  e  = strlen(rp) - 4;   // 4-char extension (.iqm / .mdl / .md3)
+        string lp = strcat(substring(rp, 0, e), "_l", substring(rp, e, 4));
+        setmodel(car.pp_wheel0, lp);   // FL (left, mirrored)
+        setmodel(car.pp_wheel2, lp);   // RL (left, mirrored)
+    }
+
+    // Chassis basis at the INTERPOLATED pose (car.origin/car.angles were just set by the predraw).
+    // Reproduces Car_PhysStep (sh_vehicle_phys.qc:150-176): pscale = r_meshpitch for alias/IQM cars,
+    // build the TRUE basis with NO model_yaw (cU stays true), then rotate fwd/right by model_yaw.
+    float rmp = carc_meshpitch;
+    float rmr = carc_meshroll;
+    float myaw = car.pp_car_myaw + carc_model_yaw;
+    makevectors([car.angles_x * rmp, car.angles_y, car.angles_z * rmr]);
+    vector tF = v_forward, tR = v_right, cU = v_up;
+    float myr = myaw * 0.0174533, mc = cos(myr), ms = sin(myr);
+    vector cF = tF * mc - tR * ms;
+    vector cR = tR * mc + tF * ms;
+    vector cgofs = tF * ((car.mins_x + car.maxs_x) * 0.5) - tR * ((car.mins_y + car.maxs_y) * 0.5);
+
+    // Integrate the shared wheel roll from forward speed (v·cF).  dt clamped so a rest-gap can't spike it.
+    float rad = carc_wheel_radius;   // world tyre radius at car.scale 1 (rolling radius)
+    // rest/travel come from the NETWORKED resolved per-car values (pp_car_rest/travel) — NOT the global cvars.
+    // The physics tunes these per-car (carset / FGD); reading the cvar left the visual wheels drooping on the
+    // stale global (10/12) so they stretched 20-40u when the car was tuned to 1/1.  Use the networked value
+    // DIRECTLY (0 is a legit tune now — ride height / travel can be 0); clamp only negatives.
+    float rest   = car.pp_car_rest;   if (rest   < 0) rest   = 0;
+    float travel = car.pp_car_travel; if (travel < 0) travel = 0;
+    float cscale = (car.scale > 0) ? car.scale : 1;
+    float rworld = rad * cscale;   // world-space tyre radius (placement + model render), scales with the car
+    float dt = cltime - car.pp_wheel_time;
+    if (dt < 0 || dt > 0.5) dt = 0;
+    car.pp_wheel_time = cltime;
+    float fwdspeed = car.velocity * cF;
+    car.pp_wheel_spin += carc_wheel_spin * (fwdspeed * dt) / (6.283185 * rad) * 360;
+    car.pp_wheel_spin = car.pp_wheel_spin - floor(car.pp_wheel_spin / 360) * 360;
+
+    float zoff   = carc_wheel_z;
+    float fwdofs = carc_wheel_fwd + car.pp_car_fwd;   // fore/aft nudge: live cvar + per-car wheel_fwd key
+    float i;
+    entity w;
+    for (i = 0; i < 4; i = i + 1)
+    {
+        if      (i == 0) w = car.pp_wheel0;
+        else if (i == 1) w = car.pp_wheel1;
+        else if (i == 2) w = car.pp_wheel2;
+        else             w = car.pp_wheel3;
+
+        // Mount = top of the strut at the collision-box bottom.  Cast the suspension ray straight down
+        // (along the car's up) and sit the tyre ON the ground (centre one radius above contact), but CAP the
+        // extension by rest+travel so a stiff/low-travel tune tucks the wheels instead of stretching them.
+        vector lofs  = Car_WheelMountLocal(car, i);
+        vector mount = car.origin + cgofs + cF * (lofs_x + fwdofs) + cR * lofs_y + cU * lofs_z;   // zoff applied post-solve
+        traceline(mount + cU * 4, mount - cU * (rest + rworld), MOVE_NOMONSTERS, car);
+        float ext;
+        if (trace_fraction < 1)
+        {
+            ext = (mount - trace_endpos) * cU - rworld;   // strut extension: centre one radius above the contact
+            // NO `ext<0 → 0` clamp: if the visual tyre radius exceeds the ride-height gap the centre floats
+            // ABOVE the mount so the tyre BOTTOM still sits exactly on the ground (was sinking through it).
+            if (ext > rest) ext = rest;                   // droop CAPPED at ride_height — compression_travel is
+                                                          // UP-room (landing squash), NOT extra droop, so the wheel
+                                                          // never extends past the ride height (was rest+travel).
+        }
+        else
+            ext = rest;                                   // airborne: droop to ride_height, no further
+        vector wc = mount - cU * ext + cU * zoff;         // zoff (cl_car_wheel_z) offsets the wheel in BOTH states
+        setorigin(w, wc);
+
+        // Orientation, done DETERMINISTICALLY: the wheel MODEL's forward (+X) IS its axle (built that way),
+        // so we point the model forward along the car's RIGHT (cR), steered about the car up (cU) on the
+        // front pair.  The spin is a ROLL about that axle, composed as a REAL 3-D rotation BEFORE the Euler
+        // decomposition (NOT a scalar add onto va_z).  Rotate the up-reference cU about the axle by the spin
+        // angle (Rodrigues), then let ONE vectoangles derive all three angles of the fully-spun pose.  This
+        // is bank-independent: the target pose is the flat wheel rigidly spun about its own axle at ANY
+        // pitch/roll/steer, so the r_meshpitch/roll round-trip applies to a coherent orientation and can't
+        // invert the roll (the old `va_z + spin` add leaked the car's bank into va_z → spin reversed on a
+        // slope).  Since axle⟂cU the Rodrigues (1-cos) term vanishes.  No gimbal pole: axle≈cR stays
+        // roughly horizontal.  Base spin/steer signs stay cvar-lockable (cl_car_wheel_spin / cl_car_wheel_steer).
+        // SPIN SIGN is the SAME for BOTH sides: all 4 wheels share one world angular velocity (same axle cR),
+        // so they render the same roll phase.  The mirrored `wheel_l.iqm` only flips the RIM to face outward —
+        // it does NOT reverse the roll-about-axle (verified empirically: the old `(left?-1:1)` left the RIGHT
+        // wheels spinning backward while the left looked right).  cl_car_wheel_spin still flips both globally.
+        float sr = (i < 2) ? (car.pp_car_steer * carc_wheel_steer * 0.0174533) : 0;
+        vector axle = cR * cos(sr) + cF * sin(sr);          // unit, and ⟂ cU (cR⟂cU, cF⟂cU)
+
+        float spinrad = -car.pp_wheel_spin * 0.0174533;
+        float cs = cos(spinrad), sn = sin(spinrad);
+        vector cw;                                          // cw = axle × cU  (manual cross — no builtin dep)
+        cw_x = axle_y*cU_z - axle_z*cU_y;
+        cw_y = axle_z*cU_x - axle_x*cU_z;
+        cw_z = axle_x*cU_y - axle_y*cU_x;
+        vector uref = cU * cs + cw * sn;                    // Rodrigues; (1-cos) term = 0 because axle⟂cU
+
+        // vectoangles() ALREADY bakes in r_meshpitch/roll (engine PF_vectoangles → VectorAngles(...,true):
+        // pitch*=r_meshpitch, roll*=r_meshroll), and the RENDERER applies them AGAIN (AngleVectorsMesh) —
+        // the two cancel, so set .angles = va DIRECTLY.  The old `va_x * rmp` DOUBLE-applied r_meshpitch
+        // (-1) → negated the wheel PITCH: invisible on flat (a level axle has pitch 0) but INVERTED the
+        // vertical tilt once the car banks → "wheels bank the wrong way."  (rmr=1, so the roll multiply was
+        // a no-op; spin, baked into uref above, is unchanged.)
+        vector va = vectoangles(axle, uref);
+        w.angles = va;
+        w.scale = cscale * (rad / 12.64);   // scale the MODEL by cl_car_wheel_radius (12.64 = baked radius) so it
+                                        // renders at rworld — Vis-radius now RESIZES the tyre instead of just
+                                        // nudging its centre up.  Bottom stays on the ground (centre at rworld).
+        w.skin  = car.skin;                            // livery: dirty car → dirty wheels (needs wheel_<N>.skin)
+        addentity(w);                                  // explicit draw from the car predraw — NO drawmask
+    }
+};
+
+// ============================================================
+//  Seated car driver — one render entity glued to the interpolated chassis (like the wheels), so it's
+//  smooth (no server-tick jitter) and visible in first person.  The server keeps the real player edict
+//  hidden (alpha -1) and its standing visual proxy is suppressed (Car_IsDriverSlot below), so there is
+//  exactly ONE body: this one.  Non-solid (a render entity), so it never fights the ground.
+// ============================================================
+void(entity car) Car_DrawDriver =
+{
+    // Free field test FIRST — the overwhelmingly common case is a car with nobody in it, and
+    // the cvar() hash lookup used to run for every one of them every frame before proving it.
+    if (car.pp_car_drv_ent <= 0) return;   // no seated driver networked (or sv_car_show_driver 0)
+    if (!cvar("cl_car_driver")) return;
+
+    if (!car.pp_driver)
+    {
+        car.pp_driver = spawn();
+        car.pp_driver.classname = "car_driver";
+    }
+    // (re)bind the model when the networked team_model_byte changes (encode 0 as unbound via +1).
+    if (car.pp_driver_bound != car.pp_car_drv_model + 1)
+    {
+        setmodel(car.pp_driver, SH_ModelPathForTeamByte(car.pp_car_drv_model));
+        car.pp_driver_bound = car.pp_car_drv_model + 1;
+    }
+    car.pp_driver.skin  = car.pp_car_drv_skin;
+    car.pp_driver.frame = cvar("cl_car_driver_frame");   // static seated pose (112 = crouch, no-IK)
+    car.pp_driver.scale = 1;
+
+    // Chassis basis at the interpolated pose — same construction as Car_DrawWheels (kept inline so the
+    // confirmed-good wheel code stays untouched).  cU/cF/cR are the banked chassis axes.
+    float rmp = carc_meshpitch;
+    float rmr = carc_meshroll;
+    float myaw = car.pp_car_myaw + carc_model_yaw;
+    makevectors([car.angles_x * rmp, car.angles_y, car.angles_z * rmr]);
+    vector tF = v_forward, tR = v_right, cU = v_up;
+    float myr = myaw * 0.0174533, mc = cos(myr), ms = sin(myr);
+    vector cF = tF * mc - tR * ms;
+    vector cR = tR * mc + tF * ms;
+    vector cgofs = tF * ((car.mins_x + car.maxs_x) * 0.5) - tR * ((car.mins_y + car.maxs_y) * 0.5);
+
+    // Seat point tracks the banked chassis; the body BANKS WITH the car by inheriting the car's pitch/roll
+    // (same raw angles → the engine's r_meshpitch/roll treats the driver exactly like the car), with the
+    // model_yaw added to face the nose.  The mapper dials seat_up/_fwd/_side per car (FGD) or via sv_car_seat_*.
+    vector org = car.origin + cgofs
+               + cU * car.pp_car_drv_up
+               + cF * car.pp_car_drv_fwd
+               + cR * car.pp_car_drv_side;
+    setorigin(car.pp_driver, org);
+    car.pp_driver.angles = [car.angles_x, car.angles_y + myaw, car.angles_z];
+    addentity(car.pp_driver);              // explicit — renders in BOTH first and third person
+};
+
+// Resolved "weapons.metal_impact" effect id for the exhaust, cached once it comes back VALID
+// (>0).  Never caches a failure — see the resolve comment in Car_DrawExhaust.
+float g_car_exhaust_eid;
+
+// Tailpipe exhaust — a metal-impact smoke puff (the one bullets use on metal) re-emitted each frame at
+// the recomputed tailpipe world-point, so it tracks the interpolated car with zero lag.  Rate scales with
+// speed + client-derived acceleration (so it works for remote cars, which have no networked throttle).
+void(entity car) Car_DrawExhaust =
+{
+    if (!cvar("cl_car_exhaust")) return;
+
+    // PARKED FAST-OUT — hoisted above the effect resolve + basis math below.  The engine is
+    // "on" only while driven or still coasting, and the old code proved that at the BOTTOM of
+    // the function, after paying for a particleeffectnum() string lookup, ~10 cvar reads, a
+    // makevectors and a full Rodrigues basis solve — every frame, for every parked car.
+    // (The velocity read is free; everything it skips is not.)
+    if (car.pp_car_drv_ent <= 0)
+        if (vlen(car.velocity) < 20)
+        {
+            car.pp_exhaust_accum = 0;
+            car.pp_exhaust_time  = cltime;   // keep the dt anchor fresh so the first driven frame
+                                             // sees a small dt instead of a seed-and-discard gap
+            return;
+        }
+
+    // Resolve the smoke id EXACTLY like the working bullet/button emitters (cl_main.qc:2081) — Impact_ResolveAll
+    // first, reuse impact_effect_metal, fall back to particleeffectnum.  The resolved id is CACHED once valid:
+    // a FAILED id is still never cached (a -1 from an early frame, before the particle cfg was ready, used to
+    // stick forever = "no smoke"), but re-running the string lookup every frame after it has succeeded bought
+    // nothing.  metal_impact is a "+"-append-only effect so impact_effect_metal itself is 0 (query-validated)
+    // → the particleeffectnum fallback is the one that actually yields a usable slot.
+    float eid = g_car_exhaust_eid;
+    if (eid <= 0)
+    {
+        Impact_ResolveAll();
+        eid = impact_effect_metal;
+        if (eid == 0 || eid == -1) eid = particleeffectnum("weapons.metal_impact");
+        if (eid == 0 || eid == -1) return;
+        g_car_exhaust_eid = eid;   // only ever cache a VALID id
+    }
+
+    // Chassis basis (same as the driver/wheels).
+    float rmp = carc_meshpitch;
+    float rmr = carc_meshroll;
+    float myaw = car.pp_car_myaw + carc_model_yaw;
+    makevectors([car.angles_x * rmp, car.angles_y, car.angles_z * rmr]);
+    vector tF = v_forward, tR = v_right, cU = v_up;
+    float myr = myaw * 0.0174533, mc = cos(myr), ms = sin(myr);
+    vector cF = tF * mc - tR * ms;
+    vector cR = tR * mc + tF * ms;
+    vector cgofs = tF * ((car.mins_x + car.maxs_x) * 0.5) - tR * ((car.mins_y + car.maxs_y) * 0.5);
+
+    // Client-derived forward speed + acceleration (dt clamped like the wheel spin so a rest-gap can't spike).
+    float dt = cltime - car.pp_exhaust_time;
+    car.pp_exhaust_time = cltime;
+    float fwdspeed = car.velocity * cF;
+    if (dt <= 0 || dt > 0.5) { car.pp_exhaust_prevfwd = fwdspeed; return; }   // first frame / big gap: seed only
+    float accel = (fwdspeed - car.pp_exhaust_prevfwd) / dt;
+    car.pp_exhaust_prevfwd = fwdspeed;
+    float speed = vlen(car.velocity);
+    // (The "engine is on" parked test that used to live here is now the fast-out at the top
+    //  of this function, so a parked car never reaches the resolve/basis work above.)
+
+    // Emit rate: a steady idle wisp plus a load term from speed and positive acceleration (blip → more smoke).
+    float load = speed / 400;
+    if (accel > 0) load += accel / 500;
+    if (load > 1.5) load = 1.5;
+    float rate = 12 + load * 40;       // ~12/s idle → ~72/s under hard accel (visible)
+    car.pp_exhaust_accum += rate * dt;
+
+    // Tailpipe = a pure offset from the car ORIGIN along the chassis basis (dialable per install).  cgofs has
+    // no Z, and the origin sits at GROUND level, so cl_car_exhaust_z must stay POSITIVE or the puff is buried.
+    vector pipe = car.origin + cgofs
+                + cF * cvar("cl_car_exhaust_x")
+                + cR * cvar("cl_car_exhaust_y")
+                + cU * cvar("cl_car_exhaust_z");
+    vector puffvel = cF * (-1 * (40 + speed * 0.35)) + cU * 10;   // trails rearward + drifts UP so it's seen
+
+    while (car.pp_exhaust_accum >= 1)
+    {
+        car.pp_exhaust_accum -= 1;
+        pointparticles(eid, pipe, puffvel, 1);
+    }
+};
+
+// Count of car mirrors that currently have a seated driver (maintained in CSQC_PhysProp_Update, and
+// decremented in CSQC_Ent_Remove for a car removed while driven).  Lets Car_IsDriverSlot skip its walk
+// entirely in the common case (nobody driving).
+float g_car_driver_count;
+
+// ---------------------------------------------------------------------------
+// CAR CHAIN — a dedicated linked list of just the car mirrors.
+//
+// EVERY physics prop (barrel, can, cabinet, prop_physics, prop_car) shares the classname
+// "phys_files", so `find(world, classname, "phys_files")` walks the WHOLE CSQC entity list
+// doing a string compare per entity, and then throws away all the non-cars.  Several
+// per-frame loops did exactly that (cl_vehicle_sound.qc ×3, cl_main.qc's camera pass,
+// Car_IsDriverSlot) — i.e. on a prop-dense map, thousands of compares per frame to find the
+// 0-8 cars.  This is the client-side twin of the server's player_chain_head (sv_physprop.qc).
+//
+// Linked on the first snapshot that reports is_car (guarded by pp_car_linked, since
+// CSQC_PhysProp_Update runs per snapshot), unlinked in CSQC_Ent_Remove.  Use .pp_car_next —
+// NOT .chain, which findradius/findchain reuse as scratch.
+// ---------------------------------------------------------------------------
+entity g_car_chain_head;
+
+void(entity car) Car_ChainLink =
+{
+    if (car.pp_car_linked)
+        return;
+    car.pp_car_next  = g_car_chain_head;
+    g_car_chain_head = car;
+    car.pp_car_linked = TRUE;
+};
+
+void(entity car) Car_ChainUnlink =
+{
+    if (!car.pp_car_linked)
+        return;
+    if (g_car_chain_head == car)
+        g_car_chain_head = car.pp_car_next;
+    else
+    {
+        entity p = g_car_chain_head;
+        while (p)
+        {
+            if (p.pp_car_next == car)
+            {
+                p.pp_car_next = car.pp_car_next;
+                break;
+            }
+            p = p.pp_car_next;
+        }
+    }
+    car.pp_car_next   = world;
+    car.pp_car_linked = FALSE;
+};
+
+// Is this player slot the seated driver of ANY car mirror?  Called from the visual-proxy predraw to suppress
+// a driver's standing body — the seated model is drawn by Car_DrawDriver instead, so there's no double.
+float(float entnum) Car_IsDriverSlot =
+{
+    if (entnum <= 0)             return FALSE;
+    if (g_car_driver_count == 0) return FALSE;   // O(1) fast path: no drivers → no scan
+    entity e = g_car_chain_head;                 // cars only — not every phys_files prop
+    while (e)
+    {
+        if (e.pp_car_drv_ent == entnum)
+            return TRUE;
+        e = e.pp_car_next;
+    }
+    return FALSE;
+};
+
+// All per-frame car render extras, driven from the 3 predraw branches below.
+void(entity car) Car_DrawExtras =
+{
+    Car_DrawWheels(car);
+    Car_DrawDriver(car);
+    Car_DrawExhaust(car);
+};
+
 float() CSQC_PhysProp_Predraw =
 {
     // CLIENT-SIDE PREDICTION: if the LOCAL player is the carrier and we're in steady
@@ -666,7 +1196,9 @@ float() CSQC_PhysProp_Predraw =
         self.angles_z = 0;
         self.angles_y = view_angles_y + 180;   // upright, facing the carrier — matches Carry_Tick
         setorigin(self, org);
+        BlobShadow_Emit(self);
         addentity(self);
+        if (self.pp_is_car) Car_DrawExtras(self);
         self.pp_pred_origin    = org;          // remember the predicted hand pose for the drop fade
         self.pp_was_predicting = TRUE;
         return PREDRAW_NEXT;
@@ -696,30 +1228,45 @@ float() CSQC_PhysProp_Predraw =
             self.pp_err_cltime = 0;
     }
 
-    // `cl_physprop_noextrap 1` disables the smoothing so you can SEE the raw snapshot
-    // cadence (a debug toggle — default off = extrapolation ON).  With it off you'll
-    // see the prop step at exactly the server send rate; with it on those steps are
-    // filled by extrapolating along the streamed velocity/avelocity.
+    // `cl_physprop_noextrap 1` = snap straight to the newest snapshot (no interpolation), so you
+    // can SEE the raw send cadence (debug toggle; default off = interpolation ON).
     if (cvar("cl_physprop_noextrap"))
     {
         setorigin(self, self.pp_snap_origin + err);
         self.angles = self.pp_snap_angles;
+        BlobShadow_Emit(self);
         addentity(self);
+        if (self.pp_is_car) Car_DrawExtras(self);
         return PREDRAW_NEXT;
     }
 
-    // Extrapolate from the last snapshot at the streamed velocity/avelocity so
-    // motion is smooth between updates.  Capped tight so a body that slams to a
-    // stop (wall / landing) doesn't visibly overshoot before the next snap.
-    float elapsed = cltime - self.pp_snap_time;
-    if (elapsed < 0)   elapsed = 0;
-    if (elapsed > 0.1) elapsed = 0.1;
+    // Interpolate between the last two snapshots, rendering one interval in the past → smooth at ANY
+    // stream rate; on the tail (late packet) coast on velocity instead of freezing (PhysProp_InterpOrigin).
+    float f = PhysProp_InterpFrac(self);                 // still drives the angle lerp + settle test
+    org = PhysProp_InterpOrigin(self);
+    setorigin(self, org + err);
+    self.angles = PhysProp_AnglesLerp(self.pp_snap_angles_prev, self.pp_snap_angles, f);
 
-    setorigin(self, self.pp_snap_origin + self.velocity * elapsed + err);
-    if (self.avelocity != '0 0 0')
-        self.angles = self.pp_snap_angles + self.avelocity * elapsed;
+    // Caught up to the newest snapshot AND at rest (+ no handoff fade / prediction pending): park
+    // exactly on it and UNHOOK.  The interp has reached cur, which == the raw origin the reader
+    // set, so there's no snap; and a settled prop stops relinking (400 resting props cost ~0).
+    // Evaluated BEFORE the blob emit: on the settle frame we bake the persistent blob INSTEAD of
+    // emitting a dynamic one — emitting both draws two coincident quads (double-dark for a frame).
+    float pp_settling = 0;
+    if (f >= 1 && vlen(self.velocity) < 0.5 && vlen(self.avelocity) < 0.5
+        && self.pp_err_cltime <= 0 && !self.pp_was_predicting)
+        pp_settling = 1;
 
+    if (pp_settling)
+        BlobShadow_BakeStatic(self);   // persistent; freed on wake (Update re-hooks) or removal
+    else
+        BlobShadow_Emit(self);
     addentity(self);
+    if (self.pp_is_car) Car_DrawExtras(self);
+
+    if (pp_settling && !self.pp_is_car)   // cars keep the predraw hooked so a PARKED car still draws its wheels
+        self.predraw = __NULL__;
+
     return PREDRAW_NEXT;
 };
 
@@ -738,12 +1285,42 @@ void(float isnew) CSQC_PhysProp_Update =
     cmod_x           = readbyte() * (1.0 / 255.0);
     cmod_y           = readbyte() * (1.0 / 255.0);
     cmod_z           = readbyte() * (1.0 / 255.0);
+    float  skn       = readbyte();   // livery skin index (selects <model>_<N>.skin). MUST match phys_files_Send.
     float  istrimesh = readbyte();   // 1 = mirror as SOLID_PHYSICS_TRIMESH (hull) when free; 0 = box. MUST match phys_files_Send wire order.
     float  sc        = readcoord();  // Patch 70: visual + narrowphase scale. MUST match phys_files_Send (after istrimesh, before phase).
     float  phase     = readbyte();   // PP_PHASE_* (was the csolid 0/1 byte)
     float  carrier   = readbyte();   // carrier edict (0 = free)
     float  hold_dist = readcoord();  // networked hold params (remote clients lack the server cvars)
     float  hold_z    = readcoord();
+    float  is_car    = readbyte();   // 1 = prop_car/func_car (engine-sound driver). Car extras follow ONLY when set.
+    float  car_steer = 0, car_wheelidx = 0, car_myaw = 0, car_base = 0, car_track = 0, car_drop = 0, car_fwd = 0;
+    float  car_rest = 0, car_travel = 0;
+    float  car_maxspd = 0, car_gears = 0, car_shift = 0;
+    float  drv_ent = 0, drv_model = 0, drv_skin = 0, drv_up = 0, drv_fwd = 0, drv_side = 0;
+    if (is_car)                       // MUST match the is-car branch in phys_files_Send byte-for-byte
+    {
+        car_steer    = readbyte() - 90;    // front steer angle (deg)
+        car_wheelidx = readshort();        // wheel model index (0 = none)
+        car_myaw     = readbyte() - 128;   // per-car model_yaw (deg)
+        car_base     = readcoord();        // resolved wheelbase / track / drop / fwd (visual wheels match physics)
+        car_track    = readcoord();
+        car_drop     = readcoord();
+        car_fwd      = readcoord();
+        car_rest     = readcoord();        // resolved ride_height + compression_travel → cap the visual droop
+        car_travel   = readcoord();
+        car_maxspd   = readshort();        // engine-sound scale: physics redline speed / gears / shift window
+        car_gears    = readbyte();
+        car_shift    = readbyte() * 0.01;
+        if (readbyte())                    // driver present (else a single 0 byte)
+        {
+            drv_ent   = readbyte();        // driver player slot
+            drv_model = readbyte();        // team_model_byte
+            drv_skin  = readbyte();        // skin
+            drv_up    = readshort() - 4096;   // resolved seat offsets (biased signed shorts)
+            drv_fwd   = readshort() - 4096;
+            drv_side  = readshort() - 4096;
+        }
+    }
 
     // classname drives Impact_ClassifyLocal → metal spark + no bullet decal.
     self.classname = "phys_files";
@@ -775,6 +1352,7 @@ void(float isnew) CSQC_PhysProp_Update =
     self.velocity  = vel;
     self.avelocity = avel;
     self.colormod  = cmod;
+    self.skin      = skn;            // livery swap: selects <model>_<N>.skin (0 = clean, 1 = dirty, …)
     self.movetype  = MOVETYPE_NONE;  // origin is wire-authoritative (no engine integrate)
     self.drawmask  = MASK_ENGINE;    // engine renders the CSQC entity
 
@@ -782,24 +1360,59 @@ void(float isnew) CSQC_PhysProp_Update =
     self.pp_carrier   = carrier;
     self.pp_hold_dist = hold_dist;
     self.pp_hold_z    = hold_z;
+    self.pp_is_car       = is_car;
+    if (is_car)
+        Car_ChainLink(self);   // first is-car snapshot puts it on the car chain (idempotent)
+    self.pp_car_steer    = car_steer;
+    self.pp_car_wheelidx = car_wheelidx;
+    self.pp_car_myaw     = car_myaw;
+    self.pp_car_base     = car_base;
+    self.pp_car_track    = car_track;
+    self.pp_car_drop     = car_drop;
+    self.pp_car_fwd      = car_fwd;
+    self.pp_car_rest     = car_rest;
+    self.pp_car_travel   = car_travel;
+    self.pp_car_maxspd   = car_maxspd;
+    self.pp_car_gears    = car_gears;
+    self.pp_car_shift    = car_shift;
+    if ((self.pp_car_drv_ent > 0) != (drv_ent > 0))   // maintain the driver count for Car_IsDriverSlot's fast path
+        g_car_driver_count += (drv_ent > 0) ? 1 : -1;
+    self.pp_car_drv_ent   = drv_ent;
+    self.pp_car_drv_model = drv_model;
+    self.pp_car_drv_skin  = drv_skin;
+    self.pp_car_drv_up    = drv_up;
+    self.pp_car_drv_fwd   = drv_fwd;
+    self.pp_car_drv_side  = drv_side;
 
-    // Anchor the extrapolator at this authoritative snapshot.
+    // Roll the previous snapshot forward, then store this authoritative one (2-snapshot interp).
+    self.pp_snap_origin_prev = self.pp_snap_origin;
+    self.pp_snap_angles_prev = self.pp_snap_angles;
+    self.pp_snap_time_prev   = self.pp_snap_time;
     self.pp_snap_origin = org;
     self.pp_snap_angles = ang;
     self.pp_snap_time   = cltime;
+    if (isnew)   // no prev to interpolate from → sit on the first snapshot (dt=0 → frac 1)
+    {
+        self.pp_snap_origin_prev = org;
+        self.pp_snap_angles_prev = ang;
+        self.pp_snap_time_prev   = cltime;
+    }
 
-    // Hook the predraw while genuinely moving (extrapolation) OR while I'm the local
-    // carrier in steady carry (so client-prediction runs every render frame even when
-    // the prop is momentarily stationary at the hold point) OR while a handoff fade is
-    // still decaying.  A deadband keeps a settled, un-owned prop's origin stable +
-    // un-extrapolated so a standing player collides with the true resting surface.
-    if (vlen(vel) > 0.5 || vlen(avel) > 0.5
-        || (phase == PP_PHASE_STEADY && carrier == player_localentnum)
-        || self.pp_was_predicting
-        || self.pp_err_cltime > 0)
-        self.predraw = CSQC_PhysProp_Predraw;
-    else
-        self.predraw = __NULL__;
+    // Rest-wake repair: a rested prop stops streaming, so on the next wake pp_snap_time_prev is stale
+    // (seconds old) and the jolt would lerp over the whole silence (a slow ooze).  A gap this large is
+    // never normal streaming (8 Hz = 0.125 s, even 4 Hz = 0.25 s), so treat it as a wake and bound the
+    // catch-up: move ONLY the timestamp (keep pp_snap_origin_prev = the current rest pose, so no pop) —
+    // dt becomes cl_physprop_wake_lerp, so PhysProp_InterpFrac sweeps prev->cur over ~80 ms (prompt +
+    // smooth).  wake_lerp 0 -> dt~=0 -> InterpFrac early-outs to 1 -> instant snap.
+    if (!isnew && (self.pp_snap_time - self.pp_snap_time_prev) > 0.3)
+        self.pp_snap_time_prev = self.pp_snap_time - cvar("cl_physprop_wake_lerp");
+
+    // Always hook the interpolator; it interpolates prev→cur over the real interval, then parks +
+    // unhooks itself once caught up at rest (see CSQC_PhysProp_Predraw), so resting props cost ~0.
+    self.predraw = CSQC_PhysProp_Predraw;
+    // The prop is live again (fresh snapshot) — drop any parked static blob; the per-frame
+    // emit in the predraw takes over.  Early-outs when no slot, so steady streams cost ~0.
+    BlobShadow_FreeStatic(self);
 };
 
 // ============================================================

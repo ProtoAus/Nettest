@@ -11,7 +11,7 @@
 //
 // Admin control follows the mod's cvar-trigger convention (SSQC has no
 // registercommand): bot_minplayers (persistent fill), botadd /
-// bot_kick (momentary, reset to 0), bot_skill (0-100 aim/reaction).
+// botkick (momentary, reset to 0), bot_skill (0-100 aim/reaction).
 //
 // Compile order: after sv_player.qc (PlayerJoinTeam/PlayerSpawn/PlayerPreThink/
 // SV_RunClientCommand) + sv_navnodes.qc (Nav_*), before sv_main.qc (StartFrame
@@ -841,10 +841,10 @@ void() Bot_FillTick =
 		bot_add_pending = bot_add_pending - 1;
 	}
 
-	float kick = cvar("bot_kick");
+	float kick = cvar("botkick");
 	if (kick != 0)
 	{
-		cvar_set("bot_kick", "0");
+		cvar_set("botkick", "0");
 		float k;
 		for (k = 0; k < kick && Bot_Count() > 0; k = k + 1)
 			Bot_KickOne();
@@ -997,6 +997,7 @@ void(entity client) NavDbg_EnsureProxy =
 	proxy.drawonlytoclient = client;
 	proxy.pvsflags = PVSF_NOREMOVE;
 	setorigin(proxy, client.origin);
+	navdbg_proxies_exist = TRUE;   // something to tear down later (see NavDbg_Tick)
 };
 
 // Per-frame driver (called from Bot_RunFrame).  sv_debug_nav 0 => tear proxies down.
@@ -1006,12 +1007,17 @@ void() NavDbg_Tick =
 
 	if (cvar("sv_debug_nav") < 1)
 	{
+		// Fast path: nothing was ever spawned, so skip the per-frame find() walk over the
+		// whole edict table.  (Same latch pattern as CarDbg_Tick — see the note there.)
+		if (!navdbg_proxies_exist)
+			return;
 		for (e = world; (e = find(e, classname, "player")); )
 			if (e.nav_debug_proxy)
 			{
 				remove(e.nav_debug_proxy);
 				e.nav_debug_proxy = world;
 			}
+		navdbg_proxies_exist = FALSE;
 		return;
 	}
 

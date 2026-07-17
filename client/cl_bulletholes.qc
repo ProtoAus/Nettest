@@ -118,7 +118,9 @@ entity bh_pvs_test_ent;
 // defaults — close enough for the brief startup window.
 float bh_cache_enabled;     // cl_bulletholes > 0
 float bh_cache_opacity;     // bound(0, cl_decal_opacity, 1)
-float bh_cache_polygon;     // r_bullethole_renderer != 0 (1 = polygon, 0 = legacy adddecal)
+float bh_cache_polygon;     // TRUE only for r_bullethole_renderer 1 (trisoup); 0=adddecal, 2=persistent-lit
+float bh_cache_renderer;    // r_bullethole_renderer raw value (0 adddecal / 1 trisoup / 2 persistent-lit)
+float bh_last_renderer;     // previous frame's renderer — to detect a switch AWAY from mode 2 (free handles)
 float bh_cache_max;         // cl_bulletholes_max — eviction cap
 float bh_cache_dist_sq;     // cl_bullethole_distance squared (0 = LOD off)
 float bh_cache_clip_geom;   // cl_bullethole_clip_geom != 0 (Source-style edge clip at spawn)
@@ -166,6 +168,10 @@ const int BH_TRISOUP_MAX_QUADS = 2048;
 // dynamic suffix, or holes that lost the slot race when the
 // buffer was full).
 .float bh_slot;
+
+// r_bullethole_renderer 2 (PERSISTENT LIT): engine persistent-decal handle for a STATIC (world)
+// hole — the engine clips it ONCE + re-emits cheaply (no per-frame BSP re-clip).  0=none, -1=off-surface.
+.float bh_handle;
 
 // Per-hole shader override path.  Empty/zero string means "use the
 // default gfx/bullethole shader and the cached batched fast path".
@@ -335,12 +341,19 @@ void(int slot, vector p0, vector p1, vector p2, vector p3,
     verts[vbase + 3].st[0]  = 0;    verts[vbase + 3].st[1]  = 0;
     verts[vbase + 3].rgba[0] = col_x; verts[vbase + 3].rgba[1] = col_y; verts[vbase + 3].rgba[2] = col_z; verts[vbase + 3].rgba[3] = alpha;
 
+    // WINDING (2026-07): 0,2,1 / 0,3,2 — i.e. the quad's triangles are wound so their geometric normal is
+    // -wn, which is CLOCKWISE when viewed from the FRONT (+wn side).  That MATCHES Quake/BSP world surfaces,
+    // and is what makes backface culling work: FTE leaves glFrontFace at GL_CCW and its default
+    // SHADER_CULL_FRONT issues glCullFace(GL_FRONT) (gl_backend.c:1032, flipcull=0 in the normal view) — the
+    // classic GLQuake convention — so CW-from-front survives and CCW-from-front is culled.  The old
+    // 0,1,2 / 0,2,3 order gave normal +wn (CCW-from-front) which culls from the FRONT (decal/blob invisible).
+    // It only ever worked because every consumer used `cull none`; now that decals cull, the winding matters.
     idx[ibase + 0] = vbase + 0;
-    idx[ibase + 1] = vbase + 1;
-    idx[ibase + 2] = vbase + 2;
+    idx[ibase + 1] = vbase + 2;
+    idx[ibase + 2] = vbase + 1;
     idx[ibase + 3] = vbase + 0;
-    idx[ibase + 4] = vbase + 2;
-    idx[ibase + 5] = vbase + 3;
+    idx[ibase + 4] = vbase + 3;
+    idx[ibase + 5] = vbase + 2;
 };
 
 // Write one quad's vertex+index data using per-vert UVs read from the
@@ -373,12 +386,12 @@ void(int slot, vector p0, vector p1, vector p2, vector p3,
     verts[vbase + 3].st[0]  = bh_io_uv3_x; verts[vbase + 3].st[1]  = bh_io_uv3_y;
     verts[vbase + 3].rgba[0] = col_x; verts[vbase + 3].rgba[1] = col_y; verts[vbase + 3].rgba[2] = col_z; verts[vbase + 3].rgba[3] = alpha;
 
-    idx[ibase + 0] = vbase + 0;
-    idx[ibase + 1] = vbase + 1;
-    idx[ibase + 2] = vbase + 2;
+    idx[ibase + 0] = vbase + 0;   // 0,2,1 / 0,3,2 — CW-from-front to match the world (see BH_WriteQuad)
+    idx[ibase + 1] = vbase + 2;
+    idx[ibase + 2] = vbase + 1;
     idx[ibase + 3] = vbase + 0;
-    idx[ibase + 4] = vbase + 2;
-    idx[ibase + 5] = vbase + 3;
+    idx[ibase + 4] = vbase + 3;
+    idx[ibase + 5] = vbase + 2;
 };
 
 // UV-aware static slot allocator — same slot-pool logic as
@@ -473,10 +486,24 @@ float(entity hole, vector p0, vector p1, vector p2, vector p3,
     return slot;
 };
 
-// Free a static hole's slot — degenerates the quad (sets all 4
-// vertex alphas to 0 so the GPU effectively skips it) and pushes
-// the slot index onto the per-shader free list for reuse. Called
-// from CSQC_BulletHoleRemove. Cheap (8 array writes + 1 push).
+// Collapse a quad's 4 verts onto its own first corner so both triangles are zero-area and
+// the GPU discards them regardless of shader / vertex alpha.  Shared by all three tri-soup
+// decal free paths (bullet holes, blood, sprays) — zeroing alpha ALONE relies on the shader
+// honouring `alphaGen vertex`, which r_showtris bypasses and a post-vid_restart base-shader
+// fallback defeats, leaving a visible ghost.  trisoup_simple_vert_t.xyz is float[3], so copy
+// per component (same idiom as Decal_ShiftQuadVerts).  Compile order (cl_progs.src) puts this
+// before the blood/spray free paths, so they can call it.
+void(trisoup_simple_vert_t *v) Decal_CollapseQuad =
+{
+    v[1].xyz[0] = v[0].xyz[0]; v[1].xyz[1] = v[0].xyz[1]; v[1].xyz[2] = v[0].xyz[2];
+    v[2].xyz[0] = v[0].xyz[0]; v[2].xyz[1] = v[0].xyz[1]; v[2].xyz[2] = v[0].xyz[2];
+    v[3].xyz[0] = v[0].xyz[0]; v[3].xyz[1] = v[0].xyz[1]; v[3].xyz[2] = v[0].xyz[2];
+};
+
+// Free a static hole's slot — degenerates the quad to ZERO-AREA geometry (collapses all 4
+// verts onto the first corner; also zeros alpha as belt-and-suspenders) so the GPU skips it
+// regardless of the bound shader, and pushes the slot index onto the per-shader free list
+// for reuse. Called from CSQC_BulletHoleRemove. Cheap (a handful of array writes + 1 push).
 void(entity hole) BH_FreeStaticSlot =
 {
     if (hole.bh_slot < 0) return;
@@ -488,6 +515,7 @@ void(entity hole) BH_FreeStaticSlot =
         bh_snow_verts[vbase + 1].rgba[3] = 0;
         bh_snow_verts[vbase + 2].rgba[3] = 0;
         bh_snow_verts[vbase + 3].rgba[3] = 0;
+        Decal_CollapseQuad(&bh_snow_verts[vbase]);
         bh_snow_free[bh_snow_free_count] = slot;
         bh_snow_free_count = bh_snow_free_count + 1;
     }
@@ -497,6 +525,7 @@ void(entity hole) BH_FreeStaticSlot =
         bh_bullet_verts[vbase + 1].rgba[3] = 0;
         bh_bullet_verts[vbase + 2].rgba[3] = 0;
         bh_bullet_verts[vbase + 3].rgba[3] = 0;
+        Decal_CollapseQuad(&bh_bullet_verts[vbase]);
         bh_bullet_free[bh_bullet_free_count] = slot;
         bh_bullet_free_count = bh_bullet_free_count + 1;
     }
@@ -546,6 +575,15 @@ void(float is_snow, vector p0, vector p1, vector p2, vector p3,
 // Both follow-ups can land later once the global budget is freed up.
 const float BH_CLIP_BUF_MAX     = 12;
 const float BH_MAX_SURFACE_TRIS = 128;   // skip huge tessellated patches
+
+// Cross-surface coplanar-seam probe (P1 fix).  getsurfacenearpoint returns ONE BSP face, so a
+// flat wall the compiler split into coplanar faces reads its A|B seam as a real outline edge and
+// slices the decal there.  For each outline edge we probe just past it and, if solid COPLANAR
+// geometry continues, treat the edge as interior (don't clip).  Kept tiny so only ~zero-width
+// compiler seams bridge — a real gap (doorway) between two coplanar walls is NOT bridged.
+const float BH_SEAM_PROBE     = 1.5;   // qu past the edge (in-plane) to sample the neighbour
+const float BH_SEAM_DEPTH     = 2.0;   // qu each side of the plane for the perpendicular micro-trace
+const float BH_SEAM_PLANE_EPS = 0.5;   // qu tolerance for "neighbour lies in the hit plane"
 
 // Ping-pong work buffers — file scope because fteqcc treats array locals
 // as globals; reusing module-scope buffers keeps the QC global count flat.
@@ -774,6 +812,32 @@ float(__inout vector q0, __inout vector q1, __inout vector q2, __inout vector q3
                                  edges_idx_a[(int)e], edges_idx_b[(int)e]))
             active_mask = active_mask + (1 << (int)e);
     }
+
+    // Cross-surface coplanar seams (P1): getsurfacenearpoint handed us ONE face, so an edge shared
+    // with a coplanar NEIGHBOUR face (a qbsp split of a flat wall) was flagged "outline" above and
+    // would slice the decal.  For each such outline edge, probe just past it and CLEAR its bit if
+    // solid geometry continues in the SAME plane.  A real corner (non-parallel neighbour) or an
+    // outer boundary (nothing past the edge) stays set, so genuine edges still clip.  Separate
+    // `continue` guards (not one &&) — fteqcc has no short-circuit — and an inline abs (no fabs dep).
+    for (e = 0; e < 3; e = e + 1)
+    {
+        if (!(active_mask & (1 << (int)e)))
+            continue;
+        vector seam_mid = (edges_v0[(int)e] + edges_v1[(int)e]) * 0.5;
+        vector seam_in  = BH_EdgePlaneNormal(edges_v0[(int)e], edges_v1[(int)e],
+                                             edges_third[(int)e], bh_io_sn);  // inward, in-plane
+        vector seam_out = normalize(seam_in * -1);                           // outward, past the edge
+        vector seam_p   = seam_mid + seam_out * BH_SEAM_PROBE;
+        traceline(seam_p + bh_io_sn * BH_SEAM_DEPTH,
+                  seam_p - bh_io_sn * BH_SEAM_DEPTH, MOVE_NOMONSTERS, world);
+        if (trace_fraction >= 1)                        continue;  // open past edge → real boundary
+        if ((trace_plane_normal * bh_io_sn) <= 0.999)   continue;  // not parallel → real corner
+        float seam_pd = (trace_endpos - bh_io_tv0) * bh_io_sn;
+        if (seam_pd < 0) seam_pd = -seam_pd;
+        if (seam_pd >= BH_SEAM_PLANE_EPS)               continue;  // parallel but offset plane
+        active_mask = active_mask - (1 << (int)e);                 // coplanar continuation → seam
+    }
+
     if (active_mask == 0)
         return 0;
 
@@ -897,6 +961,7 @@ void(entity hole) CSQC_BulletHoleRemove =
     // holes whose bh_slot stays at the -1 sentinel).
     BH_FreeStaticSlot(hole);
 
+    if (hole.bh_handle > 0) removedecal(hole.bh_handle);   // r_bullethole_renderer 2: free the engine persistent decal
     remove(hole);
     bh_count -= 1;
 };
@@ -941,14 +1006,23 @@ void(vector hit_pos, float decal_half_size) CSQC_BulletHole_DedupeNearby =
 // and a blendfunc after the maps lands on the LAST sub-pass ($lightmap) while the backend applies
 // the BASE pass's blend (would default opaque => the decal's masked-out magenta shows).  `!!samps 2`
 // = positional s_t0(png)/s_t1($lightmap).  In scope for cl_sprays.qc + cl_infodecal.qc (compiled after).
-string(string maptarget) Decal_LMShaderBody =
+// `twosided`: 1 = keep `cull none` (sprays — deliberately visible from either side, cl_sprays.qc:371).
+// 0 = OMIT cull entirely => FTE's default SHADER_CULL_FRONT (gl_shader.c:7689) = normal backface culling.
+// WHY culling matters: `polygonoffset 8` is a CONSTANT window-space depth bias (unit = -25*8 = -200,
+// gl_shader.c:1295).  Depth is nonlinear, so that constant bias equals a world-space pull toward the camera
+// of ~d²·Δz/near — it GROWS with distance (~12qu @1000, ~48qu @2000).  Past ~1-2k units it exceeds a wall's
+// thickness, the decal's depth beats the wall's FAR face, and `cull none` then draws it => the decal shows
+// THROUGH the wall from behind at range.  Culling kills that outright, and costs nothing: the engine's
+// clipper already refuses to build decal geometry on away-facing surfaces (r_decal_noperpendicular=1,
+// q1bsp.c:394-409), so there is no legitimate back-facing decal to lose.
+string(string maptarget, float twosided) Decal_LMShaderBody =
 {
     return sprintf(
         "{\n"
         "    sort decal\n"
         "    polygonoffset 8\n"
         "    nopicmip\n"
-        "    cull none\n"
+        "%s"
         "    {\n"
         "        program decal_lightmap\n"
         "        blendfunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA\n"
@@ -957,31 +1031,65 @@ string(string maptarget) Decal_LMShaderBody =
         "        map %s\n"
         "        map $lightmap\n"
         "    }\n"
-        "}\n", maptarget);
+        "}\n", twosided ? "    cull none\n" : "", maptarget);
 };
 
-// Register/refresh the `_lm` variant for every bullet-hole decal texture (a FIXED set — unlike
+// PLAIN (non-lightmap) decal shader body — the vertex-lit variant used by the trisoup path
+// (addtrisoup_simple).  A precache_pic'd name is only a 2D shader and renders INVISIBLE through
+// addtrisoup_simple (see cl_sprays.qc:344-353); registering this real decal shader under the plain
+// name is what makes r_decal_renderer 1 (trisoup) actually draw.  rgbGen/alphaGen vertex so the
+// per-vertex colour (bh_color surflight tint) + alpha the trisoup writer sets modulate the texture.
+// Same body sprays build inline (cl_sprays.qc:280-296).  Shared: in scope for cl_bloodtrisoup.qc /
+// cl_sprays.qc / cl_infodecal.qc (compiled after).
+// `twosided` — see Decal_LMShaderBody above (0 = omit cull => engine default backface culling).
+string(string maptarget, float twosided) Decal_BaseShaderBody =
+{
+    return sprintf(
+        "{\n"
+        "    sort decal\n"
+        "    polygonoffset 8\n"
+        "    nopicmip\n"
+        "%s"
+        "    {\n"
+        "        map %s\n"
+        "        rgbGen vertex\n"
+        "        alphaGen vertex\n"
+        "        blendFunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA\n"
+        "    }\n"
+        "}\n", twosided ? "    cull none\n" : "", maptarget);
+};
+
+// Register/refresh the decal shaders for every bullet-hole texture (a FIXED set — unlike
 // open-ended spray/infodecal names).  Called at the end of CSQC_BulletHolesInit AND from
 // CSQC_RendererRestarted (vid_restart purges shaderforname shaders).  shaderforname is idempotent.
+//
+// TWO shaders per texture:
+//   plain  <name>     — vertex-lit decal body, used by the TRISOUP path (addtrisoup_simple, mode 1)
+//                       and the adddecal path when r_decal_lightmap is off.  THIS is the one that was
+//                       missing — the names used to be precache_pic'd (2D only) → invisible in trisoup.
+//   <name>_lm         — per-pixel-lightmap body, used by the adddecal path (modes 0/2) when the cvar is on.
+// Init now stores bare names (no precache_pic), so these shaderforname calls create the shaders fresh.
 void() CSQC_BulletHole_ReregisterShaders =
 {
     float i;
-    shaderforname(strcat(BULLETHOLE_QUAD_SHADER, "_lm"), Decal_LMShaderBody(BULLETHOLE_QUAD_SHADER));
-    shaderforname(strcat(SNOWSPLAT_QUAD_SHADER,  "_lm"), Decal_LMShaderBody(SNOWSPLAT_QUAD_SHADER));
+    shaderforname(BULLETHOLE_QUAD_SHADER, Decal_BaseShaderBody(BULLETHOLE_QUAD_SHADER, FALSE));
+    shaderforname(SNOWSPLAT_QUAD_SHADER,  Decal_BaseShaderBody(SNOWSPLAT_QUAD_SHADER, FALSE));
+    shaderforname(strcat(BULLETHOLE_QUAD_SHADER, "_lm"), Decal_LMShaderBody(BULLETHOLE_QUAD_SHADER, FALSE));
+    shaderforname(strcat(SNOWSPLAT_QUAD_SHADER,  "_lm"), Decal_LMShaderBody(SNOWSPLAT_QUAD_SHADER, FALSE));
     for (i = 0; i < BH_MAT_CONC_COUNT;  i = i + 1)
-        if (bh_mat_path_conc[i]  != "") shaderforname(strcat(bh_mat_path_conc[i],  "_lm"), Decal_LMShaderBody(bh_mat_path_conc[i]));
+        if (bh_mat_path_conc[i]  != "") { shaderforname(bh_mat_path_conc[i],  Decal_BaseShaderBody(bh_mat_path_conc[i], FALSE));  shaderforname(strcat(bh_mat_path_conc[i],  "_lm"), Decal_LMShaderBody(bh_mat_path_conc[i], FALSE)); }
     for (i = 0; i < BH_MAT_WOOD_COUNT;  i = i + 1)
-        if (bh_mat_path_wood[i]  != "") shaderforname(strcat(bh_mat_path_wood[i],  "_lm"), Decal_LMShaderBody(bh_mat_path_wood[i]));
+        if (bh_mat_path_wood[i]  != "") { shaderforname(bh_mat_path_wood[i],  Decal_BaseShaderBody(bh_mat_path_wood[i], FALSE));  shaderforname(strcat(bh_mat_path_wood[i],  "_lm"), Decal_LMShaderBody(bh_mat_path_wood[i], FALSE)); }
     for (i = 0; i < BH_MAT_METAL_COUNT; i = i + 1)
-        if (bh_mat_path_metal[i] != "") shaderforname(strcat(bh_mat_path_metal[i], "_lm"), Decal_LMShaderBody(bh_mat_path_metal[i]));
+        if (bh_mat_path_metal[i] != "") { shaderforname(bh_mat_path_metal[i], Decal_BaseShaderBody(bh_mat_path_metal[i], FALSE)); shaderforname(strcat(bh_mat_path_metal[i], "_lm"), Decal_LMShaderBody(bh_mat_path_metal[i], FALSE)); }
     for (i = 0; i < BH_MAT_GLASS_COUNT; i = i + 1)
-        if (bh_mat_path_glass[i] != "") shaderforname(strcat(bh_mat_path_glass[i], "_lm"), Decal_LMShaderBody(bh_mat_path_glass[i]));
+        if (bh_mat_path_glass[i] != "") { shaderforname(bh_mat_path_glass[i], Decal_BaseShaderBody(bh_mat_path_glass[i], FALSE)); shaderforname(strcat(bh_mat_path_glass[i], "_lm"), Decal_LMShaderBody(bh_mat_path_glass[i], FALSE)); }
     for (i = 0; i < BH_SPLAT_COUNT;     i = i + 1)
-        if (bh_splat_path[i]     != "") shaderforname(strcat(bh_splat_path[i],     "_lm"), Decal_LMShaderBody(bh_splat_path[i]));
+        if (bh_splat_path[i]     != "") { shaderforname(bh_splat_path[i],     Decal_BaseShaderBody(bh_splat_path[i], FALSE));     shaderforname(strcat(bh_splat_path[i],     "_lm"), Decal_LMShaderBody(bh_splat_path[i], FALSE)); }
     for (i = 0; i < BH_IMPACT_COUNT;    i = i + 1)
-        if (bh_impact_path[i]    != "") shaderforname(strcat(bh_impact_path[i],    "_lm"), Decal_LMShaderBody(bh_impact_path[i]));
+        if (bh_impact_path[i]    != "") { shaderforname(bh_impact_path[i],    Decal_BaseShaderBody(bh_impact_path[i], FALSE));    shaderforname(strcat(bh_impact_path[i],    "_lm"), Decal_LMShaderBody(bh_impact_path[i], FALSE)); }
     for (i = 0; i < BH_WORLD_WOOD_COUNT; i = i + 1)
-        if (bh_world_wood_path[i] != "") shaderforname(strcat(bh_world_wood_path[i], "_lm"), Decal_LMShaderBody(bh_world_wood_path[i]));
+        if (bh_world_wood_path[i] != "") { shaderforname(bh_world_wood_path[i], Decal_BaseShaderBody(bh_world_wood_path[i], FALSE)); shaderforname(strcat(bh_world_wood_path[i], "_lm"), Decal_LMShaderBody(bh_world_wood_path[i], FALSE)); }
 };
 
 // --- Init (call from CSQC init) ---
@@ -998,34 +1106,37 @@ void() CSQC_BulletHolesInit =
     precache_pic(BULLETHOLE_QUAD_SHADER);
     precache_pic(SNOWSPLAT_QUAD_SHADER);
 
-    // Material decal variants (gfx/decals/impacts/...).  Precaching
-    // returns a persistent shader-name string we cache so the picker
-    // doesn't re-sprintf on every bullet hit.
+    // Material/splat/impact decal variants.  Store the bare shader NAME only (NOT precache_pic'd):
+    // CSQC_BulletHole_ReregisterShaders (called below) registers each name as a real decal shader via
+    // shaderforname (plain + `_lm`).  precache_pic would create a competing 2D shader under the same name
+    // that renders INVISIBLE through addtrisoup_simple (the trisoup path) and that shaderforname can't
+    // replace — so we skip it.  The texture still loads via each shader's own `map` directive.
     float i;
     for (i = 0; i < BH_MAT_CONC_COUNT; i++)
-        bh_mat_path_conc[i]  = precache_pic(sprintf("gfx/decals/impacts/conc%g",  i + 1));
+        bh_mat_path_conc[i]  = sprintf("gfx/decals/impacts/conc%g",  i + 1);
     for (i = 0; i < BH_MAT_WOOD_COUNT; i++)
-        bh_mat_path_wood[i]  = precache_pic(sprintf("gfx/decals/impacts/wood%g",  i + 1));
+        bh_mat_path_wood[i]  = sprintf("gfx/decals/impacts/wood%g",  i + 1);
     for (i = 0; i < BH_MAT_METAL_COUNT; i++)
-        bh_mat_path_metal[i] = precache_pic(sprintf("gfx/decals/impacts/metal%g", i + 1));
+        bh_mat_path_metal[i] = sprintf("gfx/decals/impacts/metal%g", i + 1);
     for (i = 0; i < BH_MAT_GLASS_COUNT; i++)
-        bh_mat_path_glass[i] = precache_pic(sprintf("gfx/decals/impacts/glass%g", i + 1));
+        bh_mat_path_glass[i] = sprintf("gfx/decals/impacts/glass%g", i + 1);
 
     // Splat variants — shared by paintball + snow splats.  Same
     // 9-PNG set drives both effects via random per-spawn pick.
     for (i = 0; i < BH_SPLAT_COUNT; i++)
-        bh_splat_path[i] = precache_pic(sprintf("gfx/impacts/paintball/splat%g", i + 1));
+        bh_splat_path[i] = sprintf("gfx/impacts/paintball/splat%g", i + 1);
 
     // World/BSP bullet-hole variants — random per hit (see CSQC_SpawnBulletHole).
     for (i = 0; i < BH_IMPACT_COUNT; i++)
-        bh_impact_path[i] = precache_pic(sprintf("gfx/impacts/impact%g", i + 1));
+        bh_impact_path[i] = sprintf("gfx/impacts/impact%g", i + 1);
 
     // World/BSP WOOD variants — used on wood-tagged world surfaces (see CSQC_SpawnBulletHole).
     for (i = 0; i < BH_WORLD_WOOD_COUNT; i++)
-        bh_world_wood_path[i] = precache_pic(sprintf("gfx/impacts/wood%g", i + 1));
+        bh_world_wood_path[i] = sprintf("gfx/impacts/wood%g", i + 1);
 
-    precache_model("models/props/barrel.iqm");
-    precache_model("models/props/can.mdl");
+    // (The barrel/can precaches that used to sit here named models/props/barrel.iqm and
+    //  models/props/can.mdl — neither exists.  The real barrel/can models are precached
+    //  server-side in phys_barrel_precache and resolved by CSQC_PhysProp_ResolveIndexes.)
     precache_model("gfx/fexplo.spr");       // CSQC_SpawnExplodeSprite (cl_bulletimpact.qc) — HL grenade fireball
 
     CSQC_BulletHole_ReregisterShaders();    // r_decal_lightmap `_lm` variants for the decal textures just precached
@@ -1079,6 +1190,7 @@ void() CSQC_BulletHolesWipeAll =
     while (hole)
     {
         next = hole.bh_next;
+        if (hole.bh_handle > 0) removedecal(hole.bh_handle);   // r_bullethole_renderer 2: this raw-remove() loop bypasses CSQC_BulletHoleRemove — must free the handle here or round-restart leaks every one
         remove(hole);
         hole = next;
     }
@@ -1157,6 +1269,42 @@ void(entity hole) CSQC_DrawBulletHoleDecal =
                  hole.alpha * CSQC_DecalOpacity());
 };
 
+// r_bullethole_renderer 2 (PERSISTENT LIT): clip a STATIC (world) hole ONCE via adddecal_static and cache
+// the handle, so the engine re-emits it cheaply every frame instead of the per-frame BSP re-clip — while
+// keeping the per-pixel lightmap.  Same arg math as CSQC_DrawBulletHoleDecal (bullet holes are square →
+// aspect 1, permanent → lifetime 0).  Tracked (moving-brushmodel) holes are NOT persisted (they move).
+void(entity hole) CSQC_BulletHole_CreatePersistent =
+{
+    vector normal_arg, side_arg, decal_origin;
+    float full_size;
+
+    makevectors(hole.angles);
+    if (hole.bh_half_size > 0)
+        full_size = hole.bh_half_size * 2;
+    else if (hole.bh_snow)
+        full_size = SNOWSPLAT_DECAL_HALF_SIZE * 2;
+    else
+        full_size = BULLETHOLE_DECAL_HALF_SIZE * 2;
+    normal_arg = -v_forward;
+    side_arg = v_right / full_size;
+    decal_origin = hole.bh_decal_origin + normal_arg * BULLETHOLE_DECAL_BIAS;
+
+    string shader_path = hole.bh_shader_path;
+    if (!shader_path)
+        shader_path = hole.bh_snow ? SNOWSPLAT_QUAD_SHADER : BULLETHOLE_QUAD_SHADER;
+
+    float h;
+    if (cvar("r_decal_lightmap"))
+        h = adddecal_static(strcat(shader_path, "_lm"), decal_origin,
+                            normal_arg, side_arg, '1 1 1',
+                            hole.alpha * CSQC_DecalOpacity(), 1, 0);
+    else
+        h = adddecal_static(shader_path, decal_origin,
+                            normal_arg, side_arg, hole.bh_color,
+                            hole.alpha * CSQC_DecalOpacity(), 1, 0);
+    hole.bh_handle = (h >= 0) ? h : -1;   // -1 = off-surface; don't retry every frame
+};
+
 // Pre-bake the four polygon corners for a static (world-owned) hole.
 // Called ONCE at spawn time — the corners are constant for static
 // holes (world doesn't move), so per-frame recomputation is wasted
@@ -1177,38 +1325,15 @@ void(entity hole, vector hit_pos, vector hit_normal) CSQC_BakeStaticBulletHoleQu
     }
     world_normal = normalize(hit_normal);
 
-    // Build a tangent / bitangent frame from the normal. Pick a
-    // reference axis that isn't parallel to the normal (otherwise
-    // crossproduct degenerates), then orthonormalise.
-    vector ref;
-    if (fabs(world_normal_z) < 0.9)
-        ref = '0 0 1';
-    else
-        ref = '1 0 0';
-    vector tangent   = normalize(crossproduct(world_normal, ref));
-    vector bitangent = crossproduct(world_normal, tangent);
-
-    // 4-way rotation around the surface normal. Free at bake time —
-    // just swap/negate the tangent + bitangent before computing
-    // corners. No trig.
-    float rot = hole.bh_quad_rot;
-    if (rot == 1)
-    {
-        vector tmp1 = tangent;
-        tangent = bitangent;
-        bitangent = -tmp1;
-    }
-    else if (rot == 2)
-    {
-        tangent = -tangent;
-        bitangent = -bitangent;
-    }
-    else if (rot == 3)
-    {
-        vector tmp3 = tangent;
-        tangent = -bitangent;
-        bitangent = tmp3;
-    }
+    // Tangent / bitangent frame — derived from the SAME makevectors(hole.angles) basis the adddecal
+    // REFERENCE path uses (CSQC_DrawBulletHoleDecal).  hole.angles already encodes the random bh_quad_rot
+    // in angles_z (all 3 callers pitch-negate + set angles_z = rot*90), so the rotation flows through
+    // makevectors IDENTICALLY to modes 0/2 — no separate swap.  The corner→UV mapping below (U along
+    // +tangent, V along -bitangent) is 180 deg from the engine's actual adddecal texture mapping, so both
+    // axes are NEGATED here to bring mode-1 upright to match modes 0/2 (a 180 deg spin about the normal).
+    makevectors(hole.angles);
+    vector tangent   = crossproduct(v_right, v_forward);   // = -cross(v_forward,v_right): U axis, 180-flipped
+    vector bitangent = v_right;                            // corners use V = -bitangent = -v_right
 
     float half = hole.bh_half_size > 0
                  ? hole.bh_half_size
@@ -1395,8 +1520,8 @@ void(entity hole) CSQC_DrawTrackedBulletHole =
                                  : BULLETHOLE_DECAL_HALF_SIZE);
 
     // Tracked (brushmodel) holes recompute every frame, so read the live cvar directly —
-    // changing r_bullethole_offset updates them next frame with no shift pass.
-    float trk_off = cvar("r_bullethole_offset");
+    // changing r_decal_offset updates them next frame with no shift pass.
+    float trk_off = cvar("r_decal_offset");   // UNIFIED decal offset (was r_bullethole_offset)
     if (trk_off < 0) trk_off = 0;
     vector center = world_pos + world_normal * trk_off;
 
@@ -1506,6 +1631,30 @@ void(float delta) BH_ShiftStaticQuads =
         Decal_ShiftQuadVerts(&bh_snow_verts[s * 4], delta);
 };
 
+// Shift the per-quad (bh_pq_head) holes' baked corners by `delta` along their surface normal on a
+// live r_decal_offset change.  BH_ShiftStaticQuads above only touches the (now-dead) bh_bullet/snow
+// static VERT buffers — but WORLD bullet holes + snow/paint splats store their corners in the entity
+// fields bh_quad_p0..p3 and draw from THOSE (CSQC_DrawBakedBulletHole), so without this they never
+// re-lift when r_decal_offset changes.  Normal recovered per hole from makevectors(h.angles):
+// v_forward = -world_normal (all spawn paths pitch-negate), so the outward lift is delta * -v_forward.
+void(float delta) BH_ShiftPQHoles =
+{
+    entity h = bh_pq_head;
+    while (h)
+    {
+        if (h.bh_quad_p0 != h.bh_quad_p2)   // skip degenerate (zeroed-corner) holes
+        {
+            makevectors(h.angles);
+            vector d = v_forward * (0 - delta);   // world normal = -v_forward; lift outward by delta
+            h.bh_quad_p0 = h.bh_quad_p0 + d;
+            h.bh_quad_p1 = h.bh_quad_p1 + d;
+            h.bh_quad_p2 = h.bh_quad_p2 + d;
+            h.bh_quad_p3 = h.bh_quad_p3 + d;
+        }
+        h = h.bh_pq_next;
+    }
+};
+
 // --- Per-frame: update dynamic holes, reset frame cap, draw decal mode ---
 void() CSQC_BulletHolesStartFrame =
 {
@@ -1524,30 +1673,47 @@ void() CSQC_BulletHolesStartFrame =
     // CSQC_BulletHolesEnabled and CSQC_DecalOpacity; now ~4 reads/frame.
     bh_cache_enabled   = cvar("cl_bulletholes") > 0;
     bh_cache_opacity   = bound(0, cvar("cl_decal_opacity"), 1);
-    bh_cache_polygon   = cvar("r_bullethole_renderer") != 0;
+    bh_cache_renderer  = cvar("r_decal_renderer");   // UNIFIED decal renderer (was r_bullethole_renderer) — one cvar for bulletholes/sprays/infodecals/blood
+    bh_cache_polygon   = bh_cache_renderer == 1;   // trisoup ONLY on mode 1 (mode 2 = persistent-lit, handled below)
+    // r_bullethole_renderer 2 = PERSISTENT LIT: static world holes are clipped ONCE by the engine
+    // (adddecal_static) and re-emitted cheaply.  On a switch AWAY from mode 2, free every hole's engine
+    // handle once (else the engine keeps emitting them under the mode-0/1 draw = double).
+    if (bh_cache_renderer != 2 && bh_last_renderer == 2)
+    {
+        entity ch = bh_head;
+        while (ch)
+        {
+            if (ch.bh_handle > 0) removedecal(ch.bh_handle);
+            ch.bh_handle = 0;
+            ch = ch.bh_next;
+        }
+    }
+    bh_last_renderer   = bh_cache_renderer;
     bh_cache_max       = cvar("cl_bulletholes_max");
     if (bh_cache_max < 1) bh_cache_max = 1;     // sanity floor
+    // Cap at the fixed pool: above BH_TRISOUP_MAX_QUADS the eviction loops (bh_count >=
+    // bh_cache_max) can never fire, so old holes never evict and new ones get slot -1 (invisible).
+    if (bh_cache_max > BH_TRISOUP_MAX_QUADS) bh_cache_max = BH_TRISOUP_MAX_QUADS;
     bh_cache_clip_geom = cvar("cl_bullethole_clip_geom") != 0;
 
-    // Live r_bullethole_offset: re-shift the persistent static quads when it changes.
-    // (Runs after the static-count reset above, so it walks the static prefix only.)
-    float bh_want_off = cvar("r_bullethole_offset");
+    // Live r_decal_offset: re-shift the baked quads when it changes.  BH_ShiftStaticQuads handles the
+    // static VERT buffers; BH_ShiftPQHoles handles the per-quad bh_pq_head holes (world bullet holes +
+    // snow/paint splats) whose corners live in bh_quad_p0..p3.  (Runs after the static-count reset above.)
+    float bh_want_off = cvar("r_decal_offset");   // UNIFIED decal offset (was r_bullethole_offset)
     if (bh_want_off < 0) bh_want_off = 0;   // negative would lift into the wall
     if (bh_want_off != bh_baked_offset)
     {
         BH_ShiftStaticQuads(bh_want_off - bh_baked_offset);
+        BH_ShiftPQHoles(bh_want_off - bh_baked_offset);
         bh_baked_offset = bh_want_off;
     }
 
-    // Frustum/distance-cull state — only used by the legacy
-    // adddecal path (CSQC_DrawBulletHoleTexture's per-hole cull
-    // check on world-owned holes). The polygon path caches
-    // vertex data at spawn time and submits via addtrisoup_simple,
-    // skipping per-hole culling entirely (let GPU + frustum clip
-    // handle visibility — see Decided notes in the v2 batching
-    // rewrite). Reading these cvars + getproperty + makevectors
-    // every frame in polygon mode was ~3 ms of pure waste.
-    if (!bh_cache_polygon)
+    // Frustum/distance-cull state for the per-hole cull in CSQC_DrawBulletHoleTexture (owner==world holes).
+    // Needed in mode 0 (bh_head walk) AND mode 1 (world bullet holes + snow/paint render via the bh_pq_head
+    // walk → CSQC_DrawBakedBulletHole, which still runs the owner==world cull).  ONLY mode 2 (persistent,
+    // engine-emitted, not per-hole culled) can skip it.  (Was gated `!bh_cache_polygon`, which starved mode 1
+    // of fresh cull state → world holes were culled against a STALE camera and vanished.)
+    if (bh_cache_renderer != 2)
     {
         float dist = cvar("cl_bullethole_distance");
         bh_cache_dist_sq = (dist > 0) ? dist * dist : 0;
@@ -1596,6 +1762,31 @@ void() CSQC_BulletHolesStartFrame =
     {
         // skip both walks AND the submit; nothing should render
     }
+    else if (bh_cache_renderer == 2)
+    {
+        // PERSISTENT LIT (r_bullethole_renderer 2): each STATIC (world) hole is clipped ONCE by the engine
+        // (adddecal_static) and re-emitted cheaply every frame — no per-frame BSP re-clip, keeps the
+        // per-pixel lightmap.  Reconcile handles here (create once for handle-less static holes); the engine
+        // draws them, so nothing is submitted for them.  Snow/paint world splats are static too → also
+        // persisted.  This walk is cheap (a handle check per hole) vs. the ≤1024 BSP re-clips mode 0 paid.
+        hole = bh_head;
+        while (hole)
+        {
+            next = hole.bh_next;
+            if (!hole.bh_dynamic && hole.bh_handle == 0)
+                CSQC_BulletHole_CreatePersistent(hole);
+            hole = next;
+        }
+        // Tracked (moving-brushmodel) holes can't be persisted (adddecal_static clips once against static
+        // world) — keep them on the per-frame trisoup path (submitted below, same as mode 1).
+        hole = bh_dyn_head;
+        while (hole)
+        {
+            next = hole.bh_dyn_next;
+            CSQC_DrawBulletHoleTexture(hole);
+            hole = next;
+        }
+    }
     else if (bh_cache_polygon)
     {
         hole = bh_dyn_head;
@@ -1637,7 +1828,10 @@ void() CSQC_BulletHolesStartFrame =
     // contribute the [0, *_static_count) prefix that persists across
     // frames; tracked holes contribute the [*_static_count, *_count)
     // suffix that was rebuilt this frame.
-    if (CSQC_BulletHolesEnabled() && bh_cache_polygon)
+    // Mode 2 also submits — but static holes were NOT baked into the trisoup buffer (bh_cache_polygon is
+    // false in mode 2, so CSQC_BakeStaticBulletHoleQuad's :1336 gate skipped them → static_count stays 0),
+    // so this submits only the tracked (moving-brushmodel) suffix.  No double with the persistent decals.
+    if (CSQC_BulletHolesEnabled() && (bh_cache_polygon || bh_cache_renderer == 2))
     {
         if (bh_bullet_count > 0)
             addtrisoup_simple(BULLETHOLE_QUAD_SHADER, 0,
@@ -1956,6 +2150,20 @@ void(vector hit_pos, vector hit_normal, entity hit_target, float impact_mat, flo
             bh_dyn_head = hole;
 
         bh_dyn_tail = hole;
+    }
+    else if (hole.bh_shader_path)
+    {
+        // Static (world-hit) bullet hole carries a per-variant shader (gfx/impacts/impactN|woodN) so it gets
+        // no batched trisoup slot — link it into bh_pq so the r_decal_renderer 1 (tri-soup) draw walk visits
+        // it for a BH_SubmitOneQuad call (mirrors CSQC_SpawnSnowSplat).  Without this, world bullet holes
+        // VANISH in mode 1 (modes 0/2 walk bh_head so they still show there; only mode 1 was broken).
+        hole.bh_pq_prev = bh_pq_tail;
+        hole.bh_pq_next = world;
+        if (bh_pq_tail)
+            bh_pq_tail.bh_pq_next = hole;
+        else
+            bh_pq_head = hole;
+        bh_pq_tail = hole;
     }
 
     bh_count += 1;

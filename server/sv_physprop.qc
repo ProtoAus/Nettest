@@ -123,21 +123,27 @@ void() PhysProp_VoidWatchdog =
 
 void() phys_barrel_precache =
 {
-	precache_model("models/props/barrel.iqm");
 	// Properly-made MP barrels (each ships a .acd convex-decomposition sidecar); spawnbarrel +
 	// spawnflood pick one at random via PhysBarrel_RandomModel().  MUST be precached before setmodel.
+	// (The old models/props/barrel.iqm precache is gone: that file does not exist and was never
+	//  setmodel'd — it only produced an "Unable to load" on every map load.)
 	precache_model("models/mega/containers/metal_barrel_mp_1.iqm");
 	precache_model("models/mega/containers/metal_barrel_mp_2.iqm");
 	precache_model("models/mega/containers/metal_barrel_mp_3.iqm");
-	precache_model("models/props/can.mdl");   // no can.iqm in models/props/ yet
-	// Carriable filecabinet — precache the HL-studio .mdl always, plus the IQM
-	// if one has been dropped in. The IQM (mod_alias) is preferred at spawn: it
-	// supports an ODE collision mesh AND NativeTrace player collision, so the
-	// player collides with the actual ROTATED mesh. HL-studio .mdl can't make
-	// an ODE collision mesh (engine has no mod_halflife case), so it uses a BOX.
-	precache_model("models/props/filecabinet.mdl");
-	if (whichpack("models/props/filecabinet/filecabinet.iqm") != "")
-		precache_model("models/props/filecabinet/filecabinet.iqm");
+	// Cans — same deal as the barrels (random pick, each ships a .acd).  Replaces the old
+	// models/props/can.mdl, which did not exist: spawncan was setmodel'ing a missing file and
+	// spawning an invisible null-model prop.  See PhysCan_RandomModel.
+	precache_model("models/mega/props/tin_can_mp_1_rusty.iqm");
+	precache_model("models/mega/props/tin_can_mp_1_rusty_1.iqm");
+	precache_model("models/bunkers/canned_food_3.iqm");
+	precache_model("models/bunkers/canned_food_4.iqm");
+	precache_model("models/bunkers/canned_food_5.iqm");
+	// Carriable filecabinet — IQM only.  The legacy models/props/filecabinet.mdl fallback is gone
+	// (the file does not exist), which is also a collision UPGRADE: HL-studio .mdl can't build an
+	// ODE collision mesh (the engine has no mod_halflife case) so it fell back to a BOX, whereas
+	// the IQM (mod_alias) supports both an ODE collision mesh and NativeTrace player collision —
+	// the player collides with the actual ROTATED mesh.
+	precache_model("models/props/filecabinet/filecabinet.iqm");
 	// Cabinet contact sounds — soft on gentle contact, hard on fast (see
 	// PhysFiles_EmitImpact).  Played server-side via sound() so all players hear.
 	precache_sound("sounds/impacts/metal_box_impact_soft1.wav");
@@ -166,6 +172,40 @@ void() phys_barrel_precache =
 	// pointer stays null even after the plugin finishes loading.
 };
 
+// ---------------------------------------------------------------------------
+// PVS policy for the phys_files_Send CSQC mirror (barrel / can / cabinet /
+// prop_physics / prop_car).  Call AFTER assigning SendEntity.
+//
+// These mirrors used to be hard-coded PVSF_NOREMOVE.  That flag does NOT exempt them from
+// PVS on the send side — its mode bits are 0 == PVSF_NORMALPVS, so the server already
+// stopped SENDING updates once the prop left your PVS — it only suppresses the REMOVE
+// message (sv_ents.c).  So the client never got CSQC_Ent_Remove, kept the last snapshot
+// forever, and its predraw went on re-adding it every frame: fly into the void and every
+// prop_physics / prop_car hangs there frozen, while prop_static (a plain packet entity with
+// no SendEntity) correctly despawns.  That asymmetry is the bug.
+//
+// The original intent was real, though: this mirror is the CLIENT's only collision hull for
+// the prop (the engine-side rigid body is invisible to the CSQC pmove), so a mirror removed
+// while you are near-but-just-outside PVS goes silently non-solid under you.  In practice
+// that is the same trade prop_static already makes, and PVS here is the FAT PVS (adjacent
+// leafs included), so the window is small.  sv_physprop_pvscull 0 restores the old
+// always-resident behaviour if it ever bites.
+//
+// Re-entry needs no special handling: the engine clears the per-client PRESENT bit on a
+// culled entity, so coming back into PVS forces a FULL baseline resend (not a delta) — a
+// prop that came to rest while you were away arrives at its true resting pose even though
+// the mod's own rest-latch fired long ago.  CSQC_PhysProp_Update's isnew branch reseeds the
+// interpolation anchors, so there is no lerp-from-stale pop.  See CSQC_Ent_Remove
+// (cl_main.qc) for the child-entity cleanup that culling makes mandatory.
+// ---------------------------------------------------------------------------
+void(entity b) PhysProp_ApplyPvsPolicy =
+{
+	if (cvar("sv_physprop_pvscull"))
+		b.pvsflags = PVSF_NORMALPVS;   // PVS-culled AND removed on exit (like prop_static)
+	else
+		b.pvsflags = PVSF_NOREMOVE;    // legacy: once seen, never removed
+};
+
 // Common setup shared by barrel and can once the bbox + origin + solid/geomtype
 // are in place. Caller must set b.solid and (if needed) b.geomtype before
 // calling this — physics_enable() locks those in when the ODE body is built.
@@ -184,7 +224,8 @@ void(entity b, float obj_mass, float obj_friction) PhysObj_Setup =
 	// Bouncing is shared + off by default (bounce 0 — stiff contacts + bounce
 	// amplify numerical noise; damping bleeds energy cleanly).  bouncestop only
 	// matters when bounce > 0.
-	b.bouncefactor = cvar("sv_physprop_bounce");
+	// Per-material bounce when a prop-material is resolved (sh_propmaterials.qc), else the shared cvar.
+	b.bouncefactor = (b.po_material >= 0) ? PropMat_Restit(b.po_material) : cvar("sv_physprop_bounce");
 	b.bouncestop   = cvar("sv_physprop_bouncestop");
 	b.erp = cvar("sv_physprop_erp");
 	// Divide damping by physics_ode_iterationsperframe: ODE applies damping ONCE PER
@@ -193,8 +234,10 @@ void(entity b, float obj_mass, float obj_friction) PhysObj_Setup =
 	// moving slowly").  Dividing keeps the per-frame damping constant, so the cvar is
 	// tuned once and stays consistent across iteration changes (like the hit force).
 	float iter = cvar("physics_ode_iterationsperframe"); if (iter < 1) iter = 1;
-	b.damp_linear  = PhysProp_SafeDamp("sv_physprop_damp_lin")  / iter;
-	b.damp_angular = PhysProp_SafeDamp("sv_physprop_damp_ang") / iter;
+	// Per-material damping multiplier (fabric damps hard = dead thud; metal least = rings/spins).
+	float dmul = (b.po_material >= 0) ? PropMat_DampMult(b.po_material) : 1;
+	b.damp_linear  = PhysProp_SafeDamp("sv_physprop_damp_lin")  * dmul / iter;
+	b.damp_angular = PhysProp_SafeDamp("sv_physprop_damp_ang") * dmul / iter;
 	b.max_angular  = 20;   // caller may override (weapon drops use 35)
 
 	b.po_is_phys = TRUE;
@@ -239,6 +282,73 @@ string() PhysBarrel_RandomModel =
 	return "models/mega/containers/metal_barrel_mp_3.iqm";
 };
 
+// Same idea for the can (spawncan / phys_can).  This replaces the old hardcoded
+// "models/props/can.mdl", which DID NOT EXIST — spawncan was setmodel'ing a missing file, so it
+// spawned an invisible prop with a null model (and an "Unable to load" on every map load).
+// Same quality bar as the barrels: only models that ship a .acd convex-decomposition sidecar.
+// This list and phys_barrel_precache's can block are the only two places to edit to change the mix.
+string() PhysCan_RandomModel =
+{
+	float pick = floor(random() * 5);
+	if (pick <= 0)
+		return "models/mega/props/tin_can_mp_1_rusty.iqm";
+	if (pick == 1)
+		return "models/mega/props/tin_can_mp_1_rusty_1.iqm";
+	if (pick == 2)
+		return "models/bunkers/canned_food_3.iqm";
+	if (pick == 3)
+		return "models/bunkers/canned_food_4.iqm";
+	return "models/bunkers/canned_food_5.iqm";
+};
+
+float(entity playerent, float changedflags) phys_files_Send;   // defined below; used by the barrel spawner
+
+// Flood-spawn queue (drained a few per frame in PhysFlood_Tick / StartFrame) so a big `spawnflood`
+// doesn't build N Box3D bodies in ONE tick → the frame hitch.  Single spawns stay immediate.
+float  phys_flood_left;      // barrels still to spawn
+float  phys_flood_index;     // next grid slot
+vector phys_flood_ground;    // ground contact under the pile
+entity phys_flood_owner;
+
+// Spawn ONE physics barrel resting on `base` (base = the ground XY+Z its bottom should sit at).
+// Shared by spawnbarrel + spawnflood so the CSQC-predict mirror AND the primitive collision shape
+// live in ONE place (both were the missing/expensive bits vs a mapped prop_physics).
+entity(vector base) PhysBarrel_SpawnAt =
+{
+	entity b = spawn();
+	b.classname = "phys_barrel";
+	// Copy the prop_physics model setup (Props_SetupModel): enable the QW-setmodel real-box transfer so setmodel
+	// hands us the TRUE model bounds, then setsize a TIGHT box that COVERS the model.  The old hardcoded ±32
+	// "sidestep" was ~2× oversized (model floated inside it) + offset the origin by the box mins (−32, not the
+	// real −22.6) → the barrel floated ~9u and the box never matched the model.
+	cvar_set("sv_gameplayfix_setmodelsize_qw", "1");
+	cvar_set("sv_gameplayfix_setmodelrealbox", "1");
+	setmodel(b, PhysBarrel_RandomModel());      // now copies the real model bounds → b.mins/maxs
+	vector rmn = b.mins, rmx = b.maxs;
+	if ((rmx_x - rmn_x) < 1 || (rmx_z - rmn_z) < 1)
+		setsize(b, '-32 -32 -32', '32 32 32');  // degenerate/zero model bbox → fallback cube (belt-and-suspenders)
+	else
+		setsize(b, rmn, rmx);                   // tight box that COVERS the model
+	setorigin(b, base + '0 0 1' * (0 - b.mins_z));   // model bottom rests ON `base` (real mins_z → no float)
+	b.angles   = '0 0 0';
+	b.solid    = SOLID_PHYSICS_TRIMESH;         // player TRACE + SIM = the real mesh hull (accurate, rolls); the
+	                                            // engine expands the TRIMESH broadphase for rotation so a tight box
+	                                            // is fine, exactly like prop_physics.
+	b.po_fx_enabled    = TRUE;
+	b.po_sleep_enabled = TRUE;
+	b.po_stuck_grace   = 5;
+	b.po_material = PropMat_For(b.model);   // per-material bounce/damp (+ future sound/impact); keeps the tuned cvar mass
+	PhysObj_Setup(b, cvar("sv_physprop_mass"), cvar("sv_physprop_friction"));
+	b.think     = PhysObj_Think;
+	b.nextthink = time + 0.05;
+	// CSQC predict mirror — the local pmove collides client-side (no rubber-band).  THIS is what the
+	// console spawns were missing vs prop_physics.
+	b.SendEntity = phys_files_Send;
+	b.SendFlags  = 1;
+	PhysProp_ApplyPvsPolicy(b);
+	return b;
+};
+
 void(entity owner) phys_barrel_spawn_infront =
 {
 	entity b;
@@ -267,45 +377,11 @@ void(entity owner) phys_barrel_spawn_infront =
 	}
 	ground = trace_endpos;
 
-	b = spawn();
-	b.classname = "phys_barrel";
-	setmodel(b, PhysBarrel_RandomModel());
-
-	// Load-confirmation dprint — names the file FTE actually committed to and
-	// the engine's modelindex slot, so any "is this really the file I edited?"
-	// question is answered by reading console. Native mins/maxs let us
-	// cross-check against viewthing.
-	if (cvar("sv_debug_physprops"))
-		dprint(sprintf("[physprop] barrel loaded: model='%s' modelindex=%g native mins=%v maxs=%v\n",
-			b.model, b.modelindex, b.mins, b.maxs));
-
-	// SOLID_PHYSICS_TRIMESH — ODE uses the IQM's triangle mesh as its
-	// collision shape, so prop-vs-world contacts track the visible mesh
-	// exactly through any rotation.
-	//
-	// AABB sized to enclose the rotating mesh's bounding sphere.
-	// Mesh half-extents (15.4, 14.4, 22.6) → bounding sphere radius
-	// sqrt(15.4² + 14.4² + 22.6²) ≈ 31. Use ±32 with a 1qu safety margin
-	// so any rotation stays inside the AABB. Dim filter (below) makes the
-	// AABB non-blocking for the player, so the slack volume is invisible.
-	setsize(b, '-32 -32 -32', '32 32 32');
-	setorigin(b, ground + '0 0 1' * (-b.mins_z + drop_height));
-	b.angles = '0 0 0';
-	b.solid = SOLID_PHYSICS_TRIMESH;
-	// No dim filter — engine patch in world.c makes pmove use mesh narrowphase
-	// for SOLID_PHYSICS_TRIMESH, so player passes through AABB empty space and
-	// stops only at the actual mesh edge.
-
-	// Free metal prop: contact FX on, QC sleep/wake at rest, 5s BSP-embed grace.
-	b.po_fx_enabled    = TRUE;
-	b.po_sleep_enabled = TRUE;
-	b.po_stuck_grace   = 5;
-	PhysObj_Setup(b, cvar("sv_physprop_mass"), cvar("sv_physprop_friction"));
-	b.think     = PhysObj_Think;   // void cull + metal contact FX (free prop)
-	b.nextthink = time + 0.05;
+	b = PhysBarrel_SpawnAt(ground + '0 0 1' * drop_height);   // shared setup (mirror + cylinder shape)
 
 	if (cvar("sv_debug_physprops"))
-		dprint(sprintf("[physprop] barrel spawned at %v\n", b.origin));
+		dprint(sprintf("[physprop] barrel loaded: model='%s' modelindex=%g native mins=%v maxs=%v spawned at %v\n",
+			b.model, b.modelindex, b.mins, b.maxs, b.origin));
 };
 
 // nettest: worst-case physics stress test. Rains `count` barrels down in a grid
@@ -314,14 +390,8 @@ void(entity owner) phys_barrel_spawn_infront =
 // and compare `physics_box3d_threads 1` vs `4` for the Box3D multicore win.
 void(entity owner, float count) phys_flood_spawn =
 {
-	entity b;
-	vector fwd, base, ground;
-	float i, gx, gy, gz, within, per_layer, cols, spacing, dist;
-
-	cols = 5;
-	spacing = 72;			// > the ±32 AABB so props don't spawn interpenetrating
-	dist = 160;
-	per_layer = cols * cols;
+	vector fwd, base;
+	float dist = cvar("sv_physprop_flood_dist");  if (dist < 1) dist = 200;  // forward offset; near edge = dist-144 clears the player
 
 	if (count < 1) count = 1;
 	if (count > 400) count = 400;	// safety cap (400 barrels is already a brutal pile)
@@ -338,36 +408,66 @@ void(entity owner, float count) phys_flood_spawn =
 		sprint(owner, PRINT_HIGH, "spawnflood: no ground found in front\n");
 		return;
 	}
-	ground = trace_endpos;
+	// ENQUEUE — PhysFlood_Tick drains a few per frame (StartFrame) so N Box3D body builds
+	// don't all land in ONE tick (the frame hitch).  New flood replaces any in progress.
+	phys_flood_ground = trace_endpos;
+	phys_flood_owner  = owner;
+	phys_flood_left   = count;
+	phys_flood_index  = 0;
+	sprint(owner, PRINT_HIGH, sprintf("spawnflood: queued %g props\n", count));
+};
 
-	i = 0;
-	while (i < count)
+// A flood cell whose column overlaps a player would drop a barrel INSIDE them → the solver
+// ejects it violently (chaos/lag).  TRUE = skip that cell.  Walk the player chain (the norm
+// here — not findradius); axis check vs the ±16 player hull + ±14.74 barrel + margin.
+float PHYSFLOOD_CLEAR = 48;
+float(vector pos) PhysFlood_ColumnBlocked =
+{
+	entity p = player_chain_head;
+	while (p)
 	{
-		gz = floor(i / per_layer);			// stacked layer
-		within = i - gz * per_layer;
-		gy = floor(within / cols);			// row
-		gx = within - gy * cols;			// column
+		if (p.classname == "player" && !p.is_dead
+		    && fabs(pos_x - p.origin_x) < PHYSFLOOD_CLEAR
+		    && fabs(pos_y - p.origin_y) < PHYSFLOOD_CLEAR)
+			return TRUE;
+		p = p.player_chain_next;
+	}
+	return FALSE;
+};
 
-		b = spawn();
-		b.classname = "phys_barrel";
-		setmodel(b, PhysBarrel_RandomModel());
-		setsize(b, '-32 -32 -32', '32 32 32');
-		setorigin(b, ground
+// Drain the flood queue a few props per frame — called every StartFrame (sv_main.qc).
+void() PhysFlood_Tick =
+{
+	if (phys_flood_left <= 0)
+		return;
+	if (phys_flood_owner == world)          // requester gone → drop the rest
+	{
+		phys_flood_left = 0;
+		return;
+	}
+	float cols = 5, spacing = 72, per_layer = 25;   // 5×5 per stacked layer
+	float perf = cvar("sv_physprop_flood_per_frame");  if (perf < 1) perf = 1;
+	float n = 0;
+	while (n < perf && phys_flood_left > 0)
+	{
+		float i  = phys_flood_index;
+		float gz = floor(i / per_layer);            // stacked layer
+		float within = i - gz * per_layer;
+		float gy = floor(within / cols);            // row
+		float gx = within - gy * cols;              // column
+		vector pos = phys_flood_ground
 			+ '1 0 0' * ((gx - (cols - 1) * 0.5) * spacing)
 			+ '0 1 0' * ((gy - (cols - 1) * 0.5) * spacing)
-			+ '0 0 1' * (0 - b.mins_z + 48 + gz * spacing));
-		b.angles = '0 0 0';
-		b.solid = SOLID_PHYSICS_TRIMESH;
-		b.po_fx_enabled    = TRUE;
-		b.po_sleep_enabled = TRUE;
-		b.po_stuck_grace   = 5;
-		PhysObj_Setup(b, cvar("sv_physprop_mass"), cvar("sv_physprop_friction"));
-		b.think     = PhysObj_Think;
-		b.nextthink = time + 0.05;
-
-		i = i + 1;
+			+ '0 0 1' * (48 + gz * spacing);
+		phys_flood_index = phys_flood_index + 1;
+		phys_flood_left  = phys_flood_left - 1;
+		// Skip a cell that would drop onto a player (gap in the pile); NOT counted against the
+		// per-frame budget (a skip is cheap), so the drain still spawns `perf` real barrels/frame.
+		if (PhysFlood_ColumnBlocked(pos))
+			continue;
+		PhysBarrel_SpawnAt(pos);
+		n = n + 1;
 	}
-	sprint(owner, PRINT_HIGH, sprintf("spawnflood: spawned %g props\n", count));
 };
 
 void(entity owner) phys_can_spawn_infront =
@@ -398,18 +498,24 @@ void(entity owner) phys_can_spawn_infront =
 
 	b = spawn();
 	b.classname = "phys_can";
-	setmodel(b, "models/props/can.mdl");   // change to .iqm when one exists
+	// Real model bounds (copy prop_physics / the barrel, Stage 4c/4d): enable the QW
+	// setmodel real-box transfer BEFORE setmodel so b.mins/maxs get the TRUE can bounds.
+	cvar_set("sv_gameplayfix_setmodelsize_qw", "1");
+	cvar_set("sv_gameplayfix_setmodelrealbox", "1");
+	setmodel(b, PhysCan_RandomModel());   // random .acd-backed can IQM (was the missing can.mdl)
 
 	if (cvar("sv_debug_physprops"))
 		dprint(sprintf("[physprop] can loaded: model='%s' modelindex=%g native mins=%v maxs=%v\n",
 			b.model, b.modelindex, b.mins, b.maxs));
 
-	// Cube AABB enclosing the rotating mesh. Same TRIMESH+dim-filter pattern
-	// as the barrel. GenerateCollisionMesh works with .mdl too (pulls verts
-	// from the model object regardless of format), so the can gets accurate
-	// mesh collision even without an .iqm.
-	setsize(b, '-12 -12 -12', '12 12 12');
-	setorigin(b, ground + '0 0 1' * (-b.mins_z + drop_height));
+	// TRIMESH mesh collision.  TIGHT real box that COVERS the model + degenerate fallback,
+	// exactly like the barrel (Stage 4c).
+	vector cmn = b.mins, cmx = b.maxs;
+	if ((cmx_x - cmn_x) < 1 || (cmx_z - cmn_z) < 1)
+		setsize(b, '-12 -12 -12', '12 12 12');   // degenerate model bbox → fallback cube
+	else
+		setsize(b, cmn, cmx);                     // tight box that COVERS the model
+	setorigin(b, ground + '0 0 1' * (drop_height - b.mins_z));
 	b.angles = '0 0 0';
 	b.solid = SOLID_PHYSICS_TRIMESH;
 	// No dim filter — engine patch handles mesh narrowphase.
@@ -417,9 +523,15 @@ void(entity owner) phys_can_spawn_infront =
 	b.po_fx_enabled    = TRUE;
 	b.po_sleep_enabled = TRUE;
 	b.po_stuck_grace   = 5;
+	b.po_material = PropMat_For(b.model);   // per-material bounce/damp; keeps the tuned cvar mass
 	PhysObj_Setup(b, cvar("sv_physprop_can_mass"), cvar("sv_physprop_friction"));
 	b.think     = PhysObj_Think;   // void cull + metal contact FX (free prop)
 	b.nextthink = time + 0.05;
+	// CSQC predict mirror (same as the barrel) — the relocated stream rest-latch feeds it
+	// so the client collides locally (no sink-and-snap).
+	b.SendEntity = phys_files_Send;
+	b.SendFlags  = 1;
+	PhysProp_ApplyPvsPolicy(b);
 
 	if (cvar("sv_debug_physprops"))
 		dprint(sprintf("[physprop] can spawned at %v\n", b.origin));
@@ -435,6 +547,17 @@ void(entity owner) phys_can_spawn_infront =
 // still moving (which would leave the client extrapolating a stale velocity).
 const float PHYSFILES_STILL_LIN = 8;
 const float PHYSFILES_STILL_ANG = 16;
+
+// Sleep gate (PhysObj_Think).  Deliberately TIGHTER than the STILL_* thresholds above:
+// those decide "settled enough to re-solidify / stop streaming", whereas these decide
+// "settled enough to stop looking at for 125 ms", which wants a prop that is genuinely
+// dead-stopped, not merely slow.  Matched to the rest-latch's own 0.5 qu/s cut so a prop
+// only sleeps once the latch has already sent its final velocity=0 snapshot.
+const float PHYSPROP_SLEEP_LIN   = 0.5;
+const float PHYSPROP_SLEEP_ANG   = 0.5;
+// Hold still this long before sleeping — long enough that a bounce apex / toss peak (a
+// single near-zero MID-AIR tick) never triggers it.
+const float PHYSPROP_SLEEP_DELAY = 0.35;
 
 // ============================================================================
 //  Contact FX — impact metal sounds (server sound(), so all players hear) + a
@@ -513,8 +636,8 @@ string(float setid, float kind, float idx) PhysObj_FxSound =
 // bouncing prop makes one sound.  `dir` is the impact direction (approach velocity).
 void(entity prop, float speed, vector dir) PhysFiles_EmitImpact =
 {
-	prop.pp_impact_cooldown = time + cvar("sv_physprop_impact_cooldown");
-	float hard = (speed >= cvar("sv_physprop_impact_hard_speed"));
+	prop.pp_impact_cooldown = time + pp_cached_impact_cooldown;
+	float hard = (speed >= pp_cached_impact_hard_speed);
 	float n = bound(1, floor(random() * 3) + 1, 3);
 	string snd = PhysObj_FxSound(prop.po_fx_soundset,
 	                             hard ? FXSND_IMPACT_HARD : FXSND_IMPACT_SOFT, n);
@@ -526,7 +649,7 @@ void(entity prop, float speed, vector dir) PhysFiles_EmitImpact =
 // (trace straight down), rate-limited.  The looping scrape SOUND is separate (StartScrape).
 void(entity prop) PhysFiles_DoSlide =
 {
-	prop.pp_slide_next = time + cvar("sv_physprop_slide_interval");
+	prop.pp_slide_next = time + pp_cached_slide_interval;
 	PhysFiles_SmokeAlong(prop, '0 0 -1', 0);
 };
 
@@ -555,7 +678,7 @@ void(entity prop, float speed) PhysFiles_StartScrape =
 		prop.pp_scrape_vol        = vol;
 		prop.pp_scrape_revol_next = time + 0.12;
 	}
-	else if (cvar("sv_physprop_scrape_track") && time >= prop.pp_scrape_revol_next
+	else if (pp_cached_scrape_track && time >= prop.pp_scrape_revol_next
 	         && fabs(vol - prop.pp_scrape_vol) >= 0.12)
 	{
 		sound(prop, CHAN_PHYSPROP_SCRAPE, scrapesnd,
@@ -598,7 +721,7 @@ void(float lin) PhysObj_DetectContactFX =
 	if (self.carried_by != world)
 		return;
 
-	float imin      = cvar("sv_physprop_impact_min_speed");
+	float imin      = pp_cached_impact_min_speed;   // per-frame cache, not a per-prop cvar() hash
 	float prevspeed = vlen(self.pp_prev_velocity);
 	float drop      = prevspeed - lin;
 	if (time >= self.pp_impact_cooldown && prevspeed >= imin && drop >= imin)
@@ -607,14 +730,30 @@ void(float lin) PhysObj_DetectContactFX =
 		// EmitImpact traces along it to the actual contacted surface.
 		PhysFiles_EmitImpact(self, prevspeed, self.pp_prev_velocity);
 	}
-	else if (drop < imin
-	         && vlen([self.velocity_x, self.velocity_y, 0]) >= cvar("sv_physprop_slide_min_speed")
-	         && PhysFiles_OnSurface(self))
+	else if (drop < imin)
 	{
-		// Sliding along a surface: keep the scrape loop alive (volume by speed) + puffs.
-		PhysFiles_StartScrape(self, vlen([self.velocity_x, self.velocity_y, 0]));
-		if (time >= self.pp_slide_next)
-			PhysFiles_DoSlide(self);
+		// SLIDE TEST — deliberately NESTED, not a single `&&` chain.
+		//
+		// `#pragma flag enable logicops` is OFF mod-wide, so fteqcc does NOT
+		// short-circuit: every operand of an `&&` is evaluated.  The old form
+		//     else if (drop < imin && vlen(horiz) >= cvar(...) && PhysFiles_OnSurface(self))
+		// therefore ran the cvar hash lookup AND PhysFiles_OnSurface's TRACEBOX for
+		// every FX prop on every 64 Hz tick — including props sitting perfectly still,
+		// forever.  That was the single biggest server cost on a prop-dense map
+		// (PhysFiles_OnSurface topped the profile at ~0.147s self / 5s with ~800
+		// traceboxes per tick).  Nesting reaches the trace only for props that are
+		// actually moving horizontally.  See [[fteqcc-logicops-off-no-shortcircuit]].
+		float horizspeed = vlen([self.velocity_x, self.velocity_y, 0]);
+		if (horizspeed >= pp_cached_slide_min_speed)
+		{
+			if (PhysFiles_OnSurface(self))
+			{
+				// Sliding along a surface: keep the scrape loop alive (volume by speed) + puffs.
+				PhysFiles_StartScrape(self, horizspeed);
+				if (time >= self.pp_slide_next)
+					PhysFiles_DoSlide(self);
+			}
+		}
 	}
 	// Cut the scrape loop once sliding has stopped for the grace window (or the prop
 	// impacted / went airborne — the slide branch stops refreshing pp_slide_active_until).
@@ -634,6 +773,12 @@ void() PhysObj_Think =
 	// streams to clients from here (the rest-latch below), so a slow tick is exactly
 	// the "large steps" you see in slow-mo.  Carried props already stream every frame
 	// via Carry_Tick.  Streaming + FX are motion-gated, so a resting prop costs ~0.
+	//
+	// ...except that "costs ~0" was only true per-prop-per-tick: at a few hundred
+	// settled props this function alone topped the server profile (6.3M statements /
+	// 5 s) purely re-scheduling itself 64×/s to look at props that had not moved in
+	// minutes.  The sleep gate at the bottom of this function drops a prop that has
+	// held still for PHYSPROP_SLEEP_DELAY down to sv_physprop_sleep_hz (default 8 Hz).
 	self.nextthink = time + 0.0156;
 
 	// Void cull (escaped world / NaN) — detach the ODE body before remove().
@@ -655,9 +800,10 @@ void() PhysObj_Think =
 	if (self.po_fx_enabled)
 		PhysObj_DetectContactFX(lin);
 
-	// ============================ CABINET-ONLY ============================
-	// (carry re-solidify + the custom CSQC mirror's rest-latch — barrel/can are
-	//  engine-replicated and never carried, so they skip both.)
+	// ==================== CARRIABLE-ONLY (re-solidify) ====================
+	// The carry re-solidify-on-drop below is cabinet/prop_physics only.  The CSQC
+	// mirror's stream rest-latch used to live here too, but it's now relocated OUT
+	// (just past this block) so EVERY mirror prop — barrel & can included — re-streams.
 	if (self.po_carry_enabled)
 	{
 
@@ -717,27 +863,127 @@ void() PhysObj_Think =
 		}
 	}
 
-	// CSQC stream gate with a rest-latch: stream every tick while moving/carried;
-	// on the moving→rest edge send ONE final snapshot with velocity zeroed so the
-	// client clears its predraw and parks the hull at the true resting origin.
-	// Without that final snapshot the client keeps extrapolating the last non-zero
-	// velocity → the collision hull drifts off the model → "no collision at rest".
-	if (lin > 0.5 || ang > 0.5 || self.carried_by != world)
-	{
-		self.SendFlags     |= 1;
-		self.pp_was_streaming = TRUE;
-	}
-	else if (self.pp_was_streaming)
-	{
-		self.velocity         = '0 0 0';
-		self.avelocity        = '0 0 0';
-		self.SendFlags       |= 1;
-		self.pp_was_streaming = FALSE;
-	}
+	}   // end if (po_carry_enabled) — carry re-solidify-on-drop (cabinet/prop_physics)
 
-	}   // end if (po_carry_enabled) — cabinet re-solidify + CSQC stream
+	// CSQC stream rest-latch — EVERY prop with the custom CSQC mirror (barrel, can,
+	// cabinet, prop_physics), NOT just carriables.  Stream every tick while moving/carried;
+	// on the moving→rest edge send ONE final snapshot with velocity zeroed so the client
+	// clears its predraw and parks the hull at the true resting origin.  Without it the
+	// client keeps extrapolating the last non-zero velocity → the collision hull drifts off
+	// the model → "server-solid but client-non-solid" (sink-and-snap) + mesh off the hull.
+	if (self.SendEntity == phys_files_Send)
+	{
+		if (lin > 0.5 || ang > 0.5 || self.carried_by != world)
+		{
+			// Throttle the MOVING stream to sv_physprop_stream_hz (default 8) — the client
+			// predraw extrapolates between snapshots, so 30 Hz keeps collision smooth while a
+			// big flood pays ~2× fewer Sends + client relinks.  The rest snapshot below stays
+			// IMMEDIATE, so the hull still parks exactly on the model at rest (Stage 4d intact).
+			float stream_hz = pp_cached_stream_hz;
+			if (stream_hz <= 0 || time >= self.pp_stream_next)
+			{
+				self.SendFlags     |= 1;
+				if (stream_hz > 0)
+					self.pp_stream_next = time + 1 / stream_hz;
+			}
+			self.pp_was_streaming  = TRUE;
+		}
+		else if (self.pp_was_streaming)
+		{
+			self.velocity          = '0 0 0';
+			self.avelocity         = '0 0 0';
+			self.SendFlags        |= 1;
+			self.pp_was_streaming  = FALSE;
+		}
+	}
 
 	self.pp_prev_velocity = self.velocity;   // latch for next think's impact-drop test + contact direction
+
+	// ==================== SLEEP GATE ====================
+	// A prop that has held still for PHYSPROP_SLEEP_DELAY drops from the 64 Hz tick to
+	// sv_physprop_sleep_hz.  Everything above this point is already motion-gated, so a
+	// slow tick on a settled prop does the same (nothing) work — just 8× less often.
+	//
+	// Why a sustained rest DELAY and not an instant "lin < x" test: a prop at the apex of
+	// a bounce, or at the top of a gravity-gun toss, is momentarily near-zero velocity in
+	// MID-AIR.  Sleeping there would slow the tick exactly when the landing impact needs
+	// detecting.  The delay means only a genuinely settled prop sleeps.
+	//
+	// Wake latency: an interaction we can SEE from QC (bullet, explosion, +use, throw,
+	// carry, gravity gun) calls PhysProp_Wake and resumes the fast tick the same tick.
+	// A contact we CANNOT see (another prop rolls into this one, a door shoves it — ODE
+	// gives QC no contact callback) is caught by the next slow tick, i.e. within
+	// 1/sleep_hz.  That is the same order as the stream throttle this system already
+	// runs at (sv_physprop_stream_hz default 8), so it costs no additional fidelity that
+	// the mirror stream was not already spending.  Set sv_physprop_sleep 0 to disable.
+	float atrest = (lin <= PHYSPROP_SLEEP_LIN && ang <= PHYSPROP_SLEEP_ANG
+	                && self.carried_by == world);
+	// Still in the post-drop re-solidify phase?  That block above must keep running at
+	// full rate until it goes solid (it polls player overlap + a 5 s safety timeout).
+	if (atrest && self.po_carry_enabled)
+		if (self.dimension_solid & PHYSDROP_DIM)
+			atrest = FALSE;
+
+	if (!atrest)
+		self.pp_rest_since = 0;                 // moving (or busy) — stay on the fast tick
+	else if (!self.pp_rest_since)
+		self.pp_rest_since = time;              // first still tick — start the settle timer
+
+	if (pp_cached_sleep_enable)
+		if (atrest)
+			if (time - self.pp_rest_since >= PHYSPROP_SLEEP_DELAY)
+				self.nextthink = time + 1 / pp_cached_sleep_hz;
+};
+
+// Resume the full 64 Hz tick on a prop that may be asleep (see the sleep gate in
+// PhysObj_Think).  Call this from EVERY path that applies a force / velocity / carry to a
+// prop, BEFORE (or right after) the force — a sleeping prop would otherwise not notice it
+// moved until its next slow tick.  Safe on non-sleeping props and on non-PhysObj_Think
+// entities (weapon drops run their own think cadence) — it only ever schedules sooner.
+void(entity e) PhysProp_Wake =
+{
+	e.pp_rest_since = 0;
+
+	// Cars (Car_Think, sv_prop_vehicle.qc) sleep differently: their body is EXPLICITLY
+	// disabled, so re-enable it here.  Both backends already auto-enable on a force
+	// (ODE dBodyEnable before dBodyAddForceAtPos; Box3D b3Body_ApplyForce wake=true), but
+	// that only wakes the BODY — the QC-side car_asleep latch would still skip
+	// Car_PhysStep, so the shoved car would coast with NO suspension until its next tick
+	// noticed.  Worse, the settle timer would still be armed, so the very next Car_Think
+	// could re-disable the body and swallow the impulse outright.  Clearing both here (on
+	// the same call the push paths already make) keeps it a one-tick resume.
+	e.car_rest_since = 0;
+	if (e.car_asleep)
+	{
+		physics_enable(e, TRUE);
+		e.car_asleep = FALSE;
+	}
+
+	if (e.think == PhysObj_Think)
+	{
+		e.nextthink       = time;      // run the real tick again immediately
+		// Re-latch the impact reference: a prop that slept with velocity 0 and is now being
+		// shoved must not read the stale latch as a giant one-tick speed DROP (= a phantom
+		// impact bang the moment it wakes).
+		e.pp_prev_velocity = e.velocity;
+	}
+};
+
+// Instant-react: force the NEXT PhysObj_Think (64 Hz) to emit this free prop's mirror snapshot, bypassing
+// the sv_physprop_stream_hz gate for that ONE send, so a shot/blast/throw reacts within ~1 tick instead of
+// waiting up to 1/stream_hz.  Clears the timer only — the think runs AFTER the ODE step, so the snapshot
+// carries the INTEGRATED velocity/origin (not a pre-step dead pose).  The ongoing cap is preserved: the
+// moving branch re-arms pp_stream_next = time + 1/stream_hz.  No-op on weapon drops (own un-throttled stream).
+void(entity e) PhysProp_KickStream =
+{
+	// The WAKE is unconditional: it must happen even with sv_physprop_stream_instant 0,
+	// because that cvar only tunes the mirror SEND rate — it has nothing to do with
+	// whether the prop's think is asleep.  (Wiring the wake behind the early-out below
+	// would leave shot props frozen for up to 1/sleep_hz with stream_instant 0.)
+	PhysProp_Wake(e);
+	if (!cvar("sv_physprop_stream_instant")) return;
+	if (e.SendEntity != phys_files_Send) return;
+	e.pp_stream_next = 0;
 };
 
 // CSQC-networked solid mirror of the filing cabinet.  The server keeps running
@@ -790,6 +1036,11 @@ float(entity playerent, float changedflags) phys_files_Send =
 	WriteByte(MSG_ENTITY, bound(0, rint(self.colormod_y * 255), 255));
 	WriteByte(MSG_ENTITY, bound(0, rint(self.colormod_z * 255), 255));
 
+	// Skin index (livery swap) — the client mirror renders self.skin, which selects a `<model>_<N>.skin`
+	// file (surface→shader remap).  For the outrun car: 0 = clean, 1 = dirty (models/outrun/car_1.skin).
+	// MUST be read in the SAME wire position in CSQC_PhysProp_Update (cl_physprop.qc).
+	WriteByte(MSG_ENTITY, bound(0, rint(self.skin), 255));
+
 	// nettest: 1 = client mirrors as SOLID_PHYSICS_TRIMESH (player collides with the generated
 	// convex hull / decomposition) when FREE_SOLID; 0 = oriented box. Derived from this prop's
 	// own solid, so the cabinet (always BOX) + weapon drops send 0 automatically. MUST be read
@@ -820,9 +1071,75 @@ float(entity playerent, float changedflags) phys_files_Send =
 	WriteByte(MSG_ENTITY, (self.carried_by != world) ? num_for_edict(self.carried_by) : 0);
 
 	// Hold params, networked so a REMOTE client (no server cvars) predicts the hold
-	// point with the EXACT server values — a mismatch here would pop on drop.
-	WriteCoord(MSG_ENTITY, cvar("sv_carry_hold_dist"));
-	WriteCoord(MSG_ENTITY, cvar("sv_carry_hold_z"));
+	// point with the EXACT server values — a mismatch here would pop on drop.  A CAR streams its
+	// larger car-carry values so the client-predicted hold matches the (un-clip-slid) server body.
+	float sc_is_car = (self.classname == "prop_car" || self.classname == "func_car");
+	WriteCoord(MSG_ENTITY, sc_is_car ? cvar("sv_car_carry_dist") : cvar("sv_carry_hold_dist"));
+	WriteCoord(MSG_ENTITY, sc_is_car ? cvar("sv_car_carry_z")    : cvar("sv_carry_hold_z"));
+
+	// Is-car byte: lets CSQC pick the CAR mirrors out of the generic phys_files
+	// stream (engine-sound driver cl_vehicle_sound.qc). MUST be read LAST in
+	// CSQC_PhysProp_Update (after hold_z).
+	WriteByte(MSG_ENTITY, sc_is_car ? 1 : 0);
+
+	// Visual spinning-wheel data — read ONLY when is-car, so the wire stays byte-symmetric and every
+	// non-car prop pays zero extra bytes.  Front steer angle (±90 at 1° res), wheel model index, and
+	// per-car model_yaw.  Consumed by Car_DrawWheels (cl_physprop.qc).  MUST match the client read order.
+	if (sc_is_car)
+	{
+		WriteByte (MSG_ENTITY, bound(0, rint(self.car_steer) + 90, 180));
+		WriteShort(MSG_ENTITY, self.car_wheel_mdlidx);
+		WriteByte (MSG_ENTITY, bound(0, rint(self.model_yaw) + 128, 255));
+		WriteCoord(MSG_ENTITY, self.res_base);    // resolved wheel spacing → visual wheels match physics + wheel_base key
+		WriteCoord(MSG_ENTITY, self.res_track);
+		WriteCoord(MSG_ENTITY, self.res_drop);
+		WriteCoord(MSG_ENTITY, self.res_fwd);     // fore/aft wheel-set shift (wheel_fwd key + sv_car_wheel_fwd)
+		// Resolved suspension (ride_height + compression_travel) so the CLIENT visual wheels cap their droop to
+		// the SAME per-car value the physics uses.  Resolved INLINE (Car_CvarZ lives in sh_vehicle_phys.qc which
+		// compiles AFTER this file — same trap as the seat offsets; ride_height/compression_travel are declared
+		// in sv_customdefs.qc so they're reachable here) and LIVE, so a mid-drive `carset ride_height/…` (F3
+		// panel) reflects at once.  Car_CvarZ semantics: non-zero per-car field wins, else the cvar — an
+		// explicit cvar 0 IS honoured so the client visual can go to 0 too.  MUST match the client read order.
+		float sr = (self.ride_height        != 0) ? self.ride_height        : cvar("sv_car_ride_height");
+		float st = (self.compression_travel != 0) ? self.compression_travel : cvar("sv_car_compression_travel");
+		WriteCoord(MSG_ENTITY, sr);
+		WriteCoord(MSG_ENTITY, st);
+		// Engine-sound scale — the CLIENT audio's virtual gears + shift-dip must land on the SAME speeds as the
+		// physics gearbox (removes the fragile cl_car_sound_maxspeed "MUST track sv_car_max_speed" coupling).
+		// Read in the SAME order in CSQC_PhysProp_Update.
+		WriteShort(MSG_ENTITY, bound(0, rint((self.maxspeed != 0) ? self.maxspeed : cvar("sv_car_max_speed")), 30000));
+		WriteByte (MSG_ENTITY, bound(1, rint(cvar("sv_car_gears")), 12));                  // virtual gear count
+		WriteByte (MSG_ENTITY, bound(0, rint(cvar("sv_car_shift_time") * 100), 255));       // shift-cut window (×100 s)
+
+		// Seated-driver render payload — the client draws the driver's player model glued to the
+		// interpolated car pose (Car_DrawDriver, cl_physprop.qc), so it's smooth (no server-tick
+		// jitter) and visible in first person.  Sent only when a driver is seated AND
+		// sv_car_show_driver; otherwise a single 0 byte keeps the wire byte-symmetric.
+		entity drv = self.car_driver;
+		if (drv != world && cvar("sv_car_show_driver"))
+		{
+			WriteByte(MSG_ENTITY, 1);
+			WriteByte(MSG_ENTITY, num_for_edict(drv));   // driver player slot (matches the visual proxy's vis_owner_entnum → proxy suppressed)
+			// team_model_byte — inline copy of the canonical encoder in sv_player.qc (PlayerVisual writer).
+			float dtm;
+			if      (drv.player_model_index == 5) dtm = 255;   // sini
+			else if (drv.player_model_index == 6) dtm = 254;   // chickenman
+			else if (drv.player_model_index == 7) dtm = 253;   // numberK
+			else if (drv.player_model_index == 8) dtm = 252;   // kilmer
+			else dtm = (drv.player_team - 1) * 4 + bound(0, drv.player_model_index, TEAM_MODEL_COUNT - 1);
+			WriteByte(MSG_ENTITY, dtm);
+			WriteByte(MSG_ENTITY, bound(0, drv.skin, 255));
+			// Resolved seat offsets (per-car key → sv_car_seat_* cvar → default), biased into signed shorts.
+			float su = self.seat_up;   if (su == 0) { su = cvar("sv_car_seat_up");   if (su == 0) su = 24; }
+			float sf = self.seat_fwd;  if (sf == 0) sf = cvar("sv_car_seat_fwd");
+			float ss = self.seat_side; if (ss == 0) ss = cvar("sv_car_seat_side");
+			WriteShort(MSG_ENTITY, bound(-32768, rint(su) + 4096, 32767));
+			WriteShort(MSG_ENTITY, bound(-32768, rint(sf) + 4096, 32767));
+			WriteShort(MSG_ENTITY, bound(-32768, rint(ss) + 4096, 32767));
+		}
+		else
+			WriteByte(MSG_ENTITY, 0);
+	}
 	return TRUE;
 };
 
@@ -861,11 +1178,11 @@ void(entity owner) phys_files_spawn_infront =
 	b = spawn();
 	b.classname = "phys_files";
 
-	// Render the IQM (alias model) when present, else the HL-studio .mdl.
-	if (whichpack("models/props/filecabinet/filecabinet.iqm") != "")
-		setmodel(b, "models/props/filecabinet/filecabinet.iqm");
-	else
-		setmodel(b, "models/props/filecabinet.mdl");
+	// IQM only — the old HL-studio models/props/filecabinet.mdl fallback is gone (the file does not
+	// exist, so the else-branch could only ever produce an "Unable to load"; the whichpack() guard
+	// made it unreachable in practice anyway).  See phys_barrel_precache for why IQM-only is also
+	// the better collision path.
+	setmodel(b, "models/props/filecabinet/filecabinet.iqm");
 
 	// SOLID_PHYSICS_BOX always (tight model hbox).  The velocity-servo carry needs
 	// a box body, and the engine OBB patch (world.c World_OBBTrace) makes a rotated
@@ -896,17 +1213,17 @@ void(entity owner) phys_files_spawn_infront =
 	b.po_fx_enabled    = TRUE;
 	b.po_carry_enabled = TRUE;
 	b.po_stuck_grace   = 5;
+	b.po_material = PropMat_For(b.model);   // per-material bounce/damp; keeps the tuned cvar carry mass
 	PhysObj_Setup(b, cvar("sv_carry_mass"), cvar("sv_physprop_friction"));
 	b.think     = PhysObj_Think;   // void cull + contact FX + (carry) re-solidify + CSQC stream
 	b.nextthink = time + 0.05;
 
 	// CSQC-networked solid mirror so the client's custom QC pmove + bullet traces
 	// collide with the cabinet (engine-replicated props are invisible to it).
-	// PVSF_NOREMOVE: keep the mirror on every client even when the resting prop
-	// leaves their PVS, so it never silently goes non-solid (matches brushsync).
+	// PVS policy (cull-on-exit vs stay-resident) is centralised — see PhysProp_ApplyPvsPolicy.
 	b.SendEntity = phys_files_Send;
 	b.SendFlags  = 1;
-	b.pvsflags   = PVSF_NOREMOVE;
+	PhysProp_ApplyPvsPolicy(b);
 
 	if (cvar("sv_debug_physprops"))
 		dprint(sprintf("[physprop] filecabinet spawned at %v\n", b.origin));
@@ -933,6 +1250,13 @@ float(entity e) Carry_IsCarriable =
 	// the carry velocity-servo drives .velocity on a MOVETYPE_PHYSICS rigid body.
 	// carry_allow_any: the gravity gun grabs ANY ODE body (cabinet, barrel, can,
 	// weapon drop), not just po_carry_enabled cabinets.  +use leaves it 0.
+	// Driveable cars: the GRAVITY GUN (carry_allow_any) may grab an EMPTY car to lift / rotate /
+	// flip it (Carry_Tick forces it upright → drop = back on its wheels), but +use (carry_allow_any=0)
+	// must NOT carry one — it MOUNTS via the sv_use.qc gate.  Never grab a car with a seated driver.
+	// carry_allow_any is only TRUE during the grab call; a HELD car must also stay carriable each
+	// Carry_Tick (carried_by != world) or the stale-link check would instant-drop it.
+	if (e.classname == "prop_car" || e.classname == "func_car")
+		return (carry_allow_any || e.carried_by != world) && (e.car_driver == world);
 	return e && e != world && e.movetype == MOVETYPE_PHYSICS
 	       && (e.po_carry_enabled || carry_allow_any);
 };
@@ -981,6 +1305,8 @@ float(entity prop, entity player) Carry_OBBOverlap =
 	     && lz >= prop.mins_z - ez && lz <= prop.maxs_z + ez);
 };
 
+void() Car_Think;   // sv_prop_vehicle.qc (compiled later) — restored on drop so a carried car drives again
+
 void(entity player) Carry_Drop =
 {
 	entity prop = player.carried_prop;
@@ -1005,7 +1331,17 @@ void(entity player) Carry_Drop =
 		// think so they come to rest, sleep, and the scrape loop stops; cabinets
 		// and generic props use PhysObj_Think.  Without this a gravity-gun-thrown
 		// weapon ran the cabinet think, never slept, and scraped forever.
-		if (prop.po_is_weapon_drop)
+		if (prop.classname == "prop_car" || prop.classname == "func_car")
+		{
+			// A car owns Car_Think (drive physics) — the generic carry replaced it with the void
+			// watchdog on grab, so restore it here or the car is dead after a drop.  Also restore full
+			// player-solidity (grab moved it to the PHYSDROP passthrough dimension).
+			prop.think           = Car_Think;
+			prop.nextthink       = time + 0.05;
+			prop.dimension_solid = dimension_default;
+			prop.dimension_hit   = dimension_default;
+		}
+		else if (prop.po_is_weapon_drop)
 		{
 			prop.think     = W_PhysDropThink;
 			prop.nextthink = time + WeaponDrop_NextThinkInterval(prop);
@@ -1052,6 +1388,7 @@ void(entity player) Carry_Throw =
 		physics_enable(prop, TRUE);   // wake so the throw velocity is integrated
 		prop.velocity = v_forward * tf + player.velocity;
 		prop.pp_prev_velocity = prop.velocity;   // re-baseline impact tracker to the throw (Carry_Drop set it to the clamped residual)
+		PhysProp_KickStream(prop);   // push the throw velocity to clients on the next tick
 		if (cvar("sv_debug_physprops"))
 			dprint(sprintf("[carry] throw prop=%g vel=%v\n", num_for_edict(prop), prop.velocity));
 	}
@@ -1080,6 +1417,8 @@ float(entity player, entity prop) Carry_TryGrab =
 	prop.carried_by        = player;
 	prop.carry_stuck_since = 0;
 	prop.avelocity         = '0 0 0';
+	PhysProp_Wake(prop);   // a settled prop is on the slow sleep tick — grabbing it must resume
+	                       // the full-rate think NOW (it drives the carry re-solidify + mirror stream)
 	// Record the floor pose + start time so Carry_Tick can smoothly PULL the prop
 	// into the carry pose over sv_carry_grab_time instead of snapping (Source-like).
 	prop.carry_grab_time   = time;
@@ -1145,10 +1484,18 @@ void(entity player) Carry_Tick =
 	physics_enable(prop, TRUE);
 	prop.phys_stuck_since = 0;
 
+	// A CAR is far bigger than a cabinet: hold it further out + higher so the big body sits clear
+	// in front (not embedded in the ground/player), and — critically — take the RAW hold with NO
+	// clip-slide so the ODE body reaches the SAME point the client predicts (phys_files_Send streams
+	// these same car values), which is what stops the model-vs-hitbox disconnect on a grabbed car.
+	float is_car = (prop.classname == "prop_car" || prop.classname == "func_car");
+
 	makevectors(player.v_angle);
+	float hdist = is_car ? cvar("sv_car_carry_dist") : cvar("sv_carry_hold_dist");
+	float hz    = is_car ? cvar("sv_car_carry_z")    : cvar("sv_carry_hold_z");
 	vector hold = player.origin + player.view_ofs
-	            + v_forward * cvar("sv_carry_hold_dist")
-	            + '0 0 1'   * cvar("sv_carry_hold_z");
+	            + v_forward * hdist
+	            + '0 0 1'   * hz;
 	// Aim the box CENTRE at the hold point (the model origin is at the feet).
 	vector center = prop.origin + '0 0 1' * ((prop.maxs_z + prop.mins_z) * 0.5);
 
@@ -1167,6 +1514,7 @@ void(entity player) Carry_Tick =
 	float  was_startsolid = FALSE;     // Patch 71: trace started embedded (resting grab / mid-carry shove-in)
 	vector hit_point   = '0 0 0';
 	vector hit_normal  = '0 0 1';
+	if (!is_car)   // cars take the RAW hold (no clip-slide) so the body matches the client-predicted hold
 	for (bump = 0; bump < 4; bump = bump + 1)
 	{
 		tracebox(cur, '0 0 0' - boxhalf, boxhalf, tgt, MOVE_NOMONSTERS, prop);
@@ -1195,7 +1543,8 @@ void(entity player) Carry_Tick =
 		vector rem = tgt - cur;
 		tgt = cur + rem - trace_plane_normal * (rem * trace_plane_normal);
 	}
-	hold = cur;                    // slid, reachable hold point
+	if (!is_car)
+		hold = cur;                // slid, reachable hold point (cars keep the raw hold above)
 
 	// GRAB PULL-IN: for the first sv_carry_grab_time after grabbing, smoothly lerp the
 	// prop from its floor pose into the carry pose (Source-like "pull + rotate into
@@ -1227,13 +1576,15 @@ void(entity player) Carry_Tick =
 	// cabinet is jammed on geometry and can't follow), OR a hard far-cap for
 	// pathological cases.  A brief over-distance from a fast turn resets as
 	// soon as the servo catches up, so normal carrying never trips this.
+	// Cars skip the stuck/far auto-drop (a big body legitimately sits far from centre + can't clip-slide
+	// to a nearer point) — you drop it deliberately.  Cabinets/props keep the jam-detect drop.
 	float drop_dist = cvar("sv_carry_drop_dist");
-	if (dist > drop_dist * 3)
+	if (!is_car && dist > drop_dist * 3)
 	{
 		Carry_Drop(player);
 		return;
 	}
-	if (dist > drop_dist)
+	if (!is_car && dist > drop_dist)
 	{
 		if (prop.carry_stuck_since == 0)
 			prop.carry_stuck_since = time;
@@ -1339,14 +1690,31 @@ float(vector shot_dir, float damage) PhysProp_TryPushFromTrace =
 	// com_phys_ode.c World_ODE_Frame), so without the × iter, raising iterations for
 	// smoothness shrinks the kick.  Baseline is iterations=1 (× iter, NOT × iter/4 —
 	// the old /4 assumed iterations=4 and quartered the force for anyone running 1).
-	float iter = cvar("physics_ode_iterationsperframe"); if (iter < 1) iter = 1;
+	// Backend-aware: xN on ODE (cancels its per-substep force divide), 1 on Box3D where the
+	// force applies over the whole frame (else physics_ode_iterationsperframe = phantom push).
+	float iter = Phys_ForceIter();
 	vector force = shot_dir * (damage * cvar("sv_physprop_hit_force") * 100 * iter);
+
+	// Cars are heavy — give them a stronger, tunable "punch" so a hit visibly shoves them,
+	// scaled DOWN when someone's driving (don't fling a car with a passenger). Bullets and
+	// melee both route through here (sh_wpn_melee.qc), so this covers both.
+	if (trace_ent.classname == "prop_car" || trace_ent.classname == "func_car")
+	{
+		float cf = cvar("sv_car_hit_force"); if (cf <= 0) cf = 4;
+		if (trace_ent.car_driver != world)
+		{
+			float os = cvar("sv_car_occupied_push_scale"); if (os <= 0) os = 0.4;
+			cf = cf * os;
+		}
+		force = force * cf;
+	}
 
 	if (cvar("sv_debug_physprops"))
 		dprint(sprintf("[physprop] bullet ent=%g force=%v at=%v\n",
 			num_for_edict(trace_ent), force, trace_endpos));
 
 	physics_addforce(trace_ent, force, trace_endpos);
+	PhysProp_KickStream(trace_ent);   // snappy mirror update on the hit (instant react), still stream_hz-capped
 	return TRUE;
 };
 
@@ -1370,7 +1738,7 @@ void(vector center, float radius, float peak_damage) PhysProp_TryRadiusPush =
 	if (force_scale <= 0) force_scale = 25000;
 	// Same ×100 (smaller cvar) + ×iter (impulse iter-independent, baseline 1) as the
 	// bullet push (see PhysProp_TryPushFromTrace).
-	float iter = cvar("physics_ode_iterationsperframe"); if (iter < 1) iter = 1;
+	float iter = Phys_ForceIter();   // backend-aware (xN on ODE, 1 on Box3D — see sh_weapon_logic.qc)
 	force_scale = force_scale * 100 * iter;
 
 	entity e = findradius(center, radius);
@@ -1404,6 +1772,7 @@ void(vector center, float radius, float peak_damage) PhysProp_TryRadiusPush =
 						num_for_edict(e), force, dist, falloff));
 
 				physics_addforce(e, force, e.origin);
+				PhysProp_KickStream(e);   // snappy mirror update on the explosion jolt
 			}
 		}
 
@@ -1431,6 +1800,7 @@ void() phys_barrel_use =
 			num_for_edict(self), force));
 
 	physics_addforce(self, force, self.origin);
+	PhysProp_KickStream(self);   // snappy mirror update on the +use shove
 };
 
 float() PhysProp_CountActive =

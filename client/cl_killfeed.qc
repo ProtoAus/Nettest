@@ -198,6 +198,12 @@ void KillFeed_Parse()
         }
     }
 
+    // --- nettest death ragdoll ----------------------------------------------
+    // MIGRATED TO SERVER (sv_ragdoll.qc): death ragdolls are now SERVER-authoritative (everyone sees the
+    // same flop; bullets shove them).  The server spawns the ragdoll in PlayerKilled and networks its bones,
+    // so the old client-side CSQC_SpawnCorpseRagdoll spawn here is removed (keeping it would double-ragdoll).
+    // The dev test spawners (spawnragdoll/throwragdoll) stay client-side in cl_ragdoll.qc.
+
     KillFeed_Add(atk_name, atk_col, connector, vic_name, vic_col, suffix, highlight);
 }
 

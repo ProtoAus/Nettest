@@ -58,6 +58,7 @@ vector sp_dec_normal  [SPRAY_ADDECAL_MAX];
 vector sp_dec_side    [SPRAY_ADDECAL_MAX];    // tangent / (full size), per adddecal API
 vector sp_dec_tint    [SPRAY_ADDECAL_MAX];    // surface-light rgb (cl_decal_surflight) for the adddecal path
 string sp_dec_map     [SPRAY_ADDECAL_MAX];    // the map target — to rebuild the `_lm` shader on renderer restart (r_decal_lightmap)
+float  sp_dec_handle  [SPRAY_ADDECAL_MAX];    // engine persistent-decal handle (r_spray_renderer 2); 0=none, -1=off-surface
 
 // Live r_spray_offset: the off-surface lift the trisoup spray quads currently reflect.
 // The bake uses this (not the live cvar); CSQC_DrawSprays polls + re-shifts on change.
@@ -81,7 +82,7 @@ float sp_baked_offset;
 string sp_bucket_tex     [SPRAY_BUCKETS];
 float  sp_bucket_lru_time[SPRAY_BUCKETS];
 trisoup_simple_vert_t sp_bucket_verts[SPRAY_BUCKETS * SPRAY_PER_BUCKET * 4];
-int                   sp_bucket_idx  [SPRAY_BUCKETS * SPRAY_PER_BUCKET * 12];
+int                   sp_bucket_idx  [SPRAY_BUCKETS * SPRAY_PER_BUCKET * 6];   // 6 idx/quad (front-only; cull none)
 int                   sp_bucket_count[SPRAY_BUCKETS];  // active quad count in this bucket
 int                   sp_bucket_free [SPRAY_BUCKETS * SPRAY_PER_BUCKET];
 int                   sp_bucket_free_count[SPRAY_BUCKETS];
@@ -182,7 +183,7 @@ vector sp_decal_tint;
 void(int bucket, int slot, vector p0, vector p1, vector p2, vector p3) CSQC_Spray_WriteQuad =
 {
     int vbase = (bucket * SPRAY_PER_BUCKET + slot) * 4;
-    int ibase = (bucket * SPRAY_PER_BUCKET + slot) * 12;   // 12 = 2 front + 2 back triangles
+    int ibase = (bucket * SPRAY_PER_BUCKET + slot) * 6;    // 6 = 2 front triangles (cull none draws both sides)
 
     sp_bucket_verts[vbase + 0].xyz[0] = p0_x; sp_bucket_verts[vbase + 0].xyz[1] = p0_y; sp_bucket_verts[vbase + 0].xyz[2] = p0_z;
     sp_bucket_verts[vbase + 0].st[0]  = 0;    sp_bucket_verts[vbase + 0].st[1]  = 1;
@@ -217,26 +218,15 @@ void(int bucket, int slot, vector p0, vector p1, vector p2, vector p3) CSQC_Spra
     // render".  Use `slot * 4 + 0..3` so the indices stay relative
     // to the passed pointer regardless of which bucket we're in.
     int vrel = slot * 4;
-    // Front face — counter-clockwise winding from the +normal side.
+    // Front face only — 2 triangles.  The registered spray shader sets `cull none`, so this one
+    // winding is already visible from BOTH sides; the old back-face pair (reverse winding over the
+    // same 4 verts) just double-drew every fragment = 2x fill + doubled alpha (1-(1-a)^2).
     sp_bucket_idx[ibase + 0] = vrel + 0;
     sp_bucket_idx[ibase + 1] = vrel + 1;
     sp_bucket_idx[ibase + 2] = vrel + 2;
     sp_bucket_idx[ibase + 3] = vrel + 0;
     sp_bucket_idx[ibase + 4] = vrel + 2;
     sp_bucket_idx[ibase + 5] = vrel + 3;
-    // Back face — reverse winding so the polygon renders from the
-    // other side too.  Necessary because most PNGs won't have a
-    // `cull none` shader entry; the engine's default sprite shader
-    // culls back faces and our tangent-frame winding can land on
-    // either side depending on the wall's normal direction.  The
-    // back image is mirrored — only visible from inside the wall,
-    // which doesn't happen during normal play.
-    sp_bucket_idx[ibase + 6] = vrel + 0;
-    sp_bucket_idx[ibase + 7] = vrel + 2;
-    sp_bucket_idx[ibase + 8] = vrel + 1;
-    sp_bucket_idx[ibase + 9] = vrel + 0;
-    sp_bucket_idx[ibase + 10] = vrel + 3;
-    sp_bucket_idx[ibase + 11] = vrel + 2;
 };
 
 // Spawn a short burst of forward-drifting smoke puffs to fake a
@@ -280,6 +270,29 @@ void(vector eye, vector forward_dir) CSQC_SpawnSpraySmoke =
         if (muzzlesmoke_list)
             muzzlesmoke_list.ms_spawn_time = cltime - i * 0.12;
     }
+};
+
+// Build + register the BASE spray shader (the key both the trisoup submit and the plain
+// adddecal path use) for shader `tex` mapping image `maptarget`.  Extracted so vid_restart
+// re-registration (CSQC_Spray_ReregisterShaders) rebuilds the SAME body — otherwise the
+// trisoup quads fall back to the engine default after a restart (opaque, ignores alphaGen
+// vertex).  Matches the scorch-decal template; returns the shader handle.
+float(string tex, string maptarget) CSQC_Spray_BuildBaseShader =
+{
+    string shader_body = sprintf(
+        "{\n"
+        "    sort decal\n"
+        "    polygonoffset 8\n"
+        "    nopicmip\n"
+        "    cull none\n"
+        "    {\n"
+        "        map %s\n"
+        "        rgbGen vertex\n"
+        "        alphaGen vertex\n"
+        "        blendFunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA\n"
+        "    }\n"
+        "}\n", maptarget);
+    return shaderforname(tex, shader_body);
 };
 
 // Public — called from CSQC_Parse_Event on CSQC_EVENT_SPRAY.
@@ -365,23 +378,10 @@ void(float spray_id, vector pos, vector normal, vector eye_origin, string name, 
     //                       brightness of the wall it sits on instead of rendering
     //                       full-bright. (texture.rgb * vertex.rgb, texture.a * vertex.a.)
     //   blendFunc straight alpha — standard alpha transparency
-    string genlines = "        rgbGen vertex\n        alphaGen vertex\n";
-    string shader_body = sprintf(
-        "{\n"
-        "    sort decal\n"
-        "    polygonoffset 8\n"
-        "    nopicmip\n"
-        "    cull none\n"
-        "    {\n"
-        "        map %s\n"
-        "%s"
-        "        blendFunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA\n"
-        "    }\n"
-        "}\n", maptarget, genlines);
-    float shader_handle = shaderforname(tex, shader_body);
+    float shader_handle = CSQC_Spray_BuildBaseShader(tex, maptarget);
     // Per-pixel-lightmap variant (`<tex>_lm`) for r_decal_lightmap on the adddecal path — shared
     // Decal_LMShaderBody (cl_bulletholes.qc).  CSQC_DrawSprays picks it + white rgb when the cvar is on.
-    shaderforname(strcat(tex, "_lm"), Decal_LMShaderBody(maptarget));
+    shaderforname(strcat(tex, "_lm"), Decal_LMShaderBody(maptarget, TRUE));
     if (!is_wad)
         precache_pic(tex);		// loose pic; wad decal textures aren't precache_pic-able
 
@@ -463,6 +463,7 @@ void(float spray_id, vector pos, vector normal, vector eye_origin, string name, 
         sp_dec_side[free_slot]   = bitangent / (half_h * 2);
         sp_dec_tint[free_slot]   = sp_decal_tint;
         sp_dec_map[free_slot]    = maptarget;
+        sp_dec_handle[free_slot] = 0;   // r_spray_renderer 2: CSQC_DrawSprays lazily creates the engine persistent decal
     }
 
     // trisoup path (r_spray_renderer 1, default).
@@ -488,9 +489,9 @@ void(float spray_id, vector pos, vector normal, vector eye_origin, string name, 
 // Public — called from CSQC_Parse_Event on CSQC_EVENT_SPRAY_REMOVE.
 //
 // Linear search across all slots is cheap at our bucket sizes
-// (SPRAY_BUCKETS × SPRAY_PER_BUCKET = 64 entries).  Zeros the quad's
-// vertex alphas (degenerate render) and recycles the slot via the
-// bucket's free list — mirrors BH_FreeStaticSlot (cl_bulletholes.qc:304).
+// (SPRAY_BUCKETS × SPRAY_PER_BUCKET = 64 entries).  Collapses the quad to
+// zero-area geometry (and zeros vertex alpha) and recycles the slot via the
+// bucket's free list — mirrors BH_FreeStaticSlot (which now collapses too).
 void(float spray_id) CSQC_RemoveSprayDecal =
 {
     // Each spray stores BOTH a trisoup slot and an adddecal slot (live-swap), so
@@ -509,6 +510,10 @@ void(float spray_id) CSQC_RemoveSprayDecal =
                 sp_bucket_verts[vbase + 1].rgba[3] = 0;
                 sp_bucket_verts[vbase + 2].rgba[3] = 0;
                 sp_bucket_verts[vbase + 3].rgba[3] = 0;
+                // Collapse to zero-area geometry too — sp_bucket_count is a high-water mark that
+                // never shrinks, so this freed slot's indices keep being submitted every frame;
+                // alpha 0 alone would ghost under r_showtris or a post-vid_restart shader fallback.
+                Decal_CollapseQuad(&sp_bucket_verts[vbase]);
                 sp_slot_id[idx] = 0;
                 sp_bucket_free[b * SPRAY_PER_BUCKET + sp_bucket_free_count[b]] = s;
                 sp_bucket_free_count[b] = sp_bucket_free_count[b] + 1;
@@ -523,6 +528,8 @@ void(float spray_id) CSQC_RemoveSprayDecal =
     {
         if (sp_dec_id[i] == spray_id)
         {
+            if (sp_dec_handle[i] > 0) removedecal(sp_dec_handle[i]);   // r_spray_renderer 2: free the engine persistent decal
+            sp_dec_handle[i] = 0;
             sp_dec_id[i]     = 0;
             sp_dec_shader[i] = "";
             break;
@@ -552,11 +559,11 @@ void() CSQC_DrawSprays =
     // LIVE-SWAP dispatch: both representations are stored per spray; this picks one
     // per frame off r_spray_renderer (1 = trisoup default, 0 = adddecal).  Polled
     // here so a mid-game toggle re-renders every existing spray next frame.
-    float trisoup = cvar("r_spray_renderer") != 0;
+    float sp_mode = cvar("r_decal_renderer");   // UNIFIED decal renderer (was r_spray_renderer)
 
-    // Live r_spray_offset: re-shift the trisoup quads when it changes.  Ungated (runs in
-    // both renderer modes) so the trisoup offset stays correct even while in adddecal mode.
-    float sp_want_off = cvar("r_spray_offset");
+    // Live r_decal_offset: re-shift the trisoup quads when it changes.  Ungated (runs in
+    // all renderer modes) so the trisoup offset stays correct even while in another mode.
+    float sp_want_off = cvar("r_decal_offset");   // UNIFIED decal offset (was r_spray_offset)
     if (sp_want_off < 0) sp_want_off = 0;   // negative would lift into the wall
     if (sp_want_off != sp_baked_offset)
     {
@@ -564,10 +571,44 @@ void() CSQC_DrawSprays =
         sp_baked_offset = sp_want_off;
     }
 
-    if (trisoup)
+    // Mode 2 = PERSISTENT LIT DECALS: the engine clips each spray ONCE (adddecal_static) and re-emits
+    // it cheaply every frame (Source-style), keeping the per-pixel lightmap without a per-frame re-clip.
+    // Reconcile handles here, then draw NOTHING (engine emits).  Mirrors CSQC_InfoDecal_DrawTrisoup.
+    if (sp_mode == 2)
+    {
+        float sp_lm2 = cvar("r_decal_lightmap");
+        int im;
+        for (im = 0; im < SPRAY_ADDECAL_MAX; im = im + 1)
+        {
+            if (sp_dec_id[im] == 0) continue;
+            if (sp_dec_handle[im] != 0) continue;   // already have a handle (or -1 = tried+failed)
+            float h;
+            if (sp_lm2)
+                h = adddecal_static(strcat(sp_dec_shader[im], "_lm"),
+                                    sp_dec_origin[im], sp_dec_normal[im], sp_dec_side[im],
+                                    '1 1 1', 1.0, 1, 0);
+            else
+                h = adddecal_static(sp_dec_shader[im],
+                                    sp_dec_origin[im], sp_dec_normal[im], sp_dec_side[im],
+                                    sp_dec_tint[im], 1.0, 1, 0);
+            sp_dec_handle[im] = (h >= 0) ? h : -1;   // -1 = off-surface; don't retry every frame
+        }
+        return;
+    }
+
+    // Modes 0/1: release any persistent decals left over from mode 2 (else they'd double-draw), then dispatch.
+    int jr;
+    for (jr = 0; jr < SPRAY_ADDECAL_MAX; jr = jr + 1)
+        if (sp_dec_handle[jr] != 0)
+        {
+            if (sp_dec_handle[jr] > 0) removedecal(sp_dec_handle[jr]);
+            sp_dec_handle[jr] = 0;
+        }
+
+    if (sp_mode != 0)
     {
         // --- trisoup-quad path (r_spray_renderer 1) ---
-        // Each active quad contributes 12 indices (4 triangles — double-sided).
+        // Each active quad contributes 6 indices (2 front triangles; cull none shows both sides).
         float spray_dbg = cvar("cl_debug_spray");   // hoisted out of the per-bucket loop
         int b;
         for (b = 0; b < SPRAY_BUCKETS; b = b + 1)
@@ -575,7 +616,7 @@ void() CSQC_DrawSprays =
             if (sp_bucket_count[b] <= 0) continue;
             if (sp_bucket_tex[b] == "")  continue;
             int base_v = b * SPRAY_PER_BUCKET * 4;
-            int base_i = b * SPRAY_PER_BUCKET * 12;
+            int base_i = b * SPRAY_PER_BUCKET * 6;
             if (spray_dbg >= 2)
                 print(sprintf("[spray] submit b=%g tex='%s' cnt=%g v0=%g i0=%g\n",
                               (float)b, sp_bucket_tex[b],
@@ -584,7 +625,7 @@ void() CSQC_DrawSprays =
             addtrisoup_simple(sp_bucket_tex[b], 0,
                               &sp_bucket_verts[base_v],
                               &sp_bucket_idx[base_i],
-                              sp_bucket_count[b] * 12);
+                              sp_bucket_count[b] * 6);
         }
     }
     else
@@ -611,15 +652,21 @@ void() CSQC_DrawSprays =
     }
 };
 
-// Re-register the per-pixel-lightmap spray shaders after a renderer restart (vid_restart purges
-// shaderforname shaders; without this, active sprays' `_lm` shader would fall back to the engine
-// default adddecal body = checkerboard).  Called from CSQC_RendererRestarted (cl_infodecal.qc).
+// Re-register spray shaders after a renderer restart (vid_restart purges shaderforname shaders).
+// Rebuilds BOTH the BASE key (that CSQC_DrawSprays' trisoup submit uses — without it the quads
+// fall back to the engine default: opaque, ignores alphaGen vertex, so freed/masked quads show)
+// AND the `_lm` per-pixel-lightmap adddecal variant.  Every active spray stores an adddecal slot
+// (live-swap), so iterating sp_dec_* covers every bucket's base shader.  Called from
+// CSQC_RendererRestarted (cl_infodecal.qc).
 void() CSQC_Spray_ReregisterShaders =
 {
     int i;
     for (i = 0; i < SPRAY_ADDECAL_MAX; i = i + 1)
         if (sp_dec_id[i] != 0 && sp_dec_map[i] != "")
-            shaderforname(strcat(sp_dec_shader[i], "_lm"), Decal_LMShaderBody(sp_dec_map[i]));
+        {
+            CSQC_Spray_BuildBaseShader(sp_dec_shader[i], sp_dec_map[i]);
+            shaderforname(strcat(sp_dec_shader[i], "_lm"), Decal_LMShaderBody(sp_dec_map[i], TRUE));
+        }
 };
 
 // Scan gfx/sprays/*.png and (re)write scripts/sprays.shader with a
@@ -705,6 +752,7 @@ void() CSQC_ClearSprays =
     {
         sp_dec_id[i]     = 0;
         sp_dec_shader[i] = "";
+        sp_dec_handle[i] = 0;   // r_spray_renderer 2: engine already wiped its store on map change (CL_ClearState)
     }
     sp_baked_offset = 0;   // next post-clear poll lifts fresh sprays from 0 to the cvar
 };

@@ -1121,7 +1121,8 @@ void(float attacker_slot, float victim_slot, float cause, float weapon, float he
 
 void(entity attacker, entity victim) PlayerKilled =
 {
-    Carry_Drop(victim);   // drop any carried prop on death so it falls free
+    Carry_Drop(victim);        // drop any carried prop on death so it falls free
+    Ragdoll_CarryDrop(victim);  // and release any gravity-gunned corpse
 
     victim.deaths = victim.deaths + 1;
     victim.prog_deaths = victim.prog_deaths + 1;   // nettest progression: lifetime deaths
@@ -1205,6 +1206,10 @@ void(entity attacker, entity victim) PlayerKilled =
     // mid-air completes the fall, an explosive blast sends the body flying).
     // Velocity is zeroed AFTER the detach copy below.
 
+    // nettest server ragdoll: stash the victim's LAST ALIVE framestate BEFORE SH_PlayerAnim_Death
+    // overwrites it, so the ragdoll (spawned below) starts in the pose they were shot in (mid-run etc.).
+    Ragdoll_CaptureAlivePose(victim);
+
     // Play death animation + scatter carried weapons, all with self = victim
     {
         entity saved;
@@ -1232,6 +1237,12 @@ void(entity attacker, entity victim) PlayerKilled =
     // Detach reads victim.velocity for the corpse's initial fall vector,
     // so this MUST run before the velocity zero below.
     Player_VisualProxy_DetachAsCorpse(victim);
+
+    // nettest server ragdoll: spawn the authoritative flopping corpse from the just-detached proxy
+    // (reads victim.last_corpse for the model/skin/pose + victim.velocity for the death momentum, so
+    // this MUST run after the detach and BEFORE the velocity zero below).  Only on weapon/FF kills.
+    if (kf_cause == KILL_CAUSE_WEAPON || kf_cause == KILL_CAUSE_FRIENDLYFIRE)
+        Ragdoll_SpawnFromDeath(attacker, victim);
 
     // Now safe to wipe the live player's velocity — corpse already has
     // its copy.  The dead player entity stays at rest until respawn.
@@ -1591,6 +1602,11 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
         // client-side time window loses at high ping, e.g. sv_minping 500).  Witnesses apply it.
         WriteByte(MSG_MULTICAST, num_for_edict(attacker));
         multicast(target.origin, MULTICAST_PVS);
+
+        // Camo body paint: getting shot scrubs a slice of coverage off
+        // (sv_paint.qc; no-op when unpainted).  Same gating as the flinch —
+        // real external damage on a living player.
+        SV_Paint_OnDamage(target);
     }
 
     // Hitmarker: server-confirmed hit on any damageable.
@@ -1899,6 +1915,7 @@ void(entity drop_ent) W_PhysDropEnable =
     // dimension masks, physics_enable.  Light + grippy (mass 1.5 / friction ~0.5) so
     // a dropped gun moves when hit/blasted but settles quickly.  max_angular bumped
     // back to 35 after (guns tumble more freely than the heavier props at 20).
+    drop_ent.po_material = -1;   // weapon drops keep their own tuned bounce/damp (no prop-material)
     PhysObj_Setup(drop_ent,
                   W_PhysDropCvarOrDefault("sv_physprop_weapon_mass",     20),
                   W_PhysDropCvarOrDefault("sv_physprop_weapon_friction", 0.5));

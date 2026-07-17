@@ -144,6 +144,21 @@ const float SLOT_UTILITY   = 4;
 // to shoot the drops themselves.
 const float PHYSDROP_DIM = 256;
 
+// Server-side death ragdolls (sv_ragdoll.qc) live on their OWN dimension bit so the
+// main bullet/movement traces (dimension_hit = dimension_default) PASS THROUGH corpses
+// (CS-style: a corpse is not cover) while a dedicated shove/grab trace ORs RAGDOLL_DIM
+// in to hit them.  Kept distinct from PHYSDROP_DIM so ragdoll shoves don't touch drops.
+const float RAGDOLL_DIM = 512;
+
+// THE canonical ragdoll doll file — ONE file for every humanoid player model.  A .rag doll binds
+// its bodies/joints to the skeleton by BONE NAME ("Bip01 ..."), and all the IQM player models share
+// that skeleton, so a single file serves them all (it used to be 11 byte-identical `<model>.iqm.rag`
+// siblings — editing one never propagated).  Loaded explicitly via skel_ragupdate("doll <path>") by
+// both the server death ragdoll (sv_ragdoll.qc) and the CSQC dev spawner (cl_ragdoll.qc).
+// *** NEVER rename this to `<model>.doll` *** — the engine AUTO-loads a doll named exactly
+// `<modelpath>.doll` and ragdolls every LIVE player using that model (then crashes).
+const string RAGDOLL_DOLL_PATH = "models/player/humanoid.rag";
+
 // Grace window before a player can pick their own toss back up. This is
 // separate from fake-drop handoff: CSQC swaps to the real server entity as
 // soon as that entity arrives, but pickup prediction stays locked until here.
@@ -271,6 +286,7 @@ const float CSQC_EVENT_ROUND_REWARD      = 45;       // round win/lose cash, sen
 const float CSQC_EVENT_NAV_GRAPH         = 46;       // debug: bot nav-graph node chunk. Payload: short total, short start, byte n, then per node: 3×coord + byte linkcount + linkcount×short neighbour. Gated on sv_debug_nav; multicast ALL; cl_navdebug draws nodes + links.
 const float CSQC_EVENT_BOT_DEBUG         = 47;       // debug: per-bot AI state. Payload: byte n, then per bot: byte entnum + 3×coord origin + byte state + byte enemy entnum + byte weapon + byte mag. Gated on sv_debug_nav; multicast ALL; cl_navdebug draws labels + enemy lines.
 const float CSQC_EVENT_KILLCAM_TRACK     = 48;       // server-side killcam: the KILLER's recorded camera track, reliably unicast to the victim on death so the rewind shows the killer's out-of-PVS approach. Payload: killer slot byte + frame_count byte, then per frame (oldest→newest): short delta_ms (kill_time - frame_time) + 3×coord origin + 2×WriteAngle (pitch, yaw) + weaponstate byte + weapon_id byte.
+const float CSQC_EVENT_PLAYER_PAINT      = 49;       // player body paint (sv_paint.qc -> cl_paint.qc). Sub-byte: 0 = camo set (slot byte + amt byte + wall-texture string), 1 = paintball splat (slot byte + r g b bytes + seed short), 2 = clear all (slot byte, respawn wash). MULTICAST_ALL (persistent visual state must reach out-of-PVS clients too).
 
 // --- Kill-feed causes (byte payload of CSQC_EVENT_KILLFEED) ---
 const float KILL_CAUSE_WEAPON       = 0;

@@ -54,6 +54,11 @@ int blood_count[7];             // submit count (== static_count; blood has no d
 auto int blood_free[7 * 256];   // per-partition free lists (flattened: part t at [t*MAX, …))
 int blood_free_count[7];
 
+// Cached r_decal_offset the baked verts currently sit at.  New splats bake off THIS (not the live
+// cvar) so the DrawBloodDecals poll can delta-shift every stored vert uniformly when the cvar changes
+// (mirrors sprays' sp_baked_offset / bullet holes' bh_baked_offset).  Reset to 0 on the blood wipe.
+float blood_baked_offset;
+
 // .bs_slot (declared in cl_bloodsplat.qc, init -1 at spawn) holds the
 // ABSOLUTE slot index across the whole flattened buffer (partition base +
 // local slot), so the fade helper / free path can address the verts
@@ -107,6 +112,21 @@ float(float part, float use_uv,
 };
 
 // ------------------------------------------------------------------
+//  Live r_decal_offset re-shift.  Translates every baked vert in every
+//  partition by `delta` along its own surface normal (Decal_ShiftQuadVerts
+//  recovers the normal from the quad's coplanar corners).  Called from the
+//  CSQC_DrawBloodDecals poll when the cvar changes — mirrors
+//  BH_ShiftStaticQuads / CSQC_Spray_ShiftQuads.
+// ------------------------------------------------------------------
+void(float delta) Blood_ShiftStaticQuads =
+{
+    int t, s;
+    for (t = 0; t < 7; t = t + 1)
+        for (s = 0; s < blood_count[t]; s = s + 1)
+            Decal_ShiftQuadVerts(&blood_verts[(t * BLOOD_TRISOUP_MAX + s) * 4], delta);
+};
+
+// ------------------------------------------------------------------
 //  Bake one splat's geometry ONCE at spawn.  Builds the 4 quad corners
 //  from bs.bs_origin + bs.bs_normal + a tangent/bitangent frame (same
 //  construction as CSQC_BakeStaticBulletHoleQuad), optionally runs the
@@ -143,8 +163,11 @@ void(entity bs) Blood_BakeTrisoup =
     if (size_scale <= 0) size_scale = 1.0;
     float half = BLOOD_HALF_SIZE * size_scale;
 
-    // Push slightly off the surface to avoid z-fighting.
-    vector center = bs.bs_origin + world_normal * BLOOD_BAKE_NUDGE;
+    // Push slightly off the surface to avoid z-fighting.  Bakes off the CACHED r_decal_offset
+    // (blood_baked_offset) — NOT the live cvar — so the CSQC_DrawBloodDecals poll can delta-shift every
+    // stored vert uniformly when the cvar changes without double-counting a freshly-baked splat.  The
+    // UNIFIED r_decal_offset matches the other decals; polygonoffset does the real z-fight defeat.
+    vector center = bs.bs_origin + world_normal * blood_baked_offset;
 
     vector q0 = center - tangent * half - bitangent * half;
     vector q1 = center + tangent * half - bitangent * half;
@@ -203,10 +226,84 @@ void(entity bs) Blood_BakeTrisoup =
     bs.bs_last_alpha = 1.0;
 };
 
+// r_decal_renderer 2 (PERSISTENT LIT) — register a REAL decal shader per blood texture so adddecal_static
+// can resolve it by name (blood was precache_pic-only, which the engine would wrap into a checkerboard-prone
+// default).  Plain variant = trisoup + non-lit persistent; `_lm` variant = per-pixel-lightmap persistent
+// (mirrors bullet holes / sprays / infodecals).  Called from CSQC_RendererRestarted (init + vid_restart).
+void() Blood_ReregisterShaders =
+{
+    float i;
+    for (i = 1; i <= BLOOD_TEX_COUNT; i = i + 1)
+    {
+        string name = CSQC_BloodShaderForIndex(i);
+        // No `cull none` — see Decal_LMShaderBody (cl_bulletholes.qc): it let the back face draw, and
+        // polygonoffset 8's constant depth bias grows with distance, so decals punched through walls.
+        shaderforname(name, sprintf(
+            "{\n"
+            "    sort decal\n"
+            "    polygonoffset 8\n"
+            "    nopicmip\n"
+            "    {\n"
+            "        map %s\n"
+            "        rgbGen vertex\n"
+            "        alphaGen vertex\n"
+            "        blendFunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA\n"
+            "    }\n"
+            "}\n", name));
+        shaderforname(strcat(name, "_lm"), Decal_LMShaderBody(name, FALSE));
+    }
+};
+
+// r_decal_renderer 2: clip a blood splat ONCE via adddecal_static + cache the handle (engine re-emits cheaply;
+// the fade is driven by updatedecal from CSQC_DrawBloodDecals).  Same tangent/size frame as Blood_BakeTrisoup;
+// blood is world-static (no moving-brushmodel case) so every splat is persistable.  Square → aspect 1.
+void(entity bs, float bl_alpha) Blood_CreatePersistent =
+{
+    if (vlen(bs.bs_normal) <= 0.001)
+    {
+        bs.bs_handle = -1;
+        return;
+    }
+    vector wn = normalize(bs.bs_normal);
+    vector tang = bs.bs_tangent;
+    if (vlen(tang) <= 0.001)
+    {
+        vector ref;
+        if (fabs(wn_z) < 0.9) ref = '0 0 1';
+        else                  ref = '1 0 0';
+        tang = crossproduct(wn, ref);
+    }
+    tang = normalize(tang);
+
+    float size_scale = bs.bs_size_scale;
+    if (size_scale <= 0) size_scale = 1.0;
+    float full_size = BLOOD_HALF_SIZE * size_scale * 2;   // side = bitangent/full_size -> decal half-extent = BLOOD_HALF_SIZE*scale
+
+    // adddecal's "side" is the V axis: the engine maps texcoord-T to side and texcoord-S to
+    // cross(-normal, side)=tangent.  Pass the BITANGENT (same one Blood_BakeTrisoup uses for V) so the
+    // texture's U/V align with the trisoup bake — else blood mode 2 is rotated 90 deg vs mode 0/1.
+    // (Matches infodecals/sprays, whose side is also the bitangent.)
+    vector bitang = crossproduct(wn, tang);
+    vector side = bitang / full_size;
+
+    float bright = cvar("cl_blood_decals_brightness");
+    if (bright <= 0) bright = 0.4;
+    vector tint = [bright, bright, bright];
+
+    string name = CSQC_BloodShaderForIndex(bs.bs_tex);
+    float h;
+    if (cvar("r_decal_lightmap"))
+        h = adddecal_static(strcat(name, "_lm"), bs.bs_origin, wn, side, tint, bl_alpha, 1, 0);
+    else
+        h = adddecal_static(name, bs.bs_origin, wn, side, tint, bl_alpha, 1, 0);
+    bs.bs_handle = (h >= 0) ? h : -1;   // -1 = off-surface; don't retry every frame
+};
+
 // ------------------------------------------------------------------
-//  Free a splat's baked slot — zero its 4 vertex alphas (degenerate, GPU
-//  skips it) and push the local slot back onto its partition's free list.
-//  Mirrors BH_FreeStaticSlot.  Safe no-op when bs_slot is the -1 sentinel.
+//  Free a splat's baked slot — degenerate it to ZERO-AREA geometry (collapse the 4 verts onto
+//  the first corner; also zero alpha) so the GPU skips it regardless of shader, and push the
+//  local slot back onto its partition's free list.  Mirrors BH_FreeStaticSlot (which now also
+//  collapses geometry, not just alpha).  Safe no-op when bs_slot is the -1 sentinel.
 // ------------------------------------------------------------------
 void(entity bs) Blood_FreeTrisoupSlot =
 {
@@ -221,6 +318,7 @@ void(entity bs) Blood_FreeTrisoupSlot =
     blood_verts[vbase + 1].rgba[3] = 0;
     blood_verts[vbase + 2].rgba[3] = 0;
     blood_verts[vbase + 3].rgba[3] = 0;
+    Decal_CollapseQuad(&blood_verts[vbase]);
 
     int free_base = p * BLOOD_TRISOUP_MAX;
     blood_free[free_base + blood_free_count[p]] = local_slot;
@@ -279,4 +377,62 @@ void() Blood_ResetTrisoup =
         blood_count[(int)t]        = 0;
         blood_free_count[(int)t]   = 0;
     }
+    blood_baked_offset = 0;   // next splats bake flush; the DrawBloodDecals poll re-lifts to r_decal_offset
+};
+
+// ------------------------------------------------------------------
+//  Live r_decal_offset poll — compare the live cvar to the cached baked
+//  offset and delta-shift every baked vert once when it changes.  Called
+//  at the top of CSQC_DrawBloodDecals (ungated, so the trisoup buffer stays
+//  correct even while in mode 0/2).  Mirrors the sprays / bullet-hole polls.
+// ------------------------------------------------------------------
+void() Blood_PollOffset =
+{
+    float want = cvar("r_decal_offset");
+    if (want < 0) want = 0;
+    if (want != blood_baked_offset)
+    {
+        Blood_ShiftStaticQuads(want - blood_baked_offset);
+        blood_baked_offset = want;
+    }
+};
+
+// ------------------------------------------------------------------
+//  Mode-0 (r_decal_renderer 0) per-frame adddecal draw for one splat.
+//  Same projection math as Blood_CreatePersistent (bitangent "side",
+//  brightness tint) but re-issued EVERY frame with the live fade alpha
+//  instead of the clip-once persistent handle — the legacy adddecal path,
+//  matching how bullet holes / sprays behave in mode 0.  Colour matches
+//  modes 1 & 2 (brightness tint, modulated by the world lightmap when
+//  r_decal_lightmap is on) so blood looks the same at every renderer setting.
+// ------------------------------------------------------------------
+void(entity bs, float bl_alpha) Blood_DrawAdddecal =
+{
+    if (vlen(bs.bs_normal) <= 0.001)
+        return;
+    vector wn = normalize(bs.bs_normal);
+    vector tang = bs.bs_tangent;
+    if (vlen(tang) <= 0.001)
+    {
+        vector ref;
+        if (fabs(wn_z) < 0.9) ref = '0 0 1';
+        else                  ref = '1 0 0';
+        tang = crossproduct(wn, ref);
+    }
+    tang = normalize(tang);
+
+    float size_scale = bs.bs_size_scale;
+    if (size_scale <= 0) size_scale = 1.0;
+    float full_size = BLOOD_HALF_SIZE * size_scale * 2;
+    vector side = crossproduct(wn, tang) / full_size;   // bitangent (V axis) — matches the bake / persistent path
+
+    float bright = cvar("cl_blood_decals_brightness");
+    if (bright <= 0) bright = 0.4;
+    vector tint = [bright, bright, bright];
+
+    string name = CSQC_BloodShaderForIndex(bs.bs_tex);
+    if (cvar("r_decal_lightmap"))
+        adddecal(strcat(name, "_lm"), bs.bs_origin, wn, side, tint, bl_alpha);
+    else
+        adddecal(name, bs.bs_origin, wn, side, tint, bl_alpha);
 };

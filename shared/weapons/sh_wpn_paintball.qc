@@ -369,6 +369,13 @@ void() W_PaintballShoot =
             color = SH_PaintballColour(self.wep_action_id);
             W_PaintballSplatEffect(trace_endpos, trace_plane_normal, self, trace_ent, color);
         }
+        else if (trace_ent.classname == "player" && trace_ent.health > 0)
+        {
+            // Body paint: the splat lands ON the player — broadcast so every
+            // client stamps it into the victim's skin (sv_paint.qc -> cl_paint.qc).
+            color = SH_PaintballColour(self.wep_action_id);
+            SV_Paint_PlayerSplat(trace_ent, color, SV_Paint_NextSeed());
+        }
 
         W_DebugImpact(trace_endpos, damage, hitgroup);
     }
@@ -558,6 +565,9 @@ void() W_PaintballProjectileTouch =
 
     if (other == world || other.solid == SOLID_BSP)
         W_PaintballSplatEffect(self.origin, n, self.owner, other, self.colormod);
+    else if (other.classname == "player" && other.health > 0)
+        // Body paint: splat the victim's skin on every client (sv_paint.qc).
+        SV_Paint_PlayerSplat(other, self.colormod, SV_Paint_NextSeed());
 
     remove(self);
 };

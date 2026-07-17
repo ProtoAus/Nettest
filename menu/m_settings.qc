@@ -382,7 +382,7 @@ void() settings_menu =
 		cvar_slider_tip([colL_x, yL], [colL_w, row_h], [0, 3000, 30],   "cl_bullethole_distance","Hole Draw Distance",  "%.0f", "Distance LOD. Holes farther than this are skipped.");                            yL += row_step;
 		cvar_slider_tip([colL_x, yL], [colL_w, row_h], [0, 2, 20],      "cl_bullethole_dedupe_scale","Dedupe Scale","%.2f", "How aggressively new holes overwrite nearby old ones (0=stack, 2=aggressive).");      yL += row_step;
 		cvar_slider_tip([colL_x, yL], [colL_w, row_h], [0, 1, 10],      "cl_decal_opacity",     "Decal Opacity",    "%.1f", "Global alpha multiplier for bullet/blood/paint decals.");                              yL += row_step;
-		cvar_slider_tip([colL_x, yL], [colL_w, row_h], [0, 1, 1],       "cl_impact_quality",    "Impact Particles", "%.0f", "Bullet-impact smoke + sparks. 0=off, 1=on. (Impact dynamic light is the separate 'Impact Light' toggle.)");   yL += row_step;
+		cvar_slider_tip([colL_x, yL], [colL_w, row_h], [0, 1, 1],       "cl_impact_quality",    "Impact Particles", "%.0f", "Bullet-impact smoke puff. 0=off, 1=on. (Physical chips are cl_impact_chips; impact dynamic light is the separate 'Impact Light' toggle.)");   yL += row_step;
 		cvar_slider_tip([colL_x, yL], [colL_w, row_h], [0, 8, 8],       "cl_impact_particle_offset","Particle Push","%.0f", "Push impact particles this many units along the surface normal\nso they don't z-fight the wall they spawned on.");      yL += row_step;
 		cvar_slider_tip([colL_x, yL], [colL_w, row_h], [0, 1, 10],      "cl_impact_light_scale","Impact Light Scale","%.1f", "Brightness scale for the per-impact dynamic light flash.");                            yL += row_step;
 

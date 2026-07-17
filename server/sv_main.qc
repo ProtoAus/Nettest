@@ -368,6 +368,11 @@ void(entity corpse) VisProxy_RetireCorpse =
 	if (corpse.vis_sinking)		// idempotent: a double-retire (RoundRestart racing
 		return;			// DetachAsCorpse) must not restart/double the sink
 
+	// nettest server ragdoll: this is the single retire path (mp_deadbodies cap, respawn,
+	// RoundRestart), so tear the corpse's authoritative ragdoll down here alongside it.
+	if (corpse.sv_ragdoll_ent)
+		Ragdoll_Free(corpse.sv_ragdoll_ent);
+
 	float stime = cvar("mp_deadbody_sink_time");
 	if (stime <= 0 || cvar("mp_deadbody_sink_depth") <= 0)
 	{
@@ -423,6 +428,10 @@ void() RoundRestart =
 		for (i = 0; i < ccount; i = i + 1)
 			VisProxy_RetireCorpse(corpses[i]);   // networked remove, NOT a silent bare remove()
 	}
+
+	// nettest: backstop-free any server ragdoll whose corpse was already gone (the corpse
+	// retire above already freed the owned ones via the VisProxy_RetireCorpse hook).
+	Ragdoll_SweepAll();
 
 	// Sweep any planted C4 (Defuse).  The bomb persists from plant until it
 	// explodes or is defused — a defused bomb is deliberately left as a blue
@@ -657,6 +666,7 @@ string sv_info_last_stopspeed;
 string sv_info_last_hull_height;
 string sv_info_last_eye_height;
 string sv_info_last_autohop;
+string sv_info_last_deastrafing;
 string sv_info_last_stamina;
 string sv_info_last_snipersway;
 string sv_info_last_mp_cheats;
@@ -764,6 +774,7 @@ void() SV_UpdateMovementServerInfo =
 	sv_info_push_if_changed("sv_hull_height",   sv_info_last_hull_height);
 	sv_info_push_if_changed("sv_eye_height",    sv_info_last_eye_height);
 	sv_info_push_if_changed("sv_autohop",       sv_info_last_autohop);
+	sv_info_push_if_changed("sv_deastrafing",   sv_info_last_deastrafing);	// Source airstrafe penalty; CSQC pmove reads it via serverkeyfloat so prediction matches
 	sv_info_push_if_changed("sv_stamina",       sv_info_last_stamina);
 	sv_info_push_if_changed("sv_snipersway",    sv_info_last_snipersway);
 	sv_info_push_if_changed("mp_cheats",        sv_info_last_mp_cheats);
@@ -1005,6 +1016,27 @@ void() StartFrame =
 		if (sv_cached_anim_qu_per_sec        <= 0) sv_cached_anim_qu_per_sec        = 240;
 		sv_cached_anim_qu_per_sec_crouch = cvar("sv_anim_qu_per_sec_crouch");
 		if (sv_cached_anim_qu_per_sec_crouch <= 0) sv_cached_anim_qu_per_sec_crouch = 100;
+
+		// Phys-prop tick constants (sv_physprop.qc PhysObj_Think / _DetectContactFX /
+		// Carry_Tick).  These ran cvar() per prop PER TICK — at a few hundred props that
+		// is thousands of string-hash lookups a second for values that change ~never.
+		pp_cached_impact_min_speed  = cvar("sv_physprop_impact_min_speed");
+		pp_cached_impact_hard_speed = cvar("sv_physprop_impact_hard_speed");
+		pp_cached_impact_cooldown   = cvar("sv_physprop_impact_cooldown");
+		pp_cached_slide_min_speed   = cvar("sv_physprop_slide_min_speed");
+		pp_cached_slide_interval    = cvar("sv_physprop_slide_interval");
+		pp_cached_scrape_track      = cvar("sv_physprop_scrape_track");
+		pp_cached_stream_hz         = cvar("sv_physprop_stream_hz");
+		pp_cached_sleep_enable      = cvar("sv_physprop_sleep");
+		pp_cached_sleep_hz          = cvar("sv_physprop_sleep_hz");
+		if (pp_cached_sleep_hz <= 0) pp_cached_sleep_hz = 8;
+		pp_cached_debug             = cvar("sv_debug_physprops");
+
+		// Car tick constants — the reads a PARKED car still makes every tick.
+		car_cached_mintic       = cvar("sv_mintic");
+		car_cached_wheel_sink   = cvar("sv_car_wheel_sink");
+		car_cached_box_yaw      = cvar("sv_car_box_yaw");
+		car_cached_sleep_enable = cvar("sv_car_sleep");
 	}
 
 	gamemode = cvar("sv_gamemode");
@@ -1136,6 +1168,8 @@ void() StartFrame =
 	// then run the bot fill + per-bot AI (sv_bots.qc).
 	Nav_Tick();
 	Bot_RunFrame();
+	CarDbg_Tick();		// prop_car physics debug overlay: per-client proxies when sv_debug_car 1
+	PhysFlood_Tick();	// drain the spawnflood queue a few props/frame (no mass-spawn hitch)
 
 	// Admin trigger: `sv_roundrestart 1` (or alias command
 	// `restartround`) queues a round restart after
@@ -1463,6 +1497,7 @@ void() worldspawn =
 	Camera_ResetState();
 	Nav_Reset();		// nettest bots: clear the nav graph before this map's info_node entities spawn
 	Surf_LoadMaterials();	// scripts/surfaceprops.txt -> texture material table (sh_surfaceprops.qc)
+	PropMat_LoadMaterials();	// scripts/propmaterials.txt -> prop material+weight table (sh_propmaterials.qc)
 
 	// Backdrop latch — the menu backdrop launchers (m_main / m_menu) set
 	// sv_backdrop_pending 1 immediately before `map <menumap>`. Consume it
@@ -1531,6 +1566,11 @@ void() worldspawn =
 	{
 		localcmd("plug_close ode\n");
 		localcmd("plug_load box3d\n");
+		// Box3D is "the multicore backend" but ships single-threaded (physics_box3d_threads
+		// default 1).  Fork/join the contact solver across cores so a dense settling pile
+		// (e.g. spawnflood) doesn't grind one core into a 1-FPS plateau.  Live-tunable:
+		// drop to 1 if any instability, raise toward core count for more.  (substeps stays 4.)
+		localcmd("physics_box3d_threads 8\n");
 	}
 	localcmd("alias roundrestart \"sv_roundrestart 1\"\n");
 	localcmd("alias roundreset \"sv_roundrestart 1\"\n");

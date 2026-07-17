@@ -11,6 +11,10 @@
 // files compiled before this one (sh_weapons.qc) can reference them.
 // attack_finished moved to shared/sh_weapons.qc
 
+// nettest death ragdoll: the corpse proxy predraw (cl_player.qc) spawns the ragdoll, but the
+// implementation lives in cl_ragdoll.qc which compiles AFTER cl_player.qc — forward-declare it here.
+entity(entity corpse, vector shotdir) CSQC_SpawnCorpseRagdoll;
+
 vector cursor_pos; /* Current mouse cursor position, updated in csqc_inputevent */
 float g_width, g_height; /* Globals for screen width and height */
 
@@ -129,6 +133,12 @@ float clframetime;
 // actual use site is CSQC_PlayerVisual_Update; see cl_player.qc for the
 // full set of vis_* fields.
 .float vis_owner_entnum;
+// Player body paint (client/cl_paint.qc, compiled AFTER cl_player.qc):
+// returns the 'replace "surf" "shader"' lines for a proxy's setcustomskin
+// call — cl_player.qc's PlayerVis_ApplySkin appends them to its geomset
+// lines.  Prototypes here so earlier files can call the later one.
+string(entity proxy) Paint_SkinLines;
+void() Paint_RendererRestarted;   // re-upload paint textures after vid_restart (cl_infodecal.qc hook)
 // Networked aim yaw + pitch (never modified by the predraw — unlike .angles_y, which
 // the predraw rotates by leg_twist).  Declared early so the remote-tracer event parse
 // (cl_bulletimpact.qc, compiled before cl_player.qc) can read them for the per-weapon

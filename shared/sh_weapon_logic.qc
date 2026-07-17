@@ -8,6 +8,25 @@
 
 // --- Shared utilities ---
 
+// Backend-aware force scale for one-shot physics_addforce impulses (props, gravity gun).
+// ODE consumes a queued force in only the FIRST of physics_ode_iterationsperframe substeps
+// (delivered impulse = F*frametime/N), so xN keeps that impulse constant across the cvar.
+// Box3D applies the force over the WHOLE frame (one b3World_Step; its substeps are internal,
+// controlled by physics_box3d_substeps), so there is nothing to cancel -> scale is 1.
+// Multiplying by the ODE cvar on Box3D (the default backend) was a phantom multiplier that
+// made props + the gravgun push far too hard.  Mirrors Car_Iter (sh_vehicle_phys.qc), which
+// learned the same lesson on vehicles.
+float() Phys_ForceIter =
+{
+    if (cvar_string("sv_physics_engine") == "ode")   // ODE: force applies for 1 of N substeps -> xN
+    {
+        float it = cvar("physics_ode_iterationsperframe");
+        if (it < 1) it = 1;
+        return it;
+    }
+    return 1;   // Box3D (default): force applies over the whole frame -> no scaling
+};
+
 // W_PlayersExpandHitboxes / W_PlayersRestoreHitboxes bodies live
 // outside this file:
 //   • SSQC — server/sv_weapons.qc walks the live player chain.
@@ -318,6 +337,8 @@ float() Weapon_IsADSActive =
         return 0;
     if (self.pm_carrying)
         return 0;
+    if (self.pm_incar)      // driving a prop_car — gun lowered, fire blocked
+        return 0;
     if (PM_ReadMovevar("sv_codladders", 0)
         && self.pm_on_ladder_cached)
         return 0;
@@ -404,7 +425,7 @@ void() SH_WeaponEnterIdle =
 #ifdef CSQC
 void() CSQC_MuzzleFlash;
 void(vector pos, vector eye_pos, vector colour, float damage, float hitgroup) CSQC_AddDebugImpact;
-void(vector pos, vector normal, float damage) CSQC_BulletImpact;
+void(vector pos, vector normal, float damage, float is_exit) CSQC_BulletImpact;
 void() HUD_TriggerHitmarker;
 void(vector pos, vector normal) CSQC_BulletImpactSilent;
 void(vector pos, vector normal) Impact_SpawnSmokeOnly;
@@ -1197,7 +1218,7 @@ void(float spread_base, float spread_move, float spread_fullspeed,
         }
         else
         {
-            CSQC_BulletImpact(trace_endpos, trace_plane_normal, damage);
+            CSQC_BulletImpact(trace_endpos, trace_plane_normal, damage, 0);
         }
         if (cvar("cl_debug_impacts"))
         {
@@ -1390,7 +1411,7 @@ void(float spread_base, float spread_move, float spread_fullspeed,
         }
         else
         {
-            CSQC_BulletImpact(trace_endpos, trace_plane_normal, damage);
+            CSQC_BulletImpact(trace_endpos, trace_plane_normal, damage, 0);
             // Skip the green-dot debug marker when the trace stopped on a
             // dropped weapon's AABB.  The bullet didn't really hit the
             // mesh; flagging it visually would just add noise around
@@ -1425,7 +1446,7 @@ void(float spread_base, float spread_move, float spread_fullspeed,
         if (close_dmg < 1) break;
 
         if (!entry_was_physprop)
-            CSQC_BulletImpact(exit_pos, exit_normal, close_dmg);
+            CSQC_BulletImpact(exit_pos, exit_normal, close_dmg, 1);   // is_exit=1 -> exit dust smoke
         if (cvar("cl_debug_impacts")
             && !(trace_ent && trace_ent.classname == "csqc_dropped_weapon"))
             CSQC_AddDebugImpact(exit_pos, src, '0 1 0', 0, 0);
@@ -1545,7 +1566,7 @@ void(float pellets, float spread_val,
             }
             else
             {
-                CSQC_BulletImpact(trace_endpos, trace_plane_normal, damage);
+                CSQC_BulletImpact(trace_endpos, trace_plane_normal, damage, 0);
             }
             if (cvar("cl_debug_impacts")
                 && !(trace_ent && trace_ent.classname == "csqc_dropped_weapon"))

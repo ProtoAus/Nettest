@@ -965,6 +965,9 @@ void() func_door_rotating =
     self.door_state  = DOOR_STATE_BOTTOM;
     self.mover_state = MOVER_STATE_BOTTOM;
 
-    if (!self.targetname && !(self.spawnflags & DOORROT_PASSABLE))
+    // Proximity trigger OFF by default (sv_door_proximity 0) — rotating doors open only on +use /
+    // target-chain / damage, never on walk-near.  Mirrors the func_door gate in sv_doors.qc.
+    if (cvar("sv_door_proximity")
+        && !self.targetname && !(self.spawnflags & DOORROT_PASSABLE))
         rotdoor_spawn_trigger();
 };

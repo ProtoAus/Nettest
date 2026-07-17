@@ -420,7 +420,7 @@ void() CSQC_PredictCrossbowCommand =
                         vector hit_pos = trace_endpos;
                         vector hit_normal = trace_plane_normal;
 
-                        CSQC_BulletImpact(hit_pos, hit_normal, XBOW_SCOPED_DAMAGE);
+                        CSQC_BulletImpact(hit_pos, hit_normal, XBOW_SCOPED_DAMAGE, 0);
                         if (cvar("cl_debug_impacts"))
                             CSQC_AddDebugImpact(hit_pos, fire_org, '0 1 0', 0, 0);
                         if (random() < 0.5)

@@ -14,6 +14,28 @@ string sv_worldspawn_snow;
 .string rain;
 .string snow;
 
+// Car fields declared HERE (not sh_vehicle_phys.qc, which compiles AFTER sv_physprop.qc) so that
+// phys_files_Send can read them to network the visual wheels.  Used by the car code later.
+.float car_steer;         // current front-wheel steer angle (deg), eased toward the input target
+.float model_yaw;         // per-car yaw offset (deg) aligning the model nose with physics forward
+.float car_wheel_mdlidx;  // wheel model's network index (0 = none); set at car spawn from the wheelmodel key
+.float res_base;          // resolved wheelbase (fwd spacing) the physics uses — networked so visual wheels match
+.float res_track;         // resolved track (L-R spacing)
+.float res_drop;          // resolved wheel drop below the box bottom
+.float res_fwd;           // resolved fore/aft wheel-set offset (wheel_fwd key + sv_car_wheel_fwd)
+
+// Per-car driver-seat offsets (FGD keys, auto-parsed by name).  Declared here so phys_files_Send can
+// read them to network the seated driver's seat position.  0 = fall back to sv_car_seat_* cvar (Car_Cvar).
+.float seat_up;           // seat height above the car origin (u; +up)
+.float seat_fwd;          // seat fore/aft offset (u; +forward)
+.float seat_side;         // seat left/right offset (u; +right)
+
+// Per-car suspension overrides (FGD keys, auto-parsed).  Declared here (not sh_vehicle_phys.qc, which
+// compiles AFTER sv_physprop.qc) so phys_files_Send can network the resolved rest/travel → the CLIENT visual
+// wheels cap their droop to the SAME value the physics uses (else they stretch on a per-car tune).
+.float ride_height;        // spring free length / ride height (u); 0 = sv_car_ride_height
+.float compression_travel; // extra compression on top of the resting sag (u); 0 = sv_car_compression_travel
+
 const float FL_JUMPRELEASED = 4096;
 
 // EF_NODRAW — hides an entity's model from the renderer while keeping
@@ -68,11 +90,23 @@ void(entity player) W_GrappleRelease;
 // viewmodel lowers like a ladder while carrying.
 .entity carried_prop;        // on player: prop being carried (world = none)
 .entity carried_by;          // on prop:   carrier (world = free); two-grabber guard
+// nettest server ragdoll gravity-gun carry (parallel to carried_prop; a corpse_ragdoll is a multi-body
+// doll, not a single MOVETYPE_PHYSICS prop, so it can't use Carry_).  Sets pm_carrying so the CLIENT
+// viewmodel/throw prediction reuses the existing gravgun flow with no new networking.
+.entity carried_ragdoll;     // on player: corpse_ragdoll being carried (world = none)
+.entity rag_carrier;         // on corpse_ragdoll: the holder (world = free); cleared on retire/drop
+.float  rag_pelvis_tag;      // on corpse_ragdoll: cached "Bip01 Pelvis" tag index (the doll centroid)
 .float  pm_carry_fire_last;  // +attack rising-edge latch (throw, not refire)
 .float  carry_stuck_since;   // on prop: time the prop went over drop_dist (0 = not stuck)
 .float  carry_resolidify_until; // on prop: timeout for the post-drop re-solidify watchdog
 .float  pp_was_streaming;     // on prop: 1 if the last think dirtied the CSQC snapshot — drives the
                              //   moving→rest edge that sends one final velocity=0 snapshot
+.float  pp_stream_next;      // on prop: earliest time the MOVING CSQC stream may re-flag SendFlags
+                             //   (throttles free-prop streaming to sv_physprop_stream_hz)
+.float  pp_rest_since;       // on prop: time this prop first went still (0 = moving/awake).  Once it has
+                             //   held still for PHYSPROP_SLEEP_DELAY, PhysObj_Think drops from 64 Hz to
+                             //   sv_physprop_sleep_hz — a settled map of props then costs ~1/8th.  Cleared
+                             //   by PhysProp_Wake (every interaction path) and by any tick that sees motion.
 .float  carry_grab_time;     // on prop: time the grab started (drives the pull-in lerp window)
 .vector carry_grab_origin;   // on prop: prop.origin at grab time (lerp start position)
 .vector carry_grab_angles;   // on prop: prop.angles at grab time (lerp start orientation)
@@ -86,6 +120,7 @@ void(entity player) W_GrappleRelease;
 .float  pp_was_touching;     // on prop (carried): 1 if the clip-slide hit a surface last Carry_Tick — distinguishes a fresh BANG from a sustained DRAG
 .float  pp_scrape_vol;       // on prop: current scrape loop volume (speed-scaled)
 .float  pp_scrape_revol_next; // on prop: next time the scrape volume may be re-issued (throttle)
+.vector car_scrape_normal;   // on car: latched wall normal while grinding along BSP (0 0 0 = not grinding)
 
 // Unified phys-object config (po_*) — set per object BEFORE PhysObj_Setup so the
 // shared ODE core + the shared think branch to the right per-object behavior.
@@ -93,10 +128,12 @@ void(entity player) W_GrappleRelease;
 .float  po_is_phys;        // 1 on any unified phys object (helper / wake gate)
 .float  po_fx_enabled;     // run contact-FX detection (impact/slide/scrape/smoke/spark)
 .float  po_fx_soundset;    // FX sound set id (0 = metal_box_*)
+.float  po_material;       // resolved prop-material index (PropMat_For, sh_propmaterials.qc); -1 = none (cvar fallback)
 .float  po_carry_enabled;  // cabinet only: +use carriable
 .float  po_sleep_enabled;  // free props (barrel/can/weapons): QC sleep/wake at rest
 .float  po_stuck_grace;    // seconds embedded in BSP before despawn (5 props / 2 drops)
 .float  po_is_weapon_drop; // weapon drop: keep weapon_touch + dropped-weapon net path
+.float  collision_shape;   // prop_physics FGD: 0=Auto(mesh/by-name) 1=Box 2=Cylinder 3=Sphere → .geomtype (cheap primitive sim)
 
 // Gravity gun widens Carry_IsCarriable to ANY ODE body for the duration of one
 // grab (the +use cabinet path leaves this 0).  See sh_wpn_gravitygun.qc.
@@ -111,6 +148,16 @@ void(entity player)               Carry_Tick;
 // sv_weapons.qc, so forward-declare here for the weapon-drop callers.
 void(entity b, float obj_mass, float obj_friction) PhysObj_Setup;
 void(float lin)                            PhysObj_DetectContactFX;  // weapon drops share the FX
+void(entity e)                             PhysProp_Wake;        // resume the 64 Hz think on a slept prop
+void(entity e)                             PhysProp_KickStream;  // Wake + un-throttle ONE mirror snapshot
+
+// Debug-proxy existence latches.  CarDbg_Tick / NavDbg_Tick run EVERY frame (StartFrame /
+// Bot_RunFrame) and, with their debug cvar off, used to walk the whole edict table via
+// find() just to tear down proxies that had never been created.  These are set where a
+// proxy is actually spawned (*Dbg_EnsureProxy) and cleared after teardown, so the common
+// debug-off case costs one float test instead of an O(num_edicts) scan per frame.
+float cardbg_proxies_exist;
+float navdbg_proxies_exist;
 
 // BSP entity-lump fields that map compilers (e.g. light, worldspawn) stamp
 // onto entities but we don't consume. Declared as no-op stubs so the engine
@@ -150,6 +197,31 @@ float sv_use_is_player_direct;  // TRUE only during SV_PlayerTryUse
 .float max_angular;
 .float dimension_solid;
 .float dimension_hit;
+
+// Server-side death ragdolls (sv_ragdoll.qc) — forward-declared here so PlayerKilled
+// (sv_weapons.qc, compiled earlier than sv_ragdoll.qc) can call them.
+void(entity p) Ragdoll_CaptureAlivePose;
+void(entity attacker, entity victim) Ragdoll_SpawnFromDeath;
+void(entity rd) Ragdoll_Free;
+.entity sv_ragdoll_ent;     // corpse proxy -> its authoritative server ragdoll (world until spawned)
+// gravity-gun carry (sv_ragdoll.qc, compiled late; called from sh_wpn_gravitygun.qc + sv_player.qc earlier)
+float(entity player, entity rd) Ragdoll_TryGrab;
+void(entity player) Ragdoll_CarryTick;
+void(entity player) Ragdoll_CarryThrow;
+void(entity player) Ragdoll_CarryDrop;
+// black-hole (+attack2) pull/blast of corpse ragdolls — called from sh_wpn_gravitygun.qc (earlier)
+void(vector center, float radius) Ragdoll_PullTick;
+void(vector center, float radius, float speed) Ragdoll_BlastFrom;
+// test spawner + sweep — called from SV_ParseClientCommand (sv_player.qc, earlier)
+void(entity player) Ragdoll_SpawnTest;
+void() Ragdoll_SweepAll;
+
+// Player body paint (server/sv_paint.qc, compiled after sv_weapons/weapon files) —
+// forward decls so the earlier files can call in: paintball player-hit splats
+// (sh_wpn_paintball.qc) and the camo damage wash (sv_weapons.qc damage path).
+void(entity victim, vector col, float seed) SV_Paint_PlayerSplat;
+float() SV_Paint_NextSeed;
+void(entity victim) SV_Paint_OnDamage;
 
 // Map weapon tracking — for round reset
 .float map_weapon;          // TRUE if this weapon was placed in the map (not dropped)

@@ -21,7 +21,7 @@ const float NET_STAT_BIN_DUR = 0.1;  // 100 ms per bin → 1s window
 
 // Byte sizes per section (updated if wire layout changes)
 const float NET_SZ_PROXY_HEADER = 2;  // version byte + changedflags byte
-const float NET_SZ_PROXY_MOVE   = 84; // 9 coords + 15 floats
+const float NET_SZ_PROXY_MOVE   = 130; // movement section (grew: ~9 coords + many floats/bytes + optional +24 in-car block)
 const float NET_SZ_PROXY_WEAP   = 17; // 8 bytes + 2 floats + zoomstage
 const float NET_SZ_PROXY_AMMO   = 45; // 45 mag/ammo/silencer bytes
 const float NET_SZ_PLAYER_VIS   = 53;
@@ -29,6 +29,7 @@ const float NET_SZ_PUSH_TRIG    = 57;
 const float NET_SZ_TELE_TRIG    = 69;
 const float NET_SZ_LADDER_TRIG  = 49;
 const float NET_SZ_SOLID_BRUSH  = 80;  // avg (static 74, door ~104)
+const float NET_SZ_PHYS_PROP    = 94;  // phys_files_Send: 21 WriteCoord×4 (sv_bigcoords) + colormod/istrimesh/phase/carrier/is_car bytes + modelindex short
 
 float net_stat_bin_idx;
 float net_stat_bin_time;
@@ -42,6 +43,7 @@ float net_stat_visual[NET_STAT_BINS];
 float net_stat_triggers[NET_STAT_BINS];
 float net_stat_brushes[NET_STAT_BINS];
 float net_stat_events[NET_STAT_BINS];
+float net_stat_props[NET_STAT_BINS];   // phys-prop CSQC mirrors (barrels/cans/cabinet) — the flood category
 
 // Section-hit counts (how many ticks received SF_*)
 float net_hit_move[NET_STAT_BINS];
@@ -51,6 +53,7 @@ float net_hit_visual_self[NET_STAT_BINS];    // own player_visual_proxy
 float net_hit_visual_remote[NET_STAT_BINS];  // other players' visuals
 float net_hit_events[NET_STAT_BINS];
 float net_hit_proxy_hdr[NET_STAT_BINS];       // raw snapshot cadence (1 per proxy packet)
+float net_hit_props[NET_STAT_BINS];           // phys-prop updates received (updates/s — reveals server round-robin throttling)
 
 void() CSQC_NetStat_Advance =
 {
@@ -70,6 +73,8 @@ void() CSQC_NetStat_Advance =
         net_stat_triggers[i] = 0;
         net_stat_brushes[i] = 0;
         net_stat_events[i] = 0;
+        net_stat_props[i] = 0;
+        net_hit_props[i] = 0;
         net_hit_move[i] = 0;
         net_hit_weap[i] = 0;
         net_hit_ammo[i] = 0;
@@ -144,6 +149,17 @@ void(float bytes) CSQC_NetStat_RecordEvent =
     net_stat_events[net_stat_bin_idx] += bytes;
     net_stat_total[net_stat_bin_idx] += bytes;
     net_hit_events[net_stat_bin_idx] += 1;
+};
+
+// Phys-prop CSQC mirror update (barrel/can/cabinet) — one 93-byte snapshot per receive.
+// Counts REAL received updates, so a spawnflood's Props row shows the true on-wire cost AND the
+// updates/s (bytes÷93), which drops far below spawned×tickrate when the server throttles/round-robins.
+void() CSQC_NetStat_RecordProp =
+{
+    CSQC_NetStat_Advance();
+    net_stat_props[net_stat_bin_idx] += NET_SZ_PHYS_PROP;
+    net_stat_total[net_stat_bin_idx] += NET_SZ_PHYS_PROP;
+    net_hit_props[net_stat_bin_idx]  += 1;
 };
 
 const float DEBUG_MAX_IMPACTS = 64;
@@ -1737,6 +1753,8 @@ float(float offset_idx) _net_sum_bin =
         else if (offset_idx == 13) s += net_hit_visual_remote[i];
         else if (offset_idx == 14) s += net_hit_events[i];
         else if (offset_idx == 15) s += net_hit_proxy_hdr[i];
+        else if (offset_idx == 16) s += net_stat_props[i];
+        else if (offset_idx == 17) s += net_hit_props[i];
     }
     return s;
 };
@@ -1761,14 +1779,33 @@ float(float x, float y) CSQC_DrawDebugBandwidth =
     float hit_vs_remote = _net_sum_bin(13);
     float hit_ev     = _net_sum_bin(14);
     float hit_snap   = _net_sum_bin(15);
+    float props      = _net_sum_bin(16);
+    float hit_props  = _net_sum_bin(17);
 
     float proxy_total = proxy_hdr + proxy_mv + proxy_wp + proxy_am;
     vector col;
 
     y = dbg_text(x, y, "--- BANDWIDTH IN (1s window) ---", '0.7 0.4 1');
 
+    // The bandwidth "cap" is only real on a ROUTED connection: the server enforces
+    // SV_RateForClient = min(rate, sv_maxrate).  A listen-server LOCAL player is LOOPBACK, which the
+    // engine EXEMPTS from the bandwidth choke (Netchan_CanPacket) — so rate/sv_maxrate are NOT
+    // enforced for you; the real ceiling is the per-packet datagram size (entity round-robin) + CPU.
+    // Detect loopback from the connection address ("...QLoopBack:0").
+    float is_loop = (strstrofs(serverkey("ip"), "QLoopBack", 0) >= 0);
+    float rc = cvar("rate");
+    float mr = cvar("sv_maxrate");   // real on a listen server (same process); 0 on a pure client
+    float eff_cap = rc;
+    if (mr > 0 && (eff_cap <= 0 || mr < eff_cap)) eff_cap = mr;
+
     col = (total_bps < 10000) ? DBG_GOOD_COL : (total_bps < 25000) ? DBG_WARN_COL : DBG_BAD_COL;
-    y = dbg_line(x, y, "Total", sprintf("%.2f KB/s", total_bps / 1024), col);
+    if (!is_loop && eff_cap > 0 && total_bps > eff_cap * 0.9) col = DBG_BAD_COL;   // near the enforced cap = saturated
+    // %8.2f = fixed field (up to 5 integer digits) so the live value never shoves the following text.
+    y = dbg_line(x, y, "Total", sprintf("%8.2f KB/s", total_bps / 1024), col);
+    if (is_loop)
+        y = dbg_line(x, y, "BW cap", "loopback: none (MTU+CPU limited)", DBG_LABEL_COL);
+    else
+        y = dbg_line(x, y, "BW cap", sprintf("%8.2f KB/s (min rate,maxrate)", eff_cap / 1024), DBG_VALUE_COL);
 
     // Raw snapshot cadence — how often a proxy packet arrived regardless of dirty bits.
     // This is the server's effective send rate for this client (sv_maxtic capped by cl_netfps/rate).
@@ -1809,6 +1846,12 @@ float(float x, float y) CSQC_DrawDebugBandwidth =
     y = dbg_line(x, y, "Brushes",  sprintf("%.2f KB/s", brushes / 1024), DBG_VALUE_COL);
     y = dbg_line(x, y, "Events",   sprintf("%.2f KB/s  %.0f /s", events / 1024, hit_ev),
         hit_ev > 0 ? DBG_VALUE_COL : DBG_LABEL_COL);
+
+    // Phys-prop mirrors (barrels/cans/cabinet) — the spawnflood category.  The updates/s number is the
+    // key tell: a big flood should stream spawned×tickrate, but the server caps it, so a low updates/s
+    // with a high KB/s = the props are eating the budget and starving other updates.
+    col = (props / 1024 > 8) ? DBG_BAD_COL : (props > 0 ? DBG_WARN_COL : DBG_LABEL_COL);
+    y = dbg_line(x, y, "Props",    sprintf("%8.2f KB/s  %5.0f upd/s", props / 1024, hit_props), col);
 
     return y + 6;
 };
@@ -2014,8 +2057,142 @@ float(float x, float y) CSQC_DrawDebugSurface =
 };
 
 // ============================================================
+//  cl_debug_prop — physics prop under the crosshair (material/mass/physics tuning)
+// ============================================================
+
+// Find the CSQC phys-prop mirror the LOCAL player is carrying (gravgun grab / +use), or world.
+// pp_carrier is the carrier edict, non-zero ONLY while held (GRABBING/STEADY); == our entnum = ours.
+// (No client pointer to the held prop exists - carried_prop is server-only - so scan the mirrors.)
+entity() CSQC_LocalCarriedProp =
+{
+    if (player_localentnum <= 0)
+        return world;
+    entity e = findchain(classname, "phys_files");
+    while (e)
+    {
+        if (e.modelindex && e.pp_carrier == player_localentnum)
+            return e;
+        e = e.chain;
+    }
+    return world;
+};
+
+// Robust "prop under the crosshair" pick.  A plain CSQC traceline only sees the world, brush func_
+// ents, and SOLID prop mirrors (free-settled phys_files + always-solid prop_predicted) - it MISSES a
+// carried/just-thrown prop (SOLID_NOT) and dropped weapons.  So traceline first (for occlusion +
+// solid hits), then oriented-box ray-test the real CSQC prop edicts a traceline can't see, keeping
+// the closest hit that isn't behind whatever the traceline stopped at.  Same idea as the bullet path
+// CSQC_PhysProp_OverrideTrace, but returns the REAL mirror (modelindex/velocity/pp_* fields) not the
+// data-less fake trace-target.  `aim` MUST be a unit vector captured by the caller BEFORE this runs
+// (the per-entity makevectors(e.angles) below clobbers v_forward/right/up).
+entity(vector src, vector aim, float dirlen) Prop_FindForDebug =
+{
+    traceline(src, src + aim * dirlen, MOVE_NOMONSTERS, predicted_player);
+    float  best_t   = (trace_fraction >= 1.0) ? dirlen : (trace_fraction * dirlen);
+    entity best_ent = world;
+    if (trace_ent != world && trace_ent != __NULL__)
+    if (trace_ent.classname == "phys_files" || trace_ent.classname == "prop_predicted")
+        best_ent = trace_ent;   // a solid mirror already under the crosshair
+
+    float pass;
+    for (pass = 0; pass < 3; pass = pass + 1)
+    {
+        string cls;
+        if      (pass == 0) cls = "phys_files";
+        else if (pass == 1) cls = "prop_predicted";
+        else                cls = "csqc_dropped_weapon";
+
+        entity e = findchain(classname, cls);
+        while (e)
+        {
+            // Skip the invisible fake trace-target (pp_fake_files: classname "phys_files", no model
+            // -> modelindex 0).  Real mirrors always setmodelindex, so modelindex 0 == not a prop.
+            if (e.modelindex == 0) { e = e.chain; continue; }
+            makevectors(e.angles);   // raw-angle OBB axes: v_forward, -v_right, v_up (World_OBBTrace basis)
+            float t = CSQC_PhysProp_RayBox(src, aim, dirlen, e.origin,
+                                           v_forward, v_right * -1, v_up, e.mins, e.maxs);
+            if (t >= 0 && t < best_t)   // closer than the traceline stop => not occluded
+            {
+                best_t   = t;
+                best_ent = e;
+            }
+            e = e.chain;
+        }
+    }
+    return best_ent;
+};
+
+float(float x, float y) CSQC_DrawDebugProp =
+{
+    y = dbg_text(x, y, "--- PROP ---", '0.3 1 0.6');
+
+    vector vorg = getproperty(VF_ORIGIN);
+    makevectors(getproperty(VF_CL_VIEWANGLES));
+    vector aim = v_forward;   // capture BEFORE Prop_FindForDebug's per-entity makevectors clobbers it
+
+    // (1) A prop held by the local player is SOLID_NOT in-hand, so the crosshair ray can't hit it.
+    entity held = CSQC_LocalCarriedProp();
+    if (held != world)
+    {
+        string hmn = held.model;
+        if (hmn == "" && held.modelindex) hmn = modelnameforindex(held.modelindex);
+        y = dbg_line(x, y, "Carrying", (hmn == "") ? held.classname : hmn, DBG_GOOD_COL);
+    }
+
+    // (2) Robust pick under the crosshair: traceline (occlusion + solid hits) then OBB-test the
+    //     SOLID_NOT prop mirrors a traceline misses.  Returns the real mirror, or world if none.
+    entity pe = Prop_FindForDebug(vorg, aim, 8192);
+
+    // No prop found (a wall or empty space leaves best_ent = world).
+    if (pe == world || pe == __NULL__)
+    {
+        y = dbg_line(x, y, "Target", "(no prop under crosshair)", DBG_WARN_COL);
+        return y + 6;
+    }
+    string mn = pe.model;
+    if (mn == "" && pe.modelindex)
+        mn = modelnameforindex(pe.modelindex);   // CSQC props use setmodelindex (empty .model)
+    if (mn == "")
+    {
+        y = dbg_line(x, y, "Target", sprintf("%s (no model)", pe.classname), DBG_WARN_COL);
+        return y + 6;
+    }
+
+    // Recompute material + derived weight locally — accurate for every derived-mass prop (the 584
+    // auto-assigned models + barrel/can/cabinet).  A per-map explicit `mass` FGD key is NOT networked,
+    // hence the "mat" tag: this is the material-derived mass, which the server also uses unless overridden.
+    float mi = PropMat_For(mn);
+    y = dbg_line(x, y, "Model",     mn, DBG_VALUE_COL);
+    y = dbg_line(x, y, "Material",  PropMat_Name(mi), DBG_GOOD_COL);
+    y = dbg_line(x, y, "Mass(mat)", sprintf("%.1f", PropMat_Mass(mi, pe)), DBG_VALUE_COL);
+    y = dbg_line(x, y, "Fric/Rest", sprintf("%.2f / %.2f", PropMat_Friction(mi), PropMat_Restit(mi)), DBG_VALUE_COL);
+    y = dbg_line(x, y, "Damp x",    sprintf("%.2f", PropMat_DampMult(mi)), DBG_VALUE_COL);
+
+    // Live state off the CSQC mirror (CSQC_PhysProp_Update).  Statics read 0 / n/a, which is honest.
+    string geom = "n/a";
+    if (pe.solid == SOLID_PHYSICS_TRIMESH)   geom = "trimesh (hull)";
+    else if (pe.solid == SOLID_PHYSICS_BOX)  geom = "box";
+    float live = (pe.classname == "phys_files");
+    y = dbg_line(x, y, "Type",    live ? "phys prop (live)" : pe.classname, live ? DBG_GOOD_COL : DBG_LABEL_COL);
+    y = dbg_line(x, y, "Speed",   sprintf("%.0f  (ang %.0f)", vlen(pe.velocity), vlen(pe.avelocity)), DBG_VALUE_COL);
+    y = dbg_line(x, y, "Geom",    geom, DBG_VALUE_COL);
+    y = dbg_line(x, y, "Scale",   sprintf("%.2f", (pe.scale > 0) ? pe.scale : 1), DBG_VALUE_COL);
+    y = dbg_line(x, y, "Carried", pe.pp_carrier ? "yes" : "no", pe.pp_carrier ? DBG_WARN_COL : DBG_VALUE_COL);
+
+    // Push knobs, so the readout self-documents the "too much push" problem (server cvars).
+    y = dbg_line(x, y, "hit_force",  sprintf("%g", cvar("sv_physprop_hit_force")), DBG_LABEL_COL);
+    y = dbg_line(x, y, "use/expl",   sprintf("%g / %g", cvar("sv_physprop_use_force"), cvar("sv_physprop_explosion_force")), DBG_LABEL_COL);
+    y = dbg_line(x, y, "mass_scale", sprintf("%g", cvar("sv_propmat_mass_scale")), DBG_LABEL_COL);
+    y = dbg_line(x, y, "ode_iters",  sprintf("%g", cvar("physics_ode_iterationsperframe")), DBG_LABEL_COL);
+
+    return y + 6;
+};
+
+// ============================================================
 //  Master debug panel draw — called from CSQC_UpdateView
 // ============================================================
+
+float(float x, float y) Car_DrawForcePanel;   // defined in cl_prop_vehicle.qc (later); self-gates on the car stream
 
 void() CSQC_DrawDebugPanels =
 {
@@ -2041,12 +2218,15 @@ void() CSQC_DrawDebugPanels =
         y = CSQC_DrawDebugGame(x, y);
     if (cvar("cl_debug_surface"))
         y = CSQC_DrawDebugSurface(x, y);
+    if (cvar("cl_debug_prop"))
+        y = CSQC_DrawDebugProp(x, y);
     if (cvar("cl_debug_smoothing"))
         y = CSQC_DrawDebugSmoothing(x, y);
     if (cvar("cl_debug_playermodel"))
         y = CSQC_DrawDebugPlayerModel(x, y);
     if (cvar("cl_debug_drift"))
         y = CSQC_DrawDebugDrift(x, y);
+    y = Car_DrawForcePanel(x, y);   // draws only while a fresh car-debug stream exists (sv_debug_car 1)
 
     drawfont = prev_font;
 };

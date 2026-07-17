@@ -57,7 +57,8 @@ const float GRAVGUN_GRAB_COOLDOWN  = 0.25;   // min time between grab attempts
 
 // Carry helper lives in sv_physprop.qc, which compiles AFTER the weapon files —
 // forward-declare the one the gravity gun drives.  (W_PhysDropWake is already
-// forward-declared in sv_breakable.qc, earlier than here.)
+// forward-declared in sv_breakable.qc, earlier than here.  PhysProp_KickStream /
+// PhysProp_Wake are forward-declared in sv_customdefs.qc, earlier still.)
 float(entity player, entity prop) Carry_TryGrab;
 
 // --- Primary: ranged grab.  The THROW reuses the generic carry path
@@ -66,7 +67,7 @@ float(entity player, entity prop) Carry_TryGrab;
 void() W_GravGunFire =
 {
     if (self.gravgun_spinning)        return;   // not while spinning
-    if (self.carried_prop != world)   return;   // holding -> throw is the throwprop path
+    if (self.carried_prop != world || self.carried_ragdoll != world) return;   // holding -> throw is the throwprop path
     if (Weapon_SprintBlocksFire())    return;
     if (time < self.attack_finished)  return;
 
@@ -84,24 +85,38 @@ void() W_GravGunFire =
     self.dimension_hit = saved_dim;
 
     entity prop = trace_ent;
-    if (prop == world)
-        return;
-    // Wake a sleeping weapon drop FIRST: while asleep it's MOVETYPE_NONE (but
-    // still solid, so the trace hit it), and both the gate below AND
-    // Carry_IsCarriable require MOVETYPE_PHYSICS.  This is exactly why cabinets
-    // (never asleep) grabbed but resting dropped weapons didn't.
-    if (prop.weapon && prop.weapon_physdrop_sleeping)
-        W_PhysDropWake(prop);
-    if (prop.movetype != MOVETYPE_PHYSICS)
-        return;   // nothing grabbable in front — no animation
+    float grabbed = FALSE;
+    if (prop != world)
+    {
+        // Wake a sleeping weapon drop FIRST: while asleep it's MOVETYPE_NONE (but
+        // still solid, so the trace hit it), and both the gate below AND
+        // Carry_IsCarriable require MOVETYPE_PHYSICS.  This is exactly why cabinets
+        // (never asleep) grabbed but resting dropped weapons didn't.
+        if (prop.weapon && prop.weapon_physdrop_sleeping)
+            W_PhysDropWake(prop);
+        if (prop.movetype == MOVETYPE_PHYSICS)
+        {
+            // Widen carry eligibility for this grab only (the +use path stays
+            // cabinet-only): carry_allow_any lets Carry_IsCarriable accept any ODE body.
+            carry_allow_any = TRUE;
+            grabbed = Carry_TryGrab(self, prop);
+            carry_allow_any = FALSE;
+        }
+    }
 
-    // Widen carry eligibility for this grab only (the +use path stays
-    // cabinet-only): carry_allow_any lets Carry_IsCarriable accept any ODE body.
-    carry_allow_any = TRUE;
-    float ok = Carry_TryGrab(self, prop);
-    carry_allow_any = FALSE;
-    if (!ok)
-        return;
+    // nettest: no prop grabbed -> try a corpse RAGDOLL (they live on RAGDOLL_DIM, not the prop dims).
+    if (!grabbed)
+    {
+        saved_dim = self.dimension_hit;
+        self.dimension_hit = self.dimension_hit | RAGDOLL_DIM;
+        traceline(start, end, MOVE_NORMAL, self);
+        self.dimension_hit = saved_dim;
+        if (trace_ent.classname == "corpse_ragdoll" && trace_ent.skeletonindex)
+            grabbed = Ragdoll_TryGrab(self, trace_ent);
+    }
+
+    if (!grabbed)
+        return;   // nothing grabbable in front — no animation
 
     // Grab succeeded -> play "fire".
     self.weaponstate    = WS_FIRE;
@@ -127,6 +142,16 @@ void() W_GravGunFrame =
     }
 };
 
+// Weapon-special (impulse 7): TOGGLE the gravity shift on/off.  Server-authoritative --
+// GravShift_UpdateActivation reads self.gravshift_toggle as the "want shift" state and, on the
+// rising edge, latches the faced direction into the global gravshift_world_dir (broadcast to all
+// clients via the "gravdir" serverinfo key).  Press once = gravity redirects toward where you
+// look; press again = restore.  (Replaces the old +button5 hold trigger.)
+void() W_GravGun_ToggleShift =
+{
+    self.gravshift_toggle = !self.gravshift_toggle;
+};
+
 void() W_GravGunEquip =
 {
     W_StandardEquipSetup(GRAVGUN_VIEWMODEL, GRAVGUN_DISPLAY_NAME, GRAVGUN_SEQ_DRAW,
@@ -134,7 +159,7 @@ void() W_GravGunEquip =
     self.fire     = W_GravGunFire;
     self.reload   = __NULL__;
     self.wepframe = W_GravGunFrame;
-    self.special  = __NULL__;   // +attack2 is the held black-hole (driven from PlayerPreThink)
+    self.special  = W_GravGun_ToggleShift;   // impulse 7 = toggle the gravity shift
     self.shoot    = __NULL__;
     self.gravgun_spinning = 0;
     // No spread — a manipulator, not a firearm.  Last arg TRUE = show crosshair.
@@ -161,7 +186,7 @@ void(vector center, float radius, float accel) GravGun_PullTowards =
 {
     if (radius <= 0 || accel <= 0)
         return;
-    float iter = cvar("physics_ode_iterationsperframe"); if (iter < 1) iter = 1;
+    float iter = Phys_ForceIter();   // backend-aware (xN on ODE, 1 on Box3D — see sh_weapon_logic.qc)
     float rest_r = cvar("sv_gravgun_rest_radius");   // Patch 68 rest deadzone (read once, not per prop)
     float rest_v = cvar("sv_gravgun_rest_speed");
 
@@ -187,6 +212,14 @@ void(vector center, float radius, float accel) GravGun_PullTowards =
                 // F = m·a → uniform acceleration `accel` toward the point.
                 vector f = (to_c / dist) * (accel * m * iter);
                 physics_addforce(e, f, e.origin);
+                // This is a per-frame force with NO PhysProp_KickStream (that only fires on
+                // the release blast), so the pulled prop must be woken here or a settled prop
+                // would keep its slow sleep tick while being dragged through the air — its
+                // mirror would stream at sleep_hz and its landing FX would lag.
+                // INSIDE the force branch on purpose: waking in the `settled` deadzone would
+                // re-enable the body every frame and defeat the Patch 68 rest deadzone this
+                // very block exists to preserve.
+                PhysProp_Wake(e);
             }
         }
         e = e.chain;
@@ -218,6 +251,7 @@ void(vector center, float radius, float blast_speed) GravGun_BlastFrom =
             dir = normalize(dir);
             e.velocity = dir * blast_speed;                // mass-independent
             physics_enable(e, TRUE);
+            PhysProp_KickStream(e);                        // snappy mirror update on the blast
         }
         e = e.chain;
     }
@@ -235,7 +269,7 @@ void() W_GravGun_ShiftPropTick =
     if (self != gravshift_owner || gravshift_world_dir == '0 0 0')   // run ONCE, by the shift owner only
         return;
     float g    = cvar("sv_gravity"); if (g <= 0) g = 800;
-    float iter = cvar("physics_ode_iterationsperframe"); if (iter < 1) iter = 1;
+    float iter = Phys_ForceIter();   // backend-aware (xN on ODE, 1 on Box3D — see sh_weapon_logic.qc)
     vector da  = gravshift_world_dir - '0 0 -1';   // extra accel: redirect -Z -> the global gravity dir
     entity e = findradius('0 0 0', 1000000);    // whole map
     while (e)
@@ -262,8 +296,8 @@ void() W_GravGun_HeldTick =
     }
 
     float held = (input_buttons & 4) ? 1 : 0;   // +attack2 (the ADS bit)
-    // Can't spin while holding a grabbed prop (mutual exclusion with primary).
-    if (self.carried_prop != world)
+    // Can't spin while holding a grabbed prop OR a corpse ragdoll (mutual exclusion with primary).
+    if (self.carried_prop != world || self.carried_ragdoll != world)
         held = 0;
     float was_held = self.pm_gravgun_held_last;
 
@@ -283,6 +317,7 @@ void() W_GravGun_HeldTick =
         // Falling edge -> blast everything outward + play "fire2".
         vector gp = GravGun_GatherPoint();
         GravGun_BlastFrom(gp, cvar("sv_gravgun_radius"), cvar("sv_gravgun_blast_speed"));
+        Ragdoll_BlastFrom(gp, cvar("sv_gravgun_radius"), cvar("sv_gravgun_blast_speed"));   // nettest: fling corpse ragdolls too
         self.gravgun_spinning = 0;
         self.weaponstate      = WS_FIRE;
         self.weaponframe      = GRAVGUN_SEQ_FIRE2;
@@ -298,7 +333,9 @@ void() W_GravGun_PullTick =
 {
     if (!self.gravgun_spinning)
         return;
-    GravGun_PullTowards(GravGun_GatherPoint(), cvar("sv_gravgun_radius"), cvar("sv_gravgun_pull_accel"));
+    vector gp = GravGun_GatherPoint();
+    GravGun_PullTowards(gp, cvar("sv_gravgun_radius"), cvar("sv_gravgun_pull_accel"));
+    Ragdoll_PullTick(gp, cvar("sv_gravgun_radius"));   // nettest: the black hole also sucks in corpse ragdolls
 };
 
 void(entity player) W_GravGunPickupCopy =

@@ -776,6 +776,12 @@ void() CheckImpulses =
 	case 19:   // spray decal — routes to the spray placer (server/sv_spray.qc)
 		SV_PlayerSpray();
 		break;
+	case 21:   // +camo pressed — camo paint accumulates in SV_Paint_CamoThink (sv_paint.qc)
+		self.camo_hold = 1;
+		break;
+	case 22:   // -camo released
+		self.camo_hold = 0;
+		break;
 	default: break;
 	}
 	self.impulse = 0;
@@ -957,6 +963,9 @@ void() PlayerPreThink =
 	// rope is attached; gravity still applies through MOVETYPE_WALK so the
 	// player swings under it.  No-op when no hook is out.
 	W_GrapplePullTick();
+	// Camo body paint — while +camo is latched (impulse 21/22) and a wall is
+	// in reach, coverage accumulates + streams to clients.  No-op otherwise.
+	SV_Paint_CamoThink();
 	// HL2 prop carry — velocity-servo the held cabinet toward the hold point
 	// (slides on walls, auto-drops when jammed; +attack throws). No-op when
 	// carried_prop is world.
@@ -2886,6 +2895,8 @@ void() PutClientInServer =
 	player_chain_add(self);
 	Prog_Load(self);	// nettest progression: load persistent XP/level (async, GUID-keyed)
 	EnvSun_StuffPlayer(self);	// sun-direction cvars for r_shadows 2 (also keeps r_sun_colour blanked; god rays removed)
+	SV_Paint_ClearPlayer(self);	// body paint: respawn wash (broadcasts the clear; corpse kept its paint until now)
+	SV_Paint_SyncTo(self);		// body paint: late-join resync of every painted player's camo
 	PlayerBeginTeamSelection();
 };
 
@@ -3452,6 +3463,14 @@ float() SV_ClaimFloodOK =
 .vector spec_view_org;
 .float  spec_view_time;
 
+// One " <cvar> <value>" pair for the carget reply — the car's per-car override if set, else the cvar value
+// (matches the physics Car_Cvar fallback; the hard default is irrelevant since the cvars are all registered).
+string(float fieldval, string cvarnm) CarGet_Pair =
+{
+	float v = (fieldval != 0) ? fieldval : cvar(cvarnm);
+	return strcat(" ", cvarnm, " ", ftos(v));
+};
+
 void(string command_string) SV_ParseClientCommand =
 {
 	tokenize(command_string);
@@ -3472,6 +3491,88 @@ void(string command_string) SV_ParseClientCommand =
 		self.spec_view_org_y = bound(-65536, stof(argv(2)), 65536);
 		self.spec_view_org_z = bound(-65536, stof(argv(3)), 65536);
 		self.spec_view_time  = time;
+		return;
+	}
+
+	// Live livery swap for the car you're driving: `cmd carskin <N>` sets skin N; `cmd carskin` with no arg
+	// cycles to the next one (0=clean 1=dirty 2=blue 3=green 4=pink 5=red 6=white 7=quake, wraps).  The new
+	// .skin is networked by phys_files_Send → the CSQC mirror re-binds the livery; SendFlags forces one resend.
+	if (cmd == "carskin")
+	{
+		entity car = self.car_driving;
+		if (car != world)
+		{
+			float sk;
+			if (argv(1) == "")  sk = car.skin + 1;     // no arg → next livery
+			else                sk = stof(argv(1));
+			if (sk < 0 || sk > 7) sk = 0;              // wrap/clamp to the 8 defined liveries
+			car.skin = sk;
+			car.SendFlags = 0xffffff;                  // dirty every section so the mirror resends the skin now
+			sprint(self, PRINT_HIGH, strcat("car livery ", ftos(sk), "\n"));
+		}
+		return;
+	}
+
+	// F3 dev-panel live tuning: `cmd carset <field> <value>` writes a PER-CAR override on the car you're
+	// driving (leaves the sv_car_* default + other cars untouched).  Physics fields are read live in
+	// Car_PhysStep every tick → instant; visual fields also dirty SendFlags so the CSQC mirror + box/seat
+	// re-resolve.  QC has no reflection, so this is a name→field if-chain over the per-car override fields.
+	if (cmd == "carset")
+	{
+		car = self.car_driving;   // `car` local declared in the carskin handler above (QC hoists to fn scope)
+		if (car != world)
+		{
+			string f = argv(1);
+			float  x = stof(argv(2));
+			float vis = 0;   // 1 = a networked/visual field → force a mirror resend
+			if      (f == "caraccel")       car.caraccel      = x;
+			else if (f == "car_brakedecel") car.car_brakedecel= x;
+			else if (f == "suspension_softness") car.suspension_softness = x;
+			else if (f == "car_damping")    car.car_damping   = x;
+			else if (f == "ride_height")        { car.ride_height        = x; vis = 1; }   // networked → cap the visual droop live
+			else if (f == "compression_travel") { car.compression_travel = x; vis = 1; }
+			else if (f == "steer_max")      car.steer_max     = x;
+			else if (f == "steer_rate")     car.steer_rate    = x;
+			else if (f == "yaw_assist")     car.yaw_assist    = x;
+			else if (f == "grip")           car.grip          = x;
+			else if (f == "mass")           car.mass          = x;
+			else if (f == "seat_up")      { car.seat_up   = x; vis = 1; }
+			else if (f == "seat_fwd")     { car.seat_fwd  = x; vis = 1; }
+			else if (f == "seat_side")    { car.seat_side = x; vis = 1; }
+			else if (f == "wheel_sink")   { car.wheel_sink= x; vis = 1; }   // Car_Think re-applies the box on change
+			else if (f == "wheel_fwd")    { car.wheel_fwd = x; vis = 1; }
+			if (vis) car.SendFlags = 0xffffff;
+		}
+		return;
+	}
+
+	// F3 panel asks for the driven car's REAL current values (per-car override if set, else the cvar), so the
+	// panel seeds each row accurately instead of guessing from cvars.  Reply is one `carvals name val …` line
+	// built by strcat in a loop (avoids the FTEQCC >8-varargs drop) and stuffed back to this client's CSQC.
+	if (cmd == "carget")
+	{
+		car = self.car_driving;
+		if (car != world)
+		{
+			string s = "carvals";
+			s = strcat(s, CarGet_Pair(car.caraccel,       "sv_car_accel"));
+			s = strcat(s, CarGet_Pair(car.car_brakedecel, "sv_car_brake_decel"));
+			s = strcat(s, CarGet_Pair(car.suspension_softness, "sv_car_suspension_softness"));
+			s = strcat(s, CarGet_Pair(car.car_damping,    "sv_car_damping"));
+			s = strcat(s, CarGet_Pair(car.ride_height,        "sv_car_ride_height"));
+			s = strcat(s, CarGet_Pair(car.compression_travel, "sv_car_compression_travel"));
+			s = strcat(s, CarGet_Pair(car.steer_max,      "sv_car_steer_max"));
+			s = strcat(s, CarGet_Pair(car.steer_rate,     "sv_car_steer_rate"));
+			s = strcat(s, CarGet_Pair(car.yaw_assist,     "sv_car_yaw_assist"));
+			s = strcat(s, CarGet_Pair(car.grip,           "sv_car_grip"));
+			s = strcat(s, CarGet_Pair(car.mass,           "sv_car_mass"));
+			s = strcat(s, CarGet_Pair(car.seat_up,        "sv_car_seat_up"));
+			s = strcat(s, CarGet_Pair(car.seat_fwd,       "sv_car_seat_fwd"));
+			s = strcat(s, CarGet_Pair(car.seat_side,      "sv_car_seat_side"));
+			s = strcat(s, CarGet_Pair(car.wheel_sink,     "sv_car_wheel_sink"));
+			s = strcat(s, CarGet_Pair(car.wheel_fwd,      "sv_car_wheel_fwd"));
+			stuffcmd(self, strcat(s, "\n"));
+		}
 		return;
 	}
 

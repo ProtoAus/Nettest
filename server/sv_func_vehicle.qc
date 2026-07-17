@@ -553,6 +553,9 @@ void() Vehicle_ShoveProps =
             {
                 physics_enable(p, TRUE);
                 p.velocity = p.velocity + fdir * (spd * 0.8) + '0 0 40';
+                // Resume the prop's full-rate think + snap its mirror out: a settled prop is on
+                // the slow sleep tick, and this shove is invisible to it until that tick fires.
+                PhysProp_KickStream(p);
             }
         }
         p = p.chain;

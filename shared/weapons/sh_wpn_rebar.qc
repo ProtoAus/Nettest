@@ -228,7 +228,7 @@ void() CSQC_PredictRebarCommand =
                             vlen(hit_pos - fire_org),
                             REBAR_CLOSE_DAMAGE, REBAR_MIN_DAMAGE, REBAR_DAMAGE_FALLOFF_RANGE);
 
-                        CSQC_BulletImpact(hit_pos, hit_normal, hit_damage);
+                        CSQC_BulletImpact(hit_pos, hit_normal, hit_damage, 0);
                         if (cvar("cl_debug_impacts"))
                             CSQC_AddDebugImpact(hit_pos, fire_org, '0 1 0', 0, 0);
                         localsound("sounds/weapons/wpn_rebar/stick.wav");

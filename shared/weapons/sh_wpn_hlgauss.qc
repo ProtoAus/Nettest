@@ -420,7 +420,7 @@ void() CSQC_PredictGaussCommand =
                                 (trace_fraction < 1.0) ? trace_endpos : gend);
                     if (trace_fraction < 1.0)
                     {
-                        CSQC_BulletImpact(trace_endpos, trace_plane_normal, GAUSS_PRIMARY_DAMAGE);
+                        CSQC_BulletImpact(trace_endpos, trace_plane_normal, GAUSS_PRIMARY_DAMAGE, 0);
                         if (cvar("cl_debug_impacts"))
                             CSQC_AddDebugImpact(trace_endpos, gsrc, '0 1 0', 0, 0);
                     }
@@ -488,7 +488,7 @@ void() CSQC_PredictGaussCommand =
                                 (trace_fraction < 1.0) ? trace_endpos : alt_gend);
                     if (trace_fraction < 1.0)
                     {
-                        CSQC_BulletImpact(trace_endpos, trace_plane_normal, damage);
+                        CSQC_BulletImpact(trace_endpos, trace_plane_normal, damage, 0);
                         if (cvar("cl_debug_impacts"))
                             CSQC_AddDebugImpact(trace_endpos, alt_gsrc, '0 1 0', 0, 0);
                     }

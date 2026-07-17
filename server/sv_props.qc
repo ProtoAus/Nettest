@@ -136,6 +136,8 @@ const float PROP_NOTSOLID   = 1;   // force no collision (overrides the per-clas
 const float PROP_FORCESOLID = 2;   // force collision ON (overrides a non-solid class default)
 const float PROP_FORCEBOX   = 4;   // force the cheap oriented box even for an IQM/MD3 model
 const float PROP_PREDICTED  = 8;   // CSQC-mirror so the LOCAL pmove collides (rock-solid; hero props only)
+const float PROP_NOSHADOW    = 16; // never cast into the r_shadows-2 sun map (overrides the per-class default)
+const float PROP_FORCESHADOW = 32; // always cast, even when the class default would skip (hero foliage)
 
 // Mesh formats that expose the engine's NativeTrace (mod_alias) can collide as their
 // actual TRIANGLE MESH (SOLID_PHYSICS_TRIMESH, world.c:1073) instead of a box.
@@ -205,6 +207,26 @@ void(float nonsolid_default) Props_SpawnStatic =
 		self.solid = SOLID_PHYSICS_TRIMESH;   // IQM/MD3 → per-triangle collision (engine NativeTrace; server-only, like the box)
 	else
 		self.solid = SOLID_PHYSICS_BOX;       // GoldSrc/Source .mdl (or Force Box) → oriented box via World_OBBTrace
+
+	// Sun-shadow casting (r_shadows 2).  EVERY prop is a caster by default, and the
+	// fake-sun depth pass re-renders every caster in the ortho box EVERY frame with no
+	// PVS at all (gl_shadow.c Sh_GenerateFakeShadows -> Sh_GenShadowFace ->
+	// BE_SelectMode(BEM_DEPTHONLY) -> GLBE_BaseEntTextures(NULL pvs)).  Decorative
+	// NON-SOLID clutter (prop_detail: bushes, grass, small scatter) is exactly the class
+	// where a thrown shadow is least missed and the caster count is highest, so skip it:
+	// EF_NOSHADOW (4096 == engine EF_NOSHADOW 1<<12, gl_model.h) -> RF_NOSHADOW
+	// (cl_ents.c) -> the caster walk drops the ent BEFORE any mesh/bone build
+	// (gl_alias.c BE_GenModelBatches, the BEM_DEPTHONLY branch).  Purely cosmetic: the
+	// per-pixel sun N.L shade term (glsl/defaultskin.glsl vsunlambert) is INDEPENDENT of
+	// the shadow map, so flagged foliage keeps its unlit-side shading and only stops
+	// throwing a shadow onto the ground.  Escape hatches both ways (mapper spawnflags),
+	// plus sv_props_foliage_noshadow 0 to restore the old all-casters behaviour.
+	float noshadow = nonsolid && cvar("sv_props_foliage_noshadow");
+	if (self.spawnflags & PROP_FORCESHADOW) noshadow = FALSE;
+	if (self.spawnflags & PROP_NOSHADOW)    noshadow = TRUE;
+	if (noshadow)
+		self.effects |= EF_NOSHADOW;
+
 	// Collision bbox scales with the visual `scale` (default 1).  For BOX props the
 	// OBB reads only mins/maxs, so this fully scales their collision; for TRIMESH it
 	// scales the broadphase/PVS bbox (the per-triangle narrowphase scale lives in the
@@ -305,17 +327,36 @@ void() Props_SpawnPhysics =
 	self.po_carry_enabled = TRUE;   // +use grab / carry / throw (flag-gated carry)
 	self.po_stuck_grace   = 5;      // seconds embedded in BSP before despawn
 
-	// Per-entity mass override ("mass" key) falls back to the shared cvar.
-	local float pmass = (self.mass > 0) ? self.mass : cvar("sv_physprop_mass");
-	PhysObj_Setup(self, pmass, cvar("sv_physprop_friction"));   // MOVETYPE_PHYSICS + ODE
+	// Collision-shape override (FGD collision_shape) — a cheaper collider for many/simple props.  Set BEFORE
+	// PhysObj_Setup (the rebuild guard ignores geomtype).  0/Auto = leave the accurate mesh/box from .solid above.
+	//   Box     = a rotating-OBB box for BOTH the sim body AND the player trace (drops the mesh hull → cheapest).
+	//   Cylinder= keep the accurate mesh trace, but a cheap rolling cylinder SIM body (Box3D).  ONLY when the
+	//             model is TALLER than wide, else the cylinder collapses to a flat disc (length = height−2·radius
+	//             ≤ 0) — the spawnflood pancake bug.
+	//   Sphere  = sim-only (the player trace has no sphere → collides as .solid).
+	if (self.collision_shape == 1)
+		self.solid = SOLID_PHYSICS_BOX;
+	else if (self.collision_shape == 2)
+	{
+		if ((self.maxs_z - self.mins_z) > (self.maxs_x - self.mins_x))
+			self.geomtype = GEOMTYPE_CYLINDER_Z;
+	}
+	else if (self.collision_shape == 3)
+		self.geomtype = GEOMTYPE_SPHERE;
+
+	// Material + weight from scripts/propmaterials.txt (per-entity "mass" key overrides the weight).
+	self.po_material  = PropMat_For(self.model);
+	local float pmass = (self.mass > 0) ? self.mass : PropMat_Mass(self.po_material, self);
+	PhysObj_Setup(self, pmass, PropMat_Friction(self.po_material));   // MOVETYPE_PHYSICS + ODE
 	self.think     = PhysObj_Think;
 	self.nextthink = time + 0.05;
 
 	// CSQC solid mirror (reused) so the local pmove + bullets collide and the
-	// carrier can client-predict the hold pose.
+	// carrier can client-predict the hold pose.  PVS policy is centralised —
+	// see PhysProp_ApplyPvsPolicy (sv_physprop.qc).
 	self.SendEntity = phys_files_Send;
 	self.SendFlags  = 1;
-	self.pvsflags   = PVSF_NOREMOVE;
+	PhysProp_ApplyPvsPolicy(self);
 };
 
 void() prop_physics             = { Props_SpawnPhysics(); };

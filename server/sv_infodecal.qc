@@ -13,8 +13,9 @@
 //    "texture"     decal material name ({gratedecal). Required.
 //    "targetname"  name it -> starts hidden, drawn when first triggered.
 //
-//  `angles` is intentionally unused (GoldSrc orients the decal from the face,
-//  not the entity) — the client builds the frame from the surface normal.
+//  The `angle` key spins the decal about the surface normal (networked below); the client
+//  builds the frame from the surface normal and rotates it by that angle. (Full `angles`
+//  pitch/yaw/roll is still unused — a surface decal only has the one in-plane DOF.)
 //
 
 .vector id_pos;     // traced surface point
@@ -34,9 +35,11 @@
 .float  renderfx;
 
 const float SF_INFODECAL_START_HIDDEN = 1;
-const float INFODECAL_RANGE = 8;    // half-length of the search line through the origin (each axis).
-                                    // The NEAREST surface wins, so a decal flush on a wall lands on the
-                                    // WALL (distance ~0) not a floor several units away.
+const float INFODECAL_MAXREACH = 16;    // top rung of the expanding-reach ladder (1,2,4,8,16 units).
+                                        // The host face is found by probing progressively larger reaches
+                                        // and, at each reach, walls-then-floor-then-ceiling; the first
+                                        // reach with a hit wins, so a decal flush on a wall lands on the
+                                        // WALL (reach ~0) and a corner prefers the wall over the floor.
 
 float(entity to, float fl) infodecal_SendEntity =
 {
@@ -57,6 +60,13 @@ float(entity to, float fl) infodecal_SendEntity =
     WriteByte(MSG_ENTITY, bound(0, rint(self.rendercolor_y), 255));
     WriteByte(MSG_ENTITY, bound(0, rint(self.rendercolor_z), 255));
     WriteByte(MSG_ENTITY, bound(0, rint(self.renderfx),     16));
+    // Decal rotation (degrees, spin about the surface normal). FTE writes the map `angle`
+    // key into .angle; fall back to angles_y if the map source folded the single-axis
+    // "angle" hint into the angles vector instead.
+    float rot = self.angle;
+    if (rot == 0)
+        rot = self.angles_y;
+    WriteCoord(MSG_ENTITY, rot);
     return TRUE;
 };
 
@@ -66,10 +76,10 @@ float(entity to, float fl) infodecal_SendEntity =
 // starts on/in the surface is start-solid and finds nothing, which is why a flush decal
 // was either removed ("no surface") or fell through to the floor.  The open (room) side of
 // the line gives a clean, non-start-solid hit right at the wall.
-void(vector dir) InfoDecal_TryDir =
+void(vector dir, float reach) InfoDecal_TryDir =
 {
-    traceline(self.origin - dir * INFODECAL_RANGE,
-              self.origin + dir * INFODECAL_RANGE, MOVE_NOMONSTERS, self);
+    traceline(self.origin - dir * reach,
+              self.origin + dir * reach, MOVE_NOMONSTERS, self);
     if (trace_startsolid || trace_fraction >= 1 || trace_plane_normal == '0 0 0')
         return;
     float d = vlen(trace_endpos - self.origin);
@@ -91,7 +101,8 @@ void() infodecal_use =
 };
 
 /*QUAKED infodecal (.6 .5 .8) (-4 -4 -4) (4 4 4) START_HIDDEN
-GoldSrc-style decal projector — paints "texture" on the nearest brush face.
+GoldSrc-style decal projector — paints "texture" on the nearest surface, preferring
+walls, then the floor, then the ceiling (expanding search out to 16 units).
 "texture"     decal material name from a mounted decals.wad ({gratedecal).
 "targetname"  name it to start hidden + appear when first triggered.
 */
@@ -110,16 +121,34 @@ void() infodecal =
     if (self.scale == 0)
         self.scale = 1.0;   // map "scale" key auto-parses into the engine .scale field; 0 = default
 
-    // Find the host face (nearest hit across the 6 axis directions).
-    self.id_found = INFODECAL_RANGE + 1;   // "nothing found" sentinel
-    InfoDecal_TryDir('1 0 0');  InfoDecal_TryDir('-1 0 0');
-    InfoDecal_TryDir('0 1 0');  InfoDecal_TryDir('0 -1 0');
-    InfoDecal_TryDir('0 0 1');  InfoDecal_TryDir('0 0 -1');
+    // Expanding-reach host-face search: probe progressively larger reaches (1->2->4->8->16 units)
+    // and, at each reach, the horizontal WALLS first (nearest of four), then the FLOOR below, then
+    // the CEILING above — stopping at the first reach that finds a surface. Lands the decal on the
+    // NEAREST surface (finer + farther than one fixed range) with a deterministic wall > floor >
+    // ceiling tie-break when several sit at the same reach (a decal in a corner lands on the WALL).
+    // Per group id_found is reset to reach+1 ("nothing this group"); a hit sets it to d <= reach,
+    // so id_found <= reach means "found".
+    float reach;
+    for (reach = 1; reach <= INFODECAL_MAXREACH; reach = reach * 2)
+    {
+        self.id_found = reach + 1;
+        InfoDecal_TryDir('1 0 0', reach);  InfoDecal_TryDir('-1 0 0', reach);
+        InfoDecal_TryDir('0 1 0', reach);  InfoDecal_TryDir('0 -1 0', reach);
+        if (self.id_found <= reach)  break;             // a wall within this reach → done
 
-    if (self.id_found > INFODECAL_RANGE)
+        self.id_found = reach + 1;
+        InfoDecal_TryDir('0 0 -1', reach);             // floor below (trace down from the open side)
+        if (self.id_found <= reach)  break;
+
+        self.id_found = reach + 1;
+        InfoDecal_TryDir('0 0 1', reach);              // ceiling above
+        if (self.id_found <= reach)  break;
+    }
+
+    if (self.id_found > INFODECAL_MAXREACH)            // loop exhausted → no surface within reach
     {
         dprint(sprintf("infodecal '%s': no surface within %g units, removing\n",
-                       self.texture, INFODECAL_RANGE));
+                       self.texture, INFODECAL_MAXREACH));
         remove(self);
         return;
     }

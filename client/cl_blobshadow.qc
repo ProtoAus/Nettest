@@ -50,7 +50,7 @@ float blob_engine_warned;
 // CSQC init and CSQC_RendererRestarted (vid_restart purges shaderforname shaders).
 void() CSQC_BlobShadow_ReregisterShaders =
 {
-    shaderforname(BLOB_SHADER, Decal_BaseShaderBody(BLOB_SHADER));
+    shaderforname(BLOB_SHADER, Decal_BaseShaderBody(BLOB_SHADER, FALSE));
 };
 
 // Frame start (cl_main.qc, next to CSQC_BulletHolesStartFrame): poll cvars, drop last
@@ -176,11 +176,6 @@ float(entity e, int slot) BlobShadow_WriteForEnt =
 // Per-frame dynamic emit — call from a live entity's predraw (before its addentity).
 void(entity e) BlobShadow_Emit =
 {
-    // Feed the per-caster fake-shadow driver too (r_shadows 2 + cl_lightshadow_perlight):
-    // this runs for every rendered caster BEFORE the blob-enable gate, and self-gates on
-    // the fake-shadow system being active, so the two systems are independent.  All six
-    // BlobShadow_Emit call sites (players, corpses, props, ragdolls) are caster origins.
-    MapLights_RegisterShadowCaster(e.origin);
     if (!blob_on)
         return;
     if (blob_count >= BLOB_MAX_QUADS)

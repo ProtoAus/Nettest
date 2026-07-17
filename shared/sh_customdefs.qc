@@ -23,6 +23,14 @@ entity gravshift_owner;          // player currently driving the shift (world = 
 vector gravshift_world_dir;      // global gravity dir while active; '0 0 0' = none
 vector gravshift_world_dir_last; // last value pushed to serverinfo (on-change guard)
 float  gravshift_owner_assert;   // time the owner last asserted (auto-clear if stale)
+.float gravshift_toggle;         // per-player latch: impulse-7 (Weapon Special) flips it on/off,
+                                 // the pmove arbiter reads it as the "want shift" state (server-auth).
+.float gravshift_hull_cube;      // 1 = the full axis-swapped hull didn't fit where we stood when the
+                                 // shift engaged; collide as a ±16 cube (a strict subset of EVERY hull
+                                 // variant, so it always fits) until the full hull clears.
+.float pm_eye_h;                 // eye height SCALAR (units above origin along gravity-"up").  The duck
+                                 // code authors this; PM_ComposeEyeOfs turns it into .view_ofs along the
+                                 // active gravity so crouch view dips toward the gravity floor, not world-Z.
 
 // nettest Patch 36 Part B: engine builtin (com_mesh.c Mod_AddHitbox) that registers a
 // per-bone hitbox on an alias/IQM player model.  Once a model has any hitbox, MOVE_HITMODEL
@@ -75,6 +83,7 @@ const float CSQC_ENT_PRED_PROP      = 6;  // prop_static/detail with the Predict
                                           // (Using 20 DID collide with the proxy version → every connect
                                           // desynced and Host_EndGame'd. See line-28 warning.)
 const float CSQC_ENT_NAV_DEBUG      = 40; // bot/nav debug overlay proxy (per-client SendEntity).
+const float CSQC_ENT_CAR            = 41; // driveable prop_car/func_car mirror (reserved; Stage 2 wheel/cam wire).
                                           // High id: clear of the 2-18 ids AND PM_CSQC_PROXY_VERSION's
                                           // upward growth, so the next proxy bump can't collide.
 // nav-debug proxy SendFlags sections (sv_bots.qc NavDbg_SendEntity <-> cl_navdebug.qc NavDebug_EntUpdate)
@@ -183,7 +192,23 @@ const float PUSH_SOURCE   = 16; // boost along movedir up to speed, don't overwr
 .float  veh_in_side;    // on PLAYER: WASD steer intent stashed by pmove while driving
 .float  pm_driving;     // on PLAYER: replicated 0/1 "am I driving" flag (prediction proxy, pm_carrying-style) — gates the pmove driver-lock + weapon-fire block on both sides
 .vector veh_seat_ofs;   // on PLAYER: rigid seat-bolt — the driver's mount offset in the car's LOCAL (yaw) frame; pm_origin is re-pinned to car+rotate(this) every pmove substep (server + CSQC) so the body tracks the car with no carry drift
+
+// --- prop_car / func_car (Box3D/ODE raycast vehicle — sh_vehicle_phys.qc / sv_prop_vehicle.qc). ---
+// SEPARATE from func_vehicle's .driving/.pm_driving so the two vehicle systems never alias.
+.entity car_driving;    // on PLAYER: the prop_car/func_car we're driving (world if none)
+.entity car_driver;     // on CAR:    the player driving it (world if none)
+.float  car_in_fwd;     // on PLAYER: WASD forward intent stashed in the real cmd path while in a car
+.float  car_in_side;    // on PLAYER: WASD steer intent stashed while in a car
+.float  car_in_brake;   // on PLAYER: handbrake (jump button) intent stashed while in a car — cuts rear grip for drift
+.float  pm_incar;       // on PLAYER: replicated 0/1 "am I in a car" flag (prediction proxy, pm_driving-style) — gates the pmove input-zero + weapon-fire block + third-person camera on both sides
 .float  veh_seat_ofs_set; // on PLAYER: 1 once veh_seat_ofs is captured for the current drive (cleared on dismount)
+// Parked-car sleep (sv_car_sleep).  A driverless, stopped car still ran the FULL raycast
+// drive sim every tick — 4 suspension tracelines, ~40 cvar reads, a yaw-damp torque, and a
+// physics_enable(TRUE) that re-woke the rigid body every single tick, permanently defeating
+// the physics backend's own autodisable.  See the Car_Think sleep gate for why this needs an
+// EXPLICIT physics_enable(FALSE) rather than just letting the backend autodisable.
+.float  car_rest_since; // on CAR: time it first went still + driverless (0 = moving/driven/awake)
+.float  car_asleep;     // on CAR: 1 = body explicitly disabled and Car_PhysStep skipped
 
 // Set on MOVER (func_train / func_tracktrain):
 .vector platform_prev_origin;    // brush origin at the previous carry tick
@@ -394,6 +419,17 @@ void(entity player) PM_SyncPredictionProxy;
 // shared/sh_pmove.qc — which compiles earlier — can reference it from
 // PM_IsLivePlayerCollider.
 .float vis_is_dead;
+// nettest death ragdoll (client-side): KillFeed_Parse flags a body-shot corpse +
+// stores the shot direction; the proxy predraw then spawns a separate client ragdoll
+// (vis_ragdoll_ent) at the corpse and hides the corpse mesh.  Torn down in CSQC_Ent_Remove.
+.float  vis_ragdoll_want;   // 1 = this corpse should ragdoll (set at death)
+.vector vis_ragdoll_dir;    // shot direction (attacker->victim) to seed the flop
+.entity vis_ragdoll_ent;    // the spawned client ragdoll (world until spawned) — now INERT (server ragdoll instead)
+.float  vis_kc_ragdoll;     // 1 on the killcam-owned ragdoll (cl_killcam.qc) — exempts it from the replay-hide
+// nettest server ragdoll: networked from the proxy IDENTITY section — 1 = a server-side corpse_ragdoll is
+// active for this corpse, so the proxy predraw HIDES the animated mesh (the ragdoll renders in its place),
+// except while the killcam re-poses it (PlayerVis_KillcamOwned).
+.float  vis_has_server_ragdoll;
 // Server-authoritative dead flag — set ONLY from the proxy snapshot (never by
 // the client predicted-death), so the proxy's bullet-trace SOLIDITY follows the
 // real server state.  vis_is_dead itself gets flipped to 1 by CSQC_TryPredictDeath
@@ -783,6 +819,22 @@ string team_red_names[] = { "Guerilla", "Leet", "Terror", "Arctic" };
 
 const float TEAM_MODEL_COUNT = 4;
 
+// Resolve a networked team_model_byte back to a model path.  Decoder half of the encoder in
+// sv_player.qc (PlayerVisual writer): 252-255 = team-independent sentinels, else (team-1)*4 + model.
+// Used client-side by the visual proxy (cl_player.qc) AND the seated car-driver render (cl_physprop.qc)
+// so both pick the SAME model the server encoded.  Lives here (shared) next to the model arrays.
+string(float tmbyte) SH_ModelPathForTeamByte =
+{
+    if (tmbyte == 255) return "models/player/sini.mdl";
+    if (tmbyte == 254) return "models/player/chickenman/chickenman.iqm";
+    if (tmbyte == 253) return "models/player/numberk/numberK.iqm";
+    if (tmbyte == 252) return "models/player/kilmer/kilmer.iqm";
+    float vteam  = floor(tmbyte / 4);        // 0 = blue, 1 = red (matches (team-1) in the encoder)
+    float vmodel = tmbyte - vteam * 4;       // 0..3 model index within the team
+    if (vteam == 0) return team_blue_models[vmodel];
+    return team_red_models[vmodel];
+};
+
 // Team stats — sent from server to client via clientstat()
 const float STAT_PLAYERTEAM       = 39;
 const float STAT_TEAMMENU_REQUEST = 40;
@@ -908,6 +960,32 @@ void() phys_barrel_precache;
 float sv_cached_anim_resend_interval;
 float sv_cached_anim_qu_per_sec;
 float sv_cached_anim_qu_per_sec_crouch;
+
+// Phys-prop per-frame cvar cache — same deal, but for the PROP tick path, which is
+// the hottest cvar consumer on a prop-dense map: PhysObj_Think runs at 64 Hz for
+// EVERY free prop, and each pass through PhysObj_DetectContactFX used to hash-look-up
+// sv_physprop_impact_min_speed + sv_physprop_slide_min_speed (~1600 lookups/tick with
+// a few hundred props).  Refreshed once per StartFrame; read as plain globals below.
+float pp_cached_impact_min_speed;
+float pp_cached_impact_hard_speed;
+float pp_cached_impact_cooldown;
+float pp_cached_slide_min_speed;
+float pp_cached_slide_interval;
+float pp_cached_scrape_track;
+float pp_cached_stream_hz;        // sv_physprop_stream_hz — moving-mirror send throttle
+float pp_cached_sleep_enable;     // sv_physprop_sleep — 1 = resting props drop to the slow tick
+float pp_cached_sleep_hz;         // sv_physprop_sleep_hz — slow-tick rate for a settled prop
+float pp_cached_debug;            // sv_debug_physprops
+
+// Car per-frame cvar cache.  Only the reads that a PARKED (asleep) car still makes every
+// tick live here — Car_TickInterval + the live box re-tune + the sleep gate itself.  The
+// ~40 sv_car_* tuning reads inside Car_PhysStep are deliberately NOT cached: the sleep gate
+// skips PhysStep entirely for parked cars (the common case), so those only run for a car
+// someone is actually driving — 1-2 cars, i.e. noise (Car_Cvar profiled at 0.006s/5s).
+float car_cached_mintic;          // sv_mintic
+float car_cached_wheel_sink;      // sv_car_wheel_sink
+float car_cached_box_yaw;         // sv_car_box_yaw
+float car_cached_sleep_enable;    // sv_car_sleep
 #endif
 
 void() precache_everything =
@@ -924,7 +1002,6 @@ void() precache_everything =
     // player model right after precache, in BOTH progs, so MOVE_HITMODEL traces the boxes
     // (native per-bone hit detection) and returns the struck box's hitgroup.  Hitbox_Register-
     // Model no-ops on the sini .mdl (HL native hitboxes) and on any unpatched engine.
-    Hitbox_RegisterModel(precache_model("models/testplayer.iqm"));
     Hitbox_RegisterModel(precache_model("models/player/arctic/arctic.iqm"));
     Hitbox_RegisterModel(precache_model("models/player/gign/gign.iqm"));
     Hitbox_RegisterModel(precache_model("models/player/gsg9/gsg9.iqm"));

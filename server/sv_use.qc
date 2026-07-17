@@ -127,6 +127,11 @@ float(entity weap) SV_TryWeaponSwap =
     return SV_TryWeaponPickup(weap);
 };
 
+// prop_car / func_car mount gate (defined in sv_prop_vehicle.qc, compiled later).
+entity(entity plyr) Car_FindMountable;
+float(entity plyr, entity car) Car_TryMount;
+void(entity plyr) Car_Dismount;
+
 // Trace forward from the player's eye; try the hit entity first, then fall
 // back to a cone search so slightly off-center aims still register. Dispatches
 // to use targets (buttons/doors) OR weapon pickups, whichever is in front.
@@ -154,6 +159,23 @@ void() SV_PlayerTryUse =
         if (veh != world)
         {
             if (Vehicle_TryMount(self, veh))
+                return;
+        }
+    }
+
+    // prop_car / func_car mount/dismount toggle (SEPARATE .car_driving field so it
+    // never aliases func_vehicle). MUST run before the carry-grab trace below, or a
+    // MOVETYPE_PHYSICS chassis would be grabbed like a filing cabinet.
+    if (self.car_driving != world)
+    {
+        Car_Dismount(self);
+        return;
+    }
+    {
+        entity car = Car_FindMountable(self);
+        if (car != world)
+        {
+            if (Car_TryMount(self, car))
                 return;
         }
     }

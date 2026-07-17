@@ -49,6 +49,12 @@ string killcam_killer_name;
 
 float  kc_posed;             // 1 while proxies are overridden by a replay frame
 
+// Killcam ragdoll: at the kill instant we flop the victim as a REAL physics doll (in place of the
+// canned CSANIM_DEATH* anim) so the death plays out true.  Slow-mo only; timescale-synced to the replay.
+entity kc_ragdoll_ent;                       // the killcam-owned doll (world = none, also the spawn latch)
+const float KC_RAGDOLL_IMPULSE = 120;        // fling speed along the shot line at spawn
+const float KC_RAGDOLL_TUMBLE  = 90;         // gentle angular launch
+
 // Bracket result (set by Killcam_Bracket).
 float  kc_lerp_f0, kc_lerp_f1, kc_lerp_frac;
 
@@ -173,6 +179,20 @@ float() Killcam_Active =
 // every proxy.  Forward-declared in cl_player.qc (compiled before this file).
 float() Killcam_IsPosing = { return kc_posed; };
 
+// Tear down the killcam-owned ragdoll (if any) and restore real-time doll stepping.  Mirrors
+// CSQC_KillRagdolls (cl_ragdoll.qc): `cleardoll` frees the Box3D bodies BEFORE the skeleton/entity go.
+void() Killcam_KillRagdoll =
+{
+	if (kc_ragdoll_ent)
+	{
+		skel_ragupdate(kc_ragdoll_ent, "cleardoll", 0);
+		skel_delete(kc_ragdoll_ent.skeletonindex);
+		remove(kc_ragdoll_ent);
+		kc_ragdoll_ent = world;
+	}
+	cvar_set("r_ragdoll_timescale", "1");	// undo the slow-mo scale so live dolls step normally
+};
+
 // Put every proxy (+ its bone-mirrored weapon) back to fully visible.  The proxy
 // network update never resets .alpha, so a replay's alpha=-1 would otherwise
 // persist and hide bodies after respawn ("walking gun, no body").
@@ -219,6 +239,7 @@ void() Killcam_RestoreProxies =
 		}
 	}
 	kc_posed = 0;
+	Killcam_KillRagdoll();		// remove the killcam doll + restore r_ragdoll_timescale when the cam ends
 };
 
 // Once the killcam stops driving the scene, restore the proxies we overrode.
@@ -463,6 +484,7 @@ void(float killer_entnum, string killer_name, float headshot) Killcam_Begin =
 	killcam_on          = 1;
 	killcam_headshot    = headshot;
 	kc_gib_fired        = 0;
+	Killcam_KillRagdoll();		// clear any doll left from a prior death before this one starts
 	kc_cam_smooth_valid = 0;		// seed the camera smoothing fresh on the first replay frame
 	kc_last_fire_action = -1;		// so the first replayed shot plays its sound
 	kc_last_fx_action   = -1;		// and its first muzzle/tracer
@@ -478,6 +500,7 @@ void() Killcam_End =
 	kc_srv_count = 0;		// drop the server track so it can't carry into the next death
 	if (kc_posed)
 		Killcam_RestoreProxies();
+	Killcam_KillRagdoll();		// explicit end (e.g. early respawn) — idempotent if already torn down
 };
 
 // Scan the killer's recorded frames in a short window around replay time rt for
@@ -648,6 +671,32 @@ float() Killcam_Replay =
 		}
 	}
 
+	// KILLCAM RAGDOLL: at the kill instant, flop the victim as a REAL physics doll (replacing the
+	// canned CSANIM_DEATH* mesh) so the death plays out true.  Slow-mo only (needs the aftermath
+	// window to fall in); one-shot; timescale-synced so it falls in lock-step with the slow-mo replay.
+	if (Killcam_Slowmo() > 0 && !kc_ragdoll_ent && rt >= killcam_death_time && player_localentnum >= 1)
+	{
+		entity vproxy = world;
+		entity vpq;
+		for (vpq = findchain(classname, "player_visual_proxy"); vpq; vpq = vpq.chain)
+			if (vpq.vis_owner_entnum == player_localentnum) { vproxy = vpq; break; }
+		float rvidx = player_localentnum * KC_RING + f0;
+		if (vproxy && vproxy.model != "" && kc_valid[rvidx])
+		{
+			vector rpos = kc_origin[rvidx];
+			vector rdir = rpos - kc_origin[killcam_killer * KC_RING + f0];
+			rdir = (vlen(rdir) > 1) ? normalize(rdir) : '0 0 1';
+			vector rvel  = vproxy.velocity + rdir * KC_RAGDOLL_IMPULSE;	// fling along the shot line
+			vector ravel = crossproduct(rdir, '0 0 1') * KC_RAGDOLL_TUMBLE;	// gentle tumble
+			kc_ragdoll_ent = CSQC_RagdollSpawnAt(rpos, FALSE, rvel, ravel, vproxy.model, vproxy);
+			if (kc_ragdoll_ent)
+			{
+				kc_ragdoll_ent.vis_kc_ragdoll = 1;			// exempt from the replay-hide
+				cvar_set("r_ragdoll_timescale", ftos(Killcam_Slowmo()));	// lock-step with slow-mo
+			}
+		}
+	}
+
 	// Re-pose every proxy from the buffer (the existing proxy render then shows
 	// the recorded scene).  Hide the killer (first-person) + slots with no data;
 	// the weapon p_model follows the body's .alpha via the predraw mirror.
@@ -669,6 +718,10 @@ float() Killcam_Replay =
 		// lying dead once the cam ends.  (Also subsumes the respawn glued-corpse case —
 		// the corpse is dead+remote → hidden, the live respawn proxy is posed.)
 		if (!hide && vp.vis_is_dead && slot != player_localentnum)
+			hide = TRUE;
+		// While the killcam ragdoll is flopping, hide the victim's canned death-anim mesh so the
+		// two don't double-draw — the ragdoll IS the victim's body now (rewind still poses alive).
+		if (kc_ragdoll_ent && rt > killcam_death_time && slot == player_localentnum)
 			hide = TRUE;
 		if (hide)
 		{
@@ -796,8 +849,14 @@ float() Killcam_Replay =
 				vector veye = kc_origin[vidx];
 				veye_z = veye_z + PM_VIEW_OFS_z * 0.5;	// the body, not the feet
 				vector look = vectoangles(veye - eye);
-				ang_x = 0 - look_x;
-				ang_y = look_y;
+				// Ease from the rewind's ending framing (0.5 toward your body at the kill
+				// instant) back to the KILLER's OWN recorded view over the aftermath window,
+				// so the camera follows the bot moving on instead of staring at the corpse.
+				float aw   = Killcam_AftermathWindow();
+				float prog = (aw > 0) ? bound(0, (rt - killcam_death_time) / aw, 1) : 1;
+				float blend = 0.5 * (1 - prog);		// 0.5 at the kill -> 0 (killer's view) by end
+				ang_x = Killcam_LerpAngle(ang_x, 0 - look_x, blend);
+				ang_y = Killcam_LerpAngle(ang_y, look_y, blend);
 			}
 		}
 		else if (rt <= killcam_death_time && player_localentnum >= 1)
@@ -810,7 +869,7 @@ float() Killcam_Replay =
 				veye = kc_origin[vidx];
 				veye_z = veye_z + PM_VIEW_OFS_z * 0.5;
 				look = vectoangles(veye - eye);
-				float blend = 0.5 - 0.2 * bound(0, (killcam_death_time - rt) / lookback, 1);
+				blend = 0.5 - 0.2 * bound(0, (killcam_death_time - rt) / lookback, 1);
 				ang_x = Killcam_LerpAngle(ang_x, 0 - look_x, blend);
 				ang_y = Killcam_LerpAngle(ang_y, look_y, blend);
 			}

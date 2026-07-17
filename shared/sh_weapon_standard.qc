@@ -12,6 +12,12 @@
 // Fire spread penalty constants are in sh_customdefs.qc
 // (must be available before sh_pmove.qc in cl_progs compile order)
 
+#ifdef SSQC
+// Server death-ragdoll bullet shove (sv_ragdoll.qc, compiled later) — fwd-decl so the
+// hitscan sites below can call it.  Server-only (ragdolls live in sv.world).
+void(vector src, vector shotend, vector dir, float damage) Ragdoll_TryShove;
+#endif
+
 // ============================================================
 //  SHARED — state machines
 // ============================================================
@@ -780,6 +786,11 @@ void(float base_spread, float move_spread, float full_spread_speed,
         else
         {
             PhysProp_TryPushFromTrace(dir, damage);
+#ifdef SSQC
+            // corpses are pass-through (RAGDOLL_DIM), so the shot reached trace_endpos through
+            // any corpse in the way — shove it (Ragdoll_TryShove saves/restores the trace globals).
+            Ragdoll_TryShove(src, trace_endpos, dir, damage);
+#endif
             W_ImpactEffect(trace_endpos);
         }
 
@@ -921,6 +932,9 @@ void(float base_spread, float move_spread, float full_spread_speed,
         else
         {
             PhysProp_TryPushFromTrace(dir, damage);
+#ifdef SSQC
+            Ragdoll_TryShove(src, trace_endpos, dir, damage);   // shove a pass-through corpse in the shot's path
+#endif
             W_ImpactEffect(trace_endpos);
         }
 

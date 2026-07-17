@@ -206,21 +206,43 @@ void() CVar_Init =
     CVar_Add("Vehicles", "sv_debug_car",             "0",     CVAR_SIDE_SV);  // draw the car physics overlay (box/wheels/steer/velocity)
     CVar_Add("Vehicles", "sv_car_debug_dist",        "2500",  CVAR_SIDE_SV);  // overlay only draws cars within this of the viewer (0 = unlimited); nearest 16 max
     CVar_Add("Vehicles", "sv_car_mass",              "1200",  CVAR_SIDE_SV);
-    CVar_Add("Vehicles", "sv_car_accel",             "5000",  CVAR_SIDE_SV);  // throttle ACCELERATION (u/s²); engine force = accel × mass (was sv_car_engine_force)
+    CVar_Add("Vehicles", "sv_car_accel",             "3200",  CVAR_SIDE_SV);  // throttle ACCELERATION (u/s²); engine force = accel × mass. 3200 paces the gears (5000 = instant redline)
     CVar_Add("Vehicles", "sv_car_brake_decel",       "9000",  CVAR_SIDE_SV);  // brake DECELERATION (u/s²) — holding S while rolling forward stops you
     CVar_Add("Vehicles", "sv_car_reverse_frac",      "0.4",   CVAR_SIDE_SV);  // reverse strength as a fraction of drive force (S once stopped)
-    CVar_Add("Vehicles", "sv_car_max_speed",         "900",   CVAR_SIDE_SV);
-    CVar_Add("Vehicles", "sv_car_ride_sag",          "1.2",   CVAR_SIDE_SV);  // rest SINK in units (bigger = softer / rides higher); spring k = mass·g/(wheels·sag) (was sv_car_susp_k)
+    CVar_Add("Vehicles", "sv_car_max_speed",         "1100",  CVAR_SIDE_SV);  // KEEP cl_car_sound_maxspeed matched (audio redline)
+    // Virtual gearbox (audio-visible drive cadence; physics has no real transmission):
+    // shifting UP cuts the throttle for shift_time (the "lift, jerk, pull" between gears);
+    // ignition_time = throttle dead after mounting while the starter cranks.
+    CVar_Add("Vehicles", "sv_car_gears",             "4",     CVAR_SIDE_SV);
+    CVar_Add("Vehicles", "sv_car_shift_time",        "0.25",  CVAR_SIDE_SV);
+    CVar_Add("Vehicles", "sv_car_ignition_time",     "1.2",   CVAR_SIDE_SV);
+    CVar_Add("Vehicles", "sv_car_suspension_softness","1.2",  CVAR_SIDE_SV);  // SOFTNESS = how far the car sinks under its OWN weight at rest (bigger = softer); spring k = mass·g/(wheels·softness) so it's mass-derived — there is NO separate strength knob (was sv_car_ride_sag / sv_car_susp_k)
     CVar_Add("Vehicles", "sv_car_damping",           "0.6",   CVAR_SIDE_SV);  // suspension damping RATIO (1 = critical / no bounce; <1 = bouncier). 0.6 ≈ near-critical (was sv_car_susp_c)
-    CVar_Add("Vehicles", "sv_car_susp_rest",         "10",    CVAR_SIDE_SV);  // wheel rest extension below the mount (ride height)
-    CVar_Add("Vehicles", "sv_car_susp_travel",       "12",    CVAR_SIDE_SV);  // extra travel before bottoming
-    CVar_Add("Vehicles", "sv_car_wheel_radius",      "8",     CVAR_SIDE_SV);
+    CVar_Add("Vehicles", "sv_car_ride_height",       "18",    CVAR_SIDE_SV);  // spring free length: how high the body rides above the ground (the single ground-clearance datum; folds in the old wheel_radius)
+    CVar_Add("Vehicles", "sv_car_compression_travel","12",    CVAR_SIDE_SV);  // EXTRA compression on top of the resting sag — the landing cushion (bump-stop = softness + this)
     CVar_Add("Vehicles", "sv_car_wheel_sink",        "18",    CVAR_SIDE_SV);  // raise the box floor + wheel mounts so the model rests on its wheels — dial until the tyres touch
     CVar_Add("Vehicles", "sv_car_grip",              "1",     CVAR_SIDE_SV);  // tire lateral grip (× per-wheel load); lower = more drift / less turn-scrub
     CVar_Add("Vehicles", "sv_car_drift_grip",        "0.35",  CVAR_SIDE_SV);  // REAR grip scale while drifting/handbraking — lower = looser drift
     CVar_Add("Vehicles", "sv_car_grip_response",     "0.5",   CVAR_SIDE_SV);  // share of lateral slip cancelled per tick (0..1); 1 = stiff/wobbly, lower = softer/driftier + stable
     CVar_Add("Vehicles", "sv_car_handbrake_decel",   "9000",  CVAR_SIDE_SV);  // HOLD Space brake deceleration (u/s²) — stop quickly
     CVar_Add("Vehicles", "sv_car_park_decel",        "600",   CVAR_SIDE_SV);  // driverless coast-to-stop deceleration (u/s²) after you hop out
+    // Parked-car sleep.  DEFAULT 0 = OFF: this is BROKEN ON BOX3D (the default backend) and the
+    // damage is much worse than "a parked car doesn't get nudged" — parked cars go COMPLETELY
+    // NON-COLLIDABLE and other cars drive straight through them.
+    //
+    // Why: a raycast-suspended car is held at ride height ONLY by per-tick QC suspension forces and
+    // has no ground contacts, so simply skipping Car_PhysStep makes it free-fall — it can never
+    // reach the backend's own sleep threshold at ride height.  The only way to freeze it in place is
+    // an explicit physics_enable(car, FALSE).  But Box3D is a Box2D-3D fork, and b2/b3Body_Disable
+    // REMOVES THE BODY FROM THE SIMULATION (shapes leave the broadphase) — so it stops colliding
+    // with everything, not just stops moving.  (ODE differs: dBodyDisable leaves the geom in the
+    // space, colliding as static — so this would be safe-ish there, hence a cvar and not a delete.)
+    //
+    // The win was small anyway (~1% of a server core: Car_PhysStep/Car_Cvar/Car_WheelLocal for
+    // parked cars), and the parked-car cvar reads it also saved are already cached per-frame.
+    // Do NOT set 1 on Box3D.  Fixing it properly needs a freeze that keeps the body collidable —
+    // e.g. a kinematic/static swap, or zeroing gravity + velocity while leaving the body enabled.
+    CVar_Add("Vehicles", "sv_car_sleep",             "0",     CVAR_SIDE_SV);
     CVar_Add("Vehicles", "sv_car_drift_tap_time",    "0.2",   CVAR_SIDE_SV);  // Space held under this = a TAP (latches a drift)
     CVar_Add("Vehicles", "sv_car_drift_min_speed",   "250",   CVAR_SIDE_SV);  // min speed to TAP-start a drift
     CVar_Add("Vehicles", "sv_car_drift_exit",        "40",    CVAR_SIDE_SV);  // lateral speed the latched drift ends at (slide resolved)
@@ -229,13 +251,34 @@ void() CVar_Init =
     CVar_Add("Vehicles", "sv_car_steer_rate",        "120",   CVAR_SIDE_SV);
     CVar_Add("Vehicles", "sv_car_yaw_assist",        "150",   CVAR_SIDE_SV);  // low-speed turn-in-place help (deg/s²); steer at a standstill to pivot; 0 = off
     CVar_Add("Vehicles", "sv_car_yaw_damp",          "8",     CVAR_SIDE_SV);  // yaw spin damping RATE (1/s) — stops a parked/shot car pirouetting; 0 = off (never fights the pivot/turns)
+    CVar_Add("Vehicles", "sv_car_roll_damp",         "0",     CVAR_SIDE_SV);  // anti-ROLL damping RATE (1/s) about the car's forward axis — planted/low-body-roll TrackMania feel; 0 = off (pure 4-spring roll). Adds to, doesn't replace, the 4 corner springs.
     CVar_Add("Vehicles", "sv_car_seat_up",           "24",    CVAR_SIDE_SV);
+    CVar_Add("Vehicles", "sv_car_seat_fwd",          "0",     CVAR_SIDE_SV);  // driver seat fore/aft offset from the car origin (u; +forward)
+    CVar_Add("Vehicles", "sv_car_seat_side",         "0",     CVAR_SIDE_SV);  // driver seat left/right offset (u; +right)
+    CVar_Add("Vehicles", "sv_car_show_driver",       "1",     CVAR_SIDE_SV);  // 1 = render the seated driver's player model (facing forward) instead of hiding it
+    CVar_Add("Vehicles", "sv_car_wheel_fwd",         "0",     CVAR_SIDE_SV);  // GLOBAL fore/aft shift of every car's visual wheel set (u); the per-car wheel_fwd key overrides
     CVar_Add("Vehicles", "sv_car_hit_force",         "4",     CVAR_SIDE_SV);  // bullet/melee push multiplier on a car
     CVar_Add("Vehicles", "sv_car_occupied_push_scale","0.4",  CVAR_SIDE_SV);  // push scale while a driver is seated
     CVar_Add("Vehicles", "sv_car_force_iterscale",   "0",     CVAR_SIDE_SV);  // 0 = normal ×iter; -1 disables; >0 scales all car forces
     CVar_Add("Vehicles", "sv_car_model_yaw",         "0",     CVAR_SIDE_SV);  // live GLOBAL drive-forward yaw offset added to every car's model_yaw (for dialing)
+    // Car body collision shape (read at spawn in prop_car(); IQM/MD3 only — .mdl always stays box):
+    //   1 = ACD MESH (default): SOLID_PHYSICS_TRIMESH for the player/bullet trace AND the sim body (no
+    //       geomtype) — player + bullets + world all hit the exact ACD hull, so nothing flings (pmove and sim
+    //       share one shape) and the low body clears kerbs.  The wheel-mount box (ab_*) and setsize are kept,
+    //       so the visual wheels don't move.  Caveat: the sim COM sits at the mesh centroid, so a model far off
+    //       origin-centre can rest slightly tilted — set 0 if a specific car dances.
+    //   0 = oriented box (World_OBBTrace) — the old behaviour; players stand on the bounding box.
+    CVar_Add("Vehicles", "sv_car_collision",         "1",     CVAR_SIDE_SV);
     CVar_Add("Vehicles", "sv_car_carry_dist",        "120",   CVAR_SIDE_SV);  // gravity-gun hold distance for a CAR (bigger than props so the big body sits clear in front)
     CVar_Add("Vehicles", "sv_car_carry_z",           "50",    CVAR_SIDE_SV);  // gravity-gun hold height for a CAR (lift it off the ground so it's flippable)
+    // World-impact leniency + FX: instead of stopping dead on the BSP, the car SLIDES along the wall (keeps its
+    // along-wall speed) and plays a metal impact/scrape sound + spark + smoke at the contact.
+    CVar_Add("Vehicles", "sv_car_impact_fx",          "1",     CVAR_SIDE_SV);  // master toggle for the whole slide+FX feature
+    CVar_Add("Vehicles", "sv_car_impact_min_speed",   "150",   CVAR_SIDE_SV);  // min pre-impact horizontal speed AND one-tick drop to register a wall hit (u/s)
+    CVar_Add("Vehicles", "sv_car_impact_cooldown",    "0.15",  CVAR_SIDE_SV);  // min seconds between hard-hit sounds (anti machine-gun)
+    CVar_Add("Vehicles", "sv_car_impact_slide_retain","0.85",  CVAR_SIDE_SV);  // fraction of along-wall speed kept on a hard hit (1 = clean glance, lower = more scrub)
+    CVar_Add("Vehicles", "sv_car_grind_min_speed",    "120",   CVAR_SIDE_SV);  // min horizontal speed to keep the continuous scrape (loop + spark/smoke stream) alive against a wall
+    CVar_Add("Vehicles", "sv_car_grind_interval",     "0.08",  CVAR_SIDE_SV);  // seconds between grind spark/smoke puffs while scraping
     CVar_Add("Vehicles", "cl_car_cam_dist",          "160",   CVAR_SIDE_CL);  // third-person chase distance
     CVar_Add("Vehicles", "cl_car_cam_height",        "64",    CVAR_SIDE_CL);
 
@@ -759,7 +802,7 @@ void() CVar_Init =
     //   cl_impact_debris_count    chunks per impact
     //   cl_impact_debris_force    launch speed along the surface normal
     //   cl_impact_debris_per_shot bursts per shot (caps shotgun/penetration)
-    CVar_Add("Client", "cl_impact_debris",          "1",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_impact_debris",          "0",   CVAR_SIDE_CL);  // default OFF (2026-07 declutter): impacts = smoke + physical chips only
     CVar_Add("Client", "cl_impact_debris_mode",     "0",   CVAR_SIDE_CL);
     CVar_Add("Client", "cl_impact_debris_count",    "4",   CVAR_SIDE_CL);
     CVar_Add("Client", "cl_impact_debris_force",    "110", CVAR_SIDE_CL);
@@ -796,21 +839,50 @@ void() CVar_Init =
     //                              wall has no loose textures/<name>.png or in _mode 1
     //                              (model-particles have no per-spawn material hook).
     //   cl_impact_chips_life       seconds a chip lies around before its fade-out
-    //   cl_impact_chips_scale_min/max  random per-chip .scale (assets authored 10x;
-    //                              0.16-0.4 = chunky-but-plausible, user-tuned 2x up
-    //                              from the original 0.08-0.2)
+    //   cl_impact_chips_scale_min/max  random per-chip .scale (assets authored 5x
+    //                              since the 2026-07 regen — same cvar values render
+    //                              HALF the old on-screen size; tune here, not the bake)
     CVar_Add("Client", "cl_impact_chips",           "1",    CVAR_SIDE_CL);
     CVar_Add("Client", "cl_impact_chips_mode",      "0",    CVAR_SIDE_CL);
     CVar_Add("Client", "cl_impact_chips_count",     "2",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_impact_chips_force",     "260",  CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_impact_chips_force",     "80",  CVAR_SIDE_CL);
     CVar_Add("Client", "cl_impact_chips_entry",       "1",  CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_impact_chips_entry_count", "2",  CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_impact_chips_entry_force", "70", CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_impact_chips_entry_count", "1",  CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_impact_chips_entry_force", "40", CVAR_SIDE_CL);
     CVar_Add("Client", "cl_impact_chips_per_shot",  "1",    CVAR_SIDE_CL);
     CVar_Add("Client", "cl_impact_chips_walltex",   "1",    CVAR_SIDE_CL);
     CVar_Add("Client", "cl_impact_chips_life",      "10",   CVAR_SIDE_CL);
     CVar_Add("Client", "cl_impact_chips_scale_min", "0.16", CVAR_SIDE_CL);
     CVar_Add("Client", "cl_impact_chips_scale_max", "0.4",  CVAR_SIDE_CL);
+    // Debris entities (impact chips + breakable chunks) cast r_shadows-2 shadows.
+    // Cost per caster = ONE extra depth-only draw of a ~20-tri mesh into the fixed
+    // shadow map (no extra passes/memory) — cheap; this is the off switch anyway.
+    CVar_Add("Client", "cl_debris_shadows",         "1",    CVAR_SIDE_CL);
+    // prop_car engine audio (cl_vehicle_sound.qc): CSQC-synthesized RPM ladder —
+    // 4 crossfaded loop anchors + fake gear sawtooth, per-frame soundupdate().
+    //   cl_car_sound_maxspeed  speed (u/s) treated as redline in top virtual gear
+    //   cl_car_sound_gears     virtual gears (AUDIO sawtooth only, physics has none)
+    CVar_Add("Client", "cl_car_sound",          "1",    CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_car_sound_volume",   "0.8",  CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_car_sound_maxspeed", "1100", CVAR_SIDE_CL);  // MUST track sv_car_max_speed (mismatch = wrong gear mapping, e.g. reverse sounding like idle)
+    CVar_Add("Client", "cl_car_sound_gears",    "4",    CVAR_SIDE_CL);  // MUST track sv_car_gears (the shift cut + audio sawtooth derive the same gears from speed)
+    CVar_Add("Client", "cl_car_sound_gearstep", "5",    CVAR_SIDE_CL);  // % pitch each gear steps UP so an up-shift sounds like a higher gear (0 = default 5; clamped 30% max)
+    CVar_Add("Client", "cl_car_sound_debug",    "0",    CVAR_SIDE_CL);  // 2 Hz console print of the driver's state (islocal match, env, ignition)
+    // BIG breakable-destruction chunks (CSQC_SpawnChunkGibs, cl_breakable.qc):
+    // large IQM pieces that REPLACE the legacy gibs for glass + wood/tile
+    // breakables — wood planks/splinters (models/gibs/wood/wood_chunk1..9.iqm)
+    // and big flat window panes (models/gibs/glass/glass_chunk1..9.iqm).
+    // 1 (default) = chunks only; 0 = the legacy glassgibs/woodgib .mdl look.
+    // Count: a mapper "cnt" key wins verbatim (wire count != the material's
+    // server default 15/6 means mapper-set); else min(6 + count*2/3, 16).
+    //   cl_breakable_chunks_mode  0 = CSQC entities (default: rollback-sweepable
+    //                             on mispredicted breaks, QC-controlled scale/alpha)
+    //                             1 = engine model-particles (weapons.breakchunks_*
+    //                             in particles/impacts.cfg; sim in C; scale/alpha/
+    //                             life baked in the cfg — tune + `reloadweapons`;
+    //                             NOT swept on break rollback)
+    CVar_Add("Client", "cl_breakable_chunks",       "1",    CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_breakable_chunks_mode",  "0",    CVAR_SIDE_CL);
     // Bullet-hole renderer path (read by cl_bulletholes.qc):
     //   1 = polygon-quad (default, fast — ~5-8x cheaper than adddecal,
     //       no decal corner-wrap on convex surfaces).
@@ -949,10 +1021,6 @@ void() CVar_Init =
     CVar_Add("Client", "cl_lightshadow_swing",     "0",   CVAR_SIDE_CL);  // 1 = swing the r_shadows-2 direction by map lights (sunless maps)
     CVar_Add("Client", "cl_lightshadow_smooth",    "0.3", CVAR_SIDE_CL);  // direction smoothing time (seconds)
     CVar_Add("Client", "cl_lightshadow_sunweight", "2",   CVAR_SIDE_CL);  // sun term weight (~= a 200 lamp at 141qu; 0 = lamps only)
-    // *** DEPRECATED — do not enable (see cl_maplights.qc): per-CASTER fake shadows
-    // (engine multi-fakeshadow atlas, r_shadows_fakecount > 1).  Static props can't
-    // register, so they inherit the player's throw angle.  Kept dormant for reference.
-    CVar_Add("Client", "cl_lightshadow_perlight",  "0",   CVAR_SIDE_CL);  // DEPRECATED: 1 = drive per-caster shadow slots
     // Max simultaneous blood splats (FIFO — oldest evicted past the cap).  Now
     // that decals are baked to a trisoup batch (cheap per-frame), this can go
     // well above the old 96.  Clamped to the compile-time buffer ceiling
@@ -1495,6 +1563,23 @@ void() CVar_Init =
     // Debug: disable phys-prop extrapolation smoothing to see the raw server
     // send cadence (default 0 = extrapolation ON).  Read in cl_physprop.qc.
     CVar_Add("Client debug", "cl_physprop_noextrap", "0", CVAR_SIDE_CL);
+    CVar_Add("Client debug", "cl_physprop_wake_lerp", "0.08", CVAR_SIDE_CL);  // seconds a prop woken from rest lerps to catch up to its first update (bounds the stale-gap crawl so a jolt looks prompt+smooth). 0 = instant snap.
+    CVar_Add("Client debug", "cl_physprop_extrap_max", "0.05", CVAR_SIDE_CL);  // max seconds a moving prop/car coasts on its streamed velocity when the next snapshot is late (instead of FREEZING at the last one — the fast-car stutter). Bounds runaway on packet loss. 0 = old freeze behaviour.
+    CVar_Add("Vehicles", "cl_car_wheels",        "1",     CVAR_SIDE_CL);  // render prop_car spinning/steering wheels from the wheelmodel key (0 = off / baked wheels)
+    CVar_Add("Vehicles", "cl_car_wheel_radius",  "12.64", CVAR_SIDE_CL);  // visual wheel rolling radius (qu) driving the spin rate; match your wheel model
+    CVar_Add("Vehicles", "cl_car_wheel_z",       "0",     CVAR_SIDE_CL);  // vertical nudge (qu) of the visual wheels along the car's up axis (tune so tyres meet the ground)
+    CVar_Add("Vehicles", "cl_car_wheel_spin",    "1",     CVAR_SIDE_CL);  // spin direction/scale (set -1 if the wheels roll backward)
+    CVar_Add("Vehicles", "cl_car_wheel_steer",   "-1",    CVAR_SIDE_CL);  // steer direction (set -1 if the wheels turn the wrong way vs +moveleft/right)
+    CVar_Add("Vehicles", "cl_car_wheel_fwd",     "0",     CVAR_SIDE_CL);  // live fore/aft nudge of the visual wheel set (u); added to the per-car wheel_fwd key
+    // Client-side seated driver model (rendered glued to the interpolated car pose — smooth, first-person visible).
+    CVar_Add("Vehicles", "cl_car_driver",        "1",     CVAR_SIDE_CL);  // render the seated driver model client-side (0 = off)
+    CVar_Add("Vehicles", "cl_car_driver_frame",  "112",   CVAR_SIDE_CL);  // static pose frame for the seated driver (112 = CSANIM_LEGS_CROUCH_STATIC, no-IK crouch)
+    // Client-side tailpipe exhaust puff (reuses the bullet metal-impact smoke effect).  The pipe point is a
+    // pure offset from the car's box centre along its chassis basis, so dial these to your model's real pipe.
+    CVar_Add("Vehicles", "cl_car_exhaust",       "1",     CVAR_SIDE_CL);  // render tailpipe exhaust smoke (0 = off)
+    CVar_Add("Vehicles", "cl_car_exhaust_x",     "-70",   CVAR_SIDE_CL);  // fore/aft from the car origin along chassis fwd (qu; - = rear)
+    CVar_Add("Vehicles", "cl_car_exhaust_y",     "25",    CVAR_SIDE_CL);  // left/right from the car origin (qu; + = right)
+    CVar_Add("Vehicles", "cl_car_exhaust_z",     "12",    CVAR_SIDE_CL);  // height ABOVE the car origin (qu) — origin sits at ground, so keep this positive or the puff is underground
     // 0=off, 1=ODE tight rotated box, 2=trace inflated AABB, 3=both.
     // Draws every csqc_dropped_weapon's bbox so the user can verify
     // the ODE collision shape matches the visible mesh and that the
@@ -1506,6 +1591,7 @@ void() CVar_Init =
     CVar_Add("Client debug", "cl_debug_move",        "0", CVAR_SIDE_CL);
     CVar_Add("Client debug", "cl_debug_game",        "0", CVAR_SIDE_CL);
     CVar_Add("Client debug", "cl_debug_surface",     "0", CVAR_SIDE_CL);   // live material readout: look-at + underfoot (surfaceprops tuning)
+    CVar_Add("Client debug", "cl_debug_prop",        "0", CVAR_SIDE_CL);   // live phys-prop readout under the crosshair (material/mass/friction + live speed + push knobs)
     CVar_Add("Client debug", "cl_debug_playermodel", "0", CVAR_SIDE_CL);
     CVar_Add("Client debug", "cl_debug_smoothing",   "0", CVAR_SIDE_CL);
     CVar_Add("Client debug", "cl_debug_spikes",      "0", CVAR_SIDE_CL);
@@ -2011,6 +2097,17 @@ void() CVar_Init =
     // r_spray_offset REMOVED — unified into r_decal_offset.
     CVar_Add("Server", "sv_sprayfrequency",        "10",            CVAR_SIDE_SV);
     CVar_Add("Server", "sv_spraymax",              "3",             CVAR_SIDE_SV);
+    // --- Player body paint (sv_paint.qc / cl_paint.qc) ---
+    // CAMO: hold +camo (alias -> impulse 21/22, default.cfg) aiming at a wall;
+    // your skin fills with THAT WALL'S texture over sv_camo_time seconds —
+    // stand against it to blend in.  Damage scrubs sv_camo_damage_loss per hit;
+    // respawn clears.  SPLATS: paintball hits paint the victim (no cvar; rides
+    // cl_paint).  cl_paint 0 disables all client-side skin painting/uploads.
+    CVar_Add("Server", "sv_camo_enable",           "1",             CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_camo_time",             "2.5",           CVAR_SIDE_SV);  // seconds of holding +camo to reach full coverage
+    CVar_Add("Server", "sv_camo_range",            "96",            CVAR_SIDE_SV);  // max distance (qu) to the wall being copied
+    CVar_Add("Server", "sv_camo_damage_loss",      "0.35",          CVAR_SIDE_SV);  // coverage scrubbed off per hit taken
+    CVar_Add("Client", "cl_paint",                 "1",             CVAR_SIDE_CL);
     // Global multiplier on every infodecal's size (final size = entity "scale" key * this).
     CVar_Add("Client", "cl_infodecal_scale",       "1.0",           CVAR_SIDE_CL);
     // UNIFIED decal renderer — ONE cvar for ALL decal systems (bullet holes, sprays, infodecals, blood).
@@ -2433,12 +2530,16 @@ void() CVar_Init =
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
     CVar_Add("ODE physics", "sv_physprop_flood_per_frame",      "1",   CVAR_SIDE_SV);  // spawnflood: props spawned per SERVER FRAME (1 = clean trickle + self-throttles to server health; raise for a faster dump)
     CVar_Add("ODE physics", "sv_physprop_stream_hz",            "8",   CVAR_SIDE_SV);  // free phys-prop CSQC mirror stream rate while MOVING (Hz). 8 = smooth + low bandwidth (client INTERPOLATES between snapshots). 0 = every tick (~64). Lower = cheaper big floods.
+    CVar_Add("ODE physics", "sv_physprop_stream_instant",       "1",   CVAR_SIDE_SV);  // 1 = on interaction (shoot/explode/gravgun/+use/throw) jump the queue and push ONE mirror update on the next tick instead of waiting up to 1/stream_hz. Ongoing rate still capped by stream_hz.
     CVar_Add("ODE physics", "sv_physprop_flood_dist",           "200", CVAR_SIDE_SV);  // spawnflood: forward distance of the pile from the player (near edge = dist-144 clears the player hull so barrels don't spawn ON you).
     // Unified phys-object core (PhysObj_Setup / PhysObj_Think): per-object mass
     // overrides + shared bounce + shared sleep/wake thresholds. The barrel uses
     // sv_physprop_mass (20); the can + weapons get their own mass; sleep_* gate the
     // QC sleep/wake-at-rest for ALL free props (barrel/can/weapon drops).
     CVar_Add("ODE physics", "sv_physprop_can_mass",       "2",    CVAR_SIDE_SV);
+    // Prop material+weight (scripts/propmaterials.txt, sh_propmaterials.qc): global weight
+    // multiplier on the per-material density*volume mass for map prop_physics.  1 = as-authored.
+    CVar_Add("ODE physics", "sv_propmat_mass_scale",      "1",    CVAR_SIDE_SV);
     CVar_Add("ODE physics", "sv_physprop_bounce",         "0",    CVAR_SIDE_SV);
     CVar_Add("ODE physics", "sv_physprop_bouncestop",     "0.5",  CVAR_SIDE_SV);
     CVar_Add("ODE physics", "sv_physprop_sleep_speed",    "8",    CVAR_SIDE_SV);
@@ -2504,6 +2605,13 @@ void() CVar_Init =
     CVar_Add("ODE physics", "sv_props_enable",           "1",  CVAR_SIDE_SV);
     CVar_Add("ODE physics", "sv_props_physics",          "1",  CVAR_SIDE_SV);
     CVar_Add("ODE physics", "sv_props_default_halfsize", "16", CVAR_SIDE_SV);
+    // 1 = NON-SOLID decorative props (prop_detail: bushes/grass/scatter) get EF_NOSHADOW
+    // at spawn, so they never enter the r_shadows-2 fake-sun depth pass (which re-renders
+    // EVERY caster in the ortho box each frame with no PVS).  Cosmetic only — the sun N.L
+    // shade term is independent of the shadow map, so they keep unlit-side shading and just
+    // stop throwing a ground shadow.  Per-prop escapes: spawnflags 16 (Never Cast Shadow) /
+    // 32 (Always Cast Shadow).  0 = every prop casts (the pre-optimisation behaviour).
+    CVar_Add("ODE physics", "sv_props_foliage_noshadow", "1",  CVAR_SIDE_SV);
     // Phys-prop contact FX (impact sounds + smoke).  Impact speed (qu/s) drives
     // soft-vs-hard sound + smoke size; below _min_speed nothing fires (gentle taps).
     // _cooldown stops a tumbling/bouncing prop machine-gunning sounds.  _slide_* drive
@@ -2517,6 +2625,22 @@ void() CVar_Init =
     // change — restarts the sample, ~inaudible for a rough scrape; throttled+deadbanded).
     // 0 = volume fixed at the speed it had when the scrape started.
     CVar_Add("ODE physics", "sv_physprop_scrape_track",      "1",    CVAR_SIDE_SV);
+    // Prop think sleep.  A prop that has held still for ~0.35s drops from the 64 Hz
+    // PhysObj_Think to _sleep_hz — on a prop-dense map that think was the single biggest
+    // server cost, re-scheduling itself 64x/s for props that had not moved in minutes.
+    // Every QC-visible interaction (bullet / explosion / +use / throw / carry / gravgun)
+    // wakes the prop the SAME tick via PhysProp_Wake; a contact QC cannot see (prop-on-prop,
+    // a door shoving it — ODE gives QC no contact callback) is caught within 1/_sleep_hz.
+    // Set _sleep 0 to restore the always-64 Hz behaviour.
+    CVar_Add("ODE physics", "sv_physprop_sleep",             "1",    CVAR_SIDE_SV);
+    CVar_Add("ODE physics", "sv_physprop_sleep_hz",          "8",    CVAR_SIDE_SV);
+    // 1 = prop_physics / prop_car CSQC mirrors are PVS-culled AND removed on PVS exit, like
+    // prop_static.  0 = legacy PVSF_NOREMOVE: once a client has seen the mirror it is never
+    // removed, so props/cars linger frozen in the void (and a driven car leaks its client
+    // wheel/driver entities).  The mirror is the client's only collision hull, so culling
+    // means a prop just outside your (fat) PVS is not client-solid — the same trade
+    // prop_static already makes.  Set 0 if that ever bites.  See PhysProp_ApplyPvsPolicy.
+    CVar_Add("ODE physics", "sv_physprop_pvscull",           "1",    CVAR_SIDE_SV);
 
     // Weapon-drop SHAPE tunables (sv_physprop_weapon_*) — the ODE collision box +
     // hitscan trace-AABB for dropped guns.  Mass / friction / bounce / damping /

@@ -5,6 +5,7 @@ shared/sh_cvar_table.qc
 shared/sh_weapon_manifest.qc
 shared/sh_weapons.qc
 shared/sh_surfaceprops.qc
+shared/sh_propmaterials.qc
 shared/sh_player_sini.qc
 shared/sh_player_anims.qc
 shared/sh_weapon_logic.qc
@@ -135,11 +136,14 @@ server/sv_env_spark.qc
 server/sv_physprop.qc
 server/sv_use.qc
 server/sv_props.qc
+shared/sh_vehicle_phys.qc
+server/sv_prop_vehicle.qc
 server/sv_push.qc
 server/sv_teleport.qc
 server/sv_ladder.qc
 server/sv_cameras.qc
 server/sv_spray.qc
+server/sv_paint.qc
 server/sv_infodecal.qc
 shared/sh_pmove.qc
 server/sv_grapple.qc
@@ -149,4 +153,5 @@ server/sv_killcam.qc
 server/sv_radio.qc
 server/sv_navnodes.qc
 server/sv_bots.qc
+server/sv_ragdoll.qc
 server/sv_main.qc

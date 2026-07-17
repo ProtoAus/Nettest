@@ -6,6 +6,42 @@ void() CSQC_Ent_Remove =
 	// so this is free for every other entity class.
 	BlobShadow_FreeStatic(self);
 
+	// Car engine audio: a removed car mirror must stop its FORCELOOP channels or
+	// they keep looping at its last origin forever.  Free for everything else.
+	if (self.pp_is_car)
+	{
+		CarSound_Stop(self);
+
+		// Release this car's CACHED CHILD RENDER ENTITIES.  Car_DrawWheels lazy-spawns 4
+		// wheel ents and Car_DrawDriver one seated-body ent, both parked on the car mirror
+		// and reused every frame — but nothing ever freed them, because until the mirrors
+		// became PVS-cullable a car mirror was never removed at all (PVSF_NOREMOVE).  Now
+		// that they ARE removed, every cull/re-add cycle across a PVS boundary would orphan
+		// 5 CSQC entities per car, forever.  Free them here.
+		if (self.pp_wheel0) remove(self.pp_wheel0);
+		if (self.pp_wheel1) remove(self.pp_wheel1);
+		if (self.pp_wheel2) remove(self.pp_wheel2);
+		if (self.pp_wheel3) remove(self.pp_wheel3);
+		self.pp_wheel0 = self.pp_wheel1 = self.pp_wheel2 = self.pp_wheel3 = world;
+		if (self.pp_driver) remove(self.pp_driver);
+		self.pp_driver = world;
+
+		// g_car_driver_count is only ever maintained in CSQC_PhysProp_Update, so a car
+		// removed WHILE DRIVEN used to leak +1 forever — which permanently defeated
+		// Car_IsDriverSlot's "no drivers -> skip the scan" fast path (its comment even
+		// notes the over-count).  With PVS culling that is no longer a rare edge case:
+		// it would happen every time a driven car left someone's PVS.
+		if (self.pp_car_drv_ent > 0)
+		{
+			g_car_driver_count -= 1;
+			if (g_car_driver_count < 0)
+				g_car_driver_count = 0;
+			self.pp_car_drv_ent = 0;
+		}
+
+		Car_ChainUnlink(self);
+	}
+
 	if (self.classname == "player_visual_proxy")
 	{
 		// nettest death ragdoll: DON'T free the ragdoll inline — CSQC_Ent_Remove runs mid network-parse,
@@ -250,6 +286,7 @@ noref void(float apiver, string enginename, float enginever) CSQC_Init =
 	CSQC_BulletHolesInit();
 	CSQC_BlobShadow_ReregisterShaders();   // blob-shadow shader (also re-registered on vid_restart)
 	Surf_LoadMaterials();       // scripts/surfaceprops.txt -> texture material table (sh_surfaceprops.qc)
+	PropMat_LoadMaterials();    // scripts/propmaterials.txt -> prop material+weight table (sh_propmaterials.qc)
 	CSQC_TracersInit();
 	CSQC_Rope_Init();
 	CSQC_Scorch_Precache();
@@ -279,12 +316,17 @@ noref void(float apiver, string enginename, float enginever) CSQC_Init =
 	registercommand("sv_defaultutility");
 	registercommand("radio");
 	registercommand("buymenu");
+	registercommand("carvals");               // F3 car panel: server's carget reply (driven car's real values)
 	registercommand("impactdebris");
 	registercommand("surf_material");        // print the material under the crosshair (surfaceprops tuning)
 	registercommand("surf_reloadmaterials"); // reload scripts/surfaceprops.txt live
+	registercommand("prop_material");        // print the phys-prop material + weight under the crosshair
+	registercommand("propmat_reloadmaterials"); // reload scripts/propmaterials.txt live (client table)
 	registercommand("spawnragdoll");         // client-side Box3D ragdoll test (cl_ragdoll.qc)
 	registercommand("throwragdoll");         // launch a ragdoll in the aim direction (cl_ragdoll_throwspeed)
+	registercommand("throwsoldier");         // QUICK TEST: throw the Ratslayer soldier.md5mesh with its own doll
 	registercommand("killragdolls");
+	registercommand("painttest");            // QUICK TEST: body paint — painttest <wallTexName|-> [amt01] [splats] (cl_paint.qc, local-only)
 	// Grapple press-and-hold aliases.  Bound via `bind <key> "+grapple"`:
 	// the engine fires `+grapple` on key down and `-grapple` on key up,
 	// which our aliases translate into the engage/release impulse pair
@@ -490,7 +532,9 @@ float(float width, float height) CSQC_UpdateViewFrameBegin =
 	Radio_TickSequence();
 	CSQC_Spray_PollCvar();
 	MapLights_SwingThrowDir();   // light-aware r_shadows-2 direction (cl_lightshadow_swing, sunless maps only)
-	MapLights_DriveCasterShadows(); // per-CASTER fake-shadow slots (cl_lightshadow_perlight + r_shadows_fakecount>1)
+	Car_RefreshCvarCache();      // one cvar read per frame for the car render path (was ~10 per car per frame)
+	CSQC_CarSound_Frame();       // prop_car engine audio: RPM-ladder loops (cl_car_sound, cl_vehicle_sound.qc)
+	Paint_AutoTestFrame();       // body-paint headless self-test (inert unless +set cl_paint_autotest <tex>)
 	//clear and update our global screen resolution vars
 	clearscene();
 	g_width = width;
@@ -547,7 +591,7 @@ void() CSQC_DrawTeamDebugServerPanels =
 	// Wrap the scoreboard draw inside this same sui_begin/end so
 	// only one bracket exists per frame (sui_begin is not re-entrant).
 	float mute_active = hud_voipmute_mode && HUD_ScoreboardVisible() && !TeamMenuIsOpen();
-	if (TeamMenuIsOpen() || Debug_PanelOpen() || Server_PanelOpen() || mute_active)
+	if (TeamMenuIsOpen() || Debug_PanelOpen() || Server_PanelOpen() || Tune_PanelOpen() || mute_active)
 	{
 		float prev_font = drawfont;
 		drawfont = hud_font;
@@ -568,6 +612,10 @@ void() CSQC_DrawTeamDebugServerPanels =
 		if (Server_PanelOpen())
 		{
 			Server_PanelDraw();
+		}
+		if (Tune_PanelOpen())
+		{
+			Tune_PanelDraw();
 		}
 		sui_end();
 		drawfont = prev_font;
@@ -830,19 +878,23 @@ float() CSQC_UpdateViewAliveCamera =
 		float cdist = cvar("cl_car_cam_dist");   if (cdist <= 0) cdist = 160;
 		float chgt  = cvar("cl_car_cam_height"); if (chgt <= 0) chgt = 64;
 		vector canchor = predicted_player.origin;
-		// find the car mirror nearest the seat (we're inside it) — it renders as classname "phys_files"
-		entity cmirror = world, cme = world;  float cbestd = 120;
-		while ((cme = find(cme, classname, "phys_files")))
+		// Find the car mirror nearest the seat (we're inside it).  Walks the CAR CHAIN
+		// (cl_physprop.qc) rather than find(classname, "phys_files"): every physics prop
+		// shares that classname, so the old scan compared strings against every barrel/can/
+		// cabinet on the map every frame — and, worse, could actually MATCH one, since it
+		// never checked pp_is_car and a prop parked within 120u of the seat would win.
+		entity cmirror = world, cme;  float cbestd = 120;
+		for (cme = g_car_chain_head; cme; cme = cme.pp_car_next)
 		{
 			float cmd = vlen(cme.pp_snap_origin - predicted_player.origin);
 			if (cmd < cbestd) { cbestd = cmd; cmirror = cme; }
 		}
 		if (cmirror != world)
 		{
-			// Anchor to the SAME 2-snapshot interpolated origin the car model renders at
-			// (CSQC_PhysProp_Predraw), so the model + chase cam stay glued at any stream rate.
-			float cf = PhysProp_InterpFrac(cmirror);
-			canchor = cmirror.pp_snap_origin_prev + (cmirror.pp_snap_origin - cmirror.pp_snap_origin_prev) * cf;
+			// Anchor to the SAME smoothed origin the car model renders at (PhysProp_InterpOrigin: interp
+			// in-range + bounded velocity coast on the tail), so the model + chase cam stay glued at any
+			// stream rate and never diverge on a late packet.
+			canchor = PhysProp_InterpOrigin(cmirror);
 		}
 		else if (cl_car_cam_org != '0 0 0')
 		{
@@ -1221,6 +1273,10 @@ float(string cmd) CSQC_ConsoleCommand =
 	tokenize(cmd);
 	switch(argv(0))
 	{
+		case "carvals":
+			// F3 car panel: the server's carget reply with the driven car's real current values.
+			Tune_StoreCarVals(cmd);
+			return TRUE;
 		case "surf_material":
 		{
 			// Trace from the view and report the texture -> material under the crosshair.
@@ -1238,11 +1294,42 @@ float(string cmd) CSQC_ConsoleCommand =
 			print(sprintf("surfaceprops reloaded: %g materials, %g patterns\n",
 				sp_mat_count, sp_pat_count));
 			return TRUE;
+		case "prop_material":
+		{
+			// Trace from the view; report the aimed phys-prop's model -> material + weight.
+			vector pvorg = getproperty(VF_ORIGIN);
+			makevectors(getproperty(VF_CL_VIEWANGLES));
+			traceline(pvorg, pvorg + v_forward * 8192, MOVE_NOMONSTERS, world);
+			string mn = trace_ent.model;
+			if (mn == "" && trace_ent.modelindex)
+				mn = modelnameforindex(trace_ent.modelindex);   // CSQC props use setmodelindex
+			if (mn == "")
+			{
+				print("prop: no model under crosshair\n");
+				return TRUE;
+			}
+			float pmi = PropMat_For(mn);
+			print(sprintf("prop: \"%s\" -> material=%s  mass=%g friction=%g restit=%g dampx=%g\n",
+				mn, PropMat_Name(pmi), PropMat_Mass(pmi, trace_ent),
+				PropMat_Friction(pmi), PropMat_Restit(pmi), PropMat_DampMult(pmi)));
+			return TRUE;
+		}
+		case "propmat_reloadmaterials":
+			PropMat_LoadMaterials();
+			print(sprintf("propmaterials reloaded: %g materials, %g patterns\n",
+				pm_mat_count, pm_pat_count));
+			return TRUE;
 		case "spawnragdoll":	// client-side Box3D ragdoll test (explicit skel_ragupdate, self-diagnosing)
 			CSQC_SpawnRagdollTest();
 			return TRUE;
 		case "throwragdoll":	// launch a ragdoll in the aim direction (cl_ragdoll_throwspeed)
 			CSQC_ThrowRagdollTest();
+			return TRUE;
+		case "throwsoldier":	// QUICK TEST: Ratslayer soldier.md5mesh + its own sample doll
+			CSQC_ThrowSoldierTest();
+			return TRUE;
+		case "painttest":		// QUICK TEST: fake a local paint state — painttest <wallTexName|-> [amt01] [splats]
+			Paint_TestCmd();
 			return TRUE;
 		case "killragdolls":
 			CSQC_KillRagdolls();
@@ -1417,6 +1504,13 @@ float(float evtype, float scanx, float chary, float devid) CSQC_InputEvent =
 			return TRUE;
 	}
 
+	// Car tuning panel: same shape but on F3.
+	if (Tune_PanelOpen())
+	{
+		if (Tune_PanelInputEvent(evtype, scanx, chary, devid))
+			return TRUE;
+	}
+
 	// F1 opens the debug panel from gameplay.
 	if (evtype == IE_KEYDOWN && scanx == K_F1)
 	{
@@ -1428,6 +1522,13 @@ float(float evtype, float scanx, float chary, float devid) CSQC_InputEvent =
 	if (evtype == IE_KEYDOWN && scanx == K_F2)
 	{
 		Server_PanelToggle();
+		return TRUE;
+	}
+
+	// F3 opens the car tuning panel from gameplay.
+	if (evtype == IE_KEYDOWN && scanx == K_F3)
+	{
+		Tune_PanelToggle();
 		return TRUE;
 	}
 
@@ -1581,6 +1682,7 @@ float(float ev) _net_event_bytes =
 	if (ev == CSQC_EVENT_KILL_REWARD)            return 5;   // 2 svc hdr + 2 short reward + 1 headshot byte
 	if (ev == CSQC_EVENT_ROUND_REWARD)           return 5;   // 2 svc hdr + 2 short amount + 1 win byte
 	if (ev == CSQC_EVENT_KILLCAM_TRACK)          return 860;  // 4 hdr + ~66 frames × 13 bytes (one-shot per death, variable)
+	if (ev == CSQC_EVENT_PLAYER_PAINT)           return 22;  // 2 svc hdr + 1 sub + 1 slot + (camo: 1 amt + ~16 texname string | splat: 3 rgb + 2 seed)
 	return 2;
 };
 
@@ -1603,6 +1705,9 @@ void() CSQC_Parse_Event =
 			break;
 		case CSQC_EVENT_KILLCAM_TRACK:
 			Killcam_SV_ParseTrack();	// server-side killcam: the killer's recorded camera track
+			break;
+		case CSQC_EVENT_PLAYER_PAINT:
+			Paint_Ev_Read();	// body paint: camo set / paintball splat / clear (cl_paint.qc)
 			break;
 		case CSQC_EVENT_IMPACT:
 		{
@@ -2063,19 +2168,27 @@ void() CSQC_Parse_Event =
 			pp_norm_y = (readbyte() - 128) / 127;
 			pp_norm_z = (readbyte() - 128) / 127;
 			float pp_bucket = readbyte();
-			float pp_sid = particleeffectnum("weapons.physprop_smoke");
-			if (pp_sid != -1 && pp_sid != 0)
-				pointparticles(pp_sid, pp_pos, pp_norm * (pp_bucket == 2 ? 30 : 12),
-				               pp_bucket == 2 ? 2 : 1);
-			// Slide (bucket 0): throw metal sparks off the scraped surface using
-			// the SAME effect a bullet impact spawns (weapons.metal_impact,
-			// normal * 100, count 1 — see cl_bulletimpact.qc), so dragging the
-			// cabinet along a wall/floor sparks like it's being ground down.
-			if (pp_bucket == 0)
-			{
-				float pp_spark = particleeffectnum("weapons.metal_impact");
-				if (pp_spark != -1 && pp_spark != 0)
-					pointparticles(pp_spark, pp_pos, pp_norm * 100, 1);
+			float cm_sid, cs_sid;   // metal_impact smoke / debris_spark ids (declared once — QC hoists locals)
+			if (pp_bucket == 3)
+			{   // CAR hard wall hit: exhaust/"gas-pipe" smoke + a spark burst at the contact
+				cm_sid = particleeffectnum("weapons.metal_impact");   // dark exhaust puff (Car_DrawExhaust reuses it)
+				if (cm_sid != -1 && cm_sid != 0) pointparticles(cm_sid, pp_pos, pp_norm * 30,  2);
+				cs_sid = particleeffectnum("weapons.debris_spark");   // thin additive scrape streaks
+				if (cs_sid != -1 && cs_sid != 0) pointparticles(cs_sid, pp_pos, pp_norm * 200, 1);
+			}
+			else if (pp_bucket == 4)
+			{   // CAR grind tick: thin sparks + a small smoke wisp (streams every sv_car_grind_interval)
+				cs_sid = particleeffectnum("weapons.debris_spark");
+				if (cs_sid != -1 && cs_sid != 0) pointparticles(cs_sid, pp_pos, pp_norm * 120, 1);
+				cm_sid = particleeffectnum("weapons.metal_impact");
+				if (cm_sid != -1 && cm_sid != 0) pointparticles(cm_sid, pp_pos, pp_norm * 12,  1);
+			}
+			else
+			{   // prop physprop_smoke path (buckets 0 slide / 1 soft / 2 hard) — unchanged
+				float pp_sid = particleeffectnum("weapons.physprop_smoke");
+				if (pp_sid != -1 && pp_sid != 0)
+					pointparticles(pp_sid, pp_pos, pp_norm * (pp_bucket == 2 ? 30 : 12),
+					               pp_bucket == 2 ? 2 : 1);
 			}
 			break;
 		}

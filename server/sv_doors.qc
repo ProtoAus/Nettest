@@ -994,12 +994,14 @@ void() func_door =
     self.door_state  = DOOR_STATE_BOTTOM;
     self.mover_state = MOVER_STATE_BOTTOM;
 
-    // Auto-spawn the proximity touch trigger only when the door is
-    // both un-targeted (mappers wiring it up via target intent want
-    // exclusive control) AND USE_ABLE (off → no proximity / no +use).
-    // PASS_THROUGH doors also skip the trigger because the brush has
-    // no collision for the trigger to hang off of meaningfully.
-    if (!self.targetname
+    // Auto-spawn the proximity touch trigger ONLY when sv_door_proximity is on (default 0 = OFF).
+    // Off → the door opens only on +use (door_use, requires USE_ABLE) / target-chain / damage — never on
+    // walk-near.  The proximity trigger re-fired door_use every frame the player stood in its box (via the
+    // per-frame SV_CheckTouchTriggers scan), which caused both the walk-near open AND the every-frame
+    // direction reversal.  Still gated on un-targeted (mappers wiring via target want exclusive control) +
+    // USE_ABLE + not PASS_THROUGH when re-enabled.
+    if (cvar("sv_door_proximity")
+        && !self.targetname
         && (self.spawnflags & DOOR_USE_ABLE)
         && !(self.spawnflags & DOOR_PASS_THROUGH))
         door_spawn_trigger();
