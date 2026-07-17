@@ -2442,6 +2442,24 @@ void() CVar_Init =
     CVar_AddSaved("ODE physics", "sv_prop_collision",             "3",   CVAR_SIDE_SV);
     CVar_AddSaved("ODE physics", "sv_prop_decomp",                "2",   CVAR_SIDE_SV);
     CVar_AddSaved("ODE physics", "sv_prop_decomp_concavity",      "0.06",CVAR_SIDE_SV);  // runtime-ACD (sv_prop_decomp 1) concavity threshold, fraction of model extent (clamped 0.01-0.5)
+    // Engine Patch 102: model-path prefixes that skip collision-hull + ACD construction at LOAD.
+    // These are pure load-time waste for models that are never SOLID_PHYSICS_* props:
+    //   models/player/  - highly concave, thousands of verts -> pays the FULL recursive ACD for nothing
+    //   models/gibs/    - 122 debris models, bounce-boxed, never prop-collided
+    //   models/nature/grass|fern|wheat - prop_detail, i.e. already SOLID_NOT, yet grass_2/grass_3/
+    //     fern_1/wheat_1 each carried THIRTY-TWO convex pieces the engine built and never used.
+    // Prefix match (Q_strncasecmp in Mod_SkipCollisionHulls), so "models/nature/grass" catches
+    // grass_2.iqm etc. stone/tree/tree_log/tree_stump/mushroom deliberately NOT listed - they stay
+    // collidable. A listed model used as a prop anyway degrades to the normal alias trace (the hull
+    // trace is gated on numhullplanes>=4), so this can't punch holes in the world.
+    // Read at model LOAD -> reload the map to apply.
+    // NOTE the value below is NOT what takes effect -- the real default lives in the ENGINE
+    // (gl_model.c mod_prop_hull_exclude), because this table's registercvar() is a documented no-op
+    // for cvars the engine already registered, and Mod_Init registers this one long before QC runs.
+    // This row exists so the value is VISIBLE and editable in server.cfg; keep the two in sync.
+    CVar_AddSaved("ODE physics", "sv_prop_hull_exclude",
+                  "models/player/;models/gibs/;models/nature/grass;models/nature/fern;models/nature/wheat",
+                  CVAR_SIDE_SV);
     CVar_AddSaved("ODE physics", "physics_ode_trimesh_from_hull", "1",   CVAR_SIDE_SV);
     CVar_AddSaved("ODE physics", "physics_ode_use_decomp",        "0",   CVAR_SIDE_SV);
     CVar_AddSaved("ODE physics", "physics_ode_restingskip",       "1",   CVAR_SIDE_SV);
