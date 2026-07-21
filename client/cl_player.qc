@@ -3996,16 +3996,26 @@ float() CSQC_PlayerVisual_Predraw =
 	// engine hides it from the main first-person view but still includes it in
 	// the fake-shadow depth passes (they run with externalview=true) and in
 	// mirrors, so you get a REAL first-person body shadow (+ a blob underfoot).
-	float vis_fp_shadowbody = FALSE;
+	// vis_fp_body    = draw the local body at all (shadow depth pass and/or on screen)
+	// vis_fp_visible = ALSO let it be seen in the main view — the CS2-style first-person
+	//                  body.  The two are separate because the shadow path deliberately
+	//                  wants it drawn-but-hidden (RF_EXTERNALMODEL, set below).
+	float vis_fp_body    = FALSE;
+	float vis_fp_visible = FALSE;
 	if (vis_skip_render)
 	{
 		float fp_want = 0;
+		if (cvar("cl_fpbody"))
+		{
+			vis_fp_visible = TRUE;
+			fp_want = 1;
+		}
 		if (cvar("r_shadows"))
 			fp_want = 1;
 		if (cvar("cl_blobshadows"))
 			fp_want = 1;
 		if (fp_want)
-			vis_fp_shadowbody = TRUE;
+			vis_fp_body = TRUE;
 		else
 			return PREDRAW_NEXT;
 	}
@@ -4239,6 +4249,11 @@ float() CSQC_PlayerVisual_Predraw =
 						// corpse — both would freeze the body.  This is why NONE animated.
 		else if (corpse_frozen && !fresh_skel)
 			do_rebuild = FALSE;
+		else if (vis_fp_visible)
+			do_rebuild = TRUE;	// FIRST-PERSON BODY: never throttle.  The idle rate is
+						// invisible on a body 500 units away, but this one is ~20
+						// units from the eye and filling the lower screen, where a
+						// 25 Hz pose update reads as a visible step/stutter.
 		else if (!fresh_skel && !self.vis_is_dead && g_spine_idle_rate > 0
 		         && vlen(self.velocity) <= 8)
 		{
@@ -4440,18 +4455,72 @@ float() CSQC_PlayerVisual_Predraw =
 		self.angles = vectoangles(gs_fwd, gs_up);
 	}
 
-	// First-person shadow body: invisible in the main view, casts + mirrors only.
+	// First-person body: "crane your neck" offset.  Nobody can look straight down their own
+	// spine — in life you pivot your head FORWARD over your chest to look at your feet, so
+	// your eye ends up in front of and above the top of your torso.  The camera here is
+	// rigidly at the eye position, so without this you look down a perfectly vertical body
+	// and it reads wrong.  Slide the BODY as the view pitches down to fake that pivot.
+	//
+	// Quake pitch: POSITIVE view_angles_x = looking DOWN.  The blend only starts once you are
+	// past cl_fpbody_pitch_start, so level and upward views are completely untouched.
+	//
+	// NOTE this moves the real entity, so at full lean your cast shadow shifts by the same
+	// amount.  Deliberate trade: the offsets are small and only reach full value when you are
+	// staring at your own feet, which is exactly when you are not looking at your shadow.
+	if (vis_fp_visible)
+	{
+		float fpp_start = cvar("cl_fpbody_pitch_start");
+		float fpp_span  = 90 - fpp_start;
+		if (fpp_span < 1)
+			fpp_span = 1;
+		float fpp_t = (view_angles_x - fpp_start) / fpp_span;
+		if (fpp_t > 0)
+		{
+			if (fpp_t > 1)
+				fpp_t = 1;
+			fpp_t = fpp_t * fpp_t * (3 - 2 * fpp_t);   // smoothstep — no crease as it engages
+			// Yaw-only basis: the lean must follow where you FACE, not where you look, or
+			// pitching down would drive the body into the floor.
+			makevectors([0, view_angles_y, 0]);
+			setorigin(self, self.origin
+			                + v_forward * (cvar("cl_fpbody_pitch_fwd") * fpp_t)
+			                + '0 0 1'   * (cvar("cl_fpbody_pitch_up")  * fpp_t));
+		}
+	}
+
+	// First-person body visibility.  RF_EXTERNALMODEL means "drawn, but not in the main
+	// first-person view" — the engine still runs it through the fake-shadow depth passes
+	// (externalview=true) and mirrors.  So:
+	//   shadow-only body  -> set it   (invisible, still casts)
+	//   cl_fpbody body    -> clear it (you can see your own legs/torso)
 	// MUST be cleared on the normal path — proxies are reused across states.
-	if (vis_fp_shadowbody)
+	// (single expression, not a nested if — the else MUST still run on the normal
+	// third-person path or a reused proxy keeps a stale RF_EXTERNALMODEL and vanishes.)
+	float vis_hide_from_view = vis_fp_body && !vis_fp_visible;
+	if (vis_hide_from_view)
 		self.renderflags |= RF_EXTERNALMODEL;
 	else
 		self.renderflags &= ~RF_EXTERNALMODEL;
+
+	// First-person body: tell the model shader to dither everything above the chest away
+	// (e_fpfade), so our own head can't clip the camera.  Cleared on every other path —
+	// proxies are reused, and a stale flag would eat another player's head.
+	if (vis_fp_visible)
+		self.renderflags |= RF_FPFADE;
+	else
+		self.renderflags &= ~RF_FPFADE;
 
 	BlobShadow_Emit(self);   // ground blob under players/corpses (culled paths returned above)
 	addentity(self);
 
 	// --- Weapon attachment (p_model) ---
+	// The first-person body must NOT attach its world weapon: the local viewmodel
+	// (CSQC_AddPredictedViewmodel) is already drawing a gun, and both would render at
+	// once — two guns, one floating at the proxy's hand.  The shadow-only body keeps its
+	// p_model, because that gun genuinely should cast a shadow.
 	string pmdl = W_GetPModelPath(self.vis_weapon_id);
+	if (vis_fp_visible)
+		pmdl = "";
 	if (pmdl != "")
 	{
 		entity wep = self.vis_weapon_ent;
@@ -4536,7 +4605,9 @@ float() CSQC_PlayerVisual_Predraw =
 											// (killcam hide/show, spectate, etc.)
 				// First-person shadow body: the held rifle follows the body's
 				// invisible-but-casting state (else it would render visibly).
-				if (vis_fp_shadowbody)
+				// (Unreachable when cl_fpbody is on — that path forces pmdl="" above so
+				// the viewmodel is the only gun — but kept correct for the shadow body.)
+				if (vis_hide_from_view)
 					wep.renderflags |= RF_EXTERNALMODEL;
 				else
 					wep.renderflags &= ~RF_EXTERNALMODEL;

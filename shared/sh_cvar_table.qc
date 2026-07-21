@@ -637,6 +637,27 @@ void() CVar_Init =
     CVar_Add("Client", "cl_player_backpedal_enter_angle", "150", CVAR_SIDE_BOTH);
     CVar_Add("Client", "cl_player_backpedal_exit_angle",  "100", CVAR_SIDE_BOTH);
     CVar_Add("Client", "cl_player_spine_debug",       "0",     CVAR_SIDE_BOTH);
+    // First-person body (CS2-style "look down and see your legs").  The local player's
+    // visual proxy is ALREADY drawn every frame for the shadow depth pass, tagged
+    // RF_EXTERNALMODEL so the main view skips it; this just stops hiding it.  The upper
+    // chest and head are dithered away by a height band so they can never clip the camera.
+    //
+    // The band is in the MODEL's own bind-pose space, which is NOT the same origin as the
+    // player HULL: the hull is origin-at-body-centre (feet -36 .. crown +36, sh_pmove.qc)
+    // but these player models are authored FEET-AT-ZERO, so the usable band sits up around
+    // 30-40, not around 2-14.  Values below are the measured-good ones; tune by eye.
+    // These are cvardf shader constants — changing them needs a vid_reload to re-take.
+    CVar_Add("Client", "cl_fpbody",             "1",  CVAR_SIDE_CL);   // 0 = classic invisible-body first person
+    CVar_Add("Client", "cl_fpbody_fade_start",  "30", CVAR_SIDE_CL);   // model Z where the dither fade begins (solid below)
+    CVar_Add("Client", "cl_fpbody_fade_end",    "40", CVAR_SIDE_CL);   // model Z where it is fully gone
+    // "Crane your neck": nobody can look straight down their own spine, so as the view
+    // pitches down the body slides to fake the head pivoting forward over the chest.
+    // Live cvars (not shader constants) — tune these in-game with no reload.
+    CVar_Add("Client", "cl_fpbody_pitch_start", "20", CVAR_SIDE_CL);   // view pitch (deg down) where the lean starts; above this, nothing changes
+    CVar_Add("Client", "cl_fpbody_pitch_fwd",   "-15", CVAR_SIDE_CL);  // qu the body slides at full lookdown. NEGATIVE = BACKWARD, which is the
+                                                                       // direction that actually reads right (measured): the eye craning forward
+                                                                       // over the chest is equivalent to the torso sliding back under it.
+    CVar_Add("Client", "cl_fpbody_pitch_up",    "0",  CVAR_SIDE_CL);   // qu the body slides UP at full lookdown
     CVar_Add("Client", "cl_skel_debug",               "0",     CVAR_SIDE_CL);  // draw each player's bone skeleton live (bone->parent beams)
     // Length of the visual flinch reaction (CSANIM_GUT_FLINCH /
     // CSANIM_HEAD_FLINCH overrides the torso anim) after a player
