@@ -1510,6 +1510,11 @@ float(float first_sequence, float replay_weapons) CSQC_ReplayBufferedCommands =
 		// note in CSQC_PredictCurrentCommand for the full rationale.
 		if (replay_weapons)
 			CSQC_PredictWeaponCommand();
+		// Replay has no prop history to pose against — only two snapshots exist — so every replayed
+		// command necessarily uses the CURRENT prop pose.  Relinking once outside the loop would be
+		// equivalent; doing it here keeps the ordering identical to the live path above.  The residual
+		// is what the prop-carry reconcile filter absorbs.
+		PhysProp_RelinkHullsForPrediction();
 		PM_PlayerMove();
 		// sv_gunkick: tick the spring decay once per replay step
 		// (post-fire, post-pmove). Mirrors live-tick path so replay
@@ -1707,6 +1712,28 @@ void() CSQC_ReconcilePrediction =
 		// "player sinks into the door" visual.
 		if (self.mover_push_active_cltime > 0
 		    && cltime - self.mover_push_active_cltime < 0.1)
+			err = '0 0 0';
+
+		// Physics-prop carry contact filter.  PM_CheckPhysPropCarry stamps
+		// prop_carry_active_cltime on every substep the player rides a
+		// MOVETYPE_PHYSICS prop.  The FULL vector is zeroed, not just err_z
+		// like the platform filter: props move on arbitrary axes (a rolling
+		// barrel is XY, a settling raft is Z), so a Z-only filter would leave
+		// the horizontal jitter untouched.  The client integrates the
+		// snapshot-interpolation derivative while the server integrates the
+		// live physics velocity — they agree in the mean but not at any given
+		// snapshot instant, and fading that difference is what reads as
+		// "shove, then snap back" while standing on a barrel.
+		//
+		// Gated on a magnitude cap, which the two filters above deliberately
+		// are NOT: prop contact is far more frequent than rotator or door
+		// contact, and zeroing err unconditionally also zeroes elen, which
+		// suppresses BOTH the lock and the smoother below.  That is right for
+		// sub-unit rate mismatch and wrong for a genuine desync (client thinks
+		// it is riding, server says it fell off) — those must still fade.
+		if (self.prop_carry_active_cltime > 0)
+		if (cltime - self.prop_carry_active_cltime < 0.1)
+		if (vlen(err) < 24)
 			err = '0 0 0';
 
 		float  elen = vlen(err);
@@ -1935,6 +1962,12 @@ void() CSQC_PredictCurrentCommand =
 	// jump after every reconcile at high ping (heavier weapon → snap back,
 	// lighter weapon → snap forward).
 	CSQC_PredictWeaponCommand();
+	// Put every MOVING prop's collision hull where this frame will draw it, BEFORE pmove traces
+	// against it.  Without this the traces hit the pose last frame's predraw left behind (render
+	// rate), which staircases against a continuously-moving player.  Deliberately after the weapon
+	// predict, so CSQC bullet traces keep using the render pose — changing hitscan-vs-prop behaviour
+	// is a separate decision and should not ride along on a movement fix.
+	PhysProp_RelinkHullsForPrediction();
 	PM_PlayerMove();
 	// sv_gunkick: decay tick runs AFTER fire so the bullet trace
 	// (inside CSQC_PredictWeaponCommand) used pre-decay pitch.
@@ -2039,6 +2072,13 @@ void() CSQC_BuildPresentationView =
 	// drop the rest — visible as drift/jitter while riding a train).
 	entity saved_platform_carry;
 	vector saved_platform_carry_velocity;
+	// Prop-carry latches — same reasoning as the platform ones above: the preview pmove runs
+	// PM_CheckPhysPropCarry too, and its writes must not leak into the next real pmove.  The
+	// active_cltime stamp especially: leaking it would arm the reconcile filter from a frame that
+	// never really happened.
+	entity saved_prop_carry;
+	vector saved_prop_carry_velocity;
+	float  saved_prop_carry_active_cltime;
 	float  saved_platform_carry_prev_yaw;
 	vector saved_platform_carry_jump_origin_consumed;
 	float  saved_platform_carry_jump_yaw_consumed;
@@ -2135,6 +2175,9 @@ void() CSQC_BuildPresentationView =
 	saved_pm_on_ladder_cached = self.pm_on_ladder_cached;
 	saved_platform_carry                      = self.platform_carry;
 	saved_platform_carry_velocity             = self.platform_carry_velocity;
+	saved_prop_carry                          = self.prop_carry;
+	saved_prop_carry_velocity                 = self.prop_carry_velocity;
+	saved_prop_carry_active_cltime            = self.prop_carry_active_cltime;
 	saved_platform_carry_prev_yaw             = self.platform_carry_prev_yaw;
 	saved_platform_carry_jump_origin_consumed = self.platform_carry_jump_origin_consumed;
 	saved_platform_carry_jump_yaw_consumed    = self.platform_carry_jump_yaw_consumed;
@@ -2316,6 +2359,9 @@ void() CSQC_BuildPresentationView =
 	self.pm_on_ladder_cached = saved_pm_on_ladder_cached;
 	self.platform_carry                      = saved_platform_carry;
 	self.platform_carry_velocity             = saved_platform_carry_velocity;
+	self.prop_carry                          = saved_prop_carry;
+	self.prop_carry_velocity                 = saved_prop_carry_velocity;
+	self.prop_carry_active_cltime            = saved_prop_carry_active_cltime;
 	self.platform_carry_prev_yaw             = saved_platform_carry_prev_yaw;
 	self.platform_carry_jump_origin_consumed = saved_platform_carry_jump_origin_consumed;
 	self.platform_carry_jump_yaw_consumed    = saved_platform_carry_jump_yaw_consumed;

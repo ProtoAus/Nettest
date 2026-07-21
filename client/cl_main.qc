@@ -42,6 +42,11 @@ void() CSQC_Ent_Remove =
 		Car_ChainUnlink(self);
 	}
 
+	// Active-prop chain — OUTSIDE the is-car block: every phys_files mirror can be in it, not just cars.
+	// A removed entity left linked would keep the relink walking freed memory.
+	if (self.classname == "phys_files")
+		PhysProp_ActiveUnlink(self);
+
 	if (self.classname == "player_visual_proxy")
 	{
 		// nettest death ragdoll: DON'T free the ragdoll inline — CSQC_Ent_Remove runs mid network-parse,
@@ -709,6 +714,7 @@ void(float in_menu_backdrop) CSQC_UpdateViewSpectator =
 					// or every blob (incl. static prop blobs) vanishes while dead/spectating
 	renderscene();
 	NavDebug_DrawText();	// nettest: bot state labels + spectated-bot panel (2D, after renderscene)
+	CSQC_DrawDebugPhysPropText();	// nettest: prop rest-state labels (2D, after renderscene)
 
 	if (!in_menu_backdrop)
 	{
@@ -1016,6 +1022,7 @@ void() CSQC_UpdateViewAliveScene =
 	renderscene();
 	CSQC_DrawDebugImpactText();
 	NavDebug_DrawText();	// nettest: bot state labels (2D, after renderscene)
+	CSQC_DrawDebugPhysPropText();	// nettest: prop rest-state labels (2D, after renderscene)
 };
 
 void(float in_menu_backdrop) CSQC_UpdateViewAliveHud =
@@ -1096,6 +1103,11 @@ void(float width, float height, float menushown) CSQC_UpdateView =
 	float spike_t_env = 0;
 	float spike_t_scene = 0;
 	float spike_t_hud = 0;
+
+	// Carry inspect mode: revalidate + flush the pending orientation upstream.  This is the
+	// catch-all that unlocks the view on every exit path the key-up can't see (drop, throw,
+	// force-drop, death, spectate, prop removed).
+	Inspect_Frame(menushown);
 
 	// (nettest death ragdolls are now freed by their own CSQC_RagdollFreeThink, scheduled in
 	// CSQC_Ent_Remove — a drain here proved re-entrant with the render and still crashed.)
@@ -1616,6 +1628,13 @@ float(float evtype, float scanx, float chary, float devid) CSQC_InputEvent =
 				return TRUE;
 		}
 	}
+
+	// Carry inspect mode (hold Reload while carrying a prop → the mouse rotates the prop
+	// and the wheel pushes/pulls it, instead of turning the player).  Sits LAST, just
+	// before the raw fallthrough, so every menu/modal above keeps priority: opening the
+	// buy menu or the scoreboard while inspecting behaves normally.
+	if (Inspect_InputEvent(evtype, scanx, chary, devid))
+		return TRUE;
 
 	switch(evtype)
 	{

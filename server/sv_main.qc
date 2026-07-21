@@ -654,6 +654,8 @@ float() MapTimeExpired =
 float sv_prev_gamemode;
 float sv_gamemode_inited;
 
+string sv_info_last_nocarry;          // sv_physprop_nocarry      — prop rider carry (shared pmove)
+string sv_info_last_carry_maxspeed;   // sv_physprop_carry_maxspeed
 string sv_info_last_shiftspeed;
 string sv_info_last_maxspeed;
 string sv_info_last_accelerate;
@@ -755,6 +757,11 @@ void(string key, __inout string last) sv_info_push_if_changed =
 
 void() SV_UpdateMovementServerInfo =
 {
+	// Prop rider carry — read inside the shared pmove (PM_CheckPhysPropCarry), so the client can only
+	// see it through serverinfo.  Without the push, CSQC falls back to the default and the predicted
+	// carry disagrees with the server's every tick.
+	sv_info_push_if_changed("sv_physprop_nocarry",        sv_info_last_nocarry);
+	sv_info_push_if_changed("sv_physprop_carry_maxspeed", sv_info_last_carry_maxspeed);
 	sv_info_push_if_changed("sv_shiftspeed",    sv_info_last_shiftspeed);
 	sv_info_push_if_changed("sv_maxspeed",      sv_info_last_maxspeed);
 	sv_info_push_if_changed("sv_accelerate",    sv_info_last_accelerate);
@@ -1031,6 +1038,18 @@ void() StartFrame =
 		pp_cached_sleep_hz          = cvar("sv_physprop_sleep_hz");
 		if (pp_cached_sleep_hz <= 0) pp_cached_sleep_hz = 8;
 		pp_cached_debug             = cvar("sv_debug_physprops");
+		pp_cached_buoyancy          = cvar("sv_prop_buoyancy");
+		pp_cached_buoy_density      = cvar("sv_prop_buoyancy_density");
+		if (pp_cached_buoy_density <= 0) pp_cached_buoy_density = 1.0;
+		pp_cached_buoy_damping      = cvar("sv_prop_buoyancy_damping");
+		if (pp_cached_buoy_damping <= 0) pp_cached_buoy_damping = 0.4;
+		pp_cached_gravity           = cvar("sv_gravity");
+		if (pp_cached_gravity <= 0) pp_cached_gravity = 800;
+		pp_cached_force_iter        = Phys_ForceIter();   // cvar_string + compare — never per-prop
+		pp_cached_meshpitch         = cvar("r_meshpitch");
+		if (!pp_cached_meshpitch) pp_cached_meshpitch = -1;
+		pp_cached_meshroll          = cvar("r_meshroll");
+		if (!pp_cached_meshroll) pp_cached_meshroll = 1;
 
 		// Car tick constants — the reads a PARKED car still makes every tick.
 		car_cached_mintic       = cvar("sv_mintic");

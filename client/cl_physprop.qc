@@ -533,35 +533,118 @@ void(entity e, vector col) CSQC_DrawPhysOBB =
     dbg_hitbox_line(c2, c6, col, al);  dbg_hitbox_line(c3, c7, col, al);
 };
 
+// Buoyancy debug mirror — populated ONLY while sv_debug_physprops is on (the server flags the payload
+// with PP_PHASE_DBG_BIT); drives the cl_debug_physprops overlay.  Zero when the server isn't sending.
+// Declared HERE, above the two draw functions below, rather than with the rest of the pp_* fields much
+// further down — fteqcc resolves strictly top-down, so a field used by a function must precede it.
+.float  pp_dbg_rest;       // PP_DBG_REST_* — none / float-rest / contact-rest
+.float  pp_dbg_wet;        // 1 = server says this prop is in water
+.float  pp_dbg_frac;       // current submerged fraction (0..1)
+.float  pp_dbg_feq;        // submerged fraction it WANTS (f_eq); >= 1 means it sinks
+.float  pp_dbg_since;      // cltime the rest state last changed (for the "held for" readout)
+.float  pp_dbg_loaded;     // 1 = something stacked on it; it must keep being forced (not a failure)
+
+// Active-prop chain (moving props only) — drives the prediction hull relink.  Own link field, NOT
+// .chain, which findradius/findchain reuse as scratch.
+.entity pp_active_next;
+.float  pp_active_linked;
+
+// Debug colour for a prop's OBB / label.  With sv_debug_physprops on the server sends the AUTHORITATIVE
+// rest state, so these are facts rather than the velocity guess this used to make:
+//   YELLOW = carried / just-dropped passthrough (non-solid to players)
+//   BLUE   = float-rest    — settled at its float line, gravity off, forcing off
+//   GREY   = contact-rest  — held by the pond floor or a prop stacked on it, gravity still on
+//   RED    = in water and STILL BEING FORCED — the state a prop should never be stuck in.  A prop that
+//            stays red is the shallow-water / stacked-pair bug: it can never reach its float line, so it
+//            is pushed upward forever and never sleeps.  This is the whole reason the overlay exists.
+//   CYAN   = dry + settled (velocity ~0; inferred, no server state needed)
+//   GREEN  = free + moving
+vector(entity e) PhysProp_DebugColour =
+{
+    if (e.solid == SOLID_NOT)              return '1 0.85 0';
+    if (e.pp_dbg_rest == PP_DBG_REST_FLOAT)   return '0.25 0.5 1';
+    if (e.pp_dbg_rest == PP_DBG_REST_CONTACT) return '0.6 0.6 0.6';
+    if (e.pp_dbg_loaded)                   return '1 0.6 0.1';   // orange: forced ON PURPOSE, holding a load
+    if (e.pp_dbg_wet)                      return '1 0.2 0.2';
+    if (vlen(e.velocity) < 0.5)
+    if (vlen(e.avelocity) < 0.5)
+        return '0 0.6 1';
+    return '0 1 0';
+};
+
+// 2D state labels for the cl_debug_physprops overlay.  MUST be called AFTER renderscene — project()
+// needs the finished view transform (same constraint NavDebug_DrawText documents and follows).
+//
+// Two lines per prop, deliberately terse so a stacked pile or a pond stays readable:
+//   FLOAT 2.4s g:off          <- rest mode + how long it has held + whether gravity is zeroed
+//   f .31/.35 v0.1 w          <- submerged fraction / what it WANTS, speed, and 'w' if wet
+// A prop whose frac can never converge on f_eq is the one that will never settle, so putting the pair
+// side by side is the fastest way to see it.
+const float PP_DBGLBL_DIST = 1200;   // don't label props further than this (a labelled pond is unreadable)
+
+void() CSQC_DrawDebugPhysPropText =
+{
+    if (!cvar("cl_debug_physprops")) return;
+
+    // Deliberately the DEFAULT font at its native 8px, and drawn ONCE with no shadow pass.  The mono
+    // hud font renders from baked sizes and came out far too heavy for a label that may be repeated
+    // over every prop in a pond — this is meant to be readable at a glance, not to look designed.
+    vector eye = getproperty(VF_ORIGIN);
+    entity e = findchain(classname, "phys_files");
+    while (e)
+    {
+        if (e.drawmask)
+        if (vlen(e.origin - eye) < PP_DBGLBL_DIST)
+        {
+            vector scr = project(e.origin + '0 0 1' * (e.maxs_z + 4));
+            if (scr_z > 0)          // skip anything behind the camera
+            {
+                string mode;
+                if (e.solid == SOLID_NOT)                      mode = "CARRIED";
+                else if (e.pp_dbg_rest == PP_DBG_REST_FLOAT)   mode = "FLOAT";
+                else if (e.pp_dbg_rest == PP_DBG_REST_CONTACT) mode = "CONTACT";
+                else if (e.pp_dbg_loaded)                      mode = "LOADED";
+                else if (e.pp_dbg_wet)                         mode = "FORCED";
+                else                                           mode = "-";
+
+                // via a float local: cltime is a __double, so inlining the subtraction into the
+                // ternary (and then into sprintf's %f) is a type mismatch.
+                float held = 0;
+                if (e.pp_dbg_rest)
+                    held = cltime - e.pp_dbg_since;
+
+                string l1 = sprintf("%s %.1fs g:%s", mode, held,
+                                    (e.pp_dbg_rest == PP_DBG_REST_FLOAT) ? "off" : "on");
+                string l2 = sprintf("f %.2f/%.2f v%.1f%s",
+                                    e.pp_dbg_frac, e.pp_dbg_feq, vlen(e.velocity),
+                                    e.pp_dbg_wet ? " w" : "");
+
+                vector col = PhysProp_DebugColour(e);
+                vector sz  = '8 8 0';
+                drawstring([scr_x - stringwidth(l1, 1, sz) * 0.5, scr_y],
+                           l1, sz, col, 1, 0);
+                drawstring([scr_x - stringwidth(l2, 1, sz) * 0.5, scr_y + 8],
+                           l2, sz, col, 1, 0);
+            }
+        }
+        e = e.chain;
+    }
+};
+
 void() CSQC_DrawDebugPhysProps =
 {
     float show_obb = cvar("cl_debug_physprops");
     if (!show_obb) return;
 
     // Cabinet (and any phys_files) OBBs — the CSQC mirrors are real csqc edicts, so
-    // findchain sees them.  Colour = state:
-    //   YELLOW = carried / just-dropped passthrough (non-solid to players)
-    //   CYAN   = free + settled (velocity ~0) — i.e. likely ODE-autodisabled/asleep
-    //   GREEN  = free + moving (active)
-    // (The exact ODE dBodyIsEnabled flag isn't exposed to QC, so "asleep" is inferred
-    //  from the streamed velocity being ~0; with physics_ode_autodisable 1 a settled
-    //  prop does sleep, which is when it goes cyan.)
+    // findchain sees them.  Colour = state, see PhysProp_DebugColour.
     entity e = findchain(classname, "phys_files");
     while (e)
     {
         if (e.drawmask)
         {
             if (show_obb)
-            {
-                vector ocol;
-                if (e.solid == SOLID_NOT)
-                    ocol = '1 0.85 0';
-                else if (vlen(e.velocity) < 0.5 && vlen(e.avelocity) < 0.5)
-                    ocol = '0 0.6 1';
-                else
-                    ocol = '0 1 0';
-                CSQC_DrawPhysOBB(e, ocol);
-            }
+                CSQC_DrawPhysOBB(e, PhysProp_DebugColour(e));
         }
         e = e.chain;
     }
@@ -660,6 +743,10 @@ void() CSQC_DrawDebugPhysProps =
 .vector pp_snap_origin_prev;   // 2-snapshot interpolation: the PREVIOUS authoritative snapshot
 .vector pp_snap_angles_prev;
 .float  pp_snap_time_prev;
+// Smoothed observed stream interval (seconds between snapshots), maintained as a running average in
+// CSQC_PhysProp_Update.  This is the RENDER DELAY; the raw prev→cur gap is only the lerp window.  Keeping
+// those two separate is the whole point — see PhysProp_RenderDelay.  0 = not measured yet.
+.float  pp_snap_interval;
 
 // Carry state (from the wire) + client-prediction bookkeeping.
 .float  pp_phase;          // PP_PHASE_* (was the csolid byte)
@@ -674,6 +761,17 @@ void() CSQC_DrawDebugPhysProps =
 .vector pp_pred_origin;    // last client-predicted feet origin (the "predicted hand" pose)
 .vector pp_err_offset;     // predicted − authoritative at the handoff edge; decays to 0
 .float  pp_err_cltime;     // cltime the error offset was seeded (0 = none pending)
+
+// Carried ORIENTATION (see shared/sh_carryrot.qc).  While THIS client is the carrier the
+// basis is client-OWNED and predicted — inspect mode writes it locally and pushes it
+// upstream, so the streamed copy is just our own echo and must NOT be read back or the
+// two fight each other.  pp_rel_valid latches the seed on the ownership edge only.
+.vector pp_rel_fwd;        // model +X in the carry frame (unit)
+.vector pp_rel_up;         // model +Z in the carry frame (unit, ⊥ fwd)
+.float  pp_rel_valid;      // 1 = pp_rel_* has been seeded from the stream
+.vector pp_snap_rel;       // newest streamed carry-frame orientation (Euler), the seed
+.vector pp_pred_fwd;       // predicted basis at the handoff edge (angular drop fade)
+.vector pp_pred_up;
 
 // Visual spinning-wheel state for prop_car mirrors (networked on the is-car branch; spin integrated locally).
 .float  pp_car_steer;      // front-wheel steer angle (deg)
@@ -722,8 +820,16 @@ vector(entity prop) PhysProp_PredictedHoldCenter =
     makevectors(view_angles);   // raw view_angles — matches the server's v_angle (NOT VF_ANGLES, which adds sway/kick)
     vector hold = eye + v_forward * prop.pp_hold_dist + '0 0 1' * prop.pp_hold_z;
 
-    vector boxhalf = (prop.maxs - prop.mins) * 0.5;
-    vector cur = prop.origin + '0 0 1' * ((prop.maxs_z + prop.mins_z) * 0.5);
+    // Rotated footprint — mirrors the server's Carry_Tick.  Both sides read the pose from
+    // the PREVIOUS frame/tick (angles are written at the end of the update on each side),
+    // so while actively rotating they can differ by one frame of mouse motion; that is a
+    // sub-unit difference in a deliberately conservative bound, and it is zero whenever
+    // the prop is not being rotated.  (Safe here: v_forward was already consumed by
+    // `hold` above and is not read again.)
+    vector boxhalf = CarryRot_RotatedHalf(prop.angles, (prop.maxs - prop.mins) * 0.5);
+    // Centre offset ROTATED by the prop's pose — mirrors Carry_Tick.  Adding it along
+    // world Z unconditionally put an upside-down prop a box-height too low.
+    vector cur = prop.origin + CarryRot_CenterOfs(prop.angles, prop.mins, prop.maxs);
     vector tgt = hold;
     float  bump;
     for (bump = 0; bump < 4; bump = bump + 1)
@@ -743,15 +849,76 @@ vector(entity prop) PhysProp_PredictedHoldCenter =
     return cur;   // slid hold centre
 };
 
-// Adaptive 2-snapshot interpolation frac: render ONE measured inter-snapshot interval in the past
-// so the prop lerps prev→cur over exactly that interval — smooth at ANY stream rate (delay = the
-// real interval, so 20/32/64 Hz all interpolate correctly; no velocity overshoot → no snap-back).
+// Sanity bounds on the measured stream interval.  MIN also doubles as the sample-reject floor: a
+// PhysProp_KickStream queue-jump (sv_physprop.qc) deliberately sends one packet early, and letting that
+// artificially short gap into the average would yank the render delay down at exactly the moment of a
+// violent motion change.  MAX keeps a pathological stream from parking the prop far in the past.
+const float PP_DELAY_MIN = 0.004;   // 250 Hz ceiling
+const float PP_DELAY_MAX = 0.25;
+const float PP_DELAY_EMA = 0.15;    // running-average weight per accepted sample
+// Assumed interval before we have measured one (one 64-tick frame).  Used for at most a frame or two:
+// the first snapshot early-outs on dt=0 anyway, and the second one measures the real rate.
+const float PP_DELAY_DEFAULT = 0.0156;
+
+// RENDER DELAY — how far in the past this prop is drawn.  This used to be the raw prev→cur gap, which
+// made ONE number do two unrelated jobs: the lerp window AND the render delay.  That coupling is what made
+// props unsmooth:
+//   * the wake repair compressed the gap to catch a woken prop up quickly, which dragged the render delay
+//     with it for one frame and then snapped back on the next packet;
+//   * the gap is the INSTANTANEOUS last interval, so a single dropped packet doubled the delay — at 8 Hz
+//     that was a small fraction of 125 ms, but at 64 Hz it is a 100% swing.
+// So the delay now comes from a smoothed average of how often packets ACTUALLY arrive (pp_snap_interval,
+// measured in CSQC_PhysProp_Update), while the raw gap keeps its real job as the lerp window.  The client
+// cannot just read sv_physprop_stream_hz — that cvar is server-side and never sent — and measuring is
+// better anyway: it adapts to packet loss and to cars, which stream far faster than free props.
+//
+// MUST be the single source of the delay: PhysProp_InterpFrac and PhysProp_InterpOrigin both call this.
+// If they ever computed it separately and disagreed, the angle lerp would desync from the origin lerp and
+// the chase cam would unglue from the car it is anchored to (see cl_main.qc's invariant comment).
+float(entity e) PhysProp_RenderDelay =
+{
+    float d, ratio;
+    if (!cvar("cl_physprop_smoothinterp"))
+        return e.pp_snap_time - e.pp_snap_time_prev;     // legacy: the raw gap, exactly as before
+    // Deliberately NOT falling back to the raw gap here.  This is also called from the wake repair, where
+    // the raw gap IS the multi-second rest silence — substituting that would make the repair a no-op and
+    // bring back the slow ooze it exists to prevent.  An assumed tick-rate interval is always safe.
+    d = e.pp_snap_interval;
+    if (d <= 0) d = PP_DELAY_DEFAULT;
+    ratio = cvar("cl_physprop_interp_ratio");
+    if (ratio < 1) ratio = 1;                            // <1 would render into the future
+    d = d * ratio;
+    if (d < PP_DELAY_MIN) d = PP_DELAY_MIN;
+    if (d > PP_DELAY_MAX) d = PP_DELAY_MAX;
+    return d;
+};
+
+// Gap above which a silence counts as a WAKE (prop stopped streaming) rather than a stream interval.
+// Derived from the measured rate instead of a fixed 0.3: at 64 Hz a literal 0.3 leaves a dead band from
+// 16 ms to 300 ms where a stall got no repair and the prop oozed.
+float(entity e) PhysProp_WakeGap =
+{
+    float g;
+    if (e.pp_snap_interval <= 0)
+        return 0.3;                                      // unmeasured: the historical threshold
+    g = e.pp_snap_interval * 8;
+    if (g < 0.1) g = 0.1;
+    if (g > 0.5) g = 0.5;
+    return g;
+};
+
+// 2-snapshot interpolation frac: lerp prev→cur across the REAL gap between them, sampled at a render time
+// that sits PhysProp_RenderDelay in the past.  Drives the angle lerp and the settle test.
 float(entity e) PhysProp_InterpFrac =
 {
     float dt = e.pp_snap_time - e.pp_snap_time_prev;
+    float d, f;
     if (dt <= 0.0001)
         return 1;                                       // first snapshot / no prev → sit on cur
-    float f = (cltime - dt - e.pp_snap_time_prev) / dt; // render time = cltime - dt (one interval back)
+    d = PhysProp_RenderDelay(e);
+    if (d <= 0.0001)
+        return 1;                                       // no usable delay → sit on cur
+    f = (cltime - d - e.pp_snap_time_prev) / dt;
     if (f < 0) f = 0;
     if (f > 1) f = 1;
     return f;
@@ -768,18 +935,52 @@ float(entity e) PhysProp_InterpFrac =
 vector(entity e) PhysProp_InterpOrigin =
 {
     float dt = e.pp_snap_time - e.pp_snap_time_prev;
+    float d, target, f, extra, cap;
     if (dt <= 0.0001)
         return e.pp_snap_origin;                         // first snapshot / no prev → sit on cur
-    float target = cltime - dt;                          // render one interval in the past
-    float f = (target - e.pp_snap_time_prev) / dt;
+    // SAME delay accessor PhysProp_InterpFrac uses — see the note there on why this must not be
+    // recomputed independently.
+    d = PhysProp_RenderDelay(e);
+    if (d <= 0.0001)
+        return e.pp_snap_origin;
+    target = cltime - d;
+    f = (target - e.pp_snap_time_prev) / dt;
     if (f < 0) f = 0;
     if (f <= 1)
         return e.pp_snap_origin_prev + (e.pp_snap_origin - e.pp_snap_origin_prev) * f;
     // tail: coast on the streamed velocity for up to cl_physprop_extrap_max instead of freezing at cur.
-    float extra = target - e.pp_snap_time;
-    float cap = cvar("cl_physprop_extrap_max"); if (cap <= 0) cap = 0.05;
+    // `extra` is clamped, so even if f lands far outside [0,1] (tiny dt against an independent delay)
+    // the coast stays bounded — the decoupling can never turn into an unbounded jump.
+    extra = target - e.pp_snap_time;
+    cap = cvar("cl_physprop_extrap_max"); if (cap <= 0) cap = 0.05;
     if (extra > cap) extra = cap;
     return e.pp_snap_origin + e.velocity * extra;
+};
+
+// Client half of the prop rider-carry accessor (declared in sh_customdefs.qc; the SSQC half returns the
+// live .velocity).  This returns the DERIVATIVE of the very interpolation PhysProp_InterpOrigin poses the
+// collision hull with — deliberately NOT the streamed .velocity.
+//
+// Why it matters: the hull sits at cltime - RenderDelay.  If the carry integrated .velocity (the value at
+// the newest snapshot) the player would advance at a slightly different rate than the surface beneath
+// them, and would visibly slide off the back of a moving prop over a few hundred ms.  Differentiating the
+// same piecewise-linear curve makes the two displacements identical by construction.
+//
+// This is NOT the origin-delta anti-pattern the train carry warns about (sh_pmove.qc): that concerns
+// `ent.origin - prev_origin`, which is zero on most substeps because the entity only moves at render
+// rate.  This is an analytic derivative — constant across a whole snapshot window, so it stays smooth at
+// any pmove rate.
+vector(entity prop) PhysProp_ContactVelocity =
+{
+    float dt = prop.pp_snap_time - prop.pp_snap_time_prev;
+    if (dt <= 0.0001)
+        return prop.velocity;                      // first snapshot — nothing to differentiate
+    float f = (cltime - PhysProp_RenderDelay(prop) - prop.pp_snap_time_prev) / dt;
+    if (f < 0)
+        return '0 0 0';                            // parked before the window opened
+    if (f > 1)
+        return prop.velocity;                      // tail: the pose is coasting on the streamed velocity
+    return (prop.pp_snap_origin - prop.pp_snap_origin_prev) * (1 / dt);
 };
 
 // Shortest-arc per-component angle lerp (handles 0/360 wrap) — client copy of Carry_AnglesLerp.
@@ -1156,6 +1357,86 @@ void(entity car) Car_ChainUnlink =
     car.pp_car_linked = FALSE;
 };
 
+// ---------------------------------------------------------------------------
+// ACTIVE-PROP CHAIN — just the props that are currently MOVING.
+//
+// Same idiom and rationale as the car chain above, for a different consumer: the prediction hull
+// relink (PhysProp_RelinkHullsForPrediction).  A settled prop must never be walked — it is already
+// parked on its authoritative origin with zero velocity, so relinking it is both pointless and
+// actively harmful (its predraw has unhooked, so nothing would put it back).
+//
+// Linked on the first snapshot that reports motion, unlinked on the settle edge and on removal.
+// ---------------------------------------------------------------------------
+entity g_pp_active_head;
+
+void(entity p) PhysProp_ActiveLink =
+{
+    if (p.pp_active_linked)
+        return;
+    p.pp_active_next  = g_pp_active_head;
+    g_pp_active_head  = p;
+    p.pp_active_linked = TRUE;
+};
+
+void(entity p) PhysProp_ActiveUnlink =
+{
+    if (!p.pp_active_linked)
+        return;
+    if (g_pp_active_head == p)
+        g_pp_active_head = p.pp_active_next;
+    else
+    {
+        entity q = g_pp_active_head;
+        while (q)
+        {
+            if (q.pp_active_next == p)
+            {
+                q.pp_active_next = p.pp_active_next;
+                break;
+            }
+            q = q.pp_active_next;
+        }
+    }
+    p.pp_active_next   = world;
+    p.pp_active_linked = FALSE;
+};
+
+// Re-pose every MOVING prop's collision hull immediately before the client runs prediction.
+//
+// The hull is otherwise positioned ONLY by CSQC_PhysProp_Predraw, which runs from addentities at
+// RENDER rate — so the pmove traces of frame N collide with the pose predraw left at frame N-1.
+// Against a continuously-moving player that reads as a staircase, and it is the shake that
+// PM_SoftDepenetrate's comments already describe.  Re-posing here costs one setorigin per MOVING
+// prop per frame (typically 0-5) and puts the hull exactly where this frame's render will draw it.
+//
+// Deliberately the SAME render-delayed pose the predraw uses, not an extrapolation to "now".  Undoing
+// the delay would match the server more closely but would visibly separate the hull from the model —
+// a barrel falling at 400 u/s would put the player's feet ~6 qu above where it is drawn.  The residual
+// disagreement with the server is left to the carry (which is relative, so it cancels) and to the
+// reconcile filter.  cl_physprop_hull_mode 0 restores the old render-rate-only behaviour for A/B.
+void() PhysProp_RelinkHullsForPrediction =
+{
+    if (!cvar("cl_physprop_hull_mode"))
+        return;
+
+    entity e = g_pp_active_head;
+    float guard = 0;
+    while (e)
+    {
+        guard = guard + 1;
+        if (guard > 256) break;          // paranoia: never let a corrupt link spin the frame
+        if (e.solid != SOLID_NOT)
+        {
+            // angles BEFORE setorigin: linking only recomputes the ROTATED broadphase AABB with the
+            // angles set at that moment (engine Patch 53/59) — the same ordering the reader documents.
+            e.angles = PhysProp_AnglesLerp(e.pp_snap_angles_prev, e.pp_snap_angles,
+                                           PhysProp_InterpFrac(e));
+            setorigin(e, PhysProp_InterpOrigin(e));
+        }
+        e = e.pp_active_next;
+    }
+};
+
 // Is this player slot the seated driver of ANY car mirror?  Called from the visual-proxy predraw to suppress
 // a driver's standing body — the seated model is drawn by Car_DrawDriver instead, so there's no double.
 float(float entnum) Car_IsDriverSlot =
@@ -1191,15 +1472,30 @@ float() CSQC_PhysProp_Predraw =
         && self.pp_phase  == PP_PHASE_STEADY)
     {
         vector center = PhysProp_PredictedHoldCenter(self);
-        vector org    = center - '0 0 1' * ((self.maxs_z + self.mins_z) * 0.5);  // centre → feet
-        self.angles_x = 0;
-        self.angles_z = 0;
-        self.angles_y = view_angles_y + 180;   // upright, facing the carrier — matches Carry_Tick
+        // Defensive: Update seeds pp_rel_* on the first held snapshot, so this should never
+        // fire — but an unseeded basis would hand vectoangles a zero vector.
+        if (self.pp_rel_fwd * self.pp_rel_fwd < 0.5)
+        {
+            self.pp_rel_fwd = '1 0 0';
+            self.pp_rel_up  = '0 0 1';
+        }
+        // Orientation from the LOCAL carry-frame basis composed with the live view yaw —
+        // the exact mirror of Carry_Tick's recompose.  (Was a hardcoded upright pose,
+        // which is why every prop looked identical however it had been lying.)  Owning
+        // this client-side is what makes inspect-mode rotation lag-free.
+        float pyaw0 = view_angles_y + 180;
+        self.angles = CarryRot_Angles(CarryRot_FromFrame(self.pp_rel_fwd, pyaw0),
+                                      CarryRot_FromFrame(self.pp_rel_up,  pyaw0));
+        // centre → feet, using the pose we just applied, so the prop pivots about its
+        // middle rather than swinging around its base.
+        vector org = center - CarryRot_CenterOfs(self.angles, self.mins, self.maxs);
         setorigin(self, org);
         BlobShadow_Emit(self);
         addentity(self);
         if (self.pp_is_car) Car_DrawExtras(self);
         self.pp_pred_origin    = org;          // remember the predicted hand pose for the drop fade
+        self.pp_pred_fwd       = CarryRot_FromFrame(self.pp_rel_fwd, pyaw0);   // and the pose, for the ANGULAR fade
+        self.pp_pred_up        = CarryRot_FromFrame(self.pp_rel_up,  pyaw0);
         self.pp_was_predicting = TRUE;
         return PREDRAW_NEXT;
     }
@@ -1210,7 +1506,14 @@ float() CSQC_PhysProp_Predraw =
     if (self.pp_was_predicting)
     {
         self.pp_was_predicting = FALSE;
-        self.pp_err_offset = self.pp_pred_origin - self.pp_snap_origin;
+        // Seed against the pose we are about to DRAW, not the raw newest snapshot.  The next frames render
+        // at PhysProp_InterpOrigin — i.e. the snapshot delayed by the render delay — so measuring the error
+        // against pp_snap_origin cancels a discontinuity that is not the one the player sees, leaving a
+        // residual of roughly one interval of motion.  (Legacy path keeps the old seed so the A/B is clean.)
+        if (cvar("cl_physprop_smoothinterp"))
+            self.pp_err_offset = self.pp_pred_origin - PhysProp_InterpOrigin(self);
+        else
+            self.pp_err_offset = self.pp_pred_origin - self.pp_snap_origin;
         if (vlen(self.pp_err_offset) > 128)        // teleport-sized → don't smear it
             self.pp_err_offset = '0 0 0';
         self.pp_err_cltime = cltime;
@@ -1218,12 +1521,16 @@ float() CSQC_PhysProp_Predraw =
 
     // Decaying handoff offset (eases predicted→authoritative; 0 once expired / none pending).
     vector err = '0 0 0';
+    float  ang_decay = 0;    // hoisted: the ANGULAR fade below rides the same decay curve
     if (self.pp_err_cltime > 0)
     {
         float st    = cvar("cl_carry_smooth_time");
         float decay = (st > 0) ? (1 - (cltime - self.pp_err_cltime) / st) : 0;
         if (decay > 0)
+        {
             err = self.pp_err_offset * decay;
+            ang_decay = decay;
+        }
         else
             self.pp_err_cltime = 0;
     }
@@ -1247,6 +1554,25 @@ float() CSQC_PhysProp_Predraw =
     setorigin(self, org + err);
     self.angles = PhysProp_AnglesLerp(self.pp_snap_angles_prev, self.pp_snap_angles, f);
 
+    // ANGULAR handoff fade — the rotational twin of the `err` offset above.  Without it a
+    // prop dropped mid-inspection pops from the predicted orientation to the authoritative
+    // one (the origin fade alone doesn't cover angles).  Done as a BASIS blend, NOT an
+    // Euler difference: subtracting angles reintroduces every wrap/gimbal case the whole
+    // orientation design exists to avoid.  Usually a no-op — releasing the rotate key
+    // fires a final settle-send, so by drop time the server has already converged.
+    if (ang_decay > 0)
+    {
+        CarryRot_Axes(self.angles);
+        vector aF = crot_X;
+        vector aU = crot_Z;
+        // >90° apart = teleport-sized (re-grab, another player took it): snap, don't smear.
+        if (aF * self.pp_pred_fwd > 0)
+        {
+            CarryRot_Nlerp(aF, aU, self.pp_pred_fwd, self.pp_pred_up, ang_decay);
+            self.angles = CarryRot_Angles(crot_oF, crot_oU);
+        }
+    }
+
     // Caught up to the newest snapshot AND at rest (+ no handoff fade / prediction pending): park
     // exactly on it and UNHOOK.  The interp has reached cur, which == the raw origin the reader
     // set, so there's no snap; and a settled prop stops relinking (400 resting props cost ~0).
@@ -1263,6 +1589,12 @@ float() CSQC_PhysProp_Predraw =
         BlobShadow_Emit(self);
     addentity(self);
     if (self.pp_is_car) Car_DrawExtras(self);
+
+    // Leave the active chain on the settle edge — for CARS TOO.  A car keeps its predraw hooked (so a
+    // parked car still draws its wheels), so gating the unlink on the same !pp_is_car test as the
+    // unhook below would leave every parked car in the chain forever, relinking its hull each frame.
+    if (pp_settling)
+        PhysProp_ActiveUnlink(self);
 
     if (pp_settling && !self.pp_is_car)   // cars keep the predraw hooked so a PARKED car still draws its wheels
         self.predraw = __NULL__;
@@ -1288,10 +1620,24 @@ void(float isnew) CSQC_PhysProp_Update =
     float  skn       = readbyte();   // livery skin index (selects <model>_<N>.skin). MUST match phys_files_Send.
     float  istrimesh = readbyte();   // 1 = mirror as SOLID_PHYSICS_TRIMESH (hull) when free; 0 = box. MUST match phys_files_Send wire order.
     float  sc        = readcoord();  // Patch 70: visual + narrowphase scale. MUST match phys_files_Send (after istrimesh, before phase).
-    float  phase     = readbyte();   // PP_PHASE_* (was the csolid 0/1 byte)
+    float  phasebyte = readbyte();   // PP_PHASE_* in the low bits + PP_PHASE_DBG_BIT on top
+    float  has_dbg   = (phasebyte & PP_PHASE_DBG_BIT);  // buoyancy debug payload appended at the END
+    float  phase     = (phasebyte & PP_PHASE_MASK);     // MUST mask — the raw byte is no longer the phase
     float  carrier   = readbyte();   // carrier edict (0 = free)
-    float  hold_dist = readcoord();  // networked hold params (remote clients lack the server cvars)
+    float  hold_dist = readcoord();  // networked hold params (remote clients lack the server cvars).
+                                     // Already includes the inspect-mode push/pull offset (folded server-side).
     float  hold_z    = readcoord();
+    // Carry-frame orientation — present ONLY while the prop is held.  MUST match the
+    // gated 3x WriteShort block in phys_files_Send byte-for-byte.
+    vector rel_ang = '0 0 0';
+    float  rel_valid = 0;
+    if (phase == PP_PHASE_GRABBING || phase == PP_PHASE_STEADY)
+    {
+        rel_ang_x = readshort() * (1 / CROT_WIRE_SCALE);
+        rel_ang_y = readshort() * (1 / CROT_WIRE_SCALE);
+        rel_ang_z = readshort() * (1 / CROT_WIRE_SCALE);
+        rel_valid = 1;
+    }
     float  is_car    = readbyte();   // 1 = prop_car/func_car (engine-sound driver). Car extras follow ONLY when set.
     float  car_steer = 0, car_wheelidx = 0, car_myaw = 0, car_base = 0, car_track = 0, car_drop = 0, car_fwd = 0;
     float  car_rest = 0, car_travel = 0;
@@ -1320,6 +1666,20 @@ void(float isnew) CSQC_PhysProp_Update =
             drv_fwd   = readshort() - 4096;
             drv_side  = readshort() - 4096;
         }
+    }
+
+    // Buoyancy debug payload — LAST on the wire, present only when the server flagged it in the phase
+    // byte (sv_debug_physprops).  Must be read unconditionally-on-the-flag and in this exact order, or
+    // every subsequent entity in the datagram decodes garbage.
+    float dbg_rest = 0, dbg_wet = 0, dbg_frac = 0, dbg_feq = 0, dbg_loaded = 0;
+    if (has_dbg)
+    {
+        float dbgstate = readbyte();
+        dbg_rest   = (dbgstate & PP_DBG_REST_MASK);
+        dbg_wet    = (dbgstate & PP_DBG_WET_BIT);
+        dbg_loaded = (dbgstate & PP_DBG_LOADED_BIT);
+        dbg_frac = readbyte() * (1.0 / 255.0);
+        dbg_feq  = readbyte() * (1.0 / 255.0);
     }
 
     // classname drives Impact_ClassifyLocal → metal spark + no bullet decal.
@@ -1356,10 +1716,48 @@ void(float isnew) CSQC_PhysProp_Update =
     self.movetype  = MOVETYPE_NONE;  // origin is wire-authoritative (no engine integrate)
     self.drawmask  = MASK_ENGINE;    // engine renders the CSQC entity
 
+    // Captured BEFORE the assignment below — a carrier change is what re-seeds the
+    // predicted orientation (see the rel block further down).
+    float carrier_changed = (self.pp_carrier != carrier);
+
     self.pp_phase     = phase;
     self.pp_carrier   = carrier;
     self.pp_hold_dist = hold_dist;
     self.pp_hold_z    = hold_z;
+
+    // Buoyancy debug mirror (cl_debug_physprops overlay).  Timestamp only the rest-state EDGE so the
+    // overlay can show how long it has held — a per-snapshot stamp would always read ~0.
+    if (self.pp_dbg_rest != dbg_rest)
+        self.pp_dbg_since = cltime;
+    self.pp_dbg_rest   = dbg_rest;
+    self.pp_dbg_wet    = dbg_wet;
+    self.pp_dbg_frac   = dbg_frac;
+    self.pp_dbg_feq    = dbg_feq;
+    self.pp_dbg_loaded = dbg_loaded;
+
+    // Carry-frame orientation.  Latch the streamed value as the SEED only on the
+    // ownership edge (or the first held snapshot); once we own it, inspect mode drives
+    // pp_rel_* locally and the stream is merely our own echo arriving a round-trip late,
+    // so reading it back every snapshot would fight the prediction and stutter.
+    // Dropping the prop clears the latch so the next grab re-seeds.
+    if (rel_valid)
+    {
+        self.pp_snap_rel = rel_ang;
+        // Re-seed on a CARRIER CHANGE as well as on a missing latch.  Clearing the latch
+        // when a free-prop snapshot arrives is not sufficient on its own: a mirror kept
+        // across a PVS gap (PVSF_NOREMOVE) can be dropped and re-grabbed while we never
+        // see a non-carry snapshot, and would then predict the whole new carry from the
+        // PREVIOUS carry's stale basis.
+        if (!self.pp_rel_valid || carrier_changed)
+        {
+            CarryRot_Axes(rel_ang);
+            self.pp_rel_fwd   = crot_X;
+            self.pp_rel_up    = crot_Z;
+            self.pp_rel_valid = 1;
+        }
+    }
+    else
+        self.pp_rel_valid = 0;   // free prop — re-seed on the next grab
     self.pp_is_car       = is_car;
     if (is_car)
         Car_ChainLink(self);   // first is-car snapshot puts it on the car chain (idempotent)
@@ -1398,18 +1796,56 @@ void(float isnew) CSQC_PhysProp_Update =
         self.pp_snap_time_prev   = cltime;
     }
 
+    // ---- measure the stream interval (this becomes the RENDER DELAY; see PhysProp_RenderDelay) ----
+    // Only REAL, plausible packet gaps count.  Three sources would poison the average and are rejected:
+    //   * isnew   — dt is forced to 0 above, and this fires on every PVS RE-ENTRY (the server resends a
+    //               full baseline), so it would repeatedly drag the average toward zero;
+    //   * a wake  — seconds of rest silence is not a stream interval;
+    //   * a kick  — PhysProp_KickStream jumps the queue on shoot/blast/throw, sending one packet early;
+    //               that artificially short gap arrives exactly when stability matters most.
+    // Deliberately updated ONLY here, on a real packet — never per-frame.  If the delay could grow while
+    // the stream is silent, InterpFrac's `f` would never saturate at 1 and the settle test below would
+    // never fire, leaving resting props with their predraw hooked forever.
+    if (!isnew)
+    {
+        float gap = self.pp_snap_time - self.pp_snap_time_prev;
+        if (gap >= PP_DELAY_MIN && gap <= PhysProp_WakeGap(self))
+        {
+            if (self.pp_snap_interval <= 0)
+                self.pp_snap_interval = gap;                                    // first sample: take it
+            else
+                self.pp_snap_interval += (gap - self.pp_snap_interval) * PP_DELAY_EMA;
+        }
+    }
+
     // Rest-wake repair: a rested prop stops streaming, so on the next wake pp_snap_time_prev is stale
-    // (seconds old) and the jolt would lerp over the whole silence (a slow ooze).  A gap this large is
-    // never normal streaming (8 Hz = 0.125 s, even 4 Hz = 0.25 s), so treat it as a wake and bound the
-    // catch-up: move ONLY the timestamp (keep pp_snap_origin_prev = the current rest pose, so no pop) —
-    // dt becomes cl_physprop_wake_lerp, so PhysProp_InterpFrac sweeps prev->cur over ~80 ms (prompt +
-    // smooth).  wake_lerp 0 -> dt~=0 -> InterpFrac early-outs to 1 -> instant snap.
-    if (!isnew && (self.pp_snap_time - self.pp_snap_time_prev) > 0.3)
-        self.pp_snap_time_prev = self.pp_snap_time - cvar("cl_physprop_wake_lerp");
+    // (seconds old) and the jolt would lerp over the whole silence (a slow ooze).  Move ONLY the timestamp
+    // (keep pp_snap_origin_prev = the current rest pose, so no pop) to bound the catch-up.
+    //
+    // WHAT to substitute is the whole point.  The legacy path used cl_physprop_wake_lerp — a hand-authored
+    // CLIENT constant standing in for a SERVER-owned stream interval, so it was only ever right at one
+    // stream rate (0.08 was tuned for 8 Hz; at 64 Hz it is 5x too long).  Because dt doubles as the render
+    // delay in the legacy code, a wrong value there = the render target jumps on the next packet.  Feeding
+    // it the MEASURED interval instead makes dt equal the render delay at the wake frame, so `f` starts at
+    // 0 and sweeps to 1 over exactly one delay — and the delay itself never changed, so nothing jumps.
+    if (!isnew && (self.pp_snap_time - self.pp_snap_time_prev) > PhysProp_WakeGap(self))
+    {
+        float wake;
+        if (cvar("cl_physprop_smoothinterp"))
+            wake = PhysProp_RenderDelay(self);
+        else
+            wake = cvar("cl_physprop_wake_lerp");
+        self.pp_snap_time_prev = self.pp_snap_time - wake;
+    }
 
     // Always hook the interpolator; it interpolates prev→cur over the real interval, then parks +
     // unhooks itself once caught up at rest (see CSQC_PhysProp_Predraw), so resting props cost ~0.
     self.predraw = CSQC_PhysProp_Predraw;
+
+    // Join the active chain while this prop is actually moving, so the prediction hull relink walks it
+    // (PhysProp_RelinkHullsForPrediction).  The predraw drops it out again on the settle edge.
+    if (vel != '0 0 0' || avel != '0 0 0')
+        PhysProp_ActiveLink(self);
     // The prop is live again (fresh snapshot) — drop any parked static blob; the per-frame
     // emit in the predraw takes over.  Early-outs when no slot, so steady streams cost ~0.
     BlobShadow_FreeStatic(self);
@@ -1438,6 +1874,7 @@ void(float isnew) CSQC_PredProp_Update =
     cmod_y           = readbyte() * (1.0 / 255.0);
     cmod_z           = readbyte() * (1.0 / 255.0);
     float  alf       = readbyte() * (1.0 / 255.0);
+    float  pshadow   = readbyte();        // bit1=NOSHADOW (no cast), bit2=NOSELFSHADOW (no receive) — see predprop_Send
 
     self.classname = "prop_predicted";
     setmodelindex(self, mdlindex);
@@ -1448,6 +1885,18 @@ void(float isnew) CSQC_PredProp_Update =
     self.angles    = ang;
     self.movetype  = MOVETYPE_NONE;       // origin is wire-authoritative
     self.drawmask  = MASK_ENGINE;         // engine renders the CSQC entity
+    // Re-apply the shadow bits the standard-net path gets for free (EF→RF mapping, cl_ents.c).  Set
+    // explicitly each update (renderflags aren't sticky across a re-add).
+    //   RF_NOSHADOW     — engine r_shadows-2 caster walk skips this ent (gl_alias.c) → no world CAST.
+    //   RF_NOSELFSHADOW — CSQCRF_NOSELFSHADOW → RF_NOSHADOWRECV → e_noshadowrecv → no self-shadow RECEIVE.
+    if (pshadow & 1)
+        self.renderflags |= RF_NOSHADOW;
+    else
+        self.renderflags &= ~RF_NOSHADOW;
+    if (pshadow & 2)
+        self.renderflags |= RF_NOSELFSHADOW;
+    else
+        self.renderflags &= ~RF_NOSELFSHADOW;
 
     // Local solid → the predicted CSQC pmove + CSQC bullet traces collide.  TRIMESH for
     // IQM (the client has the mesh + NativeTrace, scaled by the engine via .scale); else

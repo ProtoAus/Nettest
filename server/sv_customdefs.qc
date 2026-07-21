@@ -107,9 +107,39 @@ void(entity player) W_GrappleRelease;
                              //   held still for PHYSPROP_SLEEP_DELAY, PhysObj_Think drops from 64 Hz to
                              //   sv_physprop_sleep_hz — a settled map of props then costs ~1/8th.  Cleared
                              //   by PhysProp_Wake (every interaction path) and by any tick that sees motion.
+// ---- Buoyancy (props float on water) ----------------------------------------------------------
+// World BSP water is STATIC, so the surface plane is probed ONCE on entry and cached here.  A prop
+// bobbing in a pond therefore costs ZERO pointcontents per tick — that caching is the whole reason
+// this feature is affordable.
+.float  pp_buoy_vol;         // on prop: bbox volume, cached at spawn (0 = buoyancy off for this prop)
+.float  pp_water_state;      // on prop: 1 = currently in water (skip the per-tick entry probe)
+.float  pp_water_z;          // on prop: cached water SURFACE height for the pool it is in
+.vector pp_water_org;        // on prop: origin when pp_water_z was probed — re-probe when it moves off this
+.float  pp_float_rest;       // on prop: 1 = settled at its float line with gravity zeroed and forcing OFF.
+                             //   NOT the same as the sleep gate: see the comment on Buoy_EnterFloatRest for
+                             //   why float-rest must latch on the BUOYANCY criterion instead.
+.float  pp_float_since;      // on prop: time it first sat inside the equilibrium deadband (0 = not settling)
+.float  pp_contact_rest;     // on prop: 1 = held by a CONTACT (pond floor, or a prop stacked on it) rather
+                             //   than by buoyancy, so forcing is off but gravity stays ON.  See the
+                             //   stuck-rest resolution in Buoy_Tick for why this second mode is needed.
+.float  pp_stuck_since;      // on prop: time it first went still WITHOUT being able to reach its float line
+.float  pp_loaded;           // on prop: 1 = something is stacked ON it, so its buoyancy is holding that
+                             //   load up and it must KEEP being forced (float-rest would sink the stack)
+.float  pp_drift_since;      // on prop: time a RESTED prop first started drifting (below the wake cut)
+.float  pp_send_zero_vel;    // on prop: 1 = send velocity as zero in the next snapshot WITHOUT zeroing the
+                             //   entity's own .velocity — writing it would wake the whole physics island.
 .float  carry_grab_time;     // on prop: time the grab started (drives the pull-in lerp window)
 .vector carry_grab_origin;   // on prop: prop.origin at grab time (lerp start position)
 .vector carry_grab_angles;   // on prop: prop.angles at grab time (lerp start orientation)
+// Carried ORIENTATION, stored as a basis in the CARRY FRAME (the pure-yaw frame at
+// v_angle_y+180) rather than as Euler angles — see shared/sh_carryrot.qc for why.
+// Latched at grab (snapped to the nearest upright/upside-down 90° pose) and then
+// preserved for the whole carry; inspect mode rewrites it from client input.
+.vector carry_rel_fwd;       // on prop: model +X in the carry frame (unit)
+.vector carry_rel_up;        // on prop: model +Z in the carry frame (unit, ⊥ fwd)
+.float  carry_dist_ofs;      // on prop: LIVE hold-distance offset (qu), glides toward want
+.float  carry_dist_want;     // on prop: scroll-wheel target offset (qu)
+.float  carry_rot_next;      // on PLAYER: rate-limit gate for CSEv_carryrot_v
 // Contact-FX state (impact sounds + smoke).
 .vector pp_prev_velocity;    // on prop: velocity last think — a sharp speed drop = a free-fall/tumble impact; its direction locates the contact surface
 .vector pp_prev_origin;      // on prop: origin last Carry_Tick — origin-delta gives the carry-bang approach speed

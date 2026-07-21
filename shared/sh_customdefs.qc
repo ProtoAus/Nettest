@@ -98,6 +98,43 @@ const float PP_PHASE_NONSOLID   = 0;  // carried/flying mid-air, non-solid to pl
 const float PP_PHASE_FREE_SOLID = 1;  // free + re-solidified to players               (old csolid 1)
 const float PP_PHASE_GRABBING   = 2;  // server grab pull-in active — client renders the STREAM (no predict)
 const float PP_PHASE_STEADY     = 3;  // steady carry — the local carrier may client-predict the hold pose
+// The phase itself only needs 2 bits, so the top bit rides along as "the buoyancy debug payload is
+// appended at the end of this message" (set when sv_debug_physprops is on).  Carrying the flag inside a
+// byte the client already reads is what keeps the writer and the reader in lockstep across a live cvar
+// toggle.  ALWAYS mask it off before comparing a phase: `phase & PP_PHASE_MASK`.
+const float PP_PHASE_DBG_BIT    = 128;
+const float PP_PHASE_MASK       = 3;
+
+// Rest state in the debug payload (bits 0-1), plus bit 2 = in water.
+const float PP_DBG_REST_NONE    = 0;
+const float PP_DBG_REST_FLOAT   = 1;
+const float PP_DBG_REST_CONTACT = 2;
+const float PP_DBG_REST_MASK    = 3;
+const float PP_DBG_WET_BIT      = 4;
+const float PP_DBG_LOADED_BIT   = 8;   // something is stacked on it — it MUST keep being forced
+
+// ---------------------------------------------------------------------------
+// PROP RIDER CARRY (PM_CheckPhysPropCarry, sh_pmove.qc)
+//
+// Velocity of the prop surface the player is standing on.  FORWARD-DECLARED here because
+// sh_customdefs.qc compiles first on BOTH sides, while the two definitions live in files that do not:
+// on CSQC, cl_progs.src lists sh_pmove.qc at 19 and cl_physprop.qc at 43, so the pmove file cannot see
+// anything declared in cl_physprop.qc.  Cross-file forward declaration is the sanctioned way around
+// that (same pattern as sv_physprop.qc's W_PhysDropWake).
+//
+// The two sides deliberately answer DIFFERENTLY, and that is the point:
+//   SSQC — the live authoritative .velocity.
+//   CSQC — the DERIVATIVE of the same interpolation the hull is posed by, NOT .velocity.  If the hull
+//          sits at t-delay but the carry integrates the velocity at t, the player advances at a
+//          different rate than the surface under them and slides off the back of the prop over a few
+//          hundred ms.  Differentiating the curve the hull is actually posed with makes the player's
+//          displacement and the hull's displacement identical by construction.
+vector(entity prop) PhysProp_ContactVelocity;
+
+// On the PLAYER: which prop is being ridden, and the contact velocity applied this substep.
+.entity prop_carry;
+.vector prop_carry_velocity;
+.float  prop_carry_active_cltime;   // CSQC only — drives the reconcile filter
 
 // trigger_push spawnflags
 const float PUSH_ONCE     = 1;  // remove after first touch
@@ -976,6 +1013,15 @@ float pp_cached_stream_hz;        // sv_physprop_stream_hz — moving-mirror sen
 float pp_cached_sleep_enable;     // sv_physprop_sleep — 1 = resting props drop to the slow tick
 float pp_cached_sleep_hz;         // sv_physprop_sleep_hz — slow-tick rate for a settled prop
 float pp_cached_debug;            // sv_debug_physprops
+// Buoyancy per-frame cache.  force_iter and meshpitch/roll are cvar reads that would otherwise be
+// made per-prop-per-tick; Phys_ForceIter in particular does a cvar_string + string compare.
+float pp_cached_buoyancy;         // sv_prop_buoyancy — master toggle
+float pp_cached_buoy_density;     // sv_prop_buoyancy_density — density of water in the pm_density scale
+float pp_cached_buoy_damping;     // sv_prop_buoyancy_damping — target heave damping RATIO (zeta)
+float pp_cached_gravity;          // sv_gravity — Buoy_Tick needs it per prop per tick
+float pp_cached_force_iter;       // Phys_ForceIter() — backend force scale (ODE substep compensation)
+float pp_cached_meshpitch;        // r_meshpitch — the backend applies this when building the body quat
+float pp_cached_meshroll;         // r_meshroll
 
 // Car per-frame cvar cache.  Only the reads that a PARKED (asleep) car still makes every
 // tick live here — Car_TickInterval + the live box re-tune + the sleep gate itself.  The

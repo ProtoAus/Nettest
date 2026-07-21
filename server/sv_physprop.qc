@@ -767,6 +767,479 @@ void(float lin) PhysObj_DetectContactFX =
 //   - contact-FX detection          if po_fx_enabled
 //   - re-solidify-on-drop + CSQC stream rest-latch   if po_carry_enabled (cabinet)
 // (Was phys_files_think — generalized so barrel/can gain the same metal contact FX.)
+// ============================================================================
+//  BUOYANCY — props float on water.
+//
+//  Pure QC.  physics_addforce (#541) is real on both backends, and its THIRD argument is a WORLD-space
+//  application point — so applying the buoyant force off-centre produces the righting moment for free,
+//  with no physics_addtorque.  Drag computed on the POINT velocity (v + w x r) rather than the body
+//  velocity then delivers linear AND angular damping through those same calls.
+//
+//  Props never get .waterlevel/.watertype — the engine only fills those for MOVETYPE_WALK (players) —
+//  so water is detected with pointcontents.  That is worldmodel-only, i.e. BAKED BSP WATER ONLY:
+//  func_water and other brush-entity water are invisible here and will float nothing.
+//
+//  COST is the whole design problem, not the physics.  Three things keep it cheap:
+//    1. world BSP water is STATIC -> probe the surface once on entry, cache it, and a bobbing prop then
+//       costs ZERO pointcontents per tick;
+//    2. adaptive sample count -> 1 force when fully submerged (no righting differential exists), 4 only
+//       while straddling the surface;
+//    3. a rest deadband -> a prop settled at its float line stops being forced ENTIRELY, so the rigid
+//       body autodisables and the Patch 67/68 resting-contact skips stay live.
+//
+//  The damping is specified as a RATIO (sv_prop_buoyancy_damping, the classic zeta) and the actual drag
+//  coefficient is derived per-prop from its own natural frequency.  A fixed coefficient cannot work here:
+//  the heave stiffness scales as 1/(h*f_eq) while the drag scales with the submerged fraction, so any
+//  fixed number yields a ratio proportional to f_eq*sqrt(h) — small light props end up wildly
+//  underdamped and bob indefinitely while large ones look fine.  See the damping block in Buoy_Tick.
+// ============================================================================
+
+const float BUOY_DEADBAND   = 0.06;   // |frac - f_eq| inside this = at the float line
+const float BUOY_REST_DELAY = 0.25;   // hold inside the deadband this long before latching float-rest
+
+// ENTER thresholds — tight, so only a genuinely settled prop latches.  These must also satisfy
+// BUOY_REST_LIN * BUOY_REST_DELAY < BUOY_DEADBAND * h, or a prop can traverse the entire band while
+// "resting" and latch well off its float line.  At 2 qu/s * 0.25 s = 0.5 qu that holds down to ~8 qu tall.
+const float BUOY_REST_LIN   = 2;
+const float BUOY_REST_ANG   = 6;
+
+// WAKE thresholds — deliberately SEVERAL TIMES the enter cuts.  Using one constant for both (which is what
+// this did) is a latch with no hysteresis: a prop sitting near the cut chatters enter->exit->enter forever,
+// and every exit restores gravity and drops it.  Two props resting on each other trade contact impulses of
+// exactly a few qu/s indefinitely, so they sat right in that band and cycled ~1 Hz.
+const float BUOY_WAKE_LIN   = 12;
+const float BUOY_WAKE_ANG   = 30;
+
+// A rested prop moving between the enter and wake cuts is being continuously disturbed.  Give it this long,
+// then LEAVE rest and let the real buoyancy + drag model stop it.  The alternative — nudging its velocity
+// down each tick — writes to the body every tick, which is the one thing a resting prop must never do.
+const float BUOY_DRIFT_TIME = 0.5;
+
+// How long a prop may sit still WITHOUT reaching its float line before we resolve it (see Buoy_Tick).
+const float BUOY_STUCK_TIME = 1.5;
+
+const float BUOY_SCAN_STEP  = 16;     // coarse upward scan step when finding the surface
+
+// Stability guards for the explicit spring.  All three exist because the drag coefficient is now DERIVED
+// from the prop's own geometry (see the damping block in Buoy_Tick) and so is unbounded on small props.
+const float BUOY_OMEGA_DT_MAX = 0.35; // cap on omega*dt — beyond this the tick cannot resolve the spring
+const float BUOY_DAMP_DT_MAX  = 0.90; // cap on damping*dt — at 1.0 the drag term REVERSES velocity
+const float BUOY_ACCEL_MAX    = 2;    // cap on net buoyant acceleration, in gravities.  Lower than the
+                                      //   physical value on purpose: a wooden prop pushed under gets
+                                      //   1/0.35 = 2.9 g upward, which launches it clean out of the pond.
+const float BUOY_EXIT_DRAG    = 0.35; // drag retained just above the waterline, fading to 0 one prop-
+                                      //   height clear.  See the splash-drag note in the force loop.
+
+// Find the water surface height above a point known to be IN water.  Scans up in BUOY_SCAN_STEP
+// increments then refines down 1qu.  ~17 pointcontents at the floor, ~32 for a deep pool — but ONE TIME
+// per water entry, cached in .pp_water_z, so it amortises to nothing.
+// Returns 0 if no surface was found or the scan hit SOLID first.
+float(vector inwater) Buoy_SurfaceZ =
+{
+	vector p = inwater;
+	float climbed = 0;
+	float c = CONTENT_WATER;   // initialised: the caller has already confirmed this point is in water
+
+	// coarse: rise until we leave the water
+	while (climbed < 4096)
+	{
+		p_z += BUOY_SCAN_STEP;
+		climbed += BUOY_SCAN_STEP;
+		c = pointcontents(p);
+		if (c != CONTENT_WATER)
+			break;
+	}
+	if (climbed >= 4096)
+		return 0;
+	// A scan that terminates on SOLID means we are under a submerged brush (a ledge, a pipe, the
+	// underside of a dock) — that surface is NOT the waterline.  Floating up to it and latching there
+	// would freeze the prop against the brush with gravity zeroed, and the horizontal-movement
+	// invalidation below could never recover it because the error is purely vertical.
+	if (c == CONTENT_SOLID)
+		return 0;
+
+	// refine: descend 1qu until we are back in water; the last dry sample is the surface
+	while (climbed > 0)
+	{
+		p_z -= 1;
+		climbed -= 1;
+		if (pointcontents(p) == CONTENT_WATER)
+			return p_z + 1;
+	}
+	return p_z;
+};
+
+// Settled at the float line: stop forcing AND zero gravity in the same tick.
+//
+// This deliberately does NOT reuse the sleep gate's atrest test.  That path needs lin <= 0.5 held for
+// PHYSPROP_SLEEP_DELAY (0.35s = 22 ticks), but a prop inside the force deadband with gravity still on is
+// in FREE FALL — one tick at sv_gravity 800 is 12.5 qu/s, twenty-five times SLEEP_LIN — so atrest would
+// be false again immediately and the countdown would restart forever.  The prop would be pinned at the
+// 64 Hz tick, forced (and therefore woken) every tick so the body never autodisables, and streaming to
+// every client at full rate permanently.  Floating props would become the most expensive resting state
+// in the game, which is the exact opposite of the intent.
+//
+// Zeroing gravity is what makes the deadband physically self-consistent: no gravity plus no force is
+// genuinely neutral, so the prop simply stays where it is instead of falling out of the band. gravity
+// <= 0.01 maps to "gravity off" on both backends and latches on the transition tick, so this is one-shot.
+// THE SILENCE RULE, which the rest of this system now obeys: while a prop is resting, QC must write
+// NOTHING to it.  Any change to .origin/.velocity/.angles/.avelocity/.gravity marks the body modified
+// (com_phys_box3d.c:784-789), and the engine then unconditionally calls b3Body_SetAwake — which on a
+// SLEEPING body wakes the entire contact ISLAND, resetting the sleep timer of every prop stacked on or
+// under this one.  These two writes are the unavoidable one-shot cost of turning gravity off; nothing may
+// write to a rested prop on any subsequent tick.
+void(entity e) Buoy_EnterFloatRest =
+{
+	e.pp_float_rest   = TRUE;
+	e.pp_stuck_since  = 0;
+	e.pp_drift_since  = 0;
+	e.gravity         = 0.005;   // backend reads <=0.01 as gravity OFF
+	e.velocity        = '0 0 0';
+	e.avelocity       = '0 0 0';
+};
+
+// Leave float-rest: restore gravity, the fast tick and streaming TOGETHER.  Restoring only gravity would
+// leave a woken prop falling while still latched at the slow sleep tick.
+void(entity e) Buoy_ExitFloatRest =
+{
+	if (!e.pp_float_rest)
+		return;
+	e.pp_float_rest  = FALSE;
+	e.pp_float_since = 0;
+	e.pp_stuck_since = 0;
+	e.pp_drift_since = 0;
+	e.gravity        = 1;
+	if (e.think == PhysObj_Think)
+		e.nextthink = time;
+};
+
+// Held by a CONTACT rather than by buoyancy — sitting on the floor of shallow water, or with another prop
+// stacked on top of it.  Such a prop can never satisfy the float-line deadband, because `frac` is derived
+// from the water plane alone and has no contact term: shallow water bottoms it out below f_eq, and a load
+// on top pushes it under.  Before this existed it was therefore forced upward at up to BUOY_ACCEL_MAX
+// gravities FOREVER — never autodisabling, streaming to every client permanently, and creeping as the
+// force fought the contact.  That was the shallow-water "fling", and it is why a stacked pair could never
+// both go quiet: the loaded prop kept being forced, which kept waking the prop resting on it.
+//
+// Gravity stays ON here, unlike float-rest: the contact is what holds this prop up, so removing its weight
+// would float it off whatever it is sitting on.  That also makes the ORDINARY sleep test valid here — the
+// prop is genuinely supported rather than in free fall, which is precisely the case Buoy_EnterFloatRest's
+// comment above does not cover.
+//
+// Writes nothing.  It only stops the forcing.
+void(entity e) Buoy_EnterContactRest =
+{
+	e.pp_contact_rest = TRUE;
+	e.pp_stuck_since  = 0;
+	e.pp_drift_since  = 0;
+};
+
+void(entity e) Buoy_ExitContactRest =
+{
+	if (!e.pp_contact_rest)
+		return;
+	e.pp_contact_rest = FALSE;
+	e.pp_stuck_since  = 0;
+	e.pp_drift_since  = 0;
+	if (e.think == PhysObj_Think)
+		e.nextthink = time;
+};
+
+// Server half of the prop rider-carry accessor (declared in sh_customdefs.qc; the CSQC half lives in
+// cl_physprop.qc and deliberately answers from the interpolation instead).  The server holds the real
+// rigid body, so the live velocity IS the surface velocity.
+//
+// v1 is LINEAR ONLY.  A rolling barrel already carries you, because its centre translates; the missing
+// refinement is the tangential w x r term, which for true rolling contact doubles the surface speed at
+// the top.  That needs the un-mangled world omega and the geomcenter on BOTH sides (see Buoy_Tick — and
+// note it must copy the FIXED com, using v_up rather than world up), so it is deferred rather than
+// half-built.
+vector(entity prop) PhysProp_ContactVelocity =
+{
+	return prop.velocity;
+};
+
+// One buoyancy tick for a prop that is in (or may be entering) water.
+void(entity e, float lin, float ang) Buoy_Tick =
+{
+	float h = e.maxs_z - e.mins_z;
+	float c;
+
+	if (h <= 0)
+		return;
+
+	// ---- entry / exit detection -------------------------------------------------------------
+	if (!e.pp_water_state)
+	{
+		// dry: one probe at the lowest point of the prop
+		if (pointcontents(e.origin + '0 0 1' * e.mins_z) != CONTENT_WATER)
+			return;
+		c = Buoy_SurfaceZ(e.origin + '0 0 1' * e.mins_z);
+		if (!c)
+			return;                       // no usable surface (under a brush / too deep) — behave as before
+		e.pp_water_state = TRUE;
+		e.pp_water_z     = c;
+		e.pp_water_org   = e.origin;
+	}
+	else
+	{
+		// wet: re-probe only when it has drifted far enough that the cached plane may be wrong.
+		// Horizontal handles crossing between pools at different heights; vertical catches the case
+		// where the prop has sunk or risen out of the volume the plane was measured in.
+		vector d = e.origin - e.pp_water_org;
+		float  w = (e.maxs_x - e.mins_x) * 0.5;
+		if (d_x*d_x + d_y*d_y > w*w || fabs(d_z) > h)
+		{
+			if (pointcontents(e.origin + '0 0 1' * e.mins_z) != CONTENT_WATER)
+			{
+				e.pp_water_state = FALSE;   // left the water entirely
+				Buoy_ExitFloatRest(e);
+				Buoy_ExitContactRest(e);
+				return;
+			}
+			c = Buoy_SurfaceZ(e.origin + '0 0 1' * e.mins_z);
+			if (c)
+			{
+				e.pp_water_z   = c;
+				e.pp_water_org = e.origin;
+			}
+		}
+	}
+
+	// ---- equilibrium ------------------------------------------------------------------------
+	float m_disp = pp_cached_buoy_density * e.pp_buoy_vol / 1000;
+	if (m_disp <= 0)
+		return;
+	float f_eq = e.mass / m_disp;           // submerged fraction at equilibrium; >= 1 = it sinks
+	float sinker = (f_eq >= 1);
+
+	// A sinker never floats and never float-rests — but it DOES still belong in the force model, which
+	// comes out net-downward on its own for f_eq >= 1.  Returning here instead (as this used to) meant a
+	// metal barrel fell through water at full AIR speed, with no drag at all.  The one thing to avoid is
+	// forcing it forever once it has landed on the bottom: physics_addforce wakes the body, so that would
+	// pin a sunk prop at the 64 Hz tick and defeat the Patch 67/68 resting-contact skips.
+	if (sinker)
+	{
+		if (lin <= PHYSPROP_SLEEP_LIN)
+		if (ang <= PHYSPROP_SLEEP_ANG)
+			return;
+	}
+
+	// ---- body basis -------------------------------------------------------------------------
+	// World angular velocity. .avelocity is NOT it: the backend permutes on read-back
+	// (avelocity[YAW] comes from spin[ROLL] and vice versa, and pitch is multiplied by r_meshpitch).
+	// Note the source it permutes, b3Body_GetAngularVelocity, is already a CARTESIAN WORLD vector
+	// (com_phys_box3d.c:245) — the writeback is a pure slot shuffle, NOT an Euler-rate conversion, so
+	// this straight inverse permutation is the correct un-mangle.  (* pscale rather than / pscale is
+	// identical: r_meshpitch is always +-1.)
+	// pscale: cars resolve a mesh_noscale flag for HL-studio/brush models that the backend does NOT
+	// meshpitch-scale, but that field is declared in sh_vehicle_phys.qc (compiled after this file) and is
+	// only ever set on cars — which run Car_Think, not PhysObj_Think, and never reach here.  So props
+	// always take the alias path.  The one uncovered case is a TUMBLING prop_physics using an HL-studio
+	// .mdl; an upright prop is unaffected either way (pitch 0 scales to 0).
+	float pscale = pp_cached_meshpitch;
+	vector w_world = [e.avelocity_x * pscale, e.avelocity_z, e.avelocity_y] * (M_PI / 180);
+
+	// Body basis, with the same meshpitch/roll flip the backend applies when turning .angles into the
+	// body quaternion (and the right-hand flip World_OBBTrace uses).
+	makevectors([e.angles_x * pscale, e.angles_y, e.angles_z * pp_cached_meshroll]);
+	vector ax0 = v_forward;
+	vector ax1 = v_right * -1;
+	vector ax2 = v_up;          // == crossproduct(ax0, ax1) for this basis
+
+	// Torque arms are taken about the CENTRE OF MASS, which the backend places at the geomcenter
+	// (mins+maxs)*0.5 in MODEL space — not at the entity origin, and not at a half-rotated blend of the
+	// two.  All three axes must be rotated into the body basis.  Using world up for the Z term (as this
+	// did) displaces the assumed COM from the true one by c_z*('0 0 1' - ax2) whenever the prop is
+	// tilted, and since the engine takes torque about the TRUE COM that displacement contributes a
+	// spurious e x sum(F).  With the usual mins_z ~ 0 prop that term has the SAME SIGN as the tilt — it
+	// is positive feedback — and it beats the genuine righting couple whenever f_eq*h^2 > 2*hy^2, i.e.
+	// for roughly any prop taller than it is wide.  That was the "props like to flip in the water" bug;
+	// it hid during testing because at zero tilt ax2 IS '0 0 1'.
+	vector com = e.origin + ax0 * ((e.mins_x + e.maxs_x) * 0.5)
+	                      + ax1 * ((e.mins_y + e.maxs_y) * 0.5)
+	                      + ax2 * ((e.mins_z + e.maxs_z) * 0.5);
+
+	// Submerged fraction, measured at the ROTATED centre — the same quantity the force loop's centre
+	// sample sees.  The old form used the unrotated origin_z + mins_z, so on a tilted prop the latch
+	// below tested a different number than the force actually produced: a prop could sit at true force
+	// equilibrium yet read outside the deadband, reset its timer every tick and NEVER float-rest —
+	// leaving it forced at 64 Hz and streaming to every client indefinitely.
+	float frac = (e.pp_water_z - (com_z - h * 0.5)) / h;
+	if (frac < 0) frac = 0;
+	if (frac > 1) frac = 1;
+
+	// ---- float-rest latch (see Buoy_EnterFloatRest) -----------------------------------------
+	if (!sinker)
+	{
+		float latch_ok = 0;
+		if (fabs(frac - f_eq) < BUOY_DEADBAND)
+		if (lin < BUOY_REST_LIN)
+		if (ang < BUOY_REST_ANG)
+			latch_ok = 1;
+
+		// Clear on ANY failed condition.  Clearing only when OUTSIDE the deadband (as this did) let a
+		// prop that was whacked while still in-band keep a stale timestamp, then latch INSTANTLY the
+		// moment it decelerated back through BUOY_REST_LIN — a visible freeze mid-splash.
+		if (!latch_ok)
+			e.pp_float_since = 0;
+		else if (!e.pp_float_since)
+			e.pp_float_since = time;
+		else if (time - e.pp_float_since >= BUOY_REST_DELAY)
+		{
+			Buoy_EnterFloatRest(e);
+			return;
+		}
+
+		// ---- stuck-rest resolution ----------------------------------------------------------
+		// A prop can be genuinely still and STILL never satisfy the deadband above, because `frac`
+		// comes from the water plane alone and knows nothing about contacts: shallow water bottoms
+		// it out below f_eq, and a prop stacked on top pushes it under.  Such a prop used to be
+		// forced upward forever — the shallow-water fling — so resolve it once it has held still
+		// (by the ordinary sleep cut, which is valid because it plainly is not free-falling) for
+		// BUOY_STUCK_TIME without latching.
+		//
+		// ONE tracebox, on the transition tick only, picks the right rest:
+		//   something under it -> CONTACT-REST, gravity stays ON (that contact is what holds it up;
+		//                         zeroing its weight would float it off whatever it sits on)
+		//   nothing under it   -> FLOAT-REST anyway, gravity OFF.  It IS floating, just not at the
+		//                         line we predicted (a load on top, say) — and gravity off plus no
+		//                         force is neutral wherever it happens to be, so it simply stays.
+		// Threshold is BUOY_REST_LIN, not PHYSPROP_SLEEP_LIN: the question here is "is this prop making
+		// progress toward its float line", not "is it dead still".  A loaded or bottomed-out prop is
+		// being forced continuously, so it always carries some solver jitter and never held still enough
+		// to arm a 0.5 qu/s test — the resolution below could never fire, which is why stacked props
+		// stayed stuck.
+		if (lin <= BUOY_REST_LIN)
+		if (ang <= BUOY_REST_ANG)
+		{
+			if (!e.pp_stuck_since)
+				e.pp_stuck_since = time;
+			else if (time - e.pp_stuck_since >= BUOY_STUCK_TIME)
+			{
+				tracebox(e.origin, e.mins, e.maxs, e.origin - '0 0 2', MOVE_NOMONSTERS, e);
+				if (trace_fraction < 1)
+				{
+					Buoy_EnterContactRest(e);
+					return;
+				}
+				// Nothing underneath — it really is afloat, just not where we predicted.  Before parking
+				// it, check whether something is stacked ON it: this prop's own buoyancy is then the only
+				// thing holding that load up, so zeroing its gravity and cutting the force (float-rest)
+				// would sink the whole stack.  A load-bearing prop must keep being forced; it is already
+				// at mechanical equilibrium (our upward force exactly cancels the load), so it is steady
+				// even though it never satisfies the geometric deadband.  Flag it so the debug overlay
+				// can say LOADED rather than showing it as a prop that failed to settle.
+				tracebox(e.origin, e.mins, e.maxs, e.origin + '0 0 2', MOVE_NOMONSTERS, e);
+				if (trace_fraction < 1)
+				{
+					e.pp_loaded      = TRUE;
+					e.pp_stuck_since = 0;   // re-arm; it may become free later
+				}
+				else
+				{
+					e.pp_loaded = FALSE;
+					Buoy_EnterFloatRest(e);
+					return;
+				}
+			}
+		}
+		else
+		{
+			e.pp_stuck_since = 0;
+			e.pp_loaded      = FALSE;
+		}
+	}
+
+	// ---- damping ----------------------------------------------------------------------------
+	// Target a fixed damping RATIO, not a fixed coefficient.  Linearised, heave is a spring with
+	// natural frequency omega = sqrt(g / (h * f_eq)), and the force loop below multiplies the drag term
+	// by the submerged fraction (~f_eq at the float line), so the coefficient that yields a ratio of
+	// zeta is 2*zeta*omega / f_eq.
+	//
+	// The old fixed coefficient (with a 1/sqrt(f_eq) nudge) produced zeta = (C/2)*f_eq*sqrt(h/g), i.e. it
+	// scaled with BOTH density and size.  At C=4 and sv_gravity 800 that is 0.0707*f_eq*sqrt(h): a small
+	// wooden matchbox landed at 0.07 (~15 visible bobs — it "bounced in and out of the water like a
+	// frog") while a large crate reached 0.20 and looked acceptable.  Deriving from omega removes both
+	// dependencies, so every prop now settles in the same NUMBER of bobs whatever its size or material.
+	float g = pp_cached_gravity;
+	float zeta = pp_cached_buoy_damping;
+	float dt = frametime;
+	if (dt <= 0) dt = 0.0156;
+
+	float omega = sqrt(g / (h * f_eq));
+	// An explicit spring integrated once per tick needs omega*dt well under 1.  A small light prop can
+	// ask for 0.7, which the tick simply cannot resolve; clamp before deriving the coefficient from it.
+	float omega_max = BUOY_OMEGA_DT_MAX / dt;
+	if (omega > omega_max) omega = omega_max;
+
+	float drag = 2 * zeta * omega / f_eq;
+	// The drag is applied explicitly too: once drag * (submerged fraction) * dt reaches 1 it REVERSES
+	// the point velocity rather than damping it, which injects energy instead of removing it.
+	float drag_max = BUOY_DAMP_DT_MAX / (f_eq * dt);
+	if (drag > drag_max) drag = drag_max;
+
+	// ---- force model ------------------------------------------------------------------------
+	float W_full = m_disp * g;              // buoyant force at full displacement
+
+	// A very light prop that gets fully submerged would otherwise receive (1/f_eq - 1) gravities upward
+	// — nine of them for fabric — and rocket clean out of the pond, which is the other half of the
+	// "in and out of the water" symptom.  Cap the net upward acceleration.
+	float W_cap = e.mass * g * (BUOY_ACCEL_MAX + 1);
+	if (W_full > W_cap) W_full = W_cap;
+
+	float hx = (e.maxs_x - e.mins_x) * 0.5;
+	float hy = (e.maxs_y - e.mins_y) * 0.5;
+	float i;
+	vector off, p, r, v, F;
+
+	// Always FOUR points, including when fully submerged.  Collapsing to a single force at the COM (as
+	// this did above frac 1) sets r to zero, which removes the torque term entirely — a dunked prop kept
+	// all of its spin and resurfaced still spinning — and it is a force discontinuity for a tilted prop
+	// right at the boundary.  The saving was three queued force commands.
+	i = 0;
+	while (i < 4)
+	{
+		if (i == 0)      off = [ hx,  hy, 0];
+		else if (i == 1) off = [ hx, -hy, 0];
+		else if (i == 2) off = [-hx,  hy, 0];
+		else             off = [-hx, -hy, 0];
+
+		r = ax0 * off_x + ax1 * off_y;
+		p = com + r;
+
+		// this sample's own submersion, so a tilted prop gets a real restoring couple
+		float colbottom = p_z - h * 0.5;
+		float fi = (e.pp_water_z - colbottom) / h;
+		if (fi < 0) fi = 0;
+		if (fi > 1) fi = 1;
+
+		// SPLASH DRAG.  The drag needs its own fraction, which does NOT cut to zero the instant this
+		// column clears the surface.  Gating the drag on `fi` (as this did) made a prop that overshoots
+		// out of the water perfectly BALLISTIC — no damping at all above the line — so it re-entered at
+		// exactly the speed it left and bounced forever no matter what the damping ratio said.  That is
+		// why small light props still bobbed after the zeta rewrite: a 35%-submerged prop only has to
+		// overshoot by a third of its height to leave the water entirely, and small props do that on the
+		// first bob.  Real water dumps a lot of energy into that splash; model it as the drag fading out
+		// over one prop-height above the waterline instead of stopping dead at it.
+		float fd = fi;
+		if (fd <= 0)
+		{
+			float above = (colbottom - e.pp_water_z) / h;   // 0 at the line, 1 one height clear
+			if (above < 1)
+				fd = BUOY_EXIT_DRAG * (1 - above);
+		}
+
+		if (fi > 0 || fd > 0)
+		{
+			v = e.velocity + crossproduct(w_world, r);
+			F = ('0 0 1' * (W_full * fi) - v * (drag * e.mass * fd)) * (0.25 * pp_cached_force_iter);
+			physics_addforce(e, F, p);
+		}
+		i = i + 1;
+	}
+};
+
 void() PhysObj_Think =
 {
 	// Tick at the server rate (~64 Hz) not 20 Hz: a FREE falling/tumbling cabinet
@@ -865,6 +1338,66 @@ void() PhysObj_Think =
 
 	}   // end if (po_carry_enabled) — carry re-solidify-on-drop (cabinet/prop_physics)
 
+	// ==================== BUOYANCY ====================
+	// Placed here on purpose: BEFORE the stream rest-latch and the sleep gate, so the force this tick
+	// lands ahead of the lin/ang-derived streaming and sleep decisions made from it below.
+	//
+	// NESTED gates, not && — `logicops` is off mod-wide, so && / || evaluate EVERY operand (the
+	// PhysFiles_OnSurface regression documented above is the precedent).  The ordering matters for cost:
+	// a DRY SETTLED prop — the overwhelmingly common case — falls straight through on a couple of float
+	// compares and makes ZERO builtin calls.
+	if (pp_cached_buoyancy)
+	if (self.pp_buoy_vol)
+	{
+		if (self.pp_float_rest)
+		{
+			// Floating at rest with gravity zeroed: nothing to do until something disturbs it.
+			// PhysProp_Wake covers every interaction QC can see; this catches the ones it cannot
+			// (another prop drifting into it, a door shoving it).
+			//
+			// THE SILENCE RULE APPLIES HERE.  Nothing in this branch may write to the prop.  A
+			// per-tick velocity decay used to live here, to stop a nudged prop gliding forever with
+			// gravity off and no drag.  It wrote .velocity EVERY tick, which marks the body modified
+			// every tick — per-tick b3Body_SetTransform churn that feeds Box3D's own sleepVelocity
+			// test, so the body could never accumulate its 0.5 s of quiet, plus a non-zero
+			// SetLinearVelocity that self-wakes.  Two props resting on each other always have some
+			// contact jitter, so both were held permanently awake and re-teleported every tick.
+			// That was the ~1 Hz rise/fall cycle.  The drift case is now handled by LEAVING rest
+			// below and letting the real buoyancy + drag model stop the prop, which writes nothing.
+			if (lin > BUOY_WAKE_LIN)
+				Buoy_ExitFloatRest(self);
+			else if (ang > BUOY_WAKE_ANG)
+				Buoy_ExitFloatRest(self);
+			else if (lin > BUOY_REST_LIN)
+			{
+				// Drifting: under the wake cut, but not still either.  Give it a moment (so a single
+				// jostle does not break the rest) and then hand it back to the force model.
+				if (!self.pp_drift_since)
+					self.pp_drift_since = time;
+				else if (time - self.pp_drift_since >= BUOY_DRIFT_TIME)
+					Buoy_ExitFloatRest(self);
+			}
+			else
+				self.pp_drift_since = 0;
+		}
+		else if (self.pp_contact_rest)
+		{
+			// Held by a contact, gravity still on.  Same silence rule — write nothing.  The wake cuts
+			// are the LOOSE ones on purpose: this prop is in contact with the world or another prop,
+			// so small solver push-out is normal and must not be read as "it moved".
+			if (lin > BUOY_WAKE_LIN)
+				Buoy_ExitContactRest(self);
+			else if (ang > BUOY_WAKE_ANG)
+				Buoy_ExitContactRest(self);
+		}
+		else if (self.pp_water_state)
+			Buoy_Tick(self, lin, ang);      // already wet: cached surface plane, no probe
+		else if (lin > 1)
+			Buoy_Tick(self, lin, ang);      // dry but moving: one pointcontents entry test
+		// dry + settled: nothing.  World water is static, so a prop that is not moving cannot
+		// enter it, and there is no reason to probe.
+	}
+
 	// CSQC stream rest-latch — EVERY prop with the custom CSQC mirror (barrel, can,
 	// cabinet, prop_physics), NOT just carriables.  Stream every tick while moving/carried;
 	// on the moving→rest edge send ONE final snapshot with velocity zeroed so the client
@@ -875,9 +1408,9 @@ void() PhysObj_Think =
 	{
 		if (lin > 0.5 || ang > 0.5 || self.carried_by != world)
 		{
-			// Throttle the MOVING stream to sv_physprop_stream_hz (default 8) — the client
-			// predraw extrapolates between snapshots, so 30 Hz keeps collision smooth while a
-			// big flood pays ~2× fewer Sends + client relinks.  The rest snapshot below stays
+			// Throttle the MOVING stream to sv_physprop_stream_hz (currently 64) — the client
+			// predraw interpolates between snapshots, so a lower rate keeps collision smooth while
+			// a big flood pays fewer Sends + client relinks.  The rest snapshot below stays
 			// IMMEDIATE, so the hull still parks exactly on the model at rest (Stage 4d intact).
 			float stream_hz = pp_cached_stream_hz;
 			if (stream_hz <= 0 || time >= self.pp_stream_next)
@@ -887,11 +1420,17 @@ void() PhysObj_Think =
 					self.pp_stream_next = time + 1 / stream_hz;
 			}
 			self.pp_was_streaming  = TRUE;
+			self.pp_send_zero_vel  = FALSE;   // moving again — send the real velocity (see phys_files_Send)
 		}
 		else if (self.pp_was_streaming)
 		{
-			self.velocity          = '0 0 0';
-			self.avelocity         = '0 0 0';
+			// Send the rest snapshot with velocity zeroed so the client clears its predraw and parks
+			// the hull on the model — but do NOT zero the entity's own .velocity to achieve it.  That
+			// was a networking concern reaching into the simulation: any write marks the body modified,
+			// and on a SLEEPING prop the engine's unconditional b3Body_SetAwake then wakes the whole
+			// contact island, every prop stacked on or under it included.  The flag makes
+			// phys_files_Send write zeros on the wire while the body is left completely alone.
+			self.pp_send_zero_vel  = TRUE;
 			self.SendFlags        |= 1;
 			self.pp_was_streaming  = FALSE;
 		}
@@ -943,6 +1482,16 @@ void() PhysObj_Think =
 void(entity e) PhysProp_Wake =
 {
 	e.pp_rest_since = 0;
+
+	// A prop floating at rest has its gravity ZEROED and is not being forced (see Buoy_EnterFloatRest).
+	// Restore both before the caller's force lands, or the shot/blast would push a gravity-less prop that
+	// then hangs wherever it stops.  Doing it here means every interaction path gets it for free, and the
+	// pp_prev_velocity re-latch below (which suppresses the phantom impact bang) applies to it too.
+	if (e.pp_float_rest)
+		Buoy_ExitFloatRest(e);
+	if (e.pp_contact_rest)
+		Buoy_ExitContactRest(e);
+	e.pp_stuck_since = 0;
 
 	// Cars (Car_Think, sv_prop_vehicle.qc) sleep differently: their body is EXPLICITLY
 	// disabled, so re-enable it here.  Both backends already auto-enable on a force
@@ -1019,13 +1568,35 @@ float(entity playerent, float changedflags) phys_files_Send =
 
 	// Linear + angular velocity → the client predraw extrapolates between
 	// snapshots so motion (tumble / carry / throw) renders smoothly.
-	WriteCoord(MSG_ENTITY, self.velocity_x);
-	WriteCoord(MSG_ENTITY, self.velocity_y);
-	WriteCoord(MSG_ENTITY, self.velocity_z);
+	//
+	// pp_send_zero_vel is the moving→rest edge: the client needs a snapshot reading zero so it clears
+	// its predraw and parks the hull exactly on the model.  It is sent as a WIRE value only — the rest
+	// latch used to get it by zeroing the entity's own .velocity, but any write to a prop marks the
+	// body modified and wakes its whole physics island (see the silence rule above).
+	//
+	// The flag is STICKY, cleared by the moving branch of the rest latch, NOT here: this function runs
+	// once PER CLIENT, so clearing it on first use would send zeros to one client and the live velocity
+	// to everyone else.  Sticky is also simply correct — a prop that has come to rest really does have
+	// zero velocity on every subsequent snapshot until it moves again.
+	if (self.pp_send_zero_vel)
+	{
+		WriteCoord(MSG_ENTITY, 0);
+		WriteCoord(MSG_ENTITY, 0);
+		WriteCoord(MSG_ENTITY, 0);
+		WriteCoord(MSG_ENTITY, 0);
+		WriteCoord(MSG_ENTITY, 0);
+		WriteCoord(MSG_ENTITY, 0);
+	}
+	else
+	{
+		WriteCoord(MSG_ENTITY, self.velocity_x);
+		WriteCoord(MSG_ENTITY, self.velocity_y);
+		WriteCoord(MSG_ENTITY, self.velocity_z);
 
-	WriteCoord(MSG_ENTITY, self.avelocity_x);
-	WriteCoord(MSG_ENTITY, self.avelocity_y);
-	WriteCoord(MSG_ENTITY, self.avelocity_z);
+		WriteCoord(MSG_ENTITY, self.avelocity_x);
+		WriteCoord(MSG_ENTITY, self.avelocity_y);
+		WriteCoord(MSG_ENTITY, self.avelocity_z);
+	}
 
 	// Per-channel colormod (R,G,B) → 3 bytes.  The cabinet/weapon-drops use a grayscale
 	// dim (sv_carry_lightscale, e.g. '0.7 0.7 0.7') that round-trips identically; Source
@@ -1064,6 +1635,13 @@ float(entity playerent, float changedflags) phys_files_Send =
 		             ? PP_PHASE_GRABBING : PP_PHASE_STEADY;
 	else
 		pp_phase_out = (self.dimension_solid & PHYSDROP_DIM) ? PP_PHASE_NONSOLID : PP_PHASE_FREE_SOLID;
+	// The phase is a 0..3 enum, so the top bit is free: use it to tell the client whether the buoyancy
+	// debug payload is appended at the END of this message.  Latched into a local because the same
+	// answer must gate both this bit and the write below — reading the cvar twice could straddle a
+	// toggle and desync the stream.
+	float sc_dbg_state = pp_cached_debug;
+	if (sc_dbg_state)
+		pp_phase_out = pp_phase_out | PP_PHASE_DBG_BIT;
 	WriteByte(MSG_ENTITY, pp_phase_out);
 
 	// Carrier edict (0 = not carried).  The client compares this to player_localentnum
@@ -1073,13 +1651,39 @@ float(entity playerent, float changedflags) phys_files_Send =
 	// Hold params, networked so a REMOTE client (no server cvars) predicts the hold
 	// point with the EXACT server values — a mismatch here would pop on drop.  A CAR streams its
 	// larger car-carry values so the client-predicted hold matches the (un-clip-slid) server body.
+	// The inspect-mode push/pull offset is FOLDED into the streamed hold distance rather
+	// than sent separately — so the client's PhysProp_PredictedHoldCenter and every remote
+	// mirror pick up the scrolled distance for free, with zero new wire fields.
 	float sc_is_car = (self.classname == "prop_car" || self.classname == "func_car");
-	WriteCoord(MSG_ENTITY, sc_is_car ? cvar("sv_car_carry_dist") : cvar("sv_carry_hold_dist"));
+	WriteCoord(MSG_ENTITY, sc_is_car ? cvar("sv_car_carry_dist")
+	                                 : (cvar("sv_carry_hold_dist") + self.carry_dist_ofs));
 	WriteCoord(MSG_ENTITY, sc_is_car ? cvar("sv_car_carry_z")    : cvar("sv_carry_hold_z"));
 
+	// Carry-frame ORIENTATION, sent ONLY while actually held (so the hundreds of free
+	// props in the stream pay nothing).  Remote clients don't need this — they already
+	// get the final pose in the raw angles above and never predict — but the LOCAL
+	// carrier does: it is the seed for its own predicted basis, and it cannot be derived
+	// client-side without the server's v_angle_y at this snapshot, which is ~RTT stale
+	// (precisely the error prediction exists to remove).
+	// MUST be read at the SAME wire position in CSQC_PhysProp_Update (after hold_z).
+	//
+	// MASK the phase.  pp_phase_out has had PP_PHASE_DBG_BIT folded into it above, so a bare
+	// `== PP_PHASE_STEADY` is FALSE whenever the buoyancy debug payload is active — while the
+	// client (which masks correctly) still reads these three shorts.  That mismatch desyncs
+	// the whole stream from here on, corrupting EVERY prop, not just the carried one.  Keep
+	// this expression textually equivalent to the reader's gate in CSQC_PhysProp_Update.
+	if ((pp_phase_out & PP_PHASE_MASK) == PP_PHASE_GRABBING
+	 || (pp_phase_out & PP_PHASE_MASK) == PP_PHASE_STEADY)
+	{
+		vector rel_ang = CarryRot_Angles(self.carry_rel_fwd, self.carry_rel_up);
+		WriteShort(MSG_ENTITY, rint(CarryRot_Norm180(rel_ang_x) * CROT_WIRE_SCALE));
+		WriteShort(MSG_ENTITY, rint(CarryRot_Norm180(rel_ang_y) * CROT_WIRE_SCALE));
+		WriteShort(MSG_ENTITY, rint(CarryRot_Norm180(rel_ang_z) * CROT_WIRE_SCALE));
+	}
+
 	// Is-car byte: lets CSQC pick the CAR mirrors out of the generic phys_files
-	// stream (engine-sound driver cl_vehicle_sound.qc). MUST be read LAST in
-	// CSQC_PhysProp_Update (after hold_z).
+	// stream (engine-sound driver cl_vehicle_sound.qc). MUST be read after the
+	// (conditional) carry-orientation block above.
 	WriteByte(MSG_ENTITY, sc_is_car ? 1 : 0);
 
 	// Visual spinning-wheel data — read ONLY when is-car, so the wire stays byte-symmetric and every
@@ -1139,6 +1743,39 @@ float(entity playerent, float changedflags) phys_files_Send =
 		}
 		else
 			WriteByte(MSG_ENTITY, 0);
+	}
+
+	// ---- BUOYANCY DEBUG PAYLOAD (cl_debug_physprops overlay) --------------------------------
+	// Sent ONLY when sv_debug_physprops is on, and signalled by PP_PHASE_DBG_BIT in the phase byte
+	// above so the client knows whether to read it.  Carrying the flag in a byte the client already
+	// reads is what keeps writer and reader in lockstep — an unconditional field would cost bytes on
+	// every prop in every snapshot at 64 Hz, and a server-only cvar check would desync the stream the
+	// moment the cvar was toggled mid-game.  See [[prediction-proxy-serialization-split]].
+	if (sc_dbg_state)
+	{
+		// rest mode + wet, packed: bits 0-1 = 0 none / 1 float / 2 contact, bit 2 = in water.
+		float dbgstate = 0;
+		if (self.pp_float_rest)        dbgstate = 1;
+		else if (self.pp_contact_rest) dbgstate = 2;
+		if (self.pp_water_state)       dbgstate = dbgstate | 4;
+		if (self.pp_loaded)            dbgstate = dbgstate | 8;
+		WriteByte(MSG_ENTITY, dbgstate);
+
+		// Submerged fraction now, and the fraction it WANTS (f_eq) — the pair that says whether a prop
+		// can ever reach its float line.  Both 0..1 at 1/255; f_eq >= 1 (a sinker) saturates at 255.
+		float dbg_frac = 0, dbg_feq = 0;
+		if (self.pp_buoy_vol > 0)
+		{
+			float dm = pp_cached_buoy_density * self.pp_buoy_vol / 1000;
+			if (dm > 0)
+				dbg_feq = self.mass / dm;
+			float dh = self.maxs_z - self.mins_z;
+			if (dh > 0)
+			if (self.pp_water_state)
+				dbg_frac = (self.pp_water_z - (self.origin_z + self.mins_z)) / dh;
+		}
+		WriteByte(MSG_ENTITY, bound(0, rint(dbg_frac * 255), 255));
+		WriteByte(MSG_ENTITY, bound(0, rint(dbg_feq  * 255), 255));
 	}
 	return TRUE;
 };
@@ -1274,31 +1911,37 @@ float(entity a, entity b) Carry_BBoxOverlap =
 };
 
 // Player(AABB)-vs-prop ORIENTED-box (OBB) overlap, matching the engine's
-// World_OBBTrace exactly: the prop box (prop.mins/maxs) is ROTATED by prop.angles
-// (raw angles + right-hand flip, same as the patch — no mesh-pitch), then the
-// player's box is tested against it.  This is what the shove-out / re-solidify needs —
-// when the cabinet tumbles, the real collision box pokes OUTSIDE the axis-aligned
-// hbox, so the old AABB test (Carry_BBoxOverlap) missed a player standing in that
-// poke-out and the cabinet then ejected them on going solid.
+// World_OBBTrace exactly: the prop box (prop.mins/maxs) is ROTATED by prop.angles,
+// then the player's box is tested against it.  This is what the shove-out /
+// re-solidify needs — when the cabinet tumbles, the real collision box pokes OUTSIDE
+// the axis-aligned hbox, so the old AABB test (Carry_BBoxOverlap) missed a player
+// standing in that poke-out and the cabinet then ejected them on going solid.
 float(entity prop, entity player) Carry_OBBOverlap =
 {
-	// Raw angles — matches World_OBBTrace exactly (the IQM uses NO mesh-pitch flip).
-	makevectors(prop.angles);   // v_forward, v_right, v_up — box local axes are [vf, -vr, vu]
+	// MESH basis (CarryRot_Axes == AngleVectorsMesh), NOT raw makevectors().
+	// world.c World_OBBTrace builds its axes with AngleVectorsMesh + VectorNegate(axis[1]),
+	// which differs from raw AngleVectors by a pitch sign flip at r_meshpitch -1.  The old
+	// "raw angles — matches World_OBBTrace exactly" comment here predated engine Patch 64
+	// and was only ever RIGHT BY ACCIDENT: a carried prop was hard-locked to pitch 0, where
+	// the two bases coincide.  Carried props can now hold any pitch/roll (inspect mode), so
+	// a raw basis would make this test disagree with the engine's actual collision and
+	// eject players from — or embed them in — a prop dropped at a tilt.
+	CarryRot_Axes(prop.angles);   // crot_X / crot_Y / crot_Z == box local axes [vf, -vr, vu]
 
 	vector phalf = (player.maxs - player.mins) * 0.5;
 	vector pc    = player.origin + (player.maxs + player.mins) * 0.5;
 	vector d     = pc - prop.origin;
 
 	// player centre expressed in the box's local frame
-	float lx =  (d * v_forward);
-	float ly = -(d * v_right);
-	float lz =  (d * v_up);
+	float lx = (d * crot_X);
+	float ly = (d * crot_Y);
+	float lz = (d * crot_Z);
 
 	// player half-extent projected onto each local axis (rotated-AABB expansion),
 	// so the point-vs-box test below is the full box-vs-OBB overlap.
-	float ex = fabs(v_forward_x)*phalf_x + fabs(v_forward_y)*phalf_y + fabs(v_forward_z)*phalf_z;
-	float ey = fabs(v_right_x)  *phalf_x + fabs(v_right_y)  *phalf_y + fabs(v_right_z)  *phalf_z;
-	float ez = fabs(v_up_x)     *phalf_x + fabs(v_up_y)     *phalf_y + fabs(v_up_z)     *phalf_z;
+	float ex = fabs(crot_X_x)*phalf_x + fabs(crot_X_y)*phalf_y + fabs(crot_X_z)*phalf_z;
+	float ey = fabs(crot_Y_x)*phalf_x + fabs(crot_Y_y)*phalf_y + fabs(crot_Y_z)*phalf_z;
+	float ez = fabs(crot_Z_x)*phalf_x + fabs(crot_Z_y)*phalf_y + fabs(crot_Z_z)*phalf_z;
 
 	return (lx >= prop.mins_x - ex && lx <= prop.maxs_x + ex
 	     && ly >= prop.mins_y - ey && ly <= prop.maxs_y + ey
@@ -1312,6 +1955,23 @@ void(entity player) Carry_Drop =
 	entity prop = player.carried_prop;
 	if (prop != world)
 	{
+		// Optional: re-snap to the nearest upright/upside-down 90° pose on release, so a
+		// prop inspected at an odd tilt lands square.  OFF by default — free rotation is
+		// the point — this is the escape hatch if free-angle drops prove annoying.
+		// NOTE this snaps to WORLD axes, unlike the grab snap which is view-relative:
+		// on release the prop is joining the world, so squaring it to the room is what
+		// you want, not squaring it to wherever the player happened to be facing.
+		if (cvar("sv_carry_rot_dropsnap"))
+		{
+			// CarryRot_Axes calls makevectors, which clobbers v_forward — and Carry_Throw
+			// depends on v_forward surviving this call (it runs makevectors BEFORE
+			// Carry_Drop and reads v_forward after).  Save and restore around it.
+			vector kf = v_forward, kr = v_right, ku = v_up;
+			CarryRot_Axes(prop.angles);
+			CarryRot_Snap8(crot_X, crot_Z);
+			prop.angles = CarryRot_Angles(crot_oF, crot_oU);
+			v_forward = kf; v_right = kr; v_up = ku;
+		}
 		prop.carried_by        = world;
 		prop.carry_stuck_since = 0;
 		prop.gravity           = 0;   // restore normal gravity (was disabled while carried)
@@ -1424,6 +2084,28 @@ float(entity player, entity prop) Carry_TryGrab =
 	prop.carry_grab_time   = time;
 	prop.carry_grab_origin = prop.origin;
 	prop.carry_grab_angles = prop.angles;
+
+	// Latch the carried ORIENTATION.  The old code threw the grab pose away and rebuilt a
+	// single fixed pose every tick, which is exactly why every prop came up looking the
+	// same however it had been lying.  Decompose the prop's REAL pose into the carry frame
+	// (the pure-yaw frame the carry already tracks), snap it to the nearest 90° pose that
+	// is upright or upside-down — never on its side — and keep it for the whole carry.
+	// Snapping AFTER the transform into the carry frame is what makes it square-on to the
+	// player's view rather than to the world grid.
+	// NOTE: CarryRot_Axes calls makevectors; neither caller (sv_use.qc, the gravity gun)
+	// reads v_forward after Carry_TryGrab returns, and Carry_Tick re-runs makevectors itself.
+	float grab_yaw0 = player.v_angle_y + 180;
+	CarryRot_Axes(prop.angles);
+	vector grab_rf = CarryRot_ToFrame(crot_X, grab_yaw0);
+	vector grab_ru = CarryRot_ToFrame(crot_Z, grab_yaw0);
+	if (cvar("sv_carry_rot_snap"))
+		CarryRot_Snap8(grab_rf, grab_ru);
+	else
+		CarryRot_Ortho(grab_rf, grab_ru);
+	prop.carry_rel_fwd   = crot_oF;
+	prop.carry_rel_up    = crot_oU;
+	prop.carry_dist_ofs  = 0;   // inspect-mode push/pull starts from the default hold distance
+	prop.carry_dist_want = 0;
 	prop.pp_prev_origin    = prop.origin;   // seed so the first steady-carry frame's delta is clean (no false bang)
 	prop.pp_impact_cooldown = time + cvar("sv_carry_grab_time");  // no bang during the pull-in
 	PhysFiles_StopScrape(prop);   // if it was sliding when grabbed, the think stops — kill the loop now
@@ -1477,6 +2159,16 @@ void(entity player) Carry_Tick =
 		return;
 	}
 
+	// Safety net: a prop that somehow reached carry without passing through
+	// Carry_TryGrab (or one still held across a progs reload) has no basis latched.
+	// Seed it upright rather than handing vectoangles a zero vector — that would
+	// produce garbage angles and push them straight into the physics body.
+	if (prop.carry_rel_fwd * prop.carry_rel_fwd < 0.5)
+	{
+		prop.carry_rel_fwd = '1 0 0';
+		prop.carry_rel_up  = '0 0 1';
+	}
+
 	// Keep the body awake so the velocity servo is integrated (autodisable
 	// would freeze it when momentarily stationary at the hold point), and stop
 	// the stuck-despawn timer from accumulating while the prop is held in air.
@@ -1490,14 +2182,43 @@ void(entity player) Carry_Tick =
 	// these same car values), which is what stops the model-vs-hitbox disconnect on a grabbed car.
 	float is_car = (prop.classname == "prop_car" || prop.classname == "func_car");
 
+	// Resolve THIS tick's orientation up front, from the stored carry-frame basis composed
+	// with the live view yaw.  Everything below (the traced footprint, the box centre, the
+	// servo target and the final .angles write) must use the SAME pose, or the servo aims
+	// at a centre computed for a different orientation and the prop drifts as it rotates.
+	// Safe before makevectors: neither FromFrame nor CarryRot_Angles touches v_forward.
+	float  syaw0  = player.v_angle_y + 180;
+	vector newang = CarryRot_Angles(CarryRot_FromFrame(prop.carry_rel_fwd, syaw0),
+	                                CarryRot_FromFrame(prop.carry_rel_up,  syaw0));
+
 	makevectors(player.v_angle);
-	float hdist = is_car ? cvar("sv_car_carry_dist") : cvar("sv_carry_hold_dist");
+	// Inspect-mode push/pull.  GLIDE the live offset toward the scroll target rather than
+	// stepping to it: `dist` below is the servo ERROR, and dist > drop_dist*3 is an INSTANT
+	// unconditional drop, so a big scroll step would spike the error for one frame and
+	// literally throw the prop out of your hands.  Cars keep their own fixed hold.
+	if (!is_car)
+	{
+		float dofs_ft = frametime; if (dofs_ft <= 0) dofs_ft = 0.013;
+		float dofs_step = cvar("sv_carry_dist_rate") * dofs_ft;
+		float dofs_err  = prop.carry_dist_want - prop.carry_dist_ofs;
+		if (fabs(dofs_err) <= dofs_step)
+			prop.carry_dist_ofs = prop.carry_dist_want;
+		else if (dofs_err > 0)
+			prop.carry_dist_ofs = prop.carry_dist_ofs + dofs_step;
+		else
+			prop.carry_dist_ofs = prop.carry_dist_ofs - dofs_step;
+	}
+	float hdist = is_car ? cvar("sv_car_carry_dist")
+	                     : (cvar("sv_carry_hold_dist") + prop.carry_dist_ofs);
 	float hz    = is_car ? cvar("sv_car_carry_z")    : cvar("sv_carry_hold_z");
 	vector hold = player.origin + player.view_ofs
 	            + v_forward * hdist
 	            + '0 0 1'   * hz;
-	// Aim the box CENTRE at the hold point (the model origin is at the feet).
-	vector center = prop.origin + '0 0 1' * ((prop.maxs_z + prop.mins_z) * 0.5);
+	// Aim the box CENTRE at the hold point (the model origin is at the feet).  The centre
+	// offset is a MODEL-space vector, so it rotates with the prop — see CarryRot_CenterOfs.
+	// (Safe here: v_forward was already consumed by `hold` above and is not read again.)
+	vector ctrofs = CarryRot_CenterOfs(newang, prop.mins, prop.maxs);
+	vector center = prop.origin + ctrofs;
 
 	// Resolve the hold point against geometry with a CLIP-AND-SLIDE (the same scheme
 	// the player pmove uses): trace the prop's box toward the hold point; if it hits a
@@ -1506,7 +2227,12 @@ void(entity player) Carry_Tick =
 	// sticking at the first contact (the "sticks to the ground, only rotates" you saw),
 	// while never being driven into geometry.  MOVE_NOMONSTERS = world + brushwork only,
 	// so a carried prop still pushes OTHER phys props aside rather than clamping on them.
-	vector boxhalf = (prop.maxs - prop.mins) * 0.5;
+	// Trace the ROTATED footprint, not the model-local box.  A freely-rotated prop
+	// (inspect mode) turned 90° would otherwise trace too short along the axis it really
+	// occupies and get resolved into geometry.  Identical to the old value while upright,
+	// so nothing changes for the common case.  MUST match PhysProp_PredictedHoldCenter.
+	// (Safe here: v_forward was already consumed by `hold` above and is not read again.)
+	vector boxhalf = CarryRot_RotatedHalf(newang, (prop.maxs - prop.mins) * 0.5);
 	vector cur = center;
 	vector tgt = hold;
 	float  bump;
@@ -1556,11 +2282,20 @@ void(entity player) Carry_Tick =
 	{
 		float gf = (time - prop.carry_grab_time) / gtime;
 		gf = gf * gf * (3 - 2 * gf);                       // smoothstep ease in/out
-		vector tgt_org   = hold - '0 0 1' * ((prop.maxs_z + prop.mins_z) * 0.5);
-		vector carry_ang = '0 0 0';
-		carry_ang_y      = player.v_angle_y + 180;
-		setorigin(prop, prop.carry_grab_origin + (tgt_org - prop.carry_grab_origin) * gf);
-		prop.angles            = Carry_AnglesLerp(prop.carry_grab_angles, carry_ang, gf);
+		// Rotate into the carry pose as a BASIS nlerp, not the old per-component Euler
+		// lerp: from an arbitrary tumbled floor pose a Euler lerp takes visibly wrong
+		// paths, and a 0<->180 roll passes straight through "on its side" — the exact
+		// look the grab snap exists to avoid.
+		vector g_tF = CarryRot_FromFrame(prop.carry_rel_fwd, syaw0);
+		vector g_tU = CarryRot_FromFrame(prop.carry_rel_up,  syaw0);
+		CarryRot_Axes(prop.carry_grab_angles);
+		CarryRot_Nlerp(crot_X, crot_Z, g_tF, g_tU, gf);
+		vector gang = CarryRot_Angles(crot_oF, crot_oU);
+		// Centre offset from the pose we are about to APPLY, so the prop rotates about its
+		// middle during the pull-in instead of swinging around its base.
+		vector gtgt_org = hold - CarryRot_CenterOfs(gang, prop.mins, prop.maxs);
+		setorigin(prop, prop.carry_grab_origin + (gtgt_org - prop.carry_grab_origin) * gf);
+		prop.angles            = gang;
 		prop.velocity          = '0 0 0';
 		prop.avelocity         = '0 0 0';
 		prop.carry_stuck_since = 0;            // don't accrue "stuck" during the pull-in
@@ -1663,15 +2398,83 @@ void(entity player) Carry_Tick =
 	}
 	prop.velocity = desired;
 
-	// Locked orientation: upright, facing the carrier.  Writing .angles each
-	// tick re-orients the live ODE body (engine pushes it via dBodySetRotation).
-	prop.angles    = '0 0 0';
-	prop.angles_y  = player.v_angle_y + 180;
+	// Orientation: the pose resolved at the top of the tick (from the STORED carry-frame
+	// basis composed with the live view yaw).  This replaces the old hard snap
+	// (angles = '0 0 0' with angles_y = v_angle_y + 180), which discarded the prop's real
+	// pose and made every pickup look identical.  The basis is latched at grab (snapped
+	// upright/upside-down to the nearest 90°) and rewritten by inspect mode; the prop still
+	// tracks the view yaw exactly as before, so carrying feels unchanged.
+	// Writing .angles each tick re-orients the live physics body (the engine pushes it
+	// via b3Body_SetTransform / dBodySetRotation), so this IS the authoritative pose.
+	prop.angles    = newang;
 	prop.avelocity = '0 0 0';
 
 	// Stream every server frame while held so the CSQC mirror tracks the hold
 	// point smoothly (the 20 Hz think gate alone reads choppy on a fast strafe).
 	prop.SendFlags |= 1;
+};
+
+// CSQC -> SSQC: inspect mode (hold Reload while carrying) pushes the held prop's
+// ORIENTATION — as a carry-frame Euler triple — plus the scroll-wheel push/pull target.
+// `self` is the calling player.
+//
+// ABSOLUTE STATE, NOT DELTAS, deliberately.  sendevent rides the reliable channel, so
+// nothing is lost in transit — but the rate gate below DISCARDS updates that arrive too
+// soon, and that is enough to make deltas unusable: a discarded delta would leave this
+// body PERMANENTLY out of step with the client's predicted visual and pop on drop.  An
+// absolute update is simply superseded by the next one.  (The client re-sends its final
+// pose for a short window after releasing the key, precisely because this gate can eat
+// the first attempt — see Inspect_Exit in cl_carryinspect.qc.)
+//
+// Everything here reaches .angles -> b3Body_SetTransform -> the collision hull, so it is
+// validated hard.  Never write a client-supplied vector into .angles unfiltered: NaN would
+// propagate through the snapshot to every client and can wedge the physics body.
+void(vector a, float dw) CSEv_carryrot_vf =
+{
+	entity prop = self.carried_prop;
+	if (prop == world)           return;
+	if (prop.carried_by != self) return;   // not actually ours
+	if (self.is_dead)            return;
+
+	// Rate limit (same discipline as CSEv_radio_f).  Not politeness — unthrottled, a
+	// client could drive the physics body at raw packet rate.
+	float maxrate = cvar("sv_carry_rot_maxrate");
+	if (maxrate < 1)
+		maxrate = 1;
+	if (time < self.carry_rot_next)
+		return;
+	self.carry_rot_next = time + (1 / maxrate);
+
+	// Reject garbage BEFORE it becomes a basis.  Written as NEGATED comparisons so NaN —
+	// which fails every ordered test — takes the reject branch instead of sneaking past a
+	// plain `> limit` check.
+	if (!(fabs(a_x) <= 720)) return;
+	if (!(fabs(a_y) <= 720)) return;
+	if (!(fabs(a_z) <= 720)) return;
+
+	CarryRot_Axes(a);
+	CarryRot_Ortho(crot_X, crot_Z);
+	if (!(crot_oF * crot_oF > 0.5)) return;   // an orthonormal axis is unit length; NaN-safe
+	if (!(crot_oU * crot_oU > 0.5)) return;
+	prop.carry_rel_fwd = crot_oF;
+	prop.carry_rel_up  = crot_oU;
+
+	// Scroll push/pull target, clamped server-side; Carry_Tick GLIDES carry_dist_ofs toward
+	// it (see the glide comment there for why a raw step can throw the prop out of your
+	// hands).  The per-prop floor is what stops a large prop being reeled INTO the camera:
+	// a held prop is non-solid to its carrier (PHYSDROP_DIM) and the clip-slide traces
+	// MOVE_NOMONSTERS, so a flat minimum alone would not catch it.
+	float dmin  = cvar("sv_carry_dist_min");
+	float dmax  = cvar("sv_carry_dist_max");
+	float halfx = (prop.maxs_x - prop.mins_x) * 0.5;
+	float halfy = (prop.maxs_y - prop.mins_y) * 0.5;
+	float halfmax = (halfx > halfy) ? halfx : halfy;
+	float floor_ofs = halfmax + 8 - cvar("sv_carry_hold_dist");
+	if (dmin < floor_ofs) dmin = floor_ofs;
+	if (dmax < dmin)      dmax = dmin;
+	if (!(dw >= dmin))    dw = dmin;   // NaN-safe clamp
+	if (dw > dmax)        dw = dmax;
+	prop.carry_dist_want = dw;
 };
 
 // Called from hitscan paths after the weapon's traceline. If the hit ent is a

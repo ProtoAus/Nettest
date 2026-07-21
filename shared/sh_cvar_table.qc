@@ -1565,8 +1565,18 @@ void() CVar_Init =
     // Debug: disable phys-prop extrapolation smoothing to see the raw server
     // send cadence (default 0 = extrapolation ON).  Read in cl_physprop.qc.
     CVar_Add("Client debug", "cl_physprop_noextrap", "0", CVAR_SIDE_CL);
-    CVar_Add("Client debug", "cl_physprop_wake_lerp", "0.08", CVAR_SIDE_CL);  // seconds a prop woken from rest lerps to catch up to its first update (bounds the stale-gap crawl so a jolt looks prompt+smooth). 0 = instant snap.
-    CVar_Add("Client debug", "cl_physprop_extrap_max", "0.05", CVAR_SIDE_CL);  // max seconds a moving prop/car coasts on its streamed velocity when the next snapshot is late (instead of FREEZING at the last one — the fast-car stutter). Bounds runaway on packet loss. 0 = old freeze behaviour.
+    CVar_Add("Client debug", "cl_physprop_wake_lerp", "0", CVAR_SIDE_CL);  // seconds a prop woken from rest lerps to catch up to its first update (bounds the stale-gap crawl so a jolt looks prompt+smooth). 0 = instant snap.
+    CVar_Add("Client debug", "cl_physprop_extrap_max", "0.25", CVAR_SIDE_CL);  // max seconds a moving prop/car coasts on its streamed velocity when the next snapshot is late (instead of FREEZING at the last one — the fast-car stutter). Bounds runaway on packet loss. 0 = old freeze behaviour.
+    // Smoothed render delay.  The prop interpolator used to derive BOTH its lerp window and its render
+    // delay from the gap between the last two packets — one number doing two jobs.  That made the delay
+    // move whenever the packet cadence moved: a dropped packet doubled it (a 100% swing at 64 Hz), and the
+    // wake repair deliberately shrank it for one frame and then snapped back.  Now the delay comes from a
+    // running average of the OBSERVED arrival rate (measured per entity, so cars and free props each get
+    // their own), while the raw gap keeps its real job as the lerp window.
+    // 0 = exact previous behaviour, for A/B: instantaneous gap + cl_physprop_wake_lerp + the old fixed
+    // 0.3 s wake threshold + the old carry-handoff seed.
+    CVar_Add("Client debug", "cl_physprop_smoothinterp", "1", CVAR_SIDE_CL);
+    CVar_Add("Client debug", "cl_physprop_interp_ratio", "1", CVAR_SIDE_CL);  // render delay = this MANY measured intervals. 1 = one interval back (minimum that never renders into the future). Raise for more buffer against packet loss, at the cost of more visual lag.
     CVar_Add("Vehicles", "cl_car_wheels",        "1",     CVAR_SIDE_CL);  // render prop_car spinning/steering wheels from the wheelmodel key (0 = off / baked wheels)
     CVar_Add("Vehicles", "cl_car_wheel_radius",  "12.64", CVAR_SIDE_CL);  // visual wheel rolling radius (qu) driving the spin rate; match your wheel model
     CVar_Add("Vehicles", "cl_car_wheel_z",       "0",     CVAR_SIDE_CL);  // vertical nudge (qu) of the visual wheels along the car's up axis (tune so tyres meet the ground)
@@ -2549,8 +2559,8 @@ void() CVar_Init =
         CVAR_UI_SCALAR, CVAR_TAB_ODE | CVAR_TAB_CREATE_PHYS, "Friction",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
     CVar_Add("ODE physics", "sv_physprop_flood_per_frame",      "1",   CVAR_SIDE_SV);  // spawnflood: props spawned per SERVER FRAME (1 = clean trickle + self-throttles to server health; raise for a faster dump)
-    CVar_Add("ODE physics", "sv_physprop_stream_hz",            "8",   CVAR_SIDE_SV);  // free phys-prop CSQC mirror stream rate while MOVING (Hz). 8 = smooth + low bandwidth (client INTERPOLATES between snapshots). 0 = every tick (~64). Lower = cheaper big floods.
-    CVar_Add("ODE physics", "sv_physprop_stream_instant",       "1",   CVAR_SIDE_SV);  // 1 = on interaction (shoot/explode/gravgun/+use/throw) jump the queue and push ONE mirror update on the next tick instead of waiting up to 1/stream_hz. Ongoing rate still capped by stream_hz.
+    CVar_Add("ODE physics", "sv_physprop_stream_hz",            "64",   CVAR_SIDE_SV);  // free phys-prop CSQC mirror stream rate while MOVING (Hz). 8 = smooth + low bandwidth (client INTERPOLATES between snapshots). 0 = every tick (~64). Lower = cheaper big floods.
+    CVar_Add("ODE physics", "sv_physprop_stream_instant",       "0",   CVAR_SIDE_SV);  // 1 = on interaction (shoot/explode/gravgun/+use/throw) jump the queue and push ONE mirror update on the next tick instead of waiting up to 1/stream_hz. Ongoing rate still capped by stream_hz.
     CVar_Add("ODE physics", "sv_physprop_flood_dist",           "200", CVAR_SIDE_SV);  // spawnflood: forward distance of the pile from the player (near edge = dist-144 clears the player hull so barrels don't spawn ON you).
     // Unified phys-object core (PhysObj_Setup / PhysObj_Think): per-object mass
     // overrides + shared bounce + shared sleep/wake thresholds. The barrel uses
@@ -2593,6 +2603,26 @@ void() CVar_Init =
     CVar_AddSaved("ODE physics", "sv_carry_grab_dist",   "96",   CVAR_SIDE_SV);
     CVar_AddSaved("ODE physics", "sv_carry_grab_time",   "0.25", CVAR_SIDE_SV);  // pull-in animation duration on grab (0 = instant/snap)
     CVar_AddSaved("ODE physics", "sv_carry_throw_force", "300",  CVAR_SIDE_SV);  // throw speed (qu/s), velocity-set (+ player velocity)
+    // Carried-prop ORIENTATION + inspect mode (hold the Reload key while carrying to
+    // lock the view, rotate the prop with the mouse and scroll it nearer/further).
+    // snap 1 = on grab, snap the prop's real pose to the nearest 90° pose that is
+    // upright or upside-down (never on its side), measured relative to your view so it
+    // presents a flat face to the camera.  0 = keep the raw grab pose (A/B).
+    CVar_AddSaved("ODE physics", "sv_carry_rot_snap",     "1",   CVAR_SIDE_SV);
+    CVar_AddSaved("ODE physics", "sv_carry_rot_dropsnap", "0",   CVAR_SIDE_SV);  // 1 = re-snap to the nearest 90° pose on drop (escape hatch if free-angle drops annoy)
+    CVar_AddSaved("ODE physics", "sv_carry_rot_maxrate",  "40",  CVAR_SIDE_SV);  // max accepted CSEv_carryrot_v rate (Hz) — this value reaches the physics body
+    // Scroll offset bounds, ADDED to sv_carry_hold_dist (96).  CVAR_SIDE_BOTH, not SV:
+    // CVar_RegisterMine only registers a side's own cvars, so an SV-only cvar reads back
+    // as 0 in CSQC — which would collapse the client's scroll clamp to [0,0] and make the
+    // wheel do nothing.  The server re-clamps authoritatively in CSEv_carryrot_vf; the
+    // client copy only exists to bound local accumulation.
+    CVar_AddSaved("ODE physics", "sv_carry_dist_min",     "-48", CVAR_SIDE_BOTH);
+    CVar_AddSaved("ODE physics", "sv_carry_dist_max",     "120", CVAR_SIDE_BOTH);
+    CVar_AddSaved("ODE physics", "sv_carry_dist_rate",    "220", CVAR_SIDE_SV);  // qu/s glide toward the scroll target — a raw STEP would spike the servo error into the instant force-drop
+    CVar_Add     ("ODE physics", "cl_carry_rotate_speed", "0.35",CVAR_SIDE_CL);  // degrees of prop rotation per mouse count
+    CVar_Add     ("ODE physics", "cl_carry_rotate_invert","0",   CVAR_SIDE_CL);
+    CVar_Add     ("ODE physics", "cl_carry_dist_step",    "12",  CVAR_SIDE_CL);  // qu per wheel click
+    CVar_Add     ("ODE physics", "cl_carry_rotate_sendrate","20",CVAR_SIDE_CL);  // upstream orientation sends per second while rotating
     // Client: when the LOCAL player carries a prop, the client PREDICTS its hold pose
     // from the local view (zero ping lag).  On drop/throw the predicted→authoritative
     // handoff eases over this time so it doesn't pop (0 = instant snap).
@@ -2654,6 +2684,35 @@ void() CVar_Init =
     // Set _sleep 0 to restore the always-64 Hz behaviour.
     CVar_Add("ODE physics", "sv_physprop_sleep",             "1",    CVAR_SIDE_SV);
     CVar_Add("ODE physics", "sv_physprop_sleep_hz",          "8",    CVAR_SIDE_SV);
+    // BUOYANCY — props float on water, per MATERIAL density (propmaterials.txt).  A prop displaces its
+    // bbox volume of water; whether it floats is pm_density vs _density below, so with the shipped table
+    // wood/fabric/plastic/glass float and metal/rock sink with NO retuning.  Cost: a DRY SETTLED prop pays
+    // ~5 float compares and zero builtins; the water surface is probed ONCE on entry and cached (world BSP
+    // water is static); a prop settled at its float line stops being forced entirely so the rigid body
+    // still autodisables.  NOTE this floats props on BAKED BSP water only — pointcontents is worldmodel
+    // -only, so func_water brush entities float nothing.  0 = off (props sink as before).
+    CVar_Add("ODE physics", "sv_prop_buoyancy",              "1",    CVAR_SIDE_SV);
+    // Density of water in the same arbitrary scale as pm_density (propmaterials.txt). Raise to float more
+    // materials (>1.30 floats even metal), lower to sink more. 1.0 puts the line between glass and rock.
+    CVar_Add("ODE physics", "sv_prop_buoyancy_density",      "1.0",  CVAR_SIDE_SV);
+    // Fluid damping, expressed as the DAMPING RATIO of the heave spring (the classic zeta), not as a
+    // raw coefficient.  Buoy_Tick derives the actual drag from the prop's own natural frequency, so this
+    // one number means the same thing on a matchbox and on a shipping crate: they settle in the same
+    // NUMBER OF BOBS regardless of size or material.  1.0 = critically damped (sinks to the line and
+    // stops dead), 0.4 = a few visible bobs, 0.1 = wallows.  This replaced sv_prop_buoyancy_drag, which
+    // was a fixed coefficient: that made the real ratio scale as density*sqrt(height), so a small light
+    // prop landed near 0.07 and bounced in and out of the water indefinitely ("like a frog") while a big
+    // crate at 0.20 looked passable.  See Buoy_Tick for the derivation.
+    CVar_Add("ODE physics", "sv_prop_buoyancy_damping",      "0.4",  CVAR_SIDE_SV);
+    // Player RIDER CARRY on physics props — stand on a drifting crate or a floating raft and move with
+    // it.  Named for the DISABLE case on purpose: it is read inside the shared pmove via PM_ReadMovevar,
+    // which falls back to its default whenever the serverinfo value reads 0, so a default-ON toggle
+    // could never be switched off.  Keeping the default at zero makes both states read correctly on the
+    // client.  Set 1 to restore the old behaviour (the prop slides out from under you).
+    CVar_Add("ODE physics", "sv_physprop_nocarry",           "0",    CVAR_SIDE_SV);
+    // Clamp on the carry contact velocity (qu/s) — anti-fling, so a physics glitch that launches or
+    // spins a prop cannot throw the rider across the map.
+    CVar_Add("ODE physics", "sv_physprop_carry_maxspeed",    "400",  CVAR_SIDE_SV);
     // 1 = prop_physics / prop_car CSQC mirrors are PVS-culled AND removed on PVS exit, like
     // prop_static.  0 = legacy PVSF_NOREMOVE: once a client has seen the mirror it is never
     // removed, so props/cars linger frozen in the void (and a driven car leaks its client

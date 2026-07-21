@@ -1,6 +1,7 @@
 ../csprogs.dat
 cl_defs.qc
 shared/sh_customdefs.qc
+shared/sh_carryrot.qc
 shared/sh_cvar_table.qc
 shared/sh_weapon_manifest.qc
 shared/sh_weapons.qc
@@ -142,4 +143,5 @@ client/cl_env_hud.qc
 client/cl_env_explosion.qc
 client/cl_radio.qc
 client/cl_buymenu.qc
+client/cl_carryinspect.qc
 client/cl_main.qc

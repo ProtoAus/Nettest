@@ -138,6 +138,7 @@ const float PROP_FORCEBOX   = 4;   // force the cheap oriented box even for an I
 const float PROP_PREDICTED  = 8;   // CSQC-mirror so the LOCAL pmove collides (rock-solid; hero props only)
 const float PROP_NOSHADOW    = 16; // never cast into the r_shadows-2 sun map (overrides the per-class default)
 const float PROP_FORCESHADOW = 32; // always cast, even when the class default would skip (hero foliage)
+const float PROP_NOSELFSHADOW = 64; // don't RECEIVE the fake-sun shadowmap (no self-shadow); still casts. NEEDS Predicted (8): only the CSQC-mirror wire carries it (RF_NOSELFSHADOW → e_noshadowrecv).
 
 // Mesh formats that expose the engine's NativeTrace (mod_alias) can collide as their
 // actual TRIANGLE MESH (SOLID_PHYSICS_TRIMESH, world.c:1073) instead of a box.
@@ -184,6 +185,15 @@ float(entity playerent, float changedflags) predprop_Send =
 	WriteByte (MSG_ENTITY, bound(0, rint(self.colormod_y * 255), 255));
 	WriteByte (MSG_ENTITY, bound(0, rint(self.colormod_z * 255), 255));
 	WriteByte (MSG_ENTITY, bound(0, rint(self.alpha * 255), 255));   // 0 → client treats as opaque
+	// Shadow flags byte (a custom SendEntity networks ONLY what it writes, so these bits — which the
+	// standard-net path gets for free via EF→RF mapping — must be sent explicitly for a PREDICTED prop):
+	//   bit 1 = NOSHADOW  (spawnflag 16 / foliage default): don't CAST into the r_shadows-2 sun map.
+	//   bit 2 = NOSELFSHADOW (spawnflag 64): don't RECEIVE the sun map (no self-shadow); still casts.
+	// Read + re-applied to self.renderflags in CSQC_PredProp_Update (RF_NOSHADOW / RF_NOSELFSHADOW).
+	float pshadow = 0;
+	if (self.effects & EF_NOSHADOW)          pshadow |= 1;
+	if (self.spawnflags & PROP_NOSELFSHADOW) pshadow |= 2;
+	WriteByte (MSG_ENTITY, pshadow);
 	return TRUE;
 };
 
@@ -348,6 +358,13 @@ void() Props_SpawnPhysics =
 	self.po_material  = PropMat_For(self.model);
 	local float pmass = (self.mass > 0) ? self.mass : PropMat_Mass(self.po_material, self);
 	PhysObj_Setup(self, pmass, PropMat_Friction(self.po_material));   // MOVETYPE_PHYSICS + ODE
+	// Buoyancy: cache the displaced volume once.  Deliberately the SAME bbox volume PropMat_Mass used to
+	// derive the mass, so the equilibrium depth works out to exactly pm_density/water_density — the bbox's
+	// air over-estimate (a chair's box is mostly nothing) cancels between the two.  It also means a mapper
+	// who hand-sets a "mass" key gets a correspondingly correct float depth for free.
+	self.pp_buoy_vol = (self.maxs_x - self.mins_x)
+	                 * (self.maxs_y - self.mins_y)
+	                 * (self.maxs_z - self.mins_z);
 	self.think     = PhysObj_Think;
 	self.nextthink = time + 0.05;
 
