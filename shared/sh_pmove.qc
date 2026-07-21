@@ -449,6 +449,19 @@ float PM_IsLivePlayerCollider(entity e)
     return TRUE;
 }
 
+// An entity pmove should treat as a PHYSICS PROP wall: prop_static / prop_physics,
+// barrels, cans, cabinets, weapon drops -- anything using a SOLID_PHYSICS_* shape
+// (BOX 32 / SPHERE 33 / CAPSULE 34 / TRIMESH 35).  Deliberately keyed on .solid
+// rather than .movetype so it agrees on BOTH sides of the shared pmove: SSQC holds
+// the real prop (MOVETYPE_PHYSICS), while CSQC rebuilds the mirror as a free
+// SOLID_PHYSICS_BOX/_TRIMESH with no movetype (cl_physprop.qc), and prop_static is
+// MOVETYPE_NONE on both.
+float PM_IsPhysPropCollider(entity e)
+{
+    if (!e) return FALSE;
+    return (e.solid >= SOLID_PHYSICS_BOX && e.solid <= SOLID_PHYSICS_TRIMESH);
+}
+
 // Auto-disentangle: at the end of pmove, if our bbox is embedded inside
 // another live player (telefrag-grade overlap, e.g. spawning into a body
 // or a server/client reconciliation snapping positions into each other),
@@ -949,6 +962,18 @@ float PM_SlideMove()
                     || trace_ent.classname == "player_visual_proxy"))
                 break;
 
+            // nettest: the SAME graceful bail for PHYSICS PROPS.  The physics backend
+            // (Box3D) integrates props BETWEEN pmove ticks, so a prop routinely ends up
+            // overlapping our hull through no fault of the player's input -- and zeroing
+            // velocity here made that a hard DEAD STOP every time it happened.  That was
+            // the "constantly get stuck on props, have to +use them out of the way" bug.
+            // Break keeping velocity instead and let PM_SoftDepenetrate (start of the next
+            // step) push us out.  Note we do NOT advance pm_origin on this path, so this
+            // cannot tunnel the player through the prop -- it only stops throwing the
+            // player's momentum away while they are momentarily embedded.
+            if (PM_IsPhysPropCollider(trace_ent))
+                break;
+
             pm_velocity = '0 0 0';
             return PM_BLOCKED_FLOOR | PM_BLOCKED_STEP | PM_BLOCKED_OTHER;
         }
@@ -1001,8 +1026,27 @@ float PM_SlideMove()
         else
             blocked |= PM_BLOCKED_OTHER;
 
-        // Store the collision plane
-        if (num_planes < PM_MAX_CLIP_PLANES)
+        // Store the collision plane -- DEDUPED.
+        // nettest: a resting contact (we're inside the trace's 1/32u epsilon of a
+        // prop face, so it reports fraction==0) returns the SAME normal on every
+        // bump.  Storing it repeatedly filled the plane list with copies, and the
+        // multi-plane resolution below then found "conflicts" between a plane and
+        // itself, fell out of the j-loop with j==num_planes, and -- because
+        // num_planes was >2 copies rather than a genuine 2-plane crease -- hit
+        // pm_velocity='0 0 0'.  That was a dead stop from merely leaning on a prop.
+        // Skipping near-identical normals keeps the list meaningful so the crease
+        // path (num_planes==2) and the compatible-clip search actually work.
+        local float dupidx, isdup;
+        isdup = FALSE;
+        for (dupidx = 0; dupidx < num_planes; dupidx++)
+        {
+            if ((trace_plane_normal * planes[dupidx]) > 0.99)
+            {
+                isdup = TRUE;
+                break;
+            }
+        }
+        if (!isdup && num_planes < PM_MAX_CLIP_PLANES)
         {
             planes[num_planes] = trace_plane_normal;
             num_planes++;
@@ -2207,12 +2251,18 @@ void PM_SoftDepenetrate()
     entity  e, best;
     float   best_dsq, dsq;
     vector  push, delta, try;
-    float   i;
+    float   i, d;
+    local vector dirs[7];
+    float   ndirs, step, maxdist;
+    float   pass, firstdir, lastdir;
 
     best     = world;
-    best_dsq = 4096;   // 64*64 search radius
+    // 256*256.  Was 64u: a large prop (van, shipping container, tipped cabinet)
+    // can have its ORIGIN well outside 64u while its hull still swallows us, so
+    // the old search simply found nothing and gave up -- permanently stuck.
+    best_dsq = 65536;
 
-    for (e = findradius(pm_origin, 64); e; e = e.chain)
+    for (e = findradius(pm_origin, 256); e; e = e.chain)
     {
         if (e == self)
             continue;
@@ -2235,11 +2285,19 @@ void PM_SoftDepenetrate()
         }
     }
 
-    if (best == world)
-        return;   // nothing nearby; accept current position
+    // Origin-to-origin direction.  This used to be the ONLY escape direction,
+    // which is exactly why big/eccentric props trapped you: a van's origin vector
+    // can point straight INTO more of its own geometry.  It is now just one
+    // candidate among several.  (We no longer bail when no offender is found --
+    // PM_TestPositionFull already told the caller we ARE embedded in something.)
+    if (best != world)
+    {
+        push   = pm_origin - best.origin;
+        push_z = 0;
+    }
+    else
+        push = '0 0 0';
 
-    push = pm_origin - best.origin;
-    push_z = 0;
     if (push * push < 0.0001)
     {
         // exact overlap – pick a deterministic horizontal direction.
@@ -2251,13 +2309,65 @@ void PM_SoftDepenetrate()
     }
     push = normalize(push);
 
-    for (i = 1; i <= 16; i++)
+    dirs[0] = push;         // old behaviour first, so ties keep the familiar feel
+    dirs[1] = '1 0 0';
+    dirs[2] = '-1 0 0';
+    dirs[3] = '0 1 0';
+    dirs[4] = '0 -1 0';
+    dirs[5] = '0 0 1';      // UP: pop out ON TOP of a low prop instead of grinding into it
+    dirs[6] = '0 0 -1';
+    ndirs   = 7;
+
+    step    = 0.5;
+    maxdist = 24;           // was 8u -- far too short to ever clear a large prop
+
+    // Distance OUTER, direction INNER.  The first position that tests clear is by
+    // construction the SHALLOWEST escape across the candidates in that pass (a
+    // cheap minimum-translation approximation), and we return immediately -- so
+    // the common case costs only a handful of traces even though the budget is
+    // large.
+    //
+    // TWO PASSES, HORIZONTAL FIRST.  Vertical used to compete with horizontal at
+    // every distance ring, which meant the shallowest exit from a mere GRAZING
+    // contact was very often straight UP by half a unit.  That reads as a view
+    // pop, and it oscillates: we pop up, gravity and the ground trace put us
+    // straight back onto the prop, and the next tick pops again -- a shake at
+    // tickrate.  A horizontal nudge of the same size is invisible by comparison
+    // (no eye-height change), so we exhaust the whole horizontal budget before we
+    // ever consider moving the camera vertically.  Vertical stays available as
+    // the escape hatch for genuine entrapment -- clipped inside a low prop with
+    // solid geometry on every side -- which is the case it was added for.
+    for (pass = 0; pass < 2; pass = pass + 1)
     {
-        try = pm_origin + push * (i * 0.5);
-        if (PM_TestPositionFull(try))
+        if (pass == 0)
         {
-            pm_origin = try;
-            return;
+            firstdir = 0;       // dirs[0..4]: offender-relative + the 4 horizontals
+            lastdir  = 5;
+        }
+        else
+        {
+            firstdir = 5;       // dirs[5..6]: up, then down
+            lastdir  = ndirs;
+        }
+
+        for (d = step; d <= maxdist; d = d + step)
+        {
+            for (i = firstdir; i < lastdir; i++)
+            {
+                // Standing on something: never push DOWN.  It can only drive us
+                // into the floor for the ground trace to undo on the next tick,
+                // which is the same oscillation in the other direction.
+                if (pm_onground)
+                if (i == 6)
+                    continue;
+
+                try = pm_origin + dirs[i] * d;
+                if (PM_TestPositionFull(try))
+                {
+                    pm_origin = try;
+                    return;
+                }
+            }
         }
     }
     // no clear spot – leave pm_origin alone; next frame's slide will try again.
@@ -4020,6 +4130,104 @@ void() PM_CheckMovingPushers =
 };
 
 // ============================================================================
+//  24b.  PM_CheckPhysPropCarry  –  ride a moving MOVETYPE_PHYSICS prop
+//
+//  A player standing on a drifting crate or a floating raft used to have the prop simply slide out
+//  from under them: the brush carry above walks moving_brush_list, and props are never in it — they are
+//  not brushsync entities and have no brush_type.
+//
+//  Unlike PM_CheckRotatingCarry this is NOT CSQC-gated.  That one is, because the server runs a
+//  SEPARATE authoritative pass (RotDoor_CarryTick) and running both would double-apply.  Props have no
+//  such pass, so this shared pmove IS the authority — running it identically on both sides is exactly
+//  what makes it prediction-correct by construction.  The train branch's own comment is the precedent
+//  AGAINST adding a server tick pass: a 64 Hz server pass plus a 60-300 Hz client pass double-applied
+//  at snapshot boundaries and produced visible jitter on a riding player.
+//
+//  Costs no enumeration and no extra trace to find a candidate: PM_CategorizePosition already stored
+//  the ground entity in .pm_ground_ent, and PM_IsPhysPropCollider keys on the SOLID range precisely so
+//  it agrees on both sides (SSQC holds the real MOVETYPE_PHYSICS prop, CSQC a movetype-less mirror;
+//  both land in SOLID_PHYSICS_BOX..SOLID_PHYSICS_TRIMESH).
+// ============================================================================
+
+void() PM_CheckPhysPropCarry =
+{
+    entity pc = self.pm_ground_ent;
+
+    // Non-pmove states never carry (matches the train branch's gate).
+    if (self.pm_movetype == PM_MOVETYPE_NOCLIP
+     || self.pm_movetype == PM_MOVETYPE_SPECTATOR
+     || self.pm_movetype == PM_MOVETYPE_NONE)
+    {
+        self.prop_carry          = world;
+        self.prop_carry_velocity = '0 0 0';
+        return;
+    }
+    // NOTE the inverted cvar.  PM_ReadMovevar falls back to its default whenever the value reads 0
+    // (`if (!val) val = fallback`), so a default-ON toggle could never be turned off through
+    // serverinfo — the documented prediction-safe-movement-cvar trap.  Naming the DISABLE case keeps
+    // the default at zero, where that fallback is a no-op and both states read correctly.
+    if (PM_ReadMovevar("sv_physprop_nocarry", 0))
+    {
+        self.prop_carry          = world;
+        self.prop_carry_velocity = '0 0 0';
+        return;
+    }
+
+    float on_prop = 0;
+    if (self.flags & FL_ONGROUND)
+    if (PM_IsPhysPropCollider(pc))
+    {
+        // Same 4-unit confirmation the brush carry uses, plus the !startsolid exclusion the door branch
+        // learned the hard way — a player wedged INSIDE a prop must not test as riding it.
+        tracebox(pm_origin, PM_CurrentMins(), PM_CurrentMaxs(),
+                 pm_origin - '0 0 4', MOVE_NORMAL, self);
+        if (trace_fraction < 1)
+        if (trace_ent == pc)
+        if (!trace_startsolid)
+            on_prop = 1;
+    }
+
+    if (!on_prop)
+    {
+        self.prop_carry          = world;
+        self.prop_carry_velocity = '0 0 0';
+        return;
+    }
+
+    vector cv = PhysProp_ContactVelocity(pc);
+
+    // Anti-fling clamp.  The rotating-brush fling is the precedent: a physics glitch spinning or
+    // launching a prop must not be able to throw the player across the map.
+    float sp = vlen(cv);
+    float mx = PM_ReadMovevar("sv_physprop_carry_maxspeed", 400);
+    if (sp > mx)
+        cv = cv * (mx / sp);
+
+    if (cv != '0 0 0')
+    {
+        // Move with the surface, but trace the step so the carry cannot shove the player through a
+        // wall.  The prop itself is made non-solid for the trace (same shape as the train branch) —
+        // otherwise riding a prop that is moving toward us traces straight into it and stops dead.
+        vector new_origin = pm_origin + cv * pm_frametime;
+        float  saved      = pc.solid;
+        pc.solid = SOLID_NOT;
+        tracebox(pm_origin, PM_CurrentMins(), PM_CurrentMaxs(), new_origin, MOVE_NORMAL, self);
+        pc.solid = saved;
+        if (trace_fraction >= 1)
+            pm_origin = new_origin;
+        else if (trace_fraction > 0)
+            pm_origin = trace_endpos;
+    }
+
+    self.prop_carry          = pc;
+    self.prop_carry_velocity = cv;
+#ifdef CSQC
+    // Reconcile filter timestamp — SSQC has no cltime and no consumer.
+    self.prop_carry_active_cltime = cltime;
+#endif
+};
+
+// ============================================================================
 //  25.  PM_CheckTriggerPushes  –  velocity impulse from overlapping push triggers
 // ============================================================================
 
@@ -5177,6 +5385,11 @@ void PM_PlayerMoveStep()
     // the internal door / button branch is gated CSQC-only to avoid
     // double-applying on top of the server's Mover_TravelTick push.
     PM_CheckMovingPushers();
+
+    // Ride a moving MOVETYPE_PHYSICS prop.  AFTER the brush movers on purpose — a prop sitting on a
+    // moving plat should let the plat win — and BEFORE teleport (a prop can carry you into a trigger)
+    // and before the step sound, so footsteps read the carried position.
+    PM_CheckPhysPropCarry();
 
     // teleport if inside a trigger_teleport volume
     PM_CheckTeleportTriggers();
