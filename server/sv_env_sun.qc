@@ -124,14 +124,18 @@ void(entity p) EnvSun_StuffPlayer =
 {
     if (!p || bot_adding || clienttype(p) != CLIENTTYPE_REAL) return;	// bots have no netchan (engine-truth guard; bot_adding covers the spawnclient window)
     stuffcmd(p, "set r_sun_colour \"0 0 0\";set r_sun_dir \"0.271654 0.323744 0.906308\";set r_shadows_throwdirection \"-0.271654 -0.323744 -0.906308\";set _map_sun_active 0\n");   // rays dead + ericw default sun (_sun_mangle "230 -65 0") + no env_sun this map
-    // Clear-first the shadow tint too (stuffed `set`s persist for the session, so a previous map's
-    // tint would otherwise carry over).  0.5 grey = the neutral, pre-tint look.
-    stuffcmd(p, "set r_shadows_color_r 0.5;set r_shadows_color_g 0.5;set r_shadows_color_b 0.5\n");
+    // NB the shadow TINT (r_shadows_color_*) is deliberately NOT cleared here.  This fn runs from
+    // PutClientInServer = EVERY RESPAWN, and a clear-first would wipe any value the player set in the
+    // console the instant they died -> "I set it but it reads 0.5 again".  So we only ever PUSH a tint
+    // (below), and only when the map's env_sun actually carries a shadowcolor key; otherwise the client
+    // keeps whatever it has (its 0.5 cvardf default on a fresh client, or the player's own console value).
+    // Cost: a keyed map A followed by a keyless map B keeps A's tint until B sets its own key or the
+    // player resets it -- an acceptable trade for letting console experiments survive a respawn.
     if (!env_sun_active) return;
     stuffcmd(p, EnvSun_BuildCommand());            // sun dir for the QC shadow consumers
     stuffcmd(p, EnvSun_BuildShadowDirCommand());   // fake shadows (r_shadows 2) fall away from it
     if (env_sun_shadowcolor_set)
-        stuffcmd(p, EnvSun_BuildShadowColorCommand()); // ambient/sky tint of the shadows
+        stuffcmd(p, EnvSun_BuildShadowColorCommand()); // ambient/sky tint of the shadows (map opted in)
 };
 
 // Push to every currently-connected player (map-cycle case).
