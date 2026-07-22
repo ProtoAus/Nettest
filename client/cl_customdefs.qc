@@ -15,6 +15,15 @@
 // implementation lives in cl_ragdoll.qc which compiles AFTER cl_player.qc — forward-declare it here.
 entity(entity corpse, vector shotdir) CSQC_SpawnCorpseRagdoll;
 
+// nettest interactive water ripples: an entity crossing / wading a liquid surface spawns an
+// expanding ring on the tessellated water (addwaterripple).  Per-entity latch + throttle fields,
+// and the tracker (defined in cl_rain.qc, used from the prop / player / local-player hooks that
+// compile after it).  See render.h DEFORMV_RIPPLE and r_waterripple_react.
+.float  wr_wet;         // 1 = this entity's feet were in liquid last frame (entry-edge latch)
+.float  wr_next_wade;   // cltime gate throttling the wading-wake rings
+void(entity e, vector org, float feetz, float headz) WaterFX_Track;   // body in cl_rain.qc
+void() WaterFX_TrackLocalPlayer;                                       // body in cl_rain.qc
+
 vector cursor_pos; /* Current mouse cursor position, updated in csqc_inputevent */
 float g_width, g_height; /* Globals for screen width and height */
 

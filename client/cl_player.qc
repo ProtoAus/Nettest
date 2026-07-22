@@ -3673,6 +3673,12 @@ float() CSQC_PlayerVisual_Predraw =
 	if (Car_IsDriverSlot(self.vis_owner_entnum) && !PlayerVis_KillcamOwned(self))
 		return PREDRAW_NEXT;
 
+	// interactive water ripple for OTHER players wading / jumping in.  The local player is tracked
+	// once per frame from its predicted state (CSQC_UpdateView), so skip it here to avoid double
+	// rings; corpses don't move, so skip them too.  Proxy origin is the player centre (Quake hull).
+	if (self.vis_owner_entnum != player_localentnum && !self.vis_is_dead)
+		WaterFX_Track(self, self.origin, self.origin_z - 23, self.origin_z + 22);
+
 	// Hide the visual proxy when we shouldn't see it:
 	// 1. Own body in first person (not chase cam, not spectating, not death cam)
 	// 2. Spectated player's body in first-person spectate mode

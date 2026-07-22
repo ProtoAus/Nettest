@@ -1554,6 +1554,11 @@ float() CSQC_PhysProp_Predraw =
     setorigin(self, org + err);
     self.angles = PhysProp_AnglesLerp(self.pp_snap_angles_prev, self.pp_snap_angles, f);
 
+    // interactive water ripple: a prop dropping into liquid makes a splash (and a wake while it
+    // skims the surface).  The predraw already runs once/frame and unhooks when the prop settles,
+    // so a resting prop costs nothing here.  feet/head from the prop's own bbox.
+    WaterFX_Track(self, self.origin, self.origin_z + self.mins_z + 1, self.origin_z + self.maxs_z - 1);
+
     // ANGULAR handoff fade — the rotational twin of the `err` offset above.  Without it a
     // prop dropped mid-inspection pops from the predicted orientation to the authoritative
     // one (the origin fade alone doesn't cover angles).  Done as a BASIS blend, NOT an

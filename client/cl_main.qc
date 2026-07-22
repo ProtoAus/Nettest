@@ -1182,6 +1182,9 @@ void(float width, float height, float menushown) CSQC_UpdateView =
 	CSQC_PushPredictHitsUserInfo();
 	CSQC_SampleRemotePlayersForInterp();
 	CSQC_ExtrapolateRemotePlayers();
+	// interactive water ripple: our own splash / wading wake, from the finalized predicted state
+	// (once per rendered frame -- NOT in pmove, which re-runs during prediction and would multi-fire).
+	WaterFX_TrackLocalPlayer();
 	if (spike_debug)
 		spike_t_interp = gettime(0);
 

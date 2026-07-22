@@ -1265,8 +1265,69 @@ void(float i, float frac_override, float alpha_mul) Rain_DrawStreak =
 // uses for a water hit) so a bullet splash is visually identical to a rain one.
 float(float cache, string ename)         Rain_ResolveSplash;     // defined below
 void(vector pos, vector normal, float c) Rain_SpawnWaterSpray;   // defined below
+
+// ---- interactive water ripples (mesh reaction) --------------------------------------------
+// Once per rendered frame per entity: detect the entity crossing a liquid surface (a splash) and
+// wading along it (a wake), and spawn expanding rings on the tessellated water via addwaterripple.
+// The deform only uses the ring's XY, so we never chase the surface Z -- the entity's own origin is
+// the centre.  feetz/headz are absolute Z of the foot and head probe points.  All client-side.
+void(entity e, vector org, float feetz, float headz) WaterFX_Track =
+{
+    if (cvar("r_waterripple_react") <= 0)
+        return;	// feature off -- skip the pointcontents probes entirely
+
+    vector p = org;
+    p_z = feetz;
+    float feetwet = (pointcontents(p) <= CONTENT_WATER);	// same "in liquid" test the pmove uses
+
+    // ENTRY edge (dry -> wet this frame): a splash, sized by how hard it came down.
+    if (feetwet && !e.wr_wet)
+    {
+        float fall = 0 - e.velocity_z;	// downward speed only
+        if (fall < 0) fall = 0;
+        float amp = 2 + fall * 0.02;	// ~2u stepping in, bigger the harder the landing
+        if (amp > 10) amp = 10;
+        addwaterripple(org, amp, 24, 95, 1.7);
+    }
+    e.wr_wet = feetwet;
+
+    // WADING wake: feet in liquid but head OUT (the surface crosses the body) AND moving -> a
+    // throttled trail of small rings.  Fully submerged (head also wet) makes no surface wake.
+    if (feetwet && cltime >= e.wr_next_wade)
+    {
+        p_z = headz;
+        if (pointcontents(p) > CONTENT_WATER)	// head above the surface
+        {
+            float hspeed = vlen(e.velocity - e.velocity_z * '0 0 1');
+            if (hspeed > 50)
+            {
+                addwaterripple(org, 1.0 + hspeed * 0.004, 16, 60, 1.0);
+                e.wr_next_wade = cltime + 0.14;
+            }
+        }
+    }
+};
+
+// The local player isn't a proxy we iterate -- track its predicted state once per frame.
+void() WaterFX_TrackLocalPlayer =
+{
+    if (cvar("r_waterripple_react") <= 0)
+        return;
+    if (!predicted_player || !csqc_prediction_valid)
+        return;
+    // standard player hull: feet ~24 below origin, eyes ~22 above (head probe = eye height, so a
+    // fully-submerged swimmer stops making surface wake but a wader/surface-swimmer keeps it).
+    WaterFX_Track(predicted_player, predicted_player.origin,
+                  predicted_player.origin_z - 23, predicted_player.origin_z + 22);
+};
+
 void(vector pos) CSQC_Rain_SpawnBulletWaterSplash =
 {
+    // Mesh ripple: a small expanding ring where the shot hit the water.  Fired BEFORE the
+    // cl_rain_splash gate so the surface still reacts even with particle splashes turned off
+    // (no-op unless r_waterripple_react > 0).
+    addwaterripple(pos, 1.5, 12, 70, 0.9);
+
     if (cvar("cl_rain_splash") <= 0) return;
 
     float cheap = (cvar("cl_rain_splash") >= 2);   // cl_rain_splash 2 = cheap-splash mode

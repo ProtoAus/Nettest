@@ -1653,6 +1653,12 @@ float(string modelname, float(float isnew) updatecallback, float flags) deltalis
 float(vector org, float radius, vector rgb) dynamiclight_spawnstatic = #0:dynamiclight_spawnstatic; /*
 		Creates a static persistent light at the given position with the specified colour. Additional properties must be set via dynamiclight_set. */
 
+void(vector org, float amplitude, optional float size, optional float speed, optional float lifetime) addwaterripple = #0:addwaterripple; /*
+		nettest: spawn an interactive water ripple -- an expanding ring on the tessellated liquid surface centred at org
+		(only org's xy matter). amplitude = peak height in units; size = ring width / wavelength (default 16);
+		speed = ring expansion in units/sec (default 60); lifetime = seconds to fade (default 1.5).
+		No-op unless r_waterripple_react > 0. Rides on top of the ambient r_waterripple wave. */
+
 __variant(float lno, float fld) dynamiclight_get = #372; /*
 		Retrieves a property from the given dynamic/rt light. Return type depends upon the light field requested. */
 
