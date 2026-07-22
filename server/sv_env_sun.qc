@@ -41,10 +41,15 @@
 // (angles is an engine builtin.)
 .vector sundir;
 .float  sun_brightness;   // legacy god-ray key: unused, declared only so old maps don't warn
+.vector shadowcolor;      // env_sun key: the RGB a fully-shadowed sun pixel is multiplied by (the
+                          //   ambient/sky tint of a shadow). 0-1 (0.5 0.5 0.5 = neutral grey = default),
+                          //   or 0-255 and we normalise. Drives r_shadows_color_r/g/b (defaultwall.glsl).
 
 // Globals - set by env_sun spawn, read by EnvSun_StuffPlayer.
 float  env_sun_active;
 vector env_sun_dir;      // normalized direction toward the sun
+vector env_sun_shadowcolor;      // the shadow tint to push (already normalised to 0-1)
+float  env_sun_shadowcolor_set;  // 1 = the map set a custom tint; 0 = leave the neutral default
 
 // ---------------------------------------------------------------------------
 // mangle -> direction TOWARD the sun, using ericw-tools LIGHT's EXACT convention, so an
@@ -97,6 +102,15 @@ string() EnvSun_BuildShadowDirCommand =
                    0 - env_sun_dir_x, 0 - env_sun_dir_y, 0 - env_sun_dir_z);
 };
 
+// Push the shadow TINT (r_shadows_color_r/g/b, cvardf in defaultwall.glsl).  These are
+// CVAR_SHADERSYSTEM, so the `set` auto-flushes the shader (cvar.c Shader_NeedReload) - no
+// vid_reload needed.  4 args (format + 3 floats) is well under fteqcc's 8-vararg sprintf limit.
+string() EnvSun_BuildShadowColorCommand =
+{
+    return sprintf("set r_shadows_color_r %f;set r_shadows_color_g %f;set r_shadows_color_b %f\n",
+                   env_sun_shadowcolor_x, env_sun_shadowcolor_y, env_sun_shadowcolor_z);
+};
+
 // Push the sun config to one client.  ALWAYS clears r_sun_colour first
 // (archived cvar, no map-load reset - see header; rays must stay dead).
 // r_sun_dir + r_shadows_throwdirection get the same clear-first treatment: reset to
@@ -110,9 +124,14 @@ void(entity p) EnvSun_StuffPlayer =
 {
     if (!p || bot_adding || clienttype(p) != CLIENTTYPE_REAL) return;	// bots have no netchan (engine-truth guard; bot_adding covers the spawnclient window)
     stuffcmd(p, "set r_sun_colour \"0 0 0\";set r_sun_dir \"0.271654 0.323744 0.906308\";set r_shadows_throwdirection \"-0.271654 -0.323744 -0.906308\";set _map_sun_active 0\n");   // rays dead + ericw default sun (_sun_mangle "230 -65 0") + no env_sun this map
+    // Clear-first the shadow tint too (stuffed `set`s persist for the session, so a previous map's
+    // tint would otherwise carry over).  0.5 grey = the neutral, pre-tint look.
+    stuffcmd(p, "set r_shadows_color_r 0.5;set r_shadows_color_g 0.5;set r_shadows_color_b 0.5\n");
     if (!env_sun_active) return;
     stuffcmd(p, EnvSun_BuildCommand());            // sun dir for the QC shadow consumers
     stuffcmd(p, EnvSun_BuildShadowDirCommand());   // fake shadows (r_shadows 2) fall away from it
+    if (env_sun_shadowcolor_set)
+        stuffcmd(p, EnvSun_BuildShadowColorCommand()); // ambient/sky tint of the shadows
 };
 
 // Push to every currently-connected player (map-cycle case).
@@ -135,6 +154,9 @@ from it, and the QC shadow/blob code weights toward it.  No visual by itself
           so the dynamic sun matches the baked lightmap.  Default "230 -65 0".
 "angles"  read exactly like "mangle" (a sun has no other meaningful facing).
 "sundir"  explicit toward-the-sun vector "X Y Z"; overrides mangle/angles if set.
+"shadowcolor" the RGB tint of a fully-shadowed sun pixel (r_shadows 2) — set it to the map's
+          ambient/sky colour so shadows sink toward that instead of dead grey.  "0.5 0.5 0.5" =
+          neutral (default).  Accepts 0-1 ("0.35 0.4 0.6") OR 0-255 ("90 102 153"); lower = darker.
 */
 void() env_sun =
 {
@@ -151,6 +173,18 @@ void() env_sun =
         env_sun_dir = EnvSun_DirFromMangle(self.angles);   // same convention as mangle — see the helper
     else
         env_sun_dir = '0.271654 0.323744 0.906308';   // ericw LIGHT default sun (_sun_mangle "230 -65 0")
+
+    // Optional shadow TINT.  Forgiving on range: values >1 are read as 0-255 (Quake light-colour
+    // convention) and normalised, so the mapper can type "90 100 150" OR "0.35 0.4 0.6".
+    if (self.shadowcolor != '0 0 0')
+    {
+        env_sun_shadowcolor = self.shadowcolor;
+        if (env_sun_shadowcolor_x > 1 || env_sun_shadowcolor_y > 1 || env_sun_shadowcolor_z > 1)
+            env_sun_shadowcolor = env_sun_shadowcolor * (1 / 255);
+        env_sun_shadowcolor_set = 1;
+    }
+    else
+        env_sun_shadowcolor_set = 0;
 
     EnvSun_StuffAll();
 
