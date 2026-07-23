@@ -53,6 +53,10 @@ float  sv_confirmed_jump_groundstick_off_until;
 // rewinds.
 float  sv_confirmed_grapple_rope_active;
 float  sv_confirmed_pm_carrying;        // HL2 carry lowered-weapon flag (mirrors grapple)
+float  sv_confirmed_ph_hull_halfxy;     // Prop Hunt disguise hull (mirrors pm_carrying flow;
+float  sv_confirmed_ph_hull_minz;       //  height > 0 == disguised — prediction MUST use the
+float  sv_confirmed_ph_hull_height;     //  same dequantized hull as the server or the owner
+float  sv_confirmed_ph_yaw_locked;      //  rubber-bands while disguised)
 float  sv_confirmed_pm_driving;         // func_vehicle driving flag (drives the pmove driver-lock)
 float  sv_confirmed_pm_incar;           // prop_car in-car flag (pmove input-zero + camera + fire-block)
 vector cl_car_cam_org, cl_car_cam_vel;  // driven car origin/velocity (from the proxy) for the chase-cam anchor
@@ -579,6 +583,10 @@ void(entity src) CSQC_StoreConfirmedStateFromEntity =
 	sv_confirmed_pm_carrying          = src.pm_carrying;
 	sv_confirmed_pm_driving           = src.pm_driving;
 	sv_confirmed_pm_incar             = src.pm_incar;
+	sv_confirmed_ph_hull_halfxy       = src.ph_hull_halfxy;
+	sv_confirmed_ph_hull_minz         = src.ph_hull_minz;
+	sv_confirmed_ph_hull_height       = src.ph_hull_height;
+	sv_confirmed_ph_yaw_locked        = src.ph_yaw_locked;
 	sv_confirmed_grapple_anchor       = src.grapple_anchor;
 	sv_confirmed_grapple_attached     = src.grapple_attached;
 	sv_confirmed_grapple_held_last    = src.pm_grapple_held_last;
@@ -691,6 +699,10 @@ void() CSQC_ResetToConfirmedMoveState =
 	self.pm_carrying             = sv_confirmed_pm_carrying;
 	self.pm_driving              = sv_confirmed_pm_driving;
 	self.pm_incar                = sv_confirmed_pm_incar;
+	self.ph_hull_halfxy          = sv_confirmed_ph_hull_halfxy;
+	self.ph_hull_minz            = sv_confirmed_ph_hull_minz;
+	self.ph_hull_height          = sv_confirmed_ph_hull_height;
+	self.ph_yaw_locked           = sv_confirmed_ph_yaw_locked;
 	self.grapple_anchor          = sv_confirmed_grapple_anchor;
 	self.grapple_attached        = sv_confirmed_grapple_attached;
 	self.pm_grapple_held_last    = sv_confirmed_grapple_held_last;
@@ -2198,8 +2210,9 @@ void() CSQC_BuildPresentationView =
 	// this render-rate preview sim reads live WASD directly.  Without this
 	// mirror, a single preview step produces ~1 frame of visible motion
 	// before the next tick's reconcile snaps it back — looks like a server
-	// correction but is a local bypass.
-	if (getstatf(STAT_ROUND_PHASE) == ROUND_PHASE_FREEZE)
+	// correction but is a local bypass.  (Per-team in Prop Hunt — the shared
+	// helper mirrors the SSQC gate exactly, or hiders would freeze too.)
+	if (SH_RoundFreezeLocksPlayer(world))
 	{
 		input_movevalues_x = 0;
 		input_movevalues_y = 0;
@@ -3036,7 +3049,8 @@ void() CSQC_Input_Frame =
 	csqc_jump_was_down = jump_now;
 
 	// Freeze time: block WASD movement and primary attack
-	if (getstatf(STAT_ROUND_PHASE) == ROUND_PHASE_FREEZE)
+	// (per-team in Prop Hunt — mirrors the SSQC gate via the shared helper)
+	if (SH_RoundFreezeLocksPlayer(world))
 	{
 		input_movevalues_x = 0;
 		input_movevalues_y = 0;
@@ -3693,7 +3707,8 @@ float() CSQC_PlayerVisual_Predraw =
 	    && !self.vis_is_dead
 	    && spec_target == 0 && !cvar("chase_active")
 	    && !Spectate_InDeathCam()
-	    && !PlayerVis_KillcamOwned(self))	// P2: draw the victim during the killcam
+	    && !PlayerVis_KillcamOwned(self)	// P2: draw the victim during the killcam
+	    && !CSQC_PropHunt_LocalDisguised())	// Prop Hunt: disguised = third person, show own prop
 	{
 		// Don't RENDER our own first-person body, but DON'T early-return — fall
 		// through to compute its third-person animation so the killcam (which
@@ -3738,6 +3753,71 @@ float() CSQC_PlayerVisual_Predraw =
 		self.velocity = predicted_player.velocity;	// drive the anim LOCOMOTION path so the
 								// killcam records a RUNNING body, not a
 								// frozen idle one (vis_skip_render path)
+	}
+
+	// ---- PROP HUNT DISGUISE ----
+	// A disguised proxy renders as the copied PROP: a static mesh at the
+	// server-sent yaw — no skeleton, no anims, no leg twist, no spine deform,
+	// no weapon attach (everything below is player-rig code and is skipped
+	// wholesale).  Runs for corpses too: a dead hider's "body" is the prop
+	// lying where it died (the detached corpse proxy keeps the disguise
+	// IDENTITY fields).
+	if (self.ph_disguise_modelindex)
+	{
+		if (vis_skip_render)
+		{
+			// Own body hidden (true first person, e.g. before the third-person
+			// gate below kicks in) — draw nothing; there's no anim state a
+			// killcam could want from a static prop.
+			if (self.vis_weapon_ent)
+				self.vis_weapon_ent.alpha = -1;
+			return PREDRAW_NEXT;
+		}
+		if (self.modelindex != self.ph_disguise_modelindex)
+		{
+			if (self.skeletonindex)
+			{
+				skel_delete(self.skeletonindex);
+				self.skeletonindex = 0;
+				self.vis_skel_modelindex = 0;
+			}
+			setmodelindex(self, self.ph_disguise_modelindex);
+		}
+		self.frame = 0;         self.frame2 = 0;
+		self.frame1time = 0;    self.frame2time = 0;
+		self.baseframe = 0;     self.baseframe2 = 0;
+		self.lerpfrac = 0;      self.baselerpfrac = 0;
+		self.subblendfrac = 0;  self.subblend2frac = 0;
+		self.basebone = 0;
+		// Flat prop at the shown yaw.  Remote/locked: the server-sent yaw
+		// (Player_VisualProxy_Sync freezes it while ph_yaw_locked).  Local +
+		// unlocked: the live camera yaw so your own prop doesn't lag the mouse
+		// by a round-trip in third person.
+		float show_yaw = self.vis_aim_yaw;
+		if (self.vis_owner_entnum == player_localentnum && !self.vis_is_dead
+		    && predicted_player && csqc_prediction_valid && !predicted_player.ph_yaw_locked)
+		{
+			vector ph_va = getproperty(VF_CL_VIEWANGLES);
+			show_yaw = ph_va_y;
+		}
+		self.angles_x = 0;
+		self.angles_y = show_yaw;
+		self.angles_z = 0;
+		self.scale = (self.vis_disguise_scale > 0) ? self.vis_disguise_scale : 1;
+		self.skin  = self.vis_disguise_skin;
+		// Kill any lingering team wash HERE, not just in CSQC_ApplyTeamTints —
+		// the tint pass only runs in the ALIVE scene (cl_main.qc), so a viewer
+		// who died before this hider possessed would spectate a blue-tinted
+		// crate forever off the sticky .colormod.  Predraw runs in every scene.
+		self.colormod = '1 1 1';
+		if (self.alpha < 0)
+			self.alpha = 1;	// undo any prior suppression (killcam etc.)
+		self.renderflags &= ~(RF_EXTERNALMODEL | RF_FPFADE);	// no fp-body treatment on a prop
+		if (self.vis_weapon_ent)
+			self.vis_weapon_ent.alpha = -1;	// never show a gun stuck to a crate
+		BlobShadow_Emit(self);
+		addentity(self);
+		return PREDRAW_NEXT;
 	}
 
 	// Hoisted: the spine deformer below reads these; the killcam branch leaves
@@ -4824,6 +4904,18 @@ void() CSQC_PlayerVisual_Update =
 		// nettest server ragdoll: hide-mesh flag (matched write at the END of the server IDENTITY section).
 		self.vis_has_server_ragdoll = readbyte();
 
+		// Prop Hunt disguise (matched write at the END of the server IDENTITY
+		// section — keep in lockstep): copied prop modelindex (0 = undisguised),
+		// quantized hull, render scale/skin.  Shared ph_* names so the hitgroup
+		// normalize in sh_weapon_standard.qc reads the same field on both sides.
+		self.ph_disguise_modelindex = readshort();
+		self.ph_hull_halfxy = readbyte();
+		self.ph_hull_minz   = readbyte() - 64;
+		self.ph_hull_height = readbyte();
+		float ph_scale_b    = readbyte();
+		self.vis_disguise_scale = (ph_scale_b > 0) ? ph_scale_b / 16 : 1;
+		self.vis_disguise_skin  = readbyte();
+
 		// Rollback clear: if the server snapshot says alive, our
 		// predicted-death was wrong (target had armor / regen / FF /
 		// bad hitclaim) — clear the latch so future anim updates
@@ -4887,7 +4979,13 @@ void() CSQC_PlayerVisual_Update =
 	// Model change can only happen when IDENTITY section arrived — skip
 	// setmodel/setcustomskin/setsize entirely otherwise (frequent case
 	// for idle pose-only updates).
-	float model_changed = identity_changed && (self.model != mdl_path);
+	// Prop Hunt: while disguised the PREDRAW owns the model (the prop, via
+	// setmodelindex) — suppress the team-model restore here or every IDENTITY
+	// update would thrash prop->player->prop.  On UNDISGUISE (the disguise
+	// short just went 0, which itself dirtied IDENTITY) this comparison sees
+	// prop-model != team-path and restores the player model + skin normally.
+	float model_changed = identity_changed && (self.model != mdl_path)
+	                      && !self.ph_disguise_modelindex;
 	if (model_changed)
 	{
 		string prev_model = self.model;
@@ -4984,7 +5082,12 @@ void() CSQC_PlayerVisual_Update =
 	else
 		prox_ducking = (self.flags & FL_DUCKING) != 0;
 
-	if (prox_ducking)
+	if (self.ph_disguise_modelindex)
+		// Prop Hunt: proxy collision = the disguise hull (same dequantized bytes
+		// the server uses) — trust-1 client hit traces collide with THIS, so it
+		// must match the server's SetHitboxSize or hits ghost/whiff.
+		setsize(self, PH_HullMins(self), PH_HullMaxs(self));
+	else if (prox_ducking)
 		setsize(self, PM_DUCK_MINS, PM_DUCK_MAXS);
 	else
 		setsize(self, PM_MINS, PM_MAXS);
@@ -5360,6 +5463,14 @@ noref void(float isnew) CSQC_Ent_Update =
 		self.pm_driving              = readbyte();
 		// prop_car in-car flag — matches the SSQC writer tail (wire order is critical).
 		self.pm_incar                = readbyte();
+		// Prop Hunt disguise hull + rotation lock — matches the SSQC writer tail
+		// (fixed 4 bytes BEFORE the conditional car block; wire order is critical).
+		// Prediction keys on ph_hull_height > 0 (the modelindex doesn't ride this
+		// wire) — PM_CurrentMins/Maxs must use the same predicate on both sides.
+		self.ph_hull_halfxy          = readbyte();
+		self.ph_hull_minz            = readbyte() - 64;
+		self.ph_hull_height          = readbyte();
+		self.ph_yaw_locked           = readbyte();
 		// prop_car chase-cam anchor: the driven car's origin+velocity, ONLY present when pm_incar
 		// (matches the conditional SSQC writer).  cl_main.qc velocity-extrapolates it for a smooth cam.
 		if (self.pm_incar)

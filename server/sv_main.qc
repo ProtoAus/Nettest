@@ -297,6 +297,12 @@ void() RoundStart =
 {
 	float freezetime = cvar("mp_freezetime");
 
+	// Prop Hunt: the freeze phase IS the hide phase — hiders run free while
+	// seekers are locked+blindfolded (SH_RoundFreezeLocksPlayer gates per-team).
+	// Uses its own duration so normal mp_freezetime is untouched.
+	if (cvar("sv_gamemode") == GAMEMODE_PROPHUNT)
+		freezetime = cvar("mp_ph_hidetime");
+
 	round_winning_team = 0;
 
 	if (freezetime > 0)
@@ -395,6 +401,10 @@ void() RoundRestart =
 
 	round_number = round_number + 1;
 	round_winning_team = 0;
+
+	// Prop Hunt: force-shuffle SEEKERS/HIDERS before the respawn loop below, so
+	// spawns and loadouts see the final teams.  Self-gates on the gamemode.
+	PropHunt_ShuffleTeams();
 
 	// Remove dropped weapons + respawn map-placed weapons at their original positions
 	W_RespawnMapWeapons();
@@ -1117,6 +1127,17 @@ void() StartFrame =
 			cvar_set("mp_respawn",      "0");
 			cvar_set("mp_disabledoors", "0");
 		}
+		else if (gamemode == GAMEMODE_PROPHUNT)
+		{
+			// One life per round (elimination round flow).
+			cvar_set("mp_respawn",      "0");
+			cvar_set("mp_disabledoors", "0");
+			// A 1-HP tincan must survive hopping off a crate.
+			cvar_set("mp_falldamage",   "0");
+			// Hiders are weaponless by design; strip map pickups so they
+			// can't arm themselves mid-round.
+			cvar_set("mp_nomapweapons", "1");
+		}
 		else  // TDM
 		{
 			cvar_set("mp_respawn",      "1");
@@ -1249,13 +1270,23 @@ void() StartFrame =
 		if (time >= round_end_time
 			&& !(gamemode == GAMEMODE_DEFUSE && bomb_planted))
 		{
-			round_winning_team = 0;
+			if (gamemode == GAMEMODE_PROPHUNT)
+			{
+				// Prop Hunt: surviving the round clock IS the hiders' win.
+				round_winning_team = TEAM_BLUE;
+				blue_team_score += 1;
+			}
+			else
+				round_winning_team = 0;
 			round_phase = ROUND_PHASE_ROUND_END;
 			round_restart_time = time + cvar("mp_roundrestartdelay");
 		}
-		// Check team elimination — applies to elim and paintgun, both
-		// of which use the "one team left wins the round" win flow.
-		else if (gamemode == GAMEMODE_ELIMINATION || gamemode == GAMEMODE_PAINTGUN)
+		// Check team elimination — applies to elim, paintgun and prop hunt, all
+		// of which use the "one team left wins the round" win flow.  (Prop Hunt:
+		// all hiders dead -> seekers win; all seekers dead, e.g. from missfire
+		// self-damage -> hiders win.)
+		else if (gamemode == GAMEMODE_ELIMINATION || gamemode == GAMEMODE_PAINTGUN
+			|| gamemode == GAMEMODE_PROPHUNT)
 		{
 			winner = CheckTeamEliminated();
 			if (winner != 0)
@@ -1403,10 +1434,10 @@ void() StartFrame =
 					self = saved;
 				}
 				else if (gamemode == GAMEMODE_ELIMINATION || gamemode == GAMEMODE_PAINTGUN
-				         || gamemode == GAMEMODE_DEFUSE)
+				         || gamemode == GAMEMODE_DEFUSE || gamemode == GAMEMODE_PROPHUNT)
 				{
-					// Elimination / Paintgun / Defuse: one life per round — hide
-					// body, enter spectator phase (no mid-round respawn).
+					// Elimination / Paintgun / Defuse / Prop Hunt: one life per
+					// round — hide body, enter spectator phase (no mid-round respawn).
 					e.modelindex = 0;
 					e.death_time = -1;  // prevent re-triggering
 				}

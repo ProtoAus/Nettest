@@ -154,6 +154,7 @@ void() create_server_load_gamemode_options =
 	bufstr_add(create_server_gamemode_options, "Free For All", FALSE);
 	bufstr_add(create_server_gamemode_options, "Paintball", FALSE);
 	bufstr_add(create_server_gamemode_options, "Defuse", FALSE);
+	bufstr_add(create_server_gamemode_options, "Prop Hunt", FALSE);
 	create_server_gamemode_options_loaded = TRUE;
 };
 
@@ -948,6 +949,13 @@ void() create_server_launch =
 	{
 		cvar_set("mp_respawn",      "0");
 		cvar_set("mp_disabledoors", "0");
+	}
+	else if (create_server_gamemode == 6)    // PROPHUNT — one life, no falldamage
+	{
+		cvar_set("mp_respawn",      "0");
+		cvar_set("mp_disabledoors", "0");
+		cvar_set("mp_falldamage",   "0");
+		cvar_set("mp_nomapweapons", "1");
 	}
 	else                                      // TDM (0) — fallback
 	{

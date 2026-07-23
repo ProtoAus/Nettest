@@ -125,6 +125,7 @@ shared/weapons/sh_wpn_gravitygun.qc
 shared/sh_weapon_slotammo.qc
 client/cl_weapons.qc
 client/cl_player.qc
+client/cl_prophunt.qc
 client/cl_paint.qc
 client/cl_vehicle_sound.qc
 client/cl_ragdoll.qc

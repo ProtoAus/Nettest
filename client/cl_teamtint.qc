@@ -101,6 +101,17 @@ void() CSQC_ApplyTeamTints =
     {
         slot = vis.vis_owner_entnum - 1;
 
+        // Prop Hunt: a disguised hider renders as the prop — a team wash on
+        // the copy (or even the player-model brightness cap, which the map's
+        // real props don't get) is a tell against the original standing next
+        // to it.  Straight neutral, regardless of cl_teamcolours.
+        if (vis.ph_disguise_modelindex)
+        {
+            vis.colormod = TEAMTINT_NEUTRAL;
+            vis = vis.chain;
+            continue;
+        }
+
         // Brightness cap sampled at the body's render origin so a player
         // crossing a bright tile dims uniformly.  Use the per-entity CACHED
         // sampler — it re-runs getlight() only when the body moved >1qu or the

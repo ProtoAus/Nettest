@@ -149,6 +149,7 @@ server/sv_infodecal.qc
 shared/sh_pmove.qc
 server/sv_grapple.qc
 server/sv_player.qc
+server/sv_prophunt.qc
 server/sv_lagcomp.qc
 server/sv_killcam.qc
 server/sv_radio.qc

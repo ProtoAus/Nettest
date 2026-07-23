@@ -737,6 +737,12 @@ void(float base_spread, float move_spread, float full_spread_speed,
         // headshots register on any rig regardless of bone naming
         // convention (legacy MDL or new IQM with renamed bones).
         float hitgroup = W_HitgroupClassify(trace_ent, trace_endpos, trace_bone_id);
+        // Prop Hunt: a disguised hider is a PROP — no head to headshot.  Flatten
+        // the multiplier BEFORE it's applied (shared code, so trust-0 server
+        // damage AND trust-1 client claim damage stay identical; the CSQC proxy
+        // carries the same ph_disguise_modelindex via the IDENTITY section).
+        if (trace_ent.ph_disguise_modelindex)
+            hitgroup = HITGROUP_GENERIC;
         damage = damage * W_HitgroupDamageMultiplier(hitgroup);
 
         if (W_CanDamageTarget(trace_ent))
@@ -785,6 +791,9 @@ void(float base_spread, float move_spread, float full_spread_speed,
         }
         else
         {
+            // (Prop Hunt missfire lives INSIDE PhysProp_TryPushFromTrace — the one
+            // chokepoint every weapon's prop-hit branch calls, custom shotgun loops
+            // and melee included.)
             PhysProp_TryPushFromTrace(dir, damage);
 #ifdef SSQC
             // corpses are pass-through (RAGDOLL_DIM), so the shot reached trace_endpos through
@@ -894,6 +903,9 @@ void(float base_spread, float move_spread, float full_spread_speed,
         // headshots register on any rig regardless of bone naming
         // convention (legacy MDL or new IQM with renamed bones).
         float hitgroup = W_HitgroupClassify(trace_ent, trace_endpos, trace_bone_id);
+        // Prop Hunt: no headshot multiplier on a disguised hider (see W_HitscanShoot).
+        if (trace_ent.ph_disguise_modelindex)
+            hitgroup = HITGROUP_GENERIC;
         damage = damage * W_HitgroupDamageMultiplier(hitgroup);
 
         if (W_CanDamageTarget(trace_ent))
@@ -931,6 +943,7 @@ void(float base_spread, float move_spread, float full_spread_speed,
         }
         else
         {
+            // (Prop Hunt missfire lives inside PhysProp_TryPushFromTrace.)
             PhysProp_TryPushFromTrace(dir, damage);
 #ifdef SSQC
             Ragdoll_TryShove(src, trace_endpos, dir, damage);   // shove a pass-through corpse in the shot's path

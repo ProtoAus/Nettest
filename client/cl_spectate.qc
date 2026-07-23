@@ -68,6 +68,17 @@ float(float slot1) Spectate_SlotIsAliveTarget =
     if (slot1 <= 0 || slot1 > maxclients) return FALSE;
     if (slot1 == player_localentnum)      return FALSE;
 
+    // Prop Hunt anti-ghosting: dead players may only follow SEEKERS (RED) —
+    // a dead seeker cycling onto a disguised hider would broadcast their spot
+    // (and a dead hider watching another hider is the same leak via voice).
+    // modteam is the server-pushed scoreboard infokey, valid for every model.
+    if (getstatf(STAT_GAMEMODE) == GAMEMODE_PROPHUNT)
+    {
+        string ph_tv = getplayerkeyvalue(slot1 - 1, "modteam");
+        if (ph_tv == "" || stof(ph_tv) != TEAM_RED)
+            return FALSE;
+    }
+
     entity vp = findchain(classname, "player_visual_proxy");
     while (vp)
     {

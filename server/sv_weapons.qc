@@ -667,7 +667,9 @@ void() W_PlayersExpandHitboxes =
     entity p = player_chain_head;
     while (p)
     {
-        if (!p.is_dead && p.solid == SOLID_SLIDEBOX)
+        // Prop Hunt: no limb-reach padding on a disguised hider — a tincan's
+        // hitbox is exactly the tincan.  (Restore below skips the same set.)
+        if (!p.is_dead && p.solid == SOLID_SLIDEBOX && !p.ph_disguise_modelindex)
         {
             vector mn = p.mins;
             vector mx = p.maxs;
@@ -687,7 +689,7 @@ void() W_PlayersRestoreHitboxes =
     entity p = player_chain_head;
     while (p)
     {
-        if (!p.is_dead && p.solid == SOLID_SLIDEBOX)
+        if (!p.is_dead && p.solid == SOLID_SLIDEBOX && !p.ph_disguise_modelindex)
         {
             vector mn = p.mins;
             vector mx = p.maxs;
@@ -1159,6 +1161,14 @@ void(entity attacker, entity victim) PlayerKilled =
         else
         {
             attacker.frags = attacker.frags + 1;
+
+            // Prop Hunt: finding + killing a hider HEALS the seeker (offsets the
+            // missfire self-damage economy; classic prop-hunt balance).
+            if (cvar("sv_gamemode") == GAMEMODE_PROPHUNT
+                && attacker.player_team == TEAM_RED
+                && victim.player_team == TEAM_BLUE
+                && !attacker.is_dead)
+                attacker.health = min(attacker.health + cvar("mp_ph_killheal"), 100);
             // Cash reward for a legitimate enemy kill (kf_cause excludes
             // suicides and team-kills).  Headshot adds mp_cashheadshot.
             if (kf_cause == KILL_CAUSE_WEAPON)
@@ -1208,7 +1218,10 @@ void(entity attacker, entity victim) PlayerKilled =
 
     // nettest server ragdoll: stash the victim's LAST ALIVE framestate BEFORE SH_PlayerAnim_Death
     // overwrites it, so the ragdoll (spawned below) starts in the pose they were shot in (mid-run etc.).
-    Ragdoll_CaptureAlivePose(victim);
+    // Prop Hunt: a disguised victim has a PROP mesh — no player rig to capture/ragdoll;
+    // the corpse is the static prop lying where it died (predraw disguise branch).
+    if (!victim.ph_disguise_modelindex)
+        Ragdoll_CaptureAlivePose(victim);
 
     // Play death animation + scatter carried weapons, all with self = victim
     {
@@ -1241,8 +1254,17 @@ void(entity attacker, entity victim) PlayerKilled =
     // nettest server ragdoll: spawn the authoritative flopping corpse from the just-detached proxy
     // (reads victim.last_corpse for the model/skin/pose + victim.velocity for the death momentum, so
     // this MUST run after the detach and BEFORE the velocity zero below).  Only on weapon/FF kills.
-    if (kf_cause == KILL_CAUSE_WEAPON || kf_cause == KILL_CAUSE_FRIENDLYFIRE)
+    if ((kf_cause == KILL_CAUSE_WEAPON || kf_cause == KILL_CAUSE_FRIENDLYFIRE)
+        && !victim.ph_disguise_modelindex)	// Prop Hunt: no ragdoll for a prop corpse
         Ragdoll_SpawnFromDeath(attacker, victim);
+
+    // Prop Hunt: the prop corpse does NOT persist — the disguised victim
+    // gibbed (CSQC_EVENT_PLAYER_GIBS broadcast in W_ApplyDamage) and the
+    // prop copy vanishes with them.  Instant networked retire of the corpse
+    // the detach above just created (reads victim.last_corpse, so it MUST
+    // run after Player_VisualProxy_DetachAsCorpse).
+    if (victim.ph_disguise_modelindex)
+        PropHunt_RemovePropCorpse(victim);
 
     // Now safe to wipe the live player's velocity — corpse already has
     // its copy.  The dead player entity stays at rest until respawn.
@@ -1466,7 +1488,9 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
     // (a helmet halves a headshot first — the 4x head multiplier is already
     // baked into `damage`).  No-op when the player has no armor and no
     // helmet.  Players only; world/breakables are unaffected.
-    if (target.classname == "player")
+    // Prop Hunt: a DISGUISED hider gets no armor absorb — a 1-HP tincan must
+    // die to one hit regardless of any kevlar bought pre-shuffle.
+    if (target.classname == "player" && !target.ph_disguise_modelindex)
         damage = Armor_Absorb(target, damage, target.death_hitgroup == HITGROUP_HEAD);
 
     if (damage > target.health)
@@ -1641,7 +1665,13 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
         // function is called (hitscan paths, hitclaim handler, shotgun
         // pellet paths) so the hitgroup of the actual killing blow is
         // available here.
-        if (target.death_hitgroup == HITGROUP_HEAD && attacker)
+        // Prop Hunt: a killed disguised hider ALWAYS gibs — the prop
+        // "shatters" (the burst sells the kill; PlayerKilled removes the
+        // prop corpse outright).  Needed explicitly because the disguise
+        // normalizes every hit to HITGROUP_GENERIC (sh_weapon_standard.qc),
+        // so the headshot branch alone could never fire for a prop.
+        float ph_prop_gib = (target.ph_disguise_modelindex != 0);
+        if ((target.death_hitgroup == HITGROUP_HEAD || ph_prop_gib) && attacker)
         {
             vector gib_dir = target.origin - attacker.origin;
             if (vlen(gib_dir) > 0)
@@ -1655,11 +1685,19 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
             // peak vs ~1200 under the old 12-gib × 100-drop scheme).
             float gib_count = 6;
 
+            // Burst origin: head height for players; the disguise hull's
+            // CENTRE for props (a tincan's +24 would spray from the empty
+            // air above the can, a tall cabinet's from its knees).
+            float gib_z = target.origin_z + 24;               // center of mass
+            if (ph_prop_gib)
+                gib_z = target.origin_z + target.ph_hull_minz
+                      + target.ph_hull_height * 0.5;
+
             WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
             WriteByte(MSG_MULTICAST, CSQC_EVENT_PLAYER_GIBS);
             WriteCoord(MSG_MULTICAST, target.origin_x);
             WriteCoord(MSG_MULTICAST, target.origin_y);
-            WriteCoord(MSG_MULTICAST, target.origin_z + 24);  // center of mass
+            WriteCoord(MSG_MULTICAST, gib_z);
             WriteCoord(MSG_MULTICAST, gib_dir_x);
             WriteCoord(MSG_MULTICAST, gib_dir_y);
             WriteCoord(MSG_MULTICAST, gib_dir_z);
@@ -3260,6 +3298,12 @@ void() W_CheckImpulses =
             W_GrappleRelease(self);
         break;
     case WEAPON_IMPULSE_RELOAD:   // Reload
+        // Prop Hunt: a disguised hider has no weapon, so the reload key is
+        // repurposed as the ROTATION LOCK toggle (freeze the shown prop's yaw
+        // so looking around doesn't spin your disguise).  Self-gates; consumes
+        // the impulse only when it acted.
+        if (PropHunt_ToggleYawLock(self))
+            break;
         if (self.reload) self.reload();
         break;
     case WEAPON_IMPULSE_SPECIAL:  // Weapon-specific action (menu "Weapon Special")

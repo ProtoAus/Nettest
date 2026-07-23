@@ -838,8 +838,10 @@ float() CSQC_UpdateViewAliveCamera =
 		}
 	}
 
-	// Third-person chase cam — honour chase_active/chase_back/chase_up/chase_right
-	if (cvar("chase_active"))
+	// Third-person chase cam — honour chase_active/chase_back/chase_up/chase_right.
+	// Prop Hunt: a disguised hider is forced into third person so they can see
+	// how well their prop is hidden (classic prop-hunt self view).
+	if (cvar("chase_active") || CSQC_PropHunt_LocalDisguised())
 	{
 		vector chase_fwd, chase_rt, chase_up;
 		makevectors(camang);
@@ -2344,6 +2346,20 @@ void() CSQC_Parse_Event =
 			// num_for_edict (server sv_weapons.qc), so compare player_localentnum.  When
 			// cl_killcam is off the clause is false -> live gibs spawn normally.
 			float pg_local_kc = (cvar("cl_killcam") && pg_target_slot == player_localentnum);
+			// Prop Hunt: the killcam replay re-emits HEADSHOT gibs only
+			// (killcam_headshot comes from the killfeed's death_hitgroup byte,
+			// which the disguise normalizes to GENERIC) — so suppressing the
+			// live burst here would mean a disguised victim NEVER sees their
+			// own prop shatter.  The disguise flag still rides our proxy when
+			// this event lands (same server frame as the kill; the corpse
+			// remove trails it by ~0.1s), so exempt disguised local deaths.
+			if (pg_local_kc)
+			{
+				entity pg_ownvis = findfloat(world, vis_owner_entnum, pg_target_slot);
+				if (pg_ownvis && pg_ownvis.classname == "player_visual_proxy"
+				    && pg_ownvis.ph_disguise_modelindex)
+					pg_local_kc = 0;
+			}
 			if (!pg_skip && !Killcam_Active() && !pg_local_kc)
 				CSQC_SpawnPlayerGibs(pg_pos, pg_dir, pg_count, pg_dmg);
 			break;

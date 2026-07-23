@@ -956,6 +956,47 @@ const float GAMEMODE_PAINTGUN    = 4;
 // (red wins) or full defuse (blue wins).  Standard team elimination
 // still applies as a fallback win condition.
 const float GAMEMODE_DEFUSE      = 5;
+// Prop Hunt: RED = SEEKERS, BLUE = HIDERS.  Teams force-shuffled every round
+// (~mp_ph_ratio hiders per seeker).  The freeze phase is the HIDE phase —
+// hiders run free while seekers are locked + blindfolded (SH_RoundFreezeLocksPlayer).
+// Hiders +use a prop to become a copy of it (HP scaled by prop size), +reload
+// toggles rotation lock.  Seekers hurt themselves shooting real props and heal
+// on hider kills.  Timer expiry = hiders win; a team wiped = other team wins.
+const float GAMEMODE_PROPHUNT    = 6;
+
+// --- Prop Hunt disguise state (shared: SSQC player, CSQC proxies) -----------
+// Server-authoritative.  The collision hull is QUANTIZED to 3 bytes at
+// possession (sv_prophunt.qc) and the server itself uses only the dequantized
+// values; the same bytes ship on the visual proxy (broadcast) AND the
+// prediction proxy (owner), so the predicted hull is bit-identical to the
+// server's — any drift here means rubber-banding while disguised.
+// Hull is PROP-PIVOT-RELATIVE: the player origin becomes the prop pivot, so
+// the rendered prop, the traced mesh and the hull all coincide.
+// `.ph_disguise_modelindex != 0` is THE "is disguised" predicate everywhere.
+// On CSQC the same fieldnames live on the visual proxy (hitgroup normalize +
+// render) and on predicted_player (hull/eye for prediction).
+.float ph_disguise_modelindex;	// server modelindex of the copied prop (0 = undisguised)
+.float ph_hull_halfxy;			// dequantized hull half-width (1..16, never wider than the player hull)
+.float ph_hull_minz;			// hull bottom relative to origin (-64..63)
+.float ph_hull_height;			// hull height (4..72)
+.float ph_yaw_locked;			// +reload rotation lock: shown prop yaw frozen
+
+vector(entity e) PH_HullMins =
+{
+	vector m;
+	m_x = -e.ph_hull_halfxy;
+	m_y = -e.ph_hull_halfxy;
+	m_z = e.ph_hull_minz;
+	return m;
+};
+vector(entity e) PH_HullMaxs =
+{
+	vector m;
+	m_x = e.ph_hull_halfxy;
+	m_y = e.ph_hull_halfxy;
+	m_z = e.ph_hull_minz + e.ph_hull_height;
+	return m;
+};
 
 // Returns TRUE for gamemodes that present every player as one big team:
 // no Phase 0 team-pick (one unified character-select panel), single

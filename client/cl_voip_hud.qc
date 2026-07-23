@@ -480,6 +480,11 @@ void() HUD_VoIP_DrawWorldOverheads =
         if (slot < 0 || slot >= VOIP_HUD_MAX_PLAYERS) continue;
         if (slot == player_localnum) continue;   // skip self — first-person view
 
+        // Prop Hunt: never billboard the speaker icon over a disguised
+        // hider — same overhead tell the name-tag and team-tint gates
+        // remove.  (Their voice still plays; only the locator dies.)
+        if (proxy.ph_disguise_modelindex) continue;
+
         // Binary on/off — only draw while voipspeaking==1.  Muted
         // players will (in practice) never trigger this branch
         // because cl_voip_mute → vignore tells the server to stop

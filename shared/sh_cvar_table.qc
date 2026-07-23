@@ -1682,6 +1682,38 @@ void() CVar_Init =
     CVar_AddUI("Multiplayer", "mp_friendlyfire",      "0",  CVAR_SIDE_SV,
         CVAR_UI_TOGGLE, CVAR_TAB_MULTI | CVAR_TAB_CREATE_GAME, "",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
+    // --- Prop Hunt (GAMEMODE_PROPHUNT) ---
+    // Hide-phase length in seconds (the round-freeze IS the hide phase; only
+    // seekers are locked).  Separate from mp_freezetime so other modes keep
+    // their short freeze.
+    CVar_AddUI("Multiplayer", "mp_ph_hidetime",       "30", CVAR_SIDE_SV,
+        CVAR_UI_SCALAR, CVAR_TAB_MULTI | CVAR_TAB_CREATE_GAME, "PH Hide Time",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 120);
+    // Hiders per seeker for the forced round-start shuffle (4 = 1v4, 2v8...).
+    CVar_AddUI("Multiplayer", "mp_ph_ratio",          "4",  CVAR_SIDE_SV,
+        CVAR_UI_SCALAR, CVAR_TAB_MULTI | CVAR_TAB_CREATE_GAME, "PH Hiders/Seeker",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 1, 8);
+    // Fraction of the weapon's damage a seeker takes for shooting a REAL prop
+    // (per pellet, so sprayed shotguns punish hard).  0 disables missfire.
+    CVar_AddUI("Multiplayer", "mp_ph_missfire_scale", "0.5", CVAR_SIDE_SV,
+        CVAR_UI_SCALAR, CVAR_TAB_MULTI | CVAR_TAB_CREATE_GAME, "PH Missfire Dmg",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 2);
+    // HP restored to a seeker for killing a hider (capped at 100).
+    CVar_AddUI("Multiplayer", "mp_ph_killheal",       "50", CVAR_SIDE_SV,
+        CVAR_UI_SCALAR, CVAR_TAB_MULTI | CVAR_TAB_CREATE_GAME, "PH Kill Heal",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 100);
+    // Hider max-HP scale: HP = bound(1, rint(prop bbox volume / 1000 * this), mp_ph_maxhp).
+    // Tincan (~360qu^3) -> 1hp; big crate (~33000qu^3) -> ~100hp.
+    CVar_AddUI("Multiplayer", "mp_ph_hpscale",        "3",  CVAR_SIDE_SV,
+        CVAR_UI_SCALAR, CVAR_TAB_MULTI | CVAR_TAB_CREATE_GAME, "PH HP Scale",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 20);
+    CVar_AddUI("Multiplayer", "mp_ph_maxhp",          "100", CVAR_SIDE_SV,
+        CVAR_UI_SCALAR, CVAR_TAB_MULTI | CVAR_TAB_CREATE_GAME, "PH Max HP",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 1, 200);
+    // How far a hider's +use possess trace reaches (world units).
+    CVar_AddUI("Multiplayer", "mp_ph_possess_dist",   "160", CVAR_SIDE_SV,
+        CVAR_UI_SCALAR, CVAR_TAB_MULTI | CVAR_TAB_CREATE_GAME, "PH Possess Range",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 32, 512);
     // Defuse mode: when 1, the bomb-carrier can plant the C4 anywhere
     // (testing default).  When 0 + the map has func_bomb_target brushes,
     // plant is gated to inside those volumes.  Maps without bomb_target

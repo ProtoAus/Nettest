@@ -558,6 +558,30 @@ void() Killcam_SV_Init;
 void() Killcam_SV_RecordAll;
 void(entity attacker, entity victim) Killcam_SV_SendTrack;
 
+// --- Prop Hunt (sv_prophunt.qc) ---------------------------------------------
+// Server-only disguise state (the shared ph_* hull fields live in
+// sh_customdefs.qc since CSQC prediction needs them too).
+.float ph_maxhealth;			// disguise max HP; health fraction preserved across re-possess
+.float ph_locked_yaw;			// yaw latched when +reload rotation lock engaged
+.float ph_disguise_scale;		// prop .scale mirrored to the proxy render (0 treated as 1)
+.float ph_disguise_skin;		// prop .skin mirrored to the proxy render
+// Visual-proxy dirty-diff caches (live ON the proxy, Player_VisualProxy_Sync)
+.float vps_last_disguise_mi;
+.float vps_last_ph_hull_halfxy;
+.float vps_last_ph_hull_minz;
+.float vps_last_ph_hull_height;
+.float vps_last_ph_scale;
+.float vps_last_ph_skin;
+// Cross-file entry points (sv_prophunt.qc compiles after sv_weapons.qc /
+// sv_use.qc / sv_player.qc, which all call in — same pattern as Killcam above).
+float(entity pl) PropHunt_TryPossess;		// +use hook (sv_use.qc); TRUE = consumed the use
+float(entity pl) PropHunt_ToggleYawLock;	// impulse-6 hook (sv_weapons.qc); TRUE = consumed
+void(entity pl) PropHunt_ClearDisguise;		// PlayerSpawn / spectate / disconnect cleanup
+float(entity pl) PropHunt_IsHider;			// gamemode==PROPHUNT && team==BLUE (carry gate etc.)
+float(entity att, entity hit, float damage) PropHunt_Missfire;	// seeker-shot-a-real-prop reflect (PhysProp_TryPushFromTrace)
+void(entity victim) PropHunt_RemovePropCorpse;	// PlayerKilled: a killed prop gibs — instant-retire the prop corpse
+.float ph_missfire_gate_time;	// one reflect per blast: pellets/pen-chains land in one frame; this gates them to a single punish
+
 entity player_chain_head;
 .entity player_chain_next;
 .entity player_chain_prev;

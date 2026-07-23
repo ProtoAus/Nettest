@@ -250,6 +250,32 @@ float() Weapon_LowerBlocksFire =
 .float pm_ammo_mb6;
 
 // ============================================================================
+//  Round-freeze gate (shared so SSQC enforcement and CSQC prediction agree)
+// ============================================================================
+// TRUE when the round freeze should lock THIS player's movement + fire.
+// Normally freeze is global; in Prop Hunt the freeze phase is the HIDE phase,
+// so only SEEKERS (RED) are locked while hiders run free.  SSQC evaluates the
+// passed player entity; CSQC evaluates the LOCAL player from stats (the arg is
+// ignored — pass world).  Both sides MUST stay in lockstep or seekers
+// mispredict (slide-then-snap) during the freeze.
+float(entity pl) SH_RoundFreezeLocksPlayer =
+{
+#ifdef CSQC
+	if (getstatf(STAT_ROUND_PHASE) != ROUND_PHASE_FREEZE)
+		return FALSE;
+	if (getstatf(STAT_GAMEMODE) == GAMEMODE_PROPHUNT)
+		return getstatf(STAT_PLAYERTEAM) == TEAM_RED;
+	return TRUE;
+#else
+	if (round_phase != ROUND_PHASE_FREEZE)
+		return FALSE;
+	if (cvar("sv_gamemode") == GAMEMODE_PROPHUNT)
+		return pl.player_team == TEAM_RED;
+	return TRUE;
+#endif
+};
+
+// ============================================================================
 //  Per-move working globals  (loaded from self at the start of PM_PlayerMove)
 // ============================================================================
 
@@ -372,6 +398,13 @@ vector PM_CurrentMaxs()
             return '16 16 16';
         return PM_GravHullMaxs(self.flags & FL_DUCKING);
     }
+    // Prop Hunt disguise: the prop's quantized hull, replicated to CSQC via the
+    // prediction proxy (Wire B) — keys on ph_hull_height (the modelindex does
+    // NOT ride that wire), and BOTH sides dequantize the same bytes, so the
+    // predicted hull is bit-identical to the server's.  Overrides duck (the
+    // hull is already at most player-size; ducking as a crate is meaningless).
+    if (self.ph_hull_height > 0)
+        return PH_HullMaxs(self);
     if (self.flags & FL_DUCKING)
         return PM_DUCK_MAXS;
 
@@ -386,6 +419,8 @@ vector PM_CurrentMins()
             return '-16 -16 -16';
         return '0 0 0' - PM_GravHullMaxs(self.flags & FL_DUCKING);
     }
+    if (self.ph_hull_height > 0)	// Prop Hunt disguise — see PM_CurrentMaxs
+        return PH_HullMins(self);
     if (self.flags & FL_DUCKING)
         return PM_DUCK_MINS;
 
@@ -619,6 +654,16 @@ void() PM_ComposeEyeOfs =
 {
     if (!self.pm_eye_h)   // first touch: adopt the spawn/legacy Z value
         self.pm_eye_h = self.view_ofs_z ? self.view_ofs_z : PM_VIEW_OFS_z;
+    // Prop Hunt disguise: eye rides just under the prop hull's top.  Derived
+    // ONLY from the Wire-B-replicated hull fields, so server and prediction
+    // compose the identical view_ofs with nothing extra networked.  (The
+    // third-person chase cam anchors at origin + view_ofs.)
+    if (self.ph_hull_height > 0)
+    {
+        self.view_ofs = '0 0 0';
+        self.view_ofs_z = max(2, self.ph_hull_minz + self.ph_hull_height - 4);
+        return;
+    }
     vector eup = self.gravshift_active ? ('0 0 0' - self.gravitydir) : '0 0 1';
     self.view_ofs = eup * self.pm_eye_h;
 };
@@ -4839,6 +4884,11 @@ void() PM_UpdateStepSound =
     float interval;
     float vol;
     float snd_idx;
+
+    // Prop Hunt disguise: props don't have feet.  Footsteps would be a free
+    // wallhack against a hidden tincan, so a disguised hider walks silently.
+    if (self.ph_hull_height > 0)
+        return;
 
     // advance the countdown
     if (self.pm_step_time > 0)

@@ -2482,6 +2482,12 @@ void(vector a, float dw) CSEv_carryrot_vf =
 float(vector shot_dir, float damage) PhysProp_TryPushFromTrace =
 {
 	if (trace_ent == world) return FALSE;
+	// Prop Hunt: a seeker shooting a REAL prop hurts themself.  THIS is the one
+	// chokepoint every weapon's prop-hit branch calls (standard hitscan, the
+	// custom shotgun pellet loops, melee swings) — and it's reached for STATIC
+	// props too (the movetype gate below only guards the physics push).
+	// Self-gates on gamemode/team/classname + a per-blast time gate.
+	PropHunt_Missfire(self, trace_ent, damage);
 	if (trace_ent.weapon && trace_ent.weapon_physdrop_sleeping)
 		W_PhysDropWake(trace_ent);
 	if (trace_ent.movetype != MOVETYPE_PHYSICS) return FALSE;

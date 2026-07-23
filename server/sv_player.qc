@@ -597,7 +597,8 @@ void(float new_team, float model_idx) PlayerJoinTeam =
     // even mid-round (they were already a non-participant).
     if (!was_spec
         && (cvar("sv_gamemode") == GAMEMODE_ELIMINATION
-            || cvar("sv_gamemode") == GAMEMODE_PAINTGUN)
+            || cvar("sv_gamemode") == GAMEMODE_PAINTGUN
+            || cvar("sv_gamemode") == GAMEMODE_PROPHUNT)
         && (round_phase == ROUND_PHASE_ACTIVE
             || round_phase == ROUND_PHASE_ROUND_END))
     {
@@ -641,6 +642,8 @@ void() PlayerJoinSpectate =
 {
     if (self.player_team == TEAM_SPEC)
         return;
+
+    PropHunt_ClearDisguise(self);	// leave the disguise behind when leaving play
 
     self.player_team = TEAM_SPEC;
 
@@ -901,7 +904,7 @@ void() SV_RunCommandContinuation =
 		// real input as a falling edge and releases the hook.
 		input_buttons = input_buttons & ~PM_BTN_GRAPPLE;
 
-		if (round_phase == ROUND_PHASE_FREEZE)
+		if (SH_RoundFreezeLocksPlayer(self))
 		{
 			input_movevalues_x = 0;
 			input_movevalues_y = 0;
@@ -943,7 +946,8 @@ void() PlayerPreThink =
 	}
 
 	// Freeze time: suppress primary attack but allow everything else
-	if (round_phase == ROUND_PHASE_FREEZE)
+	// (per-team in Prop Hunt — hiders run free during the hide phase)
+	if (SH_RoundFreezeLocksPlayer(self))
 		self.button0 = 0;
 
 	CheckImpulses();
@@ -1100,6 +1104,16 @@ void() PlayerPostThink =
 
     PlayerCheckFallDamage();
     SH_PlayerAnim_Update();
+
+    // Prop Hunt: pin the server entity's angles to the SHOWN prop orientation
+    // (flat pitch/roll, locked-or-view yaw) AFTER the anim update, so lagcomp
+    // MOVE_HITMODEL traces the prop mesh exactly where every client renders it.
+    if (self.ph_disguise_modelindex)
+    {
+        self.angles = '0 0 0';
+        self.angles_y = self.ph_yaw_locked ? self.ph_locked_yaw : self.v_angle_y;
+    }
+
     Player_VisualProxy_Sync(self);
 };
 
@@ -1127,6 +1141,18 @@ void() ClientKill =
 	self.velocity = '0 0 0';
 	self.pm_movetype = PM_MOVETYPE_DEAD;
 	PM_SyncPredictionProxy(self);
+
+	// Prop Hunt: ClientKill bypasses PlayerKilled — the path that detaches +
+	// removes the prop corpse.  Without this, a disguised hider typing `kill`
+	// leaves their still-ATTACHED proxy streaming the disguise: a frozen
+	// unkillable ghost prop at the death spot until they reach spectate.
+	// (Normal modes deliberately keep the attached proxy on console suicide —
+	// PlayerSpawn's Ensure reuses it — so this stays disguise-scoped.)
+	if (self.ph_disguise_modelindex)
+	{
+		Player_VisualProxy_DetachAsCorpse(self);
+		PropHunt_RemovePropCorpse(self);
+	}
 };
 
 //called when a client connects to the server
@@ -1248,6 +1274,16 @@ float(entity playerent, float changedflags) Player_Visual_SendEntity =
 		WriteByte(MSG_ENTITY, self.vps_last_life_serial);
 		// nettest server ragdoll: hide-mesh flag (matched read at the END of the CSQC IDENTITY reader).
 		WriteByte(MSG_ENTITY, self.vps_hide_ragdoll);
+		// Prop Hunt disguise: modelindex of the copied prop (0 = undisguised) +
+		// quantized hull + render scale/skin.  Server modelindexes are valid
+		// client-side (replicated precache — same trick as predprop_Send).
+		// MUST stay the last fields of IDENTITY (reader appends in lockstep).
+		WriteShort(MSG_ENTITY, self.vps_last_disguise_mi);
+		WriteByte(MSG_ENTITY, self.vps_last_ph_hull_halfxy);
+		WriteByte(MSG_ENTITY, self.vps_last_ph_hull_minz + 64);	// -64..63 biased to a byte
+		WriteByte(MSG_ENTITY, self.vps_last_ph_hull_height);
+		WriteByte(MSG_ENTITY, rint(self.vps_last_ph_scale * 16));	// 0 -> reader treats as 1.0
+		WriteByte(MSG_ENTITY, self.vps_last_ph_skin);
 	}
 
 	// Grapple rope (broadcast so everyone sees the rope, not just the owner).
@@ -1444,6 +1480,8 @@ void(entity player) Player_VisualProxy_Sync =
 	vector next_angles = '0 0 0';
 	if (player.is_dead)
 		next_angles_y = vis.angles_y;  // keep whatever we last sent
+	else if (player.ph_yaw_locked)
+		next_angles_y = player.ph_locked_yaw;  // Prop Hunt rotation lock: shown prop yaw frozen
 	else
 		next_angles_y = player.v_angle_y;
 
@@ -1520,7 +1558,13 @@ void(entity player) Player_VisualProxy_Sync =
 	    || vis.vps_last_is_dead != next_is_dead
 	    || vis.vps_last_health != next_health
 	    || vis.vps_last_bodygroup != next_bodygroup
-	    || vis.vps_last_life_serial != next_life_serial)
+	    || vis.vps_last_life_serial != next_life_serial
+	    || vis.vps_last_disguise_mi != player.ph_disguise_modelindex
+	    || vis.vps_last_ph_hull_halfxy != player.ph_hull_halfxy
+	    || vis.vps_last_ph_hull_minz != player.ph_hull_minz
+	    || vis.vps_last_ph_hull_height != player.ph_hull_height
+	    || vis.vps_last_ph_scale != player.ph_disguise_scale
+	    || vis.vps_last_ph_skin != player.ph_disguise_skin)
 		bits |= VP_SF_IDENTITY;
 
 	// Grapple rope: dirty on a flag flip, or (while active) whenever the anchor
@@ -1551,6 +1595,12 @@ void(entity player) Player_VisualProxy_Sync =
 	vis.vps_last_health       = next_health;
 	vis.vps_last_bodygroup    = next_bodygroup;
 	vis.vps_last_life_serial  = next_life_serial;
+	vis.vps_last_disguise_mi     = player.ph_disguise_modelindex;
+	vis.vps_last_ph_hull_halfxy  = player.ph_hull_halfxy;
+	vis.vps_last_ph_hull_minz    = player.ph_hull_minz;
+	vis.vps_last_ph_hull_height  = player.ph_hull_height;
+	vis.vps_last_ph_scale        = player.ph_disguise_scale;
+	vis.vps_last_ph_skin         = player.ph_disguise_skin;
 	vis.grapple_rope_active   = player.grapple_rope_active;   // last-sent cache + proxy value
 	vis.grapple_anchor        = player.grapple_anchor;
 
@@ -1655,6 +1705,14 @@ float(entity playerent, float changedflags) PM_PredictionProxy_SendEntity =
 		WriteByte (MSG_ENTITY, self.pm_driving);
 		// prop_car: replicated in-car flag (pmove input-zero + fire-block + third-person camera)
 		WriteByte (MSG_ENTITY, self.pm_incar);
+		// Prop Hunt disguise hull + rotation lock — CSQC prediction MUST use the
+		// identical dequantized hull (PM_CurrentMins/Maxs) or the owner rubber-bands
+		// while disguised.  Fixed 4 bytes, always written (0/0/0/0 = undisguised) so
+		// the section layout never varies.  KEEP BEFORE the conditional car block.
+		WriteByte (MSG_ENTITY, self.ph_hull_halfxy);
+		WriteByte (MSG_ENTITY, self.ph_hull_minz + 64);	// -64..63 biased to a byte
+		WriteByte (MSG_ENTITY, self.ph_hull_height);
+		WriteByte (MSG_ENTITY, self.ph_yaw_locked);
 		// prop_car: the driven car's origin + velocity so CSQC extrapolates a render-smooth chase cam
 		// (the follow cam anchored to the tick-pinned player "stepped").  Only when actually in a car.
 		if (self.pm_incar)
@@ -1842,7 +1900,11 @@ void(entity player) PM_SyncPredictionProxy =
 	    proxy.pm_fire_suppress_until != player.pm_fire_suppress_until ||
 	    proxy.pm_carrying != player.pm_carrying ||
 	    proxy.pm_driving != player.pm_driving ||
-	    proxy.pm_incar != player.pm_incar)
+	    proxy.pm_incar != player.pm_incar ||
+	    proxy.ph_hull_halfxy != player.ph_hull_halfxy ||
+	    proxy.ph_hull_minz != player.ph_hull_minz ||
+	    proxy.ph_hull_height != player.ph_hull_height ||
+	    proxy.ph_yaw_locked != player.ph_yaw_locked)
 		bits |= PM_SF_MOVEMENT;
 
 	// Detect weapon-state changes
@@ -1947,6 +2009,10 @@ void(entity player) PM_SyncPredictionProxy =
 	proxy.pm_carrying             = player.pm_carrying;
 	proxy.pm_driving              = player.pm_driving;
 	proxy.pm_incar                = player.pm_incar;
+	proxy.ph_hull_halfxy          = player.ph_hull_halfxy;
+	proxy.ph_hull_minz            = player.ph_hull_minz;
+	proxy.ph_hull_height          = player.ph_hull_height;
+	proxy.ph_yaw_locked           = player.ph_yaw_locked;
 
 	proxy.slot_primary     = player.slot_primary;
 	proxy.slot_secondary   = player.slot_secondary;
@@ -2636,6 +2702,10 @@ void() PlayerSpawn =
 	self.is_dead = FALSE;
 	self.death_time = 0;
 	self.pending_round_join = FALSE;
+
+	// Prop Hunt: every spawn starts undisguised (covers round restarts —
+	// RoundRestart respawns everyone through here).  No-op when clean.
+	PropHunt_ClearDisguise(self);
 	PlayerRefreshScoreboardInfo(self);
 
 	self.classname = "player";
@@ -2750,7 +2820,32 @@ void() PlayerSpawn =
 	//    for whatever you kept".
 	//  - Otherwise, apply the server-configured default loadout from the
 	//    sv_default_* cvars and (re)populate starting ammo.
-	if (self.survived_round)
+	if (cvar("sv_gamemode") == GAMEMODE_PROPHUNT)
+	{
+		// Prop Hunt pins loadouts every spawn — survivors get re-shuffled
+		// across teams each round, so inventory carry-over is meaningless.
+		// HIDERS (BLUE) are weaponless by design (their "weapons" are +use
+		// possess and hiding); SEEKERS (RED) get the standard default loadout.
+		if (self.player_team == TEAM_BLUE)
+		{
+			self.slot_primary   = WEP_NONE;
+			self.slot_secondary = WEP_NONE;
+			self.slot_melee     = WEP_NONE;
+			self.slot_utility   = WEP_NONE;
+			self.weapon         = WEP_NONE;
+		}
+		else
+		{
+			self.slot_primary   = Weapon_IdFromStringOrDefault(cvar_string("sv_default_primary"),   WEP_NONE);
+			self.slot_secondary = Weapon_IdFromStringOrDefault(cvar_string("sv_default_secondary"), WEP_NONE);
+			self.slot_melee     = Weapon_IdFromStringOrDefault(cvar_string("sv_default_melee"),     WEP_NONE);
+			if (self.slot_melee == WEP_NONE)
+				self.slot_melee = WEP_MELEE;
+			self.slot_utility   = Weapon_FirstIdFromList(cvar_string("sv_default_utility"), WEP_NONE);
+		}
+		W_GiveStartingAmmo();
+	}
+	else if (self.survived_round)
 	{
 		W_GiveStartingAmmo();
 	}
@@ -2907,6 +3002,7 @@ void() ClientDisconnect =
 	self.is_bot = FALSE;	// engine recycles this slot — don't let a stale bot flag ride into a real client (see SV_PlayerHasNetchan)
 
 	Carry_Drop(self);   // release any carried prop so it falls and the link clears
+	PropHunt_ClearDisguise(self);	// slot recycles — no stale disguise on the next occupant
 
 	if (self.pm_prediction_proxy)
 	{
@@ -3102,6 +3198,15 @@ float(string command_string) SV_HandleHitclaim =
 			trace_ent = saved_te;
 		}
 	}
+	// Prop Hunt: NEVER trust a hitgroup claim against a disguised hider —
+	// the client's Z-zone classifier runs on the PROP hull, so the top of a
+	// crate classified as HEAD (4x damage + headshot cash/XP + the killfeed
+	// headshot flag).  Authoritative server-side flatten; the client-side
+	// W_HitgroupClassify normalize keeps prediction consistent, but a stale
+	// or hostile client must not be able to manufacture crate headshots.
+	if (target.ph_disguise_modelindex)
+		hitgroup = HITGROUP_GENERIC;
+
 	float damage = body_damage * W_HitgroupDamageMultiplier(hitgroup);
 
 	// Paintgun gamemode: every player-targeted hitclaim is a tag kill,
@@ -3480,6 +3585,15 @@ void(string command_string) SV_ParseClientCommand =
 	{
 		float st = stof(argv(1));
 		if (st < 0 || st > cvar("maxclients")) st = 0;
+		// Prop Hunt anti-ghosting: the server refuses to track a HIDER for a
+		// dead/spectating viewer (the client filter enforces the same, but a
+		// modified client must not get hider PVS for free).
+		if (st > 0 && cvar("sv_gamemode") == GAMEMODE_PROPHUNT)
+		{
+			entity tgt = edict_num(st);
+			if (tgt.classname == "player" && tgt.player_team == TEAM_BLUE)
+				st = 0;
+		}
 		self.spec_track_slot = st;
 		return;
 	}
@@ -3987,7 +4101,8 @@ void() SV_RunClientCommand =
 	}
 
 	// Freeze time: block WASD movement and primary attack
-	if (round_phase == ROUND_PHASE_FREEZE)
+	// (per-team in Prop Hunt — hiders run free during the hide phase)
+	if (SH_RoundFreezeLocksPlayer(self))
 	{
 		input_movevalues_x = 0;
 		input_movevalues_y = 0;

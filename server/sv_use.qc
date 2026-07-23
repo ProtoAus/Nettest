@@ -184,6 +184,13 @@ void() SV_PlayerTryUse =
     use_start = self.origin + self.view_ofs;
     use_end   = use_start + v_forward * PLAYER_USE_TRACE_LENGTH;
 
+    // Prop Hunt: a HIDER's +use aimed at a prop POSSESSES it (become a copy of
+    // it — model, hull, size-scaled HP).  Consumes the +use on success; a
+    // non-prop hit falls through so hiders still open doors / press buttons.
+    // Self-gates on gamemode + team (instant FALSE otherwise).
+    if (PropHunt_TryPossess(self))
+        return;
+
     // HL2-style carry toggle (phys_files — see sv_physprop.qc Carry_*).  Otherwise
     // trace forward and try to grab a cabinet; on success consume the +use so it doesn't
     // also fire the prop's shove .use.  Non-carriables fall through to normal +use.
@@ -205,6 +212,9 @@ void() SV_PlayerTryUse =
         Carry_Drop(self);
         return;
     }
+    // Prop Hunt hiders never hand-carry props (their +use means "become it",
+    // and a hider lugging a crate around would give the disguise away anyway).
+    if (!PropHunt_IsHider(self))
     {
         vector grab_end;
         grab_end = use_start + v_forward * cvar("sv_carry_grab_dist");

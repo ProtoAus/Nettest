@@ -48,7 +48,7 @@ string DR_PlayerName(float slot1)
 vector DR_PlayerColour(float slot1)
 {
     float gm = getstatf(STAT_GAMEMODE);
-    if (gm != GAMEMODE_TDM && gm != GAMEMODE_ELIMINATION)
+    if (gm != GAMEMODE_TDM && gm != GAMEMODE_ELIMINATION && gm != GAMEMODE_PROPHUNT)
         return '0.85 0.85 0.85';
     if (slot1 <= 0)
         return '0.85 0.85 0.85';
@@ -1315,14 +1315,15 @@ void() HUD_DrawCenterMessage =
     if (phase == ROUND_PHASE_ROUND_END)
     {
         winning_team = getstatf(STAT_WINNING_TEAM);
+        float ph_mode = (getstatf(STAT_GAMEMODE) == GAMEMODE_PROPHUNT);
         if (winning_team == TEAM_BLUE)
         {
-            main_text = "BLUE TEAM WINS";
+            main_text = ph_mode ? "PROPS WIN" : "BLUE TEAM WINS";
             main_color = '0.45 0.7 1';
         }
         else if (winning_team == TEAM_RED)
         {
-            main_text = "RED TEAM WINS";
+            main_text = ph_mode ? "SEEKERS WIN" : "RED TEAM WINS";
             main_color = '1 0.42 0.42';
         }
         else
@@ -1418,6 +1419,9 @@ void() CSQC_DrawWeaponHUD =
     // is alive-gated so spectators get the same layout minus the scope.
     prev_font_early = drawfont;
     drawfont = hud_font;
+    // Prop Hunt: seeker blindfold + hider hints — BEFORE the centre message /
+    // round timer so the countdown still draws on top of the blindfold fill.
+    PropHunt_DrawOverlays();
     HUD_DrawCenterMessage();
     HUD_DrawRoundTimer();
     HUD_DrawCodStaminaBar();

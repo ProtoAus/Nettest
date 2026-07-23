@@ -673,7 +673,7 @@ float(float gm) Server_GamemodeIndex =
     // source of the F2 panel showing "Free For All" while the
     // server was actually running Paintgun.  Update this bound
     // whenever a new GAMEMODE_* is added.
-    return bound(GAMEMODE_TDM, floor(gm + 0.5), GAMEMODE_DEFUSE);
+    return bound(GAMEMODE_TDM, floor(gm + 0.5), GAMEMODE_PROPHUNT);
 };
 
 string(float gm) Server_GamemodeLabel =
@@ -689,6 +689,8 @@ string(float gm) Server_GamemodeLabel =
         return "Paintball";
     if (gm == GAMEMODE_DEFUSE)
         return "Defuse";
+    if (gm == GAMEMODE_PROPHUNT)
+        return "Prop Hunt";
     return "Team Deathmatch";
 };
 
@@ -799,7 +801,7 @@ float(float idx) Server_EntryOptionCount =
     float src = Server_EntryEnumSource(idx);
     if (src == CVAR_ENUM_MAP_CYCLE) return sv_cycle_maps_loaded ? buf_getsize(sv_cycle_maps) : 0;
     if (src == CVAR_ENUM_TICKRATE)  return sv_tickrate_values.length;
-    if (src == CVAR_ENUM_GAMEMODE)  return 6;
+    if (src == CVAR_ENUM_GAMEMODE)  return 7;
     float loadout_kind = Server_EntryLoadoutKind(idx);
     if (loadout_kind >= 0)          return Server_LoadoutOptionCount(loadout_kind);
     return 0;

@@ -758,6 +758,7 @@ float(float x, float y) CSQC_DrawDebugGame =
     else if (gm == GAMEMODE_FFA)         gm_label = "Free For All";
     else if (gm == GAMEMODE_PAINTGUN)    gm_label = "Paintball";
     else if (gm == GAMEMODE_DEFUSE)      gm_label = "Defuse";
+    else if (gm == GAMEMODE_PROPHUNT)    gm_label = "Prop Hunt";
     else                                 gm_label = "TDM";
     y = dbg_line(x, y, "Gamemode", gm_label, DBG_VALUE_COL);
 

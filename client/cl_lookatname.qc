@@ -113,7 +113,12 @@ void() CSQC_LookatName_Pulse =
         if (hit == world || hit == self)
             return;   // hit nothing useful — hold timer will absorb
 
-        if (hit.classname == "player_visual_proxy")
+        // Prop Hunt: a disguised hider must behave EXACTLY like a real prop
+        // here — fall through into the skip-trace retry below.  A hard stop
+        // would let players A/B a suspect prop by whether a teammate's label
+        // BEHIND it survives (real props resume the trace, so the label
+        // does; a disguised proxy that swallowed the pulse would decay it).
+        if (hit.classname == "player_visual_proxy" && !hit.ph_disguise_modelindex)
             break;     // resolved — fall through to slot bookkeeping
 
         if (retries <= 0)
@@ -211,6 +216,15 @@ void() CSQC_LookatName_DrawWorld =
         // SSQC-only; CSQC sees the same state via vis_is_dead, which
         // the server sets via VP_SF_IDENTITY during DetachAsCorpse.
         if (proxy.vis_is_dead) continue;
+        // Prop Hunt: if the target possessed a prop DURING the hold window,
+        // drop the target outright — kills BOTH labels this frame instead of
+        // floating the name over the disguise for the rest of the hold (the
+        // pulse above already refuses to refresh a disguised hit).
+        if (proxy.ph_disguise_modelindex)
+        {
+            lookat_target_slot = -1;
+            return;
+        }
 
         // Anchor at the VOIP icon's NORMAL height — when the name
         // tag is showing, cl_voip_hud.qc pushes the icon up by

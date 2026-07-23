@@ -15,6 +15,16 @@
 // implementation lives in cl_ragdoll.qc which compiles AFTER cl_player.qc — forward-declare it here.
 entity(entity corpse, vector shotdir) CSQC_SpawnCorpseRagdoll;
 
+// Prop Hunt (cl_prophunt.qc + the disguise branches in cl_player.qc).  The
+// shared ph_* disguise fields live in sh_customdefs.qc; these are the
+// client-only render extras carried by the visual-proxy IDENTITY section.
+.float vis_disguise_scale;	// prop .scale for the shown prop (wire 0 -> 1.0)
+.float vis_disguise_skin;	// prop .skin for the shown prop
+// Defined in cl_prophunt.qc (compiles after cl_player.qc) — forward-declared
+// here so cl_player/cl_weapons/cl_main can gate on them (ragdoll pattern).
+float() CSQC_PropHunt_LocalDisguised;	// local player currently disguised (third-person gate)
+void() PropHunt_DrawOverlays;			// seeker blindfold + hider hints (HUD pass)
+
 // nettest interactive water ripples: an entity crossing / wading a liquid surface spawns an
 // expanding ring on the tessellated water (addwaterripple).  Per-entity latch + throttle fields,
 // and the tracker (defined in cl_rain.qc, used from the prop / player / local-player hooks that

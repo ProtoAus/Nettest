@@ -581,6 +581,16 @@ float(entity target, vector hit_pos, float bone_id) W_HitgroupClassify =
         && target.classname != "player_visual_proxy")
         return HITGROUP_GENERIC;
 
+    // Prop Hunt: a disguised hider is a prop-shaped player — no anatomy.
+    // Flatten BEFORE the Z-zone math or the top ~22% of every crate is a
+    // 4x "headshot" (and CSQC_TryPredictDeath's head branch would fire
+    // gibs at player head height).  This is the classify every path uses:
+    // CSQC hitclaims (the damage source under sv_trust_clienthits >= 1),
+    // the server-auth trace, and projectile hits.  Field rides the proxy
+    // IDENTITY wire client-side and lives on the player entity server-side.
+    if (target.ph_disguise_modelindex)
+        return HITGROUP_GENERIC;
+
     // nettest Patch 36 Part B: native per-bone hitbox collision.  When the engine traced the
     // player's registered hitboxes (MOVE_HITMODEL on a model with addmodelhitbox boxes — see
     // Hitbox_RegisterModel), it reports the EXACT struck box's hitgroup in trace_surface_id

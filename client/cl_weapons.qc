@@ -1430,7 +1430,10 @@ void() CSQC_PredictWeaponImpulse =
             CSQC_PredictUse();
         break;
     case WEAPON_IMPULSE_RELOAD:
-        CSQC_PredictReload();
+        // Prop Hunt: for a disguised hider the reload key is the rotation-lock
+        // toggle (server-side, W_CheckImpulses) — nothing to predict.
+        if (!CSQC_PropHunt_LocalDisguised())
+            CSQC_PredictReload();
         break;
     case WEAPON_IMPULSE_SPECIAL:
         if (self.weapon == WEP_SNOWBALL)
@@ -1618,8 +1621,9 @@ void() CSQC_AddPredictedViewmodel =
     if (getstatf(STAT_IS_DEAD))
         return;
     // Chase cam renders the third-person proxy — the viewmodel would float
-    // in front of the camera like first-person, which looks wrong.
-    if (cvar("chase_active"))
+    // in front of the camera like first-person, which looks wrong.  Same for a
+    // Prop Hunt disguise (weaponless anyway, but belt-and-braces).
+    if (cvar("chase_active") || CSQC_PropHunt_LocalDisguised())
         return;
     // Scope visibility — hide the viewmodel while the player is
     // "looking through" any scope so the gun doesn't poke through the
