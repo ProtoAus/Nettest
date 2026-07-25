@@ -579,7 +579,6 @@ float(entity pl) PropHunt_ToggleYawLock;	// impulse-6 hook (sv_weapons.qc); TRUE
 void(entity pl) PropHunt_ClearDisguise;		// PlayerSpawn / spectate / disconnect cleanup
 float(entity pl) PropHunt_IsHider;			// gamemode==PROPHUNT && team==BLUE (carry gate etc.)
 float(entity att, entity hit, float damage) PropHunt_Missfire;	// seeker-shot-a-real-prop reflect (PhysProp_TryPushFromTrace)
-void(entity victim) PropHunt_RemovePropCorpse;	// PlayerKilled: a killed prop gibs — instant-retire the prop corpse
 .float ph_missfire_gate_time;	// one reflect per blast: pellets/pen-chains land in one frame; this gates them to a single punish
 
 entity player_chain_head;

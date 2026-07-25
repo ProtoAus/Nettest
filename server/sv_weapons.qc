@@ -1218,10 +1218,11 @@ void(entity attacker, entity victim) PlayerKilled =
 
     // nettest server ragdoll: stash the victim's LAST ALIVE framestate BEFORE SH_PlayerAnim_Death
     // overwrites it, so the ragdoll (spawned below) starts in the pose they were shot in (mid-run etc.).
-    // Prop Hunt: a disguised victim has a PROP mesh — no player rig to capture/ragdoll;
-    // the corpse is the static prop lying where it died (predraw disguise branch).
-    if (!victim.ph_disguise_modelindex)
-        Ragdoll_CaptureAlivePose(victim);
+    // Prop Hunt: capture UNCONDITIONALLY — a disguised hider DECLOAKS on death (the disguise is
+    // cleared below, before the detach), so the corpse reveals the real player model and ragdolls
+    // it.  victim.frame/baseframe hold a valid player anim even while disguised (SH_PlayerAnim_Update
+    // runs every PlayerPostThink; the prop mesh is a client-render-only substitution).
+    Ragdoll_CaptureAlivePose(victim);
 
     // Play death animation + scatter carried weapons, all with self = victim
     {
@@ -1242,6 +1243,16 @@ void(entity attacker, entity victim) PlayerKilled =
     sound(victim, CHAN_WEAPON, "sounds/null.wav", 1, ATTN_NORM);
     victim.weaponstate = WS_IDLE;
 
+    // Prop Hunt DECLOAK: clear the disguise on the victim BEFORE the detach.  The
+    // corpse proxy's server .model is ALWAYS the team player model (the prop is a
+    // client-render-only substitution keyed on ph_disguise_modelindex), so zeroing
+    // the disguise here makes the detach's final Sync network disguise=0 → the
+    // client reverts the corpse to the real player model, which the ragdoll below
+    // then flops.  The smoke poof (W_ApplyDamage) covers the swap.  MUST come
+    // after Ragdoll_CaptureAlivePose (needs the live pose) and before the detach.
+    if (victim.ph_disguise_modelindex)
+        PropHunt_ClearDisguise(victim);
+
     // Detach the visual proxy as a corpse — the body persists on the
     // ground for the rest of the round (cleaned up by RoundRestart's
     // corpse sweep). Works in both TDM (PlayerSpawn's Ensure spawns a
@@ -1254,17 +1265,10 @@ void(entity attacker, entity victim) PlayerKilled =
     // nettest server ragdoll: spawn the authoritative flopping corpse from the just-detached proxy
     // (reads victim.last_corpse for the model/skin/pose + victim.velocity for the death momentum, so
     // this MUST run after the detach and BEFORE the velocity zero below).  Only on weapon/FF kills.
-    if ((kf_cause == KILL_CAUSE_WEAPON || kf_cause == KILL_CAUSE_FRIENDLYFIRE)
-        && !victim.ph_disguise_modelindex)	// Prop Hunt: no ragdoll for a prop corpse
+    // Prop Hunt: the disguise was cleared above, so a killed hider ragdolls its revealed player
+    // model here just like any other death (non-IQM team models no-op inside → plain decloaked corpse).
+    if (kf_cause == KILL_CAUSE_WEAPON || kf_cause == KILL_CAUSE_FRIENDLYFIRE)
         Ragdoll_SpawnFromDeath(attacker, victim);
-
-    // Prop Hunt: the prop corpse does NOT persist — the disguised victim
-    // gibbed (CSQC_EVENT_PLAYER_GIBS broadcast in W_ApplyDamage) and the
-    // prop copy vanishes with them.  Instant networked retire of the corpse
-    // the detach above just created (reads victim.last_corpse, so it MUST
-    // run after Player_VisualProxy_DetachAsCorpse).
-    if (victim.ph_disguise_modelindex)
-        PropHunt_RemovePropCorpse(victim);
 
     // Now safe to wipe the live player's velocity — corpse already has
     // its copy.  The dead player entity stays at rest until respawn.
@@ -1665,13 +1669,29 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
         // function is called (hitscan paths, hitclaim handler, shotgun
         // pellet paths) so the hitgroup of the actual killing blow is
         // available here.
-        // Prop Hunt: a killed disguised hider ALWAYS gibs — the prop
-        // "shatters" (the burst sells the kill; PlayerKilled removes the
-        // prop corpse outright).  Needed explicitly because the disguise
-        // normalizes every hit to HITGROUP_GENERIC (sh_weapon_standard.qc),
-        // so the headshot branch alone could never fire for a prop.
+        // Prop Hunt: a killed disguised hider DECLOAKS instead of gibbing —
+        // the prop poofs into smoke and PlayerKilled (below) reveals + ragdolls
+        // the real player model.  Fire the smoke burst at the disguise hull's
+        // CENTRE (the z the old flesh-gib burst used).  NO attacker needed
+        // (trigger/void deaths decloak too), and NO corpse-modelindex zeroing —
+        // the corpse becomes the ragdoll's owner, not an exploded nothing.
         float ph_prop_gib = (target.ph_disguise_modelindex != 0);
-        if ((target.death_hitgroup == HITGROUP_HEAD || ph_prop_gib) && attacker)
+        if (ph_prop_gib)
+        {
+            float poof_z = target.origin_z + target.ph_hull_minz
+                         + target.ph_hull_height * 0.5;
+            WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
+            WriteByte(MSG_MULTICAST, CSQC_EVENT_PROP_DECLOAK);
+            WriteCoord(MSG_MULTICAST, target.origin_x);
+            WriteCoord(MSG_MULTICAST, target.origin_y);
+            WriteCoord(MSG_MULTICAST, poof_z);
+            WriteByte(MSG_MULTICAST, bound(4, target.ph_hull_height, 72));  // hull size → poof scale
+            multicast(target.origin, MULTICAST_PVS);
+        }
+        // Headshot kill on a REAL player → flesh chunks + blood ("the head
+        // explodes").  Hitgroup-based, not damage-based.  Disguised hiders never
+        // reach here — their hits normalize to GENERIC and they decloak above.
+        else if (target.death_hitgroup == HITGROUP_HEAD && attacker)
         {
             vector gib_dir = target.origin - attacker.origin;
             if (vlen(gib_dir) > 0)
@@ -1684,14 +1704,7 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
             // spray + 8-drop trickle ≈ 200 simultaneous polygons at
             // peak vs ~1200 under the old 12-gib × 100-drop scheme).
             float gib_count = 6;
-
-            // Burst origin: head height for players; the disguise hull's
-            // CENTRE for props (a tincan's +24 would spray from the empty
-            // air above the can, a tall cabinet's from its knees).
             float gib_z = target.origin_z + 24;               // center of mass
-            if (ph_prop_gib)
-                gib_z = target.origin_z + target.ph_hull_minz
-                      + target.ph_hull_height * 0.5;
 
             WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
             WriteByte(MSG_MULTICAST, CSQC_EVENT_PLAYER_GIBS);

@@ -1142,16 +1142,30 @@ void() ClientKill =
 	self.pm_movetype = PM_MOVETYPE_DEAD;
 	PM_SyncPredictionProxy(self);
 
-	// Prop Hunt: ClientKill bypasses PlayerKilled — the path that detaches +
-	// removes the prop corpse.  Without this, a disguised hider typing `kill`
-	// leaves their still-ATTACHED proxy streaming the disguise: a frozen
-	// unkillable ghost prop at the death spot until they reach spectate.
+	// Prop Hunt: a disguised hider typing `kill` DECLOAKS like any other death —
+	// reveal + ragdoll the real player model with the smoke poof, instead of the
+	// still-ATTACHED proxy streaming a frozen ghost prop until they reach spectate.
 	// (Normal modes deliberately keep the attached proxy on console suicide —
 	// PlayerSpawn's Ensure reuses it — so this stays disguise-scoped.)
 	if (self.ph_disguise_modelindex)
 	{
+		// Poof at the hull centre BEFORE clearing the disguise (which zeroes the hull).
+		float ck_poof_z = self.origin_z + self.ph_hull_minz + self.ph_hull_height * 0.5;
+		WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
+		WriteByte(MSG_MULTICAST, CSQC_EVENT_PROP_DECLOAK);
+		WriteCoord(MSG_MULTICAST, self.origin_x);
+		WriteCoord(MSG_MULTICAST, self.origin_y);
+		WriteCoord(MSG_MULTICAST, ck_poof_z);
+		WriteByte(MSG_MULTICAST, bound(4, self.ph_hull_height, 72));
+		multicast(self.origin, MULTICAST_PVS);
+
+		// Capture the (death-anim) pose, decloak, detach, then flop in place.  No
+		// attacker → Ragdoll_SpawnFromDeath launches with zero momentum (self-gates
+		// on sv_ragdoll_enable + IQM; non-IQM models leave a plain decloaked corpse).
+		Ragdoll_CaptureAlivePose(self);
+		PropHunt_ClearDisguise(self);
 		Player_VisualProxy_DetachAsCorpse(self);
-		PropHunt_RemovePropCorpse(self);
+		Ragdoll_SpawnFromDeath(self, self);
 	}
 };
 

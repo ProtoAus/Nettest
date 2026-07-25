@@ -282,30 +282,3 @@ float(entity pl) PropHunt_ToggleYawLock =
 	}
 	return TRUE;
 };
-
-// --- Prop-corpse removal ----------------------------------------------------
-
-// A killed disguised hider SHATTERS: W_ApplyDamage broadcasts the player-gib
-// burst, and the prop copy must vanish with them instead of lying around as a
-// frozen prop corpse (an obvious double next to the still-standing original).
-// Called from PlayerKilled right after Player_VisualProxy_DetachAsCorpse, so it
-// operates on the freshly detached victim.last_corpse.
-//
-// Instant networked removal, NOT VisProxy_RetireCorpse: the CoD body-sink would
-// slide a crate through the floor over a second, and the corpse must disappear
-// under the gib burst.  PVSF_NOREMOVE must be dropped BEFORE the remove or the
-// engine never sends CSQC_Ent_Remove and the prop ghosts on clients until the
-// edict slot is reused (same trap VisProxy_RetireCorpse documents).
-void(entity victim) PropHunt_RemovePropCorpse =
-{
-	entity c = victim.last_corpse;
-	if (!c || c.classname != "player_visual_proxy" || !c.vis_is_corpse)
-		return;
-	if (c.vis_sinking)
-		return;			// already mid-retire elsewhere — don't double-process
-	c.vis_sinking = TRUE;	// idempotency latch: RetireCorpse (respawn / round sweep) now skips it
-	c.pvsflags    = 0;	// drop NOREMOVE so the remove networks
-	c.think       = SUB_Remove;
-	c.nextthink   = time + 0.1;
-	victim.last_corpse = world;	// PlayerSpawn's previous-body retire has nothing left to do
-};

@@ -1707,6 +1707,7 @@ float(float ev) _net_event_bytes =
 	if (ev == CSQC_EVENT_ROUND_REWARD)           return 5;   // 2 svc hdr + 2 short amount + 1 win byte
 	if (ev == CSQC_EVENT_KILLCAM_TRACK)          return 860;  // 4 hdr + ~66 frames × 13 bytes (one-shot per death, variable)
 	if (ev == CSQC_EVENT_PLAYER_PAINT)           return 22;  // 2 svc hdr + 1 sub + 1 slot + (camo: 1 amt + ~16 texname string | splat: 3 rgb + 2 seed)
+	if (ev == CSQC_EVENT_PROP_DECLOAK)           return 15;  // 2 svc hdr + 12 pos + 1 hull-size byte
 	return 2;
 };
 
@@ -2213,6 +2214,26 @@ void() CSQC_Parse_Event =
 				if (pp_sid != -1 && pp_sid != 0)
 					pointparticles(pp_sid, pp_pos, pp_norm * (pp_bucket == 2 ? 30 : 12),
 					               pp_bucket == 2 ? 2 : 1);
+			}
+			break;
+		}
+		case CSQC_EVENT_PROP_DECLOAK:
+		{
+			// Prop Hunt: a disguised hider died. A smoke puff swallows the prop
+			// as the server reveals + ragdolls their real player model in its
+			// place. Reuse the loaded prop-contact smoke; the burst COUNT scales
+			// with the disguise hull height (a cabinet poofs bigger than a tincan).
+			// '0 0 24' base dir makes the puff billow upward.
+			vector dc_pos;
+			dc_pos_x = readcoord();
+			dc_pos_y = readcoord();
+			dc_pos_z = readcoord();
+			float dc_size = readbyte();
+			float dc_sid = particleeffectnum("weapons.physprop_smoke");
+			if (dc_sid != -1 && dc_sid != 0)
+			{
+				float dc_count = bound(8, ceil(dc_size / 3), 24);
+				pointparticles(dc_sid, dc_pos, '0 0 24', dc_count);
 			}
 			break;
 		}

@@ -3195,6 +3195,13 @@ float() PlayerVis_LerpDuration =
 .float  vis_kc_replay_valid;	// killcam replay: vis_kc_replay_prevorg seeded this killcam
 .float vis_prev_cltime;
 .vector vis_prev_origin;
+// Prop Hunt "march" bob: the disguise predraw returns before the normal
+// locomotion bookkeeping (vis_prev_origin at ~:4017), so the prop-waddle keeps
+// its OWN distance-phase accumulator + previous-origin here.  ph_bob_phase
+// advances by horizontal distance travelled (mirrors the leg cadence) → a
+// sin() roll rock + |sin()| vertical hop, both speed-scaled.  Cosmetic only.
+.float  ph_bob_phase;
+.vector ph_bob_prev_origin;
 .float vis_last_anim_top;
 .float vis_last_anim_bottom;
 .float vis_aim_yaw;          // server-sent aim direction (never modified by predraw)
@@ -3803,6 +3810,46 @@ float() CSQC_PlayerVisual_Predraw =
 		self.angles_x = 0;
 		self.angles_y = show_yaw;
 		self.angles_z = 0;
+
+		// ---- PROP MARCH BOB ----
+		// A funny South-Park waddle: rock the prop left/right (roll) with a small
+		// per-step vertical hop, cadence + amplitude tied to movement speed — the
+		// way the player model's legs cycle faster when you move faster.  Purely
+		// cosmetic: it touches ONLY the render angles/origin (restored below), never
+		// the collision hull (the separate predicted entity) or the networked origin.
+		// Runs for every viewer (local third-person + remote) since self.velocity is
+		// populated on both.  Skipped on a corpse (a dead prop shouldn't waddle) and
+		// when cl_prop_bob is off.
+		float bob_hop = 0;
+		if (cvar("cl_prop_bob") && !self.vis_is_dead)
+		{
+			vector bob_vel = self.velocity; bob_vel_z = 0;
+			float bob_speed = vlen(bob_vel);
+
+			// Phase advances by HORIZONTAL distance travelled (total 2D, so
+			// strafing waddles too), matching the leg foot-clock's distance basis.
+			vector bob_d = self.origin - self.ph_bob_prev_origin; bob_d_z = 0;
+			self.ph_bob_prev_origin = self.origin;
+			float bob_dist = bound(0, vlen(bob_d), 64);	// clamp teleport / respawn / PVS-rejoin spikes
+
+			float bob_stride = cvar("cl_prop_bob_stride");
+			if (bob_stride <= 0) bob_stride = 40;
+			self.ph_bob_phase = self.ph_bob_phase + bob_dist / bob_stride;
+
+			// Amplitude eases in with speed (same 0..250 scale the leg twist uses)
+			// so a still prop is dead upright and a sprinting one rocks fully.
+			float bob_amp = bound(0, bob_speed / 250, 1);
+			float bob_s   = sin(self.ph_bob_phase);
+			self.angles_z = cvar("cl_prop_bob_roll") * bob_amp * bob_s;	// roll rock (deg)
+			bob_hop = cvar("cl_prop_bob_hop") * bob_amp * fabs(bob_s);	// hop peaks at each roll extreme
+		}
+		else
+		{
+			// Keep prev-origin fresh while idle/dead so the first moving frame
+			// after standing still doesn't see a huge distance delta.
+			self.ph_bob_prev_origin = self.origin;
+		}
+
 		self.scale = (self.vis_disguise_scale > 0) ? self.vis_disguise_scale : 1;
 		self.skin  = self.vis_disguise_skin;
 		// Kill any lingering team wash HERE, not just in CSQC_ApplyTeamTints —
@@ -3815,8 +3862,15 @@ float() CSQC_PlayerVisual_Predraw =
 		self.renderflags &= ~(RF_EXTERNALMODEL | RF_FPFADE);	// no fp-body treatment on a prop
 		if (self.vis_weapon_ent)
 			self.vis_weapon_ent.alpha = -1;	// never show a gun stuck to a crate
-		BlobShadow_Emit(self);
+		BlobShadow_Emit(self);	// BEFORE the hop offset → the ground shadow stays planted
+		// March hop: nudge the RENDER origin up, draw, then restore immediately.  The
+		// disguise branch doesn't run the normal vis_prev_origin bookkeeping and the
+		// proxy is velocity-extrapolated between snapshots (~:2802), so an un-restored
+		// offset would accumulate into drift.  Restore-after-addentity keeps it render-only.
+		vector bob_base_org = self.origin;
+		self.origin_z = self.origin_z + bob_hop;
 		addentity(self);
+		self.origin = bob_base_org;
 		return PREDRAW_NEXT;
 	}
 

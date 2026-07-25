@@ -1447,6 +1447,14 @@ void() CVar_Init =
     CVar_Add("Renderer", "gl_texturemode2d",      "n.l",   CVAR_SIDE_CL);
     CVar_Add("Renderer", "gl_texturemode",        "nll",   CVAR_SIDE_CL);
     CVar_Add("Client", "cl_teamcolours",          "1",     CVAR_SIDE_CL);
+    // Prop Hunt "march" bob — the disguised-prop South-Park waddle
+    // (client/cl_player.qc disguise predraw).  Purely cosmetic; scales with
+    // movement speed.  Master toggle + roll amplitude (deg), vertical hop
+    // (qu), and stride length (qu of travel per half-step of the sine phase).
+    CVar_Add("Client", "cl_prop_bob",             "1",     CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_prop_bob_roll",        "4",     CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_prop_bob_hop",         "1.5",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_prop_bob_stride",      "20",    CVAR_SIDE_CL);
     CVar_Add("Client", "cl_menu_backdrop",        "1",     CVAR_SIDE_CL);
     // Scoreboard backdrop blur — when 1, HUD_DrawScoreboard runs a
     // 2-pass separable Gaussian blur of $currentrender via two

@@ -287,6 +287,7 @@ const float CSQC_EVENT_NAV_GRAPH         = 46;       // debug: bot nav-graph nod
 const float CSQC_EVENT_BOT_DEBUG         = 47;       // debug: per-bot AI state. Payload: byte n, then per bot: byte entnum + 3×coord origin + byte state + byte enemy entnum + byte weapon + byte mag. Gated on sv_debug_nav; multicast ALL; cl_navdebug draws labels + enemy lines.
 const float CSQC_EVENT_KILLCAM_TRACK     = 48;       // server-side killcam: the KILLER's recorded camera track, reliably unicast to the victim on death so the rewind shows the killer's out-of-PVS approach. Payload: killer slot byte + frame_count byte, then per frame (oldest→newest): short delta_ms (kill_time - frame_time) + 3×coord origin + 2×WriteAngle (pitch, yaw) + weaponstate byte + weapon_id byte.
 const float CSQC_EVENT_PLAYER_PAINT      = 49;       // player body paint (sv_paint.qc -> cl_paint.qc). Sub-byte: 0 = camo set (slot byte + amt byte + wall-texture string), 1 = paintball splat (slot byte + r g b bytes + seed short), 2 = clear all (slot byte, respawn wash). MULTICAST_ALL (persistent visual state must reach out-of-PVS clients too).
+const float CSQC_EVENT_PROP_DECLOAK      = 50;       // Prop Hunt: a disguised hider died — smoke poof at the disguise hull centre as the real player model is revealed + ragdolled (server-side). Payload: pos 3×coord + hull-height byte (poof scale). MULTICAST_PVS.
 
 // --- Kill-feed causes (byte payload of CSQC_EVENT_KILLFEED) ---
 const float KILL_CAUSE_WEAPON       = 0;
