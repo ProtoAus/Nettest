@@ -47,3 +47,11 @@ w_pistol.qc
 # --- Scratch: map tooling ---
 triggers.cpp
 halflife-cs.fgd
+
+# --- Python tooling caches ---
+__pycache__/
+*.pyc
+
+# --- Build logs ---
+build.log
+sv_build.log

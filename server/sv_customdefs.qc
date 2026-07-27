@@ -150,6 +150,9 @@ void(entity player) W_GrappleRelease;
 .float  pp_was_touching;     // on prop (carried): 1 if the clip-slide hit a surface last Carry_Tick — distinguishes a fresh BANG from a sustained DRAG
 .float  pp_scrape_vol;       // on prop: current scrape loop volume (speed-scaled)
 .float  pp_scrape_revol_next; // on prop: next time the scrape volume may be re-issued (throttle)
+.float  pp_scrape_var;       // on prop: which scrape variant the active loop is playing — latched at
+                             // start and re-used on a volume re-issue, so a material with several
+                             // scrape loops (wood 6, plastic 5, concrete 3) doesn't swap timbre mid-slide
 .vector car_scrape_normal;   // on car: latched wall normal while grinding along BSP (0 0 0 = not grinding)
 
 // Unified phys-object config (po_*) — set per object BEFORE PhysObj_Setup so the
@@ -157,8 +160,11 @@ void(entity player) W_GrappleRelease;
 // Barrel / can / cabinet / weapon-drop all route through one setup + one FX path.
 .float  po_is_phys;        // 1 on any unified phys object (helper / wake gate)
 .float  po_fx_enabled;     // run contact-FX detection (impact/slide/scrape/smoke/spark)
-.float  po_fx_soundset;    // FX sound set id (0 = metal_box_*)
 .float  po_material;       // resolved prop-material index (PropMat_For, sh_propmaterials.qc); -1 = none (cvar fallback)
+.float  po_sndset;         // scripts/materialsounds.txt SET INDEX for this object's contact sounds
+                           // (MatSnd_*, sh_matsounds.qc).  Resolved once in PhysObj_Setup from
+                           // PropMat_FxSound(po_material); weapon drops get the "weapon" set and
+                           // cars override to "metal".  Replaces the old 2-value po_fx_soundset.
 .float  po_carry_enabled;  // cabinet only: +use carriable
 .float  po_sleep_enabled;  // free props (barrel/can/weapons): QC sleep/wake at rest
 .float  po_stuck_grace;    // seconds embedded in BSP before despawn (5 props / 2 drops)
@@ -562,7 +568,8 @@ void(entity attacker, entity victim) Killcam_SV_SendTrack;
 // Server-only disguise state (the shared ph_* hull fields live in
 // sh_customdefs.qc since CSQC prediction needs them too).
 .float ph_maxhealth;			// disguise max HP; health fraction preserved across re-possess
-.float ph_locked_yaw;			// yaw latched when +reload rotation lock engaged
+.float ph_locked_yaw;			// carry-frame yaw (v_angle_y) frozen while committed; compose yaw0 = ph_locked_yaw + 180
+.float ph_rot_next;				// rate gate for the CSEv_prop_rotate upstream (mirrors carry_rot_next)
 .float ph_disguise_scale;		// prop .scale mirrored to the proxy render (0 treated as 1)
 .float ph_disguise_skin;		// prop .skin mirrored to the proxy render
 // Visual-proxy dirty-diff caches (live ON the proxy, Player_VisualProxy_Sync)
@@ -576,8 +583,10 @@ void(entity attacker, entity victim) Killcam_SV_SendTrack;
 // sv_use.qc / sv_player.qc, which all call in — same pattern as Killcam above).
 float(entity pl) PropHunt_TryPossess;		// +use hook (sv_use.qc); TRUE = consumed the use
 float(entity pl) PropHunt_ToggleYawLock;	// impulse-6 hook (sv_weapons.qc); TRUE = consumed
+float(entity pl) PropHunt_TryDecloak;		// impulse-7 (Weapon Special) hook (sv_weapons.qc); TRUE = consumed
 void(entity pl) PropHunt_ClearDisguise;		// PlayerSpawn / spectate / disconnect cleanup
 float(entity pl) PropHunt_IsHider;			// gamemode==PROPHUNT && team==BLUE (carry gate etc.)
+float(entity pl) PropHunt_HiderNoWeapons;	// mp_ph_hider_noweapons: hider may not pick up / fire guns
 float(entity att, entity hit, float damage) PropHunt_Missfire;	// seeker-shot-a-real-prop reflect (PhysProp_TryPushFromTrace)
 .float ph_missfire_gate_time;	// one reflect per blast: pellets/pen-chains land in one frame; this gates them to a single punish
 

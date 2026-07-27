@@ -222,8 +222,11 @@ void(entity car) Car_PhysStep =
 			vector wp = trace_endpos, wn = trace_plane_normal;
 			if (trace_fraction >= 1) { wp = bcenter; wn = normalize(hprev) * -1; }
 			vector nn = normalize(wn);
-			float  sndn = bound(1, floor(random() * 3) + 1, 3);
-			sound(car, CHAN_BODY, PhysObj_FxSound(0, FXSND_IMPACT_HARD, sndn), 1.0, ATTN_NORM);
+			// Car body bang — po_sndset is "metal" (set in sv_prop_vehicle.qc; cars run
+			// po_material -1 so PropMat_FxSound gives nothing).  Variant count from the table.
+			string csnd = MatSnd_Pick(car.po_sndset, MSND_HARD);
+			if (csnd != "")
+				sound(car, CHAN_BODY, csnd, 1.0, ATTN_NORM);
 			PhysFiles_SmokeEvent(wp, nn, 3);           // bucket 3 = car HARD hit (smoke + spark burst)
 			vector vtan = hprev - (hprev * nn) * nn;   // strip the into-wall component
 			float retain = cvar("sv_car_impact_slide_retain"); if (retain <= 0) retain = 0.85;

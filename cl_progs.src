@@ -7,6 +7,7 @@ shared/sh_weapon_manifest.qc
 shared/sh_weapons.qc
 shared/sh_surfaceprops.qc
 shared/sh_propmaterials.qc
+shared/sh_matsounds.qc
 shared/sh_player_sini.qc
 shared/sh_player_anims.qc
 client/cl_customdefs.qc
@@ -145,4 +146,5 @@ client/cl_env_explosion.qc
 client/cl_radio.qc
 client/cl_buymenu.qc
 client/cl_carryinspect.qc
+client/cl_prophunt_rotate.qc
 client/cl_main.qc

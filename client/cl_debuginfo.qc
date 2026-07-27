@@ -2031,26 +2031,36 @@ float(float x, float y) CSQC_DrawDebugSurface =
     }
 
     y = dbg_line(x, y, "Look tex",   (look_tex == "") ? "(none)" : look_tex, DBG_VALUE_COL);
-    y = dbg_line(x, y, "Look mat",   sprintf("%s  (impact %g, footstep %s)", Surf_MatName(look_mat),
-                    Surf_ImpactMat(look_mat), (Surf_FootstepName(look_mat) == "") ? "generic" : Surf_FootstepName(look_mat)), DBG_GOOD_COL);
+    y = dbg_line(x, y, "Look mat",   sprintf("%s  (impact %g, sndset %s)", Surf_MatName(look_mat),
+                    Surf_ImpactMat(look_mat), (Surf_SoundSet(look_mat) == "") ? "generic" : Surf_SoundSet(look_mat)), DBG_GOOD_COL);
     y = dbg_line(x, y, "Ground tex", (gnd_tex == "") ? "(none)" : gnd_tex, DBG_VALUE_COL);
-    y = dbg_line(x, y, "Ground mat", sprintf("%s  (impact %g, footstep %s)", Surf_MatName(gnd_mat),
-                    Surf_ImpactMat(gnd_mat), (Surf_FootstepName(gnd_mat) == "") ? "generic" : Surf_FootstepName(gnd_mat)), DBG_GOOD_COL);
+    y = dbg_line(x, y, "Ground mat", sprintf("%s  (impact %g, sndset %s)", Surf_MatName(gnd_mat),
+                    Surf_ImpactMat(gnd_mat), (Surf_SoundSet(gnd_mat) == "") ? "generic" : Surf_SoundSet(gnd_mat)), DBG_GOOD_COL);
 
     // The ACTUAL footstep set PM_UpdateStepSound plays — computed the SAME way it is (down-trace to
-    // the floor surface, then the metal phys-prop override).  This line == what you hear, so if it
-    // ever reads "metal" on a concrete/wood floor the Ground tex above names the offending surface.
+    // the floor surface, then the phys-prop MATERIAL override).  This line == what you hear, so if
+    // it ever reads wrong the Ground tex above names the offending surface.
     string foot = "n/a";
     if (predicted_player)
     {
         vector fg = predicted_player.gravshift_active ? predicted_player.gravitydir : '0 0 -1';
         traceline(predicted_player.origin, predicted_player.origin + fg * 8192, MOVE_NOMONSTERS, predicted_player);
-        string ffset = Surf_FootstepName(Surf_MaterialAtPoint(trace_ent, trace_endpos));
+        string ffset = Surf_SoundSet(Surf_MaterialAtPoint(trace_ent, trace_endpos));
+        string fsrc  = "surface";
         entity ge = predicted_player.pm_ground_ent;
-        if (ge.classname == "phys_files" || ge.classname == "phys_barrel" || ge.classname == "phys_can")
-            foot = "metal (phys prop)";
-        else
-            foot = strcat((ffset == "") ? "generic" : ffset, " (surface)");
+        if (PM_GroundIsPhysObj(ge))
+        {
+            string gm = MatSnd_ModelPath(ge);
+            if (gm != "" && substring(gm, 0, 1) != "*")
+            {
+                string ps = PropMat_FxSound(PropMat_For(gm));
+                if (ps != "") { ffset = ps; fsrc = "phys prop"; }
+            }
+        }
+        // Name the set that will actually PLAY, not just the material: materials with no
+        // real footstep wavs (cardboard/concrete/plastic/rubber/dirt) resolve to generic.
+        string fplay = (PM_FootstepBase(ffset) == FS_SOUND_STEP_BASE) ? "generic" : ffset;
+        foot = sprintf("%s (%s mat %s)", fplay, fsrc, (ffset == "") ? "-" : ffset);
     }
     y = dbg_line(x, y, "Foot set", foot, DBG_GOOD_COL);
 

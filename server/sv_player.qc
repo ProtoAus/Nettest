@@ -1106,12 +1106,13 @@ void() PlayerPostThink =
     SH_PlayerAnim_Update();
 
     // Prop Hunt: pin the server entity's angles to the SHOWN prop orientation
-    // (flat pitch/roll, locked-or-view yaw) AFTER the anim update, so lagcomp
-    // MOVE_HITMODEL traces the prop mesh exactly where every client renders it.
+    // (full 3-axis pose composed from the stored basis) AFTER the anim update, so
+    // lagcomp MOVE_HITMODEL traces the prop mesh exactly where every client renders it.
+    // Frame yaw is frozen (ph_locked_yaw) while committed, else tracks the live view.
     if (self.ph_disguise_modelindex)
     {
-        self.angles = '0 0 0';
-        self.angles_y = self.ph_yaw_locked ? self.ph_locked_yaw : self.v_angle_y;
+        float ph_yaw0 = (self.ph_yaw_locked ? self.ph_locked_yaw : self.v_angle_y) + 180;
+        self.angles = PH_PoseAngles(self.ph_rel_fwd, self.ph_rel_up, ph_yaw0);
     }
 
     Player_VisualProxy_Sync(self);
@@ -1494,8 +1495,13 @@ void(entity player) Player_VisualProxy_Sync =
 	vector next_angles = '0 0 0';
 	if (player.is_dead)
 		next_angles_y = vis.angles_y;  // keep whatever we last sent
-	else if (player.ph_yaw_locked)
-		next_angles_y = player.ph_locked_yaw;  // Prop Hunt rotation lock: shown prop yaw frozen
+	else if (player.ph_disguise_modelindex)
+	{
+		// Prop Hunt: broadcast the FULL 3-axis prop pose (all three angle floats already
+		// ride the POSE wire).  Frame yaw frozen while committed, else follows the view.
+		float ph_yaw0 = (player.ph_yaw_locked ? player.ph_locked_yaw : player.v_angle_y) + 180;
+		next_angles = PH_PoseAngles(player.ph_rel_fwd, player.ph_rel_up, ph_yaw0);
+	}
 	else
 		next_angles_y = player.v_angle_y;
 
@@ -3768,6 +3774,10 @@ void(string command_string) SV_ParseClientCommand =
 		self.attack_finished = time;
 		if (Weapon_LowerBlocksFire()) return;
 		if (Weapon_SprintBlocksFire()) return;
+		// Prop Hunt: a weaponless hider never fires (mp_ph_hider_noweapons).  The
+		// client-driven fire path needs the same gate as W_WeaponFrame's autonomous
+		// one, or a hider under sv_trust_clienthits >= 1 would shoot through it.
+		if (PropHunt_HiderNoWeapons(self)) return;
 		if (self.fire)
 		{
 			vector saved_v = self.v_angle;

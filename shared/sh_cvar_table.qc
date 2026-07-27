@@ -362,16 +362,16 @@ void() CVar_Init =
     //
     // All four read but never write predicted_player or input_angles, so
     // bullets still fire from the player's real aim direction.
-    CVar_Add("Client", "cl_camerabob",                 "0",     CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_camerabob_amp_z",           "0.55",  CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_camerabob_amp_x",           "0.35",  CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_camerabob_cycle",           "120",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_camerabob",                 "1",     CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_camerabob_amp_z",           "1",     CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_camerabob_amp_x",           "2",     CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_camerabob_cycle",           "240",   CVAR_SIDE_CL);
     CVar_Add("Client", "cl_camerabob_speed_ref",       "250",   CVAR_SIDE_CL);
     CVar_Add("Client", "cl_camerabob_fade_time",       "0.18",  CVAR_SIDE_CL);
 
-    CVar_Add("Client", "cl_viewmodelbob",              "0",     CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_viewmodelbob_pos_scale",    "1.0",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_viewmodelbob_ang_scale",    "1.0",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_viewmodelbob",              "1",     CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_viewmodelbob_pos_scale",    "0.2",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_viewmodelbob_ang_scale",    "0.15",  CVAR_SIDE_CL);
     // Seconds after a real ground tick during which the bob/sprint
     // envelopes still treat the player as grounded.  Smooths the gun
     // pose over single-frame FL_ONGROUND flicker on clip-brush slopes.
@@ -390,8 +390,8 @@ void() CVar_Init =
     CVar_Add("Client", "cl_grappling_rope_hand_fwd",   "2",     CVAR_SIDE_CL);
     CVar_Add("Client", "cl_grappling_rope_hand_up",    "0",     CVAR_SIDE_CL);
 
-    CVar_Add("Client", "cl_viewmodelweight",           "0",     CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_viewmodelweight_threshold", "200",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_viewmodelweight",           "1",     CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_viewmodelweight_threshold", "80",    CVAR_SIDE_CL);
     CVar_Add("Client", "cl_viewmodelweight_scale",     "0.02",  CVAR_SIDE_CL);
     CVar_Add("Client", "cl_viewmodelweight_max",       "8",     CVAR_SIDE_CL);
     CVar_Add("Client", "cl_viewmodelweight_stiffness", "65",    CVAR_SIDE_CL);
@@ -399,43 +399,43 @@ void() CVar_Init =
     // Independent per-target scales so the camera and the gun can dip
     // by different amounts (e.g. cam_scale 1.0 + gun_scale 0.5 keeps
     // the gun mostly attached to the screen while the camera drops).
-    CVar_Add("Client", "cl_viewmodelweight_cam_scale", "1.0",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_viewmodelweight_cam_scale", "2.0",   CVAR_SIDE_CL);
     CVar_Add("Client", "cl_viewmodelweight_gun_scale", "1.0",   CVAR_SIDE_CL);
 
-    CVar_Add("Client", "cl_viewmodelsway",             "0",     CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_viewmodelsway_yaw_scale",   "0.06",  CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_viewmodelsway_pitch_scale", "0.05",  CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_viewmodelsway_pos_scale",   "0.50",  CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_viewmodelsway",             "1",     CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_viewmodelsway_yaw_scale",   "-0.08", CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_viewmodelsway_pitch_scale", "-0.13", CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_viewmodelsway_pos_scale",   "1",     CVAR_SIDE_CL);
     CVar_Add("Client", "cl_viewmodelsway_recover",     "9",     CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_viewmodelsway_max_yaw",     "4",     CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_viewmodelsway_max_pitch",   "3",     CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_viewmodelsway_max_yaw",     "10",    CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_viewmodelsway_max_pitch",   "10",    CVAR_SIDE_CL);
     // Pivot mode: when the current viewmodel has weapon_muzzle_bone
     // set, rotate the gun around the muzzle (CoD-style — butt swings,
     // muzzle stays put) instead of applying the default translation
     // parallax.  Models without a muzzle bone always fall back to the
     // translation path regardless of this cvar.
-    CVar_Add("Client", "cl_viewmodelsway_pivot",       "0",     CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_viewmodelsway_pivot",       "1",     CVAR_SIDE_CL);
 
     // Speed-driven gun lowering — fades with the same envelope as the
     // walk/run bob so the gun drops as the player accelerates and
     // recovers when they stop.
     CVar_Add("Client", "cl_viewmodellowering",         "1",     CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_viewmodellowering_amount",  "4.0",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_viewmodellowering_amount",  "1",     CVAR_SIDE_CL);
     // Sprint pose — when sv_shiftspeed > 1 and the player holds
     // +button4 while running, rotates and pulls the gun across the
     // chest (CoD-style).  Sub-cvars below tune the pose; the *_fade
     // controls how fast it ramps on/off.
-    CVar_Add("Client", "cl_viewmodellowering_sprint",        "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_viewmodellowering_sprint_pitch",  "6",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_viewmodellowering_sprint_yaw",    "18",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_viewmodellowering_sprint_roll",   "12",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_viewmodellowering_sprint_forward","2",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_viewmodellowering_sprint_down",   "3",    CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_viewmodellowering_sprint",        "1",    CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_viewmodellowering_sprint_pitch",  "7",    CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_viewmodellowering_sprint_yaw",    "35",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_viewmodellowering_sprint_roll",   "7",    CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_viewmodellowering_sprint_forward","1",    CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_viewmodellowering_sprint_down",   "2",    CVAR_SIDE_CL);
     // Lateral shift while in the sprint pose.  +ve = right in viewmodel
     // space; the apply code negates this for XFLIP'd weapons so "right"
     // stays right on screen regardless of the per-weapon flip flag.
-    CVar_Add("Client", "cl_viewmodellowering_sprint_right",  "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_viewmodellowering_sprint_fade",   "0.15", CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_viewmodellowering_sprint_right",  "-6",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_viewmodellowering_sprint_fade",   "0.35", CVAR_SIDE_CL);
 
     // ADS (+attack2 hold to aim).  Mirrors the sprint-pose envelope
     // and offsets but with its own pose and a tighter ramp.  Sprint
@@ -446,8 +446,8 @@ void() CVar_Init =
     // Subtracted from the base fov cvar while ADS engaged (envelope
     // scaled), added to base fov while sprinting.  Both stack
     // independently and clamp to [10, 170].
-    CVar_Add("Client", "cl_ads_fov",                 "8",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_sprinting_fov",           "5",    CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_ads_fov",                 "15",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_sprinting_fov",           "8",    CVAR_SIDE_CL);
     CVar_Add("Client", "cl_ads_fade",      "0.5",  CVAR_SIDE_CL);
     // Shared ADS pose — the fallback pose for any weapon without its own
     // per-weapon cl_ads_<weapon>_* set (see cl_viewfx.qc ads_pfx select).
@@ -534,7 +534,7 @@ void() CVar_Init =
     // commits the state machine to FADING_IN (no return to RAISING
     // / FALLING — closes the +attack2 spam exploit).  Lower = scope
     // commits earlier into the ADS rise.
-    CVar_Add("Client", "cl_codscope_ads_threshold",   "0.85", CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_codscope_ads_threshold",   "0.75", CVAR_SIDE_CL);
     // Fraction of g_height the scope overlay slides through during
     // the rise / fall animation.  Lower = subtler movement, higher =
     // more theatrical.  Default 0.30 puts the start position with
@@ -545,14 +545,14 @@ void() CVar_Init =
     // to the camera angles while sv_snipersway is on AND the player
     // is scoped in either CS or CoD mode.  Slow rate ≈ 1 breath per
     // 5.5 s; amplitude is the peak pitch contribution.
-    CVar_Add("Client", "cl_codscope_sway_breath_amp",  "0.4",  CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_codscope_sway_breath_rate", "0.18", CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_codscope_sway_breath_amp",  "1.5",  CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_codscope_sway_breath_rate", "0.18", CVAR_SIDE_CL);  // Hz (one breath ≈ 5.5s)
     // Multiplier applied to ALL sway (classic + breathing) when the
     // player presses +button4 to hold breath while scoped.  Old code
     // used a hard 0.15 snap; the new envelope eases to this target
     // via cl_codscope_sway_breath_fade.
-    CVar_Add("Client", "cl_codscope_sway_holdbreath_mult", "0.15", CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_codscope_sway_breath_fade",     "0.30", CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_codscope_sway_holdbreath_mult", "0.02", CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_codscope_sway_breath_fade",     "1.00", CVAR_SIDE_CL);  // ease time for hold-breath
     // Overlay vertical step kick amplitude (pixels) while walking /
     // running.  Scales with horizontal velocity and breath envelope
     // so a held-breath stationary player gets near-zero step bob.
@@ -564,8 +564,8 @@ void() CVar_Init =
 
     // Bob amplitude multipliers that lerp in/out with the sprint
     // envelope — 1.0 = no change, >1 = bigger steps while sprinting.
-    CVar_Add("Client", "cl_camerabob_sprint_mult",     "1.0",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_viewmodelbob_sprint_mult",  "1.0",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_camerabob_sprint_mult",     "1.4",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_viewmodelbob_sprint_mult",  "1.6",   CVAR_SIDE_CL);
 
     // Max Hz at which CSQC re-issues per-frame-mutable dynamic lights
     // (muzzle-flash + bullet-impact + explosion).  At 1000 fps render
@@ -588,7 +588,7 @@ void() CVar_Init =
     // Does NOT throttle: flashlight (must track camera every frame),
     // C4 idle pulse (already 0.15s rate), HL beam dlights (one-shot
     // per beam-trail parse).
-    CVar_Add("Client", "cl_dlight_update_hz",     "500", CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_dlight_update_hz",     "0",   CVAR_SIDE_CL);
 
     // Inter-sequence anim blend (legs / torso) on remote player
     // visual proxies.  Higher = longer, smoother transitions when
@@ -607,18 +607,25 @@ void() CVar_Init =
     // yaw delta after the whole player model turns toward movement;
     // negative keeps the torso facing aim on the current CS IQM axes.
     // Pitch scales view pitch before distributing it across the spine.
+    //
+    // SIDES: _deform / _twist_scale / _pitch_scale / _pitch_max are BOTH because
+    // shared/sh_player_anims.qc reads them and is in sv_progs.src.  Every other
+    // spine cvar below is read ONLY by client/cl_player.qc, so it is CL — marking
+    // those BOTH made the server register a default the client never used, which
+    // is how the _upper_scale pair ended up at 0.5/0.6 on the server and 1 on the
+    // client.  `python cvar_audit.py` re-checks this.
     CVar_Add("Client", "cl_player_spine_twist_scale", "0.55",  CVAR_SIDE_BOTH);
-    CVar_Add("Client", "cl_player_spine_twist_max",   "50",    CVAR_SIDE_BOTH);
-    CVar_Add("Client", "cl_player_spine_twist_waist_scale", "1", CVAR_SIDE_BOTH);
+    CVar_Add("Client", "cl_player_spine_twist_max",   "50",    CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_player_spine_twist_waist_scale", "1", CVAR_SIDE_CL);
     // Scales the upper spine bones (spine2 + spine3) yaw fraction.
     // Lower values keep the waist leaning naturally while reducing how far
     // the head/shoulders rotate when strafing.  1.0 = original feel.
-    CVar_Add("Client", "cl_player_spine_twist_upper_scale", "0.5", CVAR_SIDE_BOTH);
+    CVar_Add("Client", "cl_player_spine_twist_upper_scale", "1",   CVAR_SIDE_CL);
     CVar_Add("Client", "cl_player_spine_pitch_scale", "1",     CVAR_SIDE_BOTH);
     CVar_Add("Client", "cl_player_spine_pitch_max",   "55",    CVAR_SIDE_BOTH);
     // Scales spine3 + neck pitch fractions so the head bobs less when
     // looking up/down.  1.0 = original feel.
-    CVar_Add("Client", "cl_player_spine_pitch_upper_scale", "0.6", CVAR_SIDE_BOTH);
+    CVar_Add("Client", "cl_player_spine_pitch_upper_scale", "1",   CVAR_SIDE_CL);
     // Orthonormalize the spine's parents (pelvis + Bip01 root) before the strafe
     // yaw.  The yaw rotates each spine bone's local basis and the engine rebuilds
     // model space through the parent's actual matrix; IQM frame-blend leaves that
@@ -633,7 +640,7 @@ void() CVar_Init =
     // skeleton every frame is wasted; cap it.  Moving players always rebuild every
     // frame.  The trust-1 trace uses the SAME cached skeleton, so hit detection
     // stays consistent at this rate.  0 = always rebuild (off).
-    CVar_Add("Client", "cl_player_skel_idle_rate", "25", CVAR_SIDE_BOTH);
+    CVar_Add("Client", "cl_player_skel_idle_rate", "25", CVAR_SIDE_CL);
     CVar_Add("Client", "cl_player_backpedal_enter_angle", "150", CVAR_SIDE_BOTH);
     CVar_Add("Client", "cl_player_backpedal_exit_angle",  "100", CVAR_SIDE_BOTH);
     CVar_Add("Client", "cl_player_spine_debug",       "0",     CVAR_SIDE_BOTH);
@@ -665,7 +672,7 @@ void() CVar_Init =
     // ≈ 0.066 s); the duration here should be close to that so the
     // sequence plays once instead of holding on the last frame.
     // Set to 0 to disable flinching entirely.
-    CVar_Add("Client", "cl_player_flinch_time",    "0.10",  CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_player_flinch_time",    "0.067", CVAR_SIDE_CL);
     // Predict func_breakable destruction the moment local damage
     // exceeds remaining brush_health, so the shooter sees the brush
     // disappear instantly. CSQC_BreakPredict_Expire rolls back if the
@@ -692,7 +699,7 @@ void() CVar_Init =
     // 2 u keeps the puff from z-fighting the bullet-hole decal;
     // higher values lift the smoke further off the wall.  Dlight
     // lives at the raw impact position independent of this.
-    CVar_Add("Client", "cl_impact_particle_offset", "2",    CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_impact_particle_offset", "0",    CVAR_SIDE_CL);
     // Counterpart for muzzle particles.  Currently a no-op because
     // this mod's muzzle flash is a sprite (already `sort additive`
     // in scripts/effects.shader, so it never darkens its own
@@ -706,7 +713,7 @@ void() CVar_Init =
     // cl_impact_quality 3 so users can keep full particle FX while
     // killing the lightmap-rebuild storm under sustained fire).
     CVar_Add("Client", "cl_impact_light",         "1",     CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_impact_light_scale",   "1.0",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_impact_light_scale",   "1",     CVAR_SIDE_CL);
     CVar_Add("Client", "cl_impact_light_offset",  "8",     CVAR_SIDE_CL); // units the impact dlight stands off the wall along its normal (0 = flush; pull back so the wall face lights up)
     // Realtime shadows on transient combat lights (bullet impacts, explosions, C4
     // flashes).  0 = NOSHADOW (default): these sub-second flashes don't need cast
@@ -734,7 +741,7 @@ void() CVar_Init =
     // separate kill-switch for users on weak GPUs or those who find
     // the warm-orange flash distracting in tight rooms.  Off only
     // suppresses NEW lights — already-active fades play out naturally.
-    CVar_Add("Client", "cl_explosion_light",      "1",     CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_explosion_light",      "0",     CVAR_SIDE_CL);
     // Forward extrapolation budget (seconds) for rotating brushwork —
     // func_door_rotating, func_pendulum, etc.  The CSQC predraw projects
     // visible angles as `snap_angles + avelocity * elapsed`, with elapsed
@@ -761,13 +768,13 @@ void() CVar_Init =
     // start/end come from CSQC_PredictedImpact / CSQC_BulletImpactRemote
     // (server tags the IMPACT multicast with a shooter entnum).
     CVar_Add("Client", "cl_tracer",               "1",         CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_tracer_width",         "1.5",       CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_tracer_width",         "0.5",       CVAR_SIDE_CL);
     // Empty string disables the color overlay entirely (vertex tint
     // = white, shader texture renders untinted).  Any non-empty value
     // parses as "R G B" floats 0..1.
-    CVar_Add("Client", "cl_tracer_color",         "1 0.85 0.5", CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_tracer_opacity",       "0.7",       CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_tracer_time",          "0.12",      CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_tracer_color",         "1 0.5 0",    CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_tracer_opacity",       "0.2",       CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_tracer_time",          "0.05",      CVAR_SIDE_CL);
     // Override texture/shader path for the tracer quad.  Empty falls
     // back to gfx/tracer; set e.g. "gfx/rain/streak1" to render a
     // sprite-streak in place of the default glow ribbon.
@@ -776,8 +783,8 @@ void() CVar_Init =
     // short stretched quad that flies from muzzle to impact at
     // _speed qu/s, fading near the end.  Slots tag themselves at
     // spawn so static and travel tracers can coexist mid-flight.
-    CVar_Add("Client", "cl_tracer_travel",        "0",         CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_tracer_travel_speed",  "8000",      CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_tracer_travel",        "1",         CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_tracer_travel_speed",  "4000",      CVAR_SIDE_CL);
     CVar_Add("Client", "cl_tracer_impact_delay",  "1",         CVAR_SIDE_CL); // 1 = delay the bullet-impact FX until the tracer streak reaches the wall; 0 = instant impact
     CVar_Add("Client", "cl_tracer_alpha",         "0.9",       CVAR_SIDE_CL);
     CVar_Add("Client", "cl_tracer_travel_size",   "1.5",       CVAR_SIDE_CL);
@@ -790,13 +797,13 @@ void() CVar_Init =
     // Full-length instant mode: emit a fixed-length tracer at the
     // muzzle and slide it forward to the impact point.  Overrides
     // cl_tracer_travel when set.
-    CVar_Add("Client", "cl_tracer_travel_full",   "0",         CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_tracer_travel_full",   "1",         CVAR_SIDE_CL);
     // 0 = off, nonzero = texture-backed decals.
-    CVar_Add("Client", "cl_bulletholes",          "2",     CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_bulletholes",          "1",     CVAR_SIDE_CL);
     // Cap decal spawns per shot.  Penetration can spawn entry+exit
     // decals across multiple targets — 0 = unlimited (old behaviour),
     // 1 = entry decal only (no penetration exit holes), N = max N.
-    CVar_Add("Client", "cl_bulletholes_per_shot", "0",     CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_bulletholes_per_shot", "1",     CVAR_SIDE_CL);
     // PVS reachability test — skip decals whose hit surface ends up in
     // a leaf that's not in the PVS from the local camera.  Catches
     // penetration exit decals in sealed-off voids that the pointcontents
@@ -807,12 +814,12 @@ void() CVar_Init =
     // one dlight per hit; with penetration that compounds quickly.
     // 0 = unlimited; default 2 keeps the visual punch on entry + one
     // penetration without quadratic light blow-up.
-    CVar_Add("Client", "cl_impact_dlights_per_shot", "2",  CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_impact_dlights_per_shot", "1",  CVAR_SIDE_CL);
     // Cap particle-effect spawns per shot (Impact_SpawnParticles — the
     // smoke / spark puff on every impact).  Penetration through walls
     // can stack 4+ exit smokes from a single shot; cap thins them.
     // 0 = unlimited (old behaviour); default 2 mirrors the dlight cap.
-    CVar_Add("Client", "cl_impact_effects_per_shot", "2",  CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_impact_effects_per_shot", "3",  CVAR_SIDE_CL);
     // Bullet-impact DEBRIS — rock chunks / brown squares thrown off the first
     // impact (CSQC_SpawnImpactDebris, cl_bulletimpact.qc; effects in
     // particles/weapons.cfg).  Needs r_bouncysparks 1 (engine default) for the
@@ -832,7 +839,7 @@ void() CVar_Init =
     //   cl_impact_exitsmoke        master toggle (puffs where a penetrating shot leaves a surface)
     //   cl_impact_exitsmoke_count  puffs per exit (each leaves faster + thicker)
     CVar_Add("Client", "cl_impact_exitsmoke",       "1",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_impact_exitsmoke_count", "4",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_impact_exitsmoke_count", "2",   CVAR_SIDE_CL);
     // Impact debris CHIPS (CSQC_SpawnImpactChips, cl_bulletimpact.qc): small material-
     // matched IQM chips (models/gibs/impact/) that bounce, settle, and fade out.
     // TWO spawn sites: EXIT (fast, thrown along the bullet's exit line where the exit
@@ -985,10 +992,10 @@ void() CVar_Init =
     //   _brightness multiplier on the colour (>1 = HDR bloom on bright shaders)
     //   _color      "r g b" floats 0..1, warm white by default to read as flashlight
     CVar_Add("Client", "cl_flashlight_style",      "1",            CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_flashlight_radius",     "400",          CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_flashlight_fov",        "35",           CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_flashlight_brightness", "1.5",          CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_flashlight_color",      "1.0 0.95 0.85", CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_flashlight_radius",     "1000",         CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_flashlight_fov",        "50",           CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_flashlight_brightness", "3",            CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_flashlight_color",      "0.9 0.9 1",     CVAR_SIDE_CL);
     CVar_Add("Client", "cl_decal_opacity",        "1",     CVAR_SIDE_CL);
     // Grenade scorch decals — projected via adddecal() so they
     // wrap stair / wall geometry instead of clipping flat. Capped
@@ -1017,11 +1024,11 @@ void() CVar_Init =
     // (1.0 = full bright source PNG; 0.4 = dried-blood maroon).  Pure
     // black collapses to invisible because SRC_ALPHA blend pulls the
     // surface toward 0,0,0 which then alpha-blends to no change.
-    CVar_Add("Client", "cl_blood_decals_brightness",  "0.4", CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_blood_decals_brightness",  "0.25", CVAR_SIDE_CL);
     // 0 = blood decals fade after BLOOD_FADE_END seconds (default).
     // 1 = full alpha forever, only the FIFO cap removes them.  Same
     //     semantics as cl_scorch_persistent.
-    CVar_Add("Client", "cl_blood_persistent",         "0",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_blood_persistent",         "1",   CVAR_SIDE_CL);
     // Source-style edge clipping for the BAKED blood-decal trisoup.  When
     // 1 (default) each splat's quad is clipped at spawn against the hit
     // BSP triangle's 3 edges so it conforms to the surface boundary
@@ -1054,7 +1061,7 @@ void() CVar_Init =
     // and the final classification for every player hit.  Toggle on
     // briefly when verifying head/body multipliers are landing where
     // you aim; off otherwise (chatty).
-    CVar_Add("Client", "cl_debug_hitgroup",           "0",     CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_debug_hitgroup",           "0",   CVAR_SIDE_BOTH);
     // Client-side rain effect.  Drops trace from an upwind sky-anchor
     // down along (cl_rain_angle_x, 0, -1) to the world surface, animate
     // as textured streaks, and stamp small water-drop decals on impact.
@@ -1065,17 +1072,17 @@ void() CVar_Init =
     // cl_rain_fps caps the rain simulation/update rate; 0 = render fps.
     // Fully CSQC; no server cooperation required.
     CVar_Add("Client", "cl_rain",                     "0",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_rain_intensity",           "0.5", CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_rain_radius",              "1024",CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_rain_speed",               "800", CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_rain_angle_x",             "0.3", CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_rain_angle_y",             "0",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_rain_intensity",           "0.25", CVAR_SIDE_CL);  // supports up to 32.0 = 4096 active drops
+    CVar_Add("Client", "cl_rain_radius",              "1200", CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_rain_speed",               "2000", CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_rain_angle_x",             "0.4", CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_rain_angle_y",             "0.4", CVAR_SIDE_CL);
     // env_hud / titles.txt playback speed multiplier.  1.0 = author
     // timings; <1 = slower (longer hold / longer fades / slower
     // typewriter scroll-out); >1 = faster.  Affects every active
     // env_message simultaneously, so cinematic credit sequences can
     // be slowed down without re-authoring titles.txt.
-    CVar_Add("Client", "cl_envhud_speed",             "1.0", CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_envhud_speed",             "0.5", CVAR_SIDE_CL);
     // Debug: force every env_message into the screen centre,
     // ignoring titles.txt $position.  Use to verify whether an
     // invisible message is actually firing (centred = renders fine,
@@ -1116,13 +1123,13 @@ void() CVar_Init =
     // 0 = native Quake placement (no offset).
     CVar_Add("Server", "sv_goldsrcspawnfix",          "0",   CVAR_SIDE_SV);
     CVar_Add("Client", "cl_rain_center_impacts",      "1",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_rain_alpha",               "1",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_rain_width",               "1.5", CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_rain_color",               "1 1 1", CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_rain_alpha",               "0.35", CVAR_SIDE_CL);  // streak transparency
+    CVar_Add("Client", "cl_rain_width",               "0.35", CVAR_SIDE_CL);  // streak thickness
+    CVar_Add("Client", "cl_rain_color",               "0.75 0.9 1", CVAR_SIDE_CL);  // RGB, white-blue example
     CVar_Add("Client", "cl_rain_streak_texture",      "gfx/rain/streak", CVAR_SIDE_CL);
     CVar_Add("Client", "cl_rain_splash_texture",      "gfx/rain/splash", CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_rain_splash_alpha",        "1",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_rain_splash_size",         "4",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_rain_splash_alpha",        "0.85", CVAR_SIDE_CL);  // splash/drop transparency
+    CVar_Add("Client", "cl_rain_splash_size",         "10",  CVAR_SIDE_CL);  // splash/drop size
     // 0 = no splash effect drawn on raindrop impact, 1 = splash quad
     // animates through cl_rain_splash_texture frames at cl_rain_splash_fps.
     CVar_Add("Client", "cl_rain_splash",              "1",   CVAR_SIDE_CL);
@@ -1133,11 +1140,11 @@ void() CVar_Init =
     CVar_Add("Client", "cl_rain_reseed_per_frame",    "64",  CVAR_SIDE_CL);
     CVar_Add("Client", "cl_rain_stagger",             "1",   CVAR_SIDE_CL);
     CVar_Add("Client", "cl_rain_draw_distance",       "0",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_rain_fps",                 "0",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_rain_fps",                 "40",  CVAR_SIDE_CL);  // rain simulation FPS; 0 = render FPS
     CVar_Add("Client", "cl_rain_length",              "64",  CVAR_SIDE_CL);
     // Splash frame-cycle rate (4-frame animation).  Default 12.5fps =
     // 80ms/frame = 0.32s total splash lifetime.  Bound 1..120 in code.
-    CVar_Add("Client", "cl_rain_splash_fps",          "12.5",CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_rain_splash_fps",          "30",  CVAR_SIDE_CL);
     // 1 = additive blend (DRAWFLAG_ADD) on both the upright sprite and
     // the ground ring so splashes pop on dark/foggy maps.  0 = normal
     // alpha blend.  Mirrors cl_snow_fullbright.
@@ -1151,7 +1158,7 @@ void() CVar_Init =
     // cl_lightning is on AND weather (cl_rain || cl_snow) is on.
     CVar_Add("Client", "cl_lightning",                "0",   CVAR_SIDE_CL);
     CVar_Add("Client", "cl_lightning_min_interval",   "8",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_lightning_max_interval",   "25",  CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_lightning_max_interval",   "12",  CVAR_SIDE_CL);
     CVar_Add("Client", "cl_lightning_flash_duration", "0.25",CVAR_SIDE_CL);
     CVar_Add("Client", "cl_lightning_thunder_min_delay","1", CVAR_SIDE_CL);
     CVar_Add("Client", "cl_lightning_thunder_max_delay","4", CVAR_SIDE_CL);
@@ -1177,17 +1184,17 @@ void() CVar_Init =
     // Snow-mode fall speed override (units/sec). When >0, replaces the
     // legacy 0.15× cl_rain_speed scaling in Rain_ResolveTuning so snow
     // can be tuned independently of rain. Default 600 ≈ slow drift.
-    CVar_Add("Client", "cl_snow_speed",               "600",              CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_snow_speed",               "60",               CVAR_SIDE_CL);
     // Snow drop count multiplier — same scale as cl_rain_intensity
     // (1.0 = 128 flakes, 32 = the 4096-flake cap).  0 or unset falls
     // back to cl_rain_intensity so snow inherits rain's tuning.
-    CVar_Add("Client", "cl_snow_intensity",           "0",                CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_snow_intensity",           "0.5",              CVAR_SIDE_CL);
     // Snow-mode flake alpha override (separate from cl_rain_alpha).
     // Consumed in Rain_ResolveTuning when cl_snow != 0 and value > 0.
     CVar_Add("Client", "cl_snow_alpha",               "1",                CVAR_SIDE_CL);
     // Fullbright snow: forces flake vertex color to pure white in the
     // streak draw, bypassing any rain_tick_color tint path.
-    CVar_Add("Client", "cl_snow_fullbright",          "0",                CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_snow_fullbright",          "1",                CVAR_SIDE_CL);
     // Cheapest snow path — when 1, skip the camera-facing billboard
     // basis entirely and emit world-axis-aligned (+X / +Z) squares
     // instead.  Flakes still draw at their tracked positions but
@@ -1220,13 +1227,13 @@ void() CVar_Init =
     // player (no rain/snow under roofs / indoors), via one up-trace per cell.
     // 0 = solid-cell skip only (still no drops inside walls, but rain falls on
     // roofs above you).  Turn off if a map's sky brushes confuse the up-trace.
-    CVar_Add("Client", "cl_weather_skycheck",         "1",                CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_weather_skycheck",         "0",                CVAR_SIDE_CL);
     // Water-surface rings: pop expanding weather.ringsplash quads where rain
     // lands on water (the engine can't detect water hits per-drop, so a QC
     // emitter traces for water near the camera).  _rate = rings/sec per unit
     // cl_rain_intensity (capped 8/frame).
     CVar_Add("Client", "cl_weather_waterring",        "1",                CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_weather_waterring_rate",   "40",               CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_weather_waterring_rate",   "64",               CVAR_SIDE_CL);
     // Live top-left overlay: active weather backend (engine vs CSQC pool),
     // selected effect, spawn rate / target population, pool cap, resolved
     // handles, and the engine's own dump of the effect (type/blend/texture/
@@ -1238,9 +1245,9 @@ void() CVar_Init =
     // as the cl_rain_* cluster — runtime-configurable, no map work
     // needed.  Implementation in client/cl_throwtrail.qc.
     CVar_Add("Client", "cl_throwtrail",               "1",                       CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_throwtrail_length",        "0.4",                     CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_throwtrail_width",         "2",                       CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_throwtrail_alpha",         "0.6",                     CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_throwtrail_length",        "1",                       CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_throwtrail_width",         "6",                       CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_throwtrail_alpha",         "0.15",                    CVAR_SIDE_CL);
     CVar_Add("Client", "cl_throwtrail_color",         "1 1 1",                   CVAR_SIDE_CL);
     CVar_Add("Client", "cl_throwtrail_texture",       "gfx/throwtrail/default",  CVAR_SIDE_CL);
     // Head-end width rampup: trail grows from 0 → cl_throwtrail_width
@@ -1248,9 +1255,12 @@ void() CVar_Init =
     // 0 disables the ramp (trail starts at full width immediately).
     // Default 0.25s — visible "tapering into existence" from the
     // throw moment.
-    CVar_Add("Client", "cl_throwtrail_rampup",        "0.25",                    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_muzzleflash_light",    "0",     CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_muzzleflash_light_scale", "1.0", CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_throwtrail_rampup",        "0.3",                     CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_muzzleflash_light",    "1",     CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_muzzleflash_light_scale", "1",   CVAR_SIDE_CL);
+    // Playback rate for the ANIMATED flash frames (gfx/muzzle/animated/animated_NN),
+    // used by the deagle test path.  Total on-screen time = FRAME_COUNT / this.
+    CVar_Add("Client", "cl_muzzleflash_anim_fps", "240",   CVAR_SIDE_CL);
     // Single-frame additive sprite muzzle flash (cl_muzzleflash.qc
     // CSQC_SpawnMuzzleFlashSprite). Picks one of gfx/muzzleflash1..4
     // per shot, then animates SIZE growing while ALPHA fades over
@@ -1271,10 +1281,10 @@ void() CVar_Init =
     //                    0 by t=1). Per-channel multiplier on the
     //                    additive intensity — 0 = invisible.
     CVar_Add("Client", "cl_muzzleflash_sprite",         "1",     CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_muzzleflash_sprite_time",    "0.06",  CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_muzzleflash_sprite_scale",   "1.0",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_muzzleflash_sprite_time",    "0.05",  CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_muzzleflash_sprite_scale",   "0.35",  CVAR_SIDE_CL);
     CVar_Add("Client", "cl_muzzleflash_sprite_shrink",  "2.0",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_muzzleflash_sprite_opacity", "1.0",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_muzzleflash_sprite_opacity", "0.7",   CVAR_SIDE_CL);
     // Muzzle smoke "heat" producer (cl_muzzlesmoke.qc). Single
     // global accumulator: every shot bumps `heat`, heat decays
     // exponentially each frame, and emission rate + per-puff
@@ -1302,12 +1312,12 @@ void() CVar_Init =
     //                     (1 + heat_norm * thick_max).
     //   _ life_bonus      additional per-puff life mult at sat.
     CVar_Add("Client", "cl_muzzlesmoke",                "1",         CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_muzzlesmoke_life",           "0.5",       CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_muzzlesmoke_size",           "4",         CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_muzzlesmoke_grow",           "4",         CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_muzzlesmoke_opacity",        "0.5",       CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_muzzlesmoke_drift_up",       "18",        CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_muzzlesmoke_drift_fwd",      "12",        CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_muzzlesmoke_life",           "0.35",      CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_muzzlesmoke_size",           "1",         CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_muzzlesmoke_grow",           "6",         CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_muzzlesmoke_opacity",        "0.1",       CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_muzzlesmoke_drift_up",       "4",         CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_muzzlesmoke_drift_fwd",      "0",         CVAR_SIDE_CL);
     CVar_Add("Client", "cl_muzzlesmoke_texture",        "gfx/smoke", CVAR_SIDE_CL);
     CVar_Add("Client", "cl_muzzlesmoke_heat_per_shot",  "1.0",       CVAR_SIDE_CL);
     CVar_Add("Client", "cl_muzzlesmoke_heat_halflife",  "0.3",       CVAR_SIDE_CL);
@@ -1320,7 +1330,7 @@ void() CVar_Init =
     // _inherit bakes a fraction of the current wind into each puff's
     // spawn velocity; _continuous re-samples wind every draw frame and
     // accumulates an offset on top of the linear ms_drift trajectory.
-    CVar_Add("Client", "cl_muzzlesmoke_wind_strength",  "18",        CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_muzzlesmoke_wind_strength",  "90",        CVAR_SIDE_CL);
     CVar_Add("Client", "cl_muzzlesmoke_wind_inherit",   "1",         CVAR_SIDE_CL);
     CVar_Add("Client", "cl_muzzlesmoke_wind_continuous","1",         CVAR_SIDE_CL);
     // Debug visualization for muzzle position tuning. When 1, draws
@@ -1333,7 +1343,7 @@ void() CVar_Init =
     // Brightness ceiling for the viewmodel's lighting sample (engine-side
     // patch). 0–255 byte; 180 keeps a slight ambient cap so the viewmodel
     // doesn't go fully blown-out under bright effects/lights.
-    CVar_Add("Client", "r_viewmodel_maxlight",    "180",   CVAR_SIDE_CL);
+    CVar_Add("Client", "r_viewmodel_maxlight",    "0",     CVAR_SIDE_CL);
     // Brightness ceilings for non-viewmodel entities. Implemented QC-side
     // via a colormod scale at predraw time (cl_teamtint.qc + cl_weapons.qc),
     // not in the engine — the engine cap only applies to RF_WEAPONMODEL.
@@ -1343,8 +1353,8 @@ void() CVar_Init =
     //                   top of the team-tint colormod.
     //   _physdrops_     caps light on dropped weapon entities (CSQC entities
     //                   with predraw, not engine-replicated phys barrels).
-    CVar_Add("Client", "r_playermodels_maxlight", "180",   CVAR_SIDE_CL);
-    CVar_Add("Client", "r_physdrops_maxlight",    "180",   CVAR_SIDE_CL);
+    CVar_Add("Client", "r_playermodels_maxlight", "0",     CVAR_SIDE_CL);
+    CVar_Add("Client", "r_physdrops_maxlight",    "0",     CVAR_SIDE_CL);
     // Soft-knee rolloff for the two _maxlight caps above (player models +
     // dropped weapons). Fraction of the cap where brightness starts to
     // roll off smoothly toward the ceiling instead of hard-clamping flat:
@@ -1368,7 +1378,7 @@ void() CVar_Init =
     // formats (the engine CoD checkpvs NULL-deref is fixed). Cheap on Quake
     // maps; on Source/CoD maps each test decompresses vis, so it costs a little
     // more per nearby drop — enable where a map accumulates many occluded drops.
-    CVar_Add("Client", "r_physdrops_pvscull",     "0",     CVAR_SIDE_CL);
+    CVar_Add("Client", "r_physdrops_pvscull",     "1",     CVAR_SIDE_CL);
     // Corpse render cull — the only client lever on the engine scene-render
     // floor (an off-screen corpse still costs a full edict-copy + ~50-bone skin
     // every frame with no engine pre-cull). Scoped to SETTLED corpses, keyed off
@@ -1431,11 +1441,11 @@ void() CVar_Init =
     // actual cvar; CVar_Add just forwards the default + flags.
     CVar_Add("Performance", "sys_highpriority",     "1",     CVAR_SIDE_CL);
     CVar_Add("Performance", "sys_clockprecision",   "1",     CVAR_SIDE_CL);
-    CVar_Add("Performance", "sys_clocktype",        "3",     CVAR_SIDE_CL);
-    CVar_Add("Performance", "sys_framepacing",      "3",     CVAR_SIDE_CL);
+    CVar_Add("Performance", "sys_clocktype",        "2",     CVAR_SIDE_CL);
+    CVar_Add("Performance", "sys_framepacing",      "4",     CVAR_SIDE_CL);
     CVar_Add("Performance", "cl_yieldcpu",          "0",     CVAR_SIDE_CL);
     CVar_Add("Performance", "cl_maxfps",            "300",   CVAR_SIDE_CL);
-    CVar_Add("Performance", "cl_idlefps",           "300",   CVAR_SIDE_CL);
+    CVar_Add("Performance", "cl_idlefps",           "64",    CVAR_SIDE_CL);
 
     // ---------- Renderer (engine cvars) ----------
     CVar_Add("Renderer", "vid_conautoscale",      "2",     CVAR_SIDE_CL);
@@ -1477,7 +1487,7 @@ void() CVar_Init =
     // which is what the shaders' !!cvarf bindings actually sample.
     // Result: blur radius glides from 0 → this value as the
     // scoreboard rises into place, and back to 0 as it falls out.
-    CVar_Add("Client", "cl_scoreboard_blur_radius", "0.0033", CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_scoreboard_blur_radius", "0.001",  CVAR_SIDE_CL);
     // Internal — per-frame animated blur radius written by
     // HUD_DrawScoreboard, read by the screen_blur_h/v shaders via
     // !!cvarf binding.  Underscore prefix marks it as not user-
@@ -1498,10 +1508,10 @@ void() CVar_Init =
     // serverinfo (sv_main.qc).  Default 1 so legacy servers don't blank
     // crosshairs for new clients.
     CVar_Add("Server", "sv_crosshair",            "1",     CVAR_SIDE_SV);
-    CVar_Add("Client", "cl_crosshairlength",      "6",     CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_crosshairlength",      "7",     CVAR_SIDE_CL);
     CVar_Add("Client", "cl_crosshairthickness",   "1",     CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_crosshairgap",         "3",     CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_crosshaircolour",      "0 1 0", CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_crosshairgap",         "4",     CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_crosshaircolour",      "0 255 0", CVAR_SIDE_CL);
     CVar_Add("Client", "cl_crosshairdynamic",     "1",     CVAR_SIDE_CL);
     CVar_Add("Client", "cl_crosshairweapongap",   "1",     CVAR_SIDE_CL);
     CVar_Add("Client", "r_damageflash_intensity", "0",     CVAR_SIDE_CL);
@@ -1527,7 +1537,7 @@ void() CVar_Init =
     CVar_AddUI("Voice", "cl_voip_capturedevice",  "",      CVAR_SIDE_CL,
         CVAR_UI_STRING, CVAR_TAB_VOICE, "Capture Device",
         0, CVAR_ENUM_NONE, 0, 0);
-    CVar_AddUI("Voice", "cl_voip_micamp",         "2",     CVAR_SIDE_CL,
+    CVar_AddUI("Voice", "cl_voip_micamp",         "1",     CVAR_SIDE_CL,
         CVAR_UI_SCALAR, CVAR_TAB_VOICE, "Mic Gain",
         0, CVAR_ENUM_NONE, 0, 10);
     CVar_AddUI("Voice", "cl_voip_play",           "1",     CVAR_SIDE_CL,
@@ -1542,7 +1552,7 @@ void() CVar_Init =
     CVar_AddUI("Voice", "cl_voip_noisefilter",    "1",     CVAR_SIDE_CL,
         CVAR_UI_TOGGLE, CVAR_TAB_VOICE, "Noise Filter",
         0, CVAR_ENUM_NONE, 0, 0);
-    CVar_AddUI("Voice", "cl_voip_autogain",       "0",     CVAR_SIDE_CL,
+    CVar_AddUI("Voice", "cl_voip_autogain",       "1",     CVAR_SIDE_CL,
         CVAR_UI_TOGGLE, CVAR_TAB_VOICE, "Auto Gain",
         0, CVAR_ENUM_NONE, 0, 0);
     CVar_AddUI("Voice", "cl_voip_vad_threshhold", "15",    CVAR_SIDE_CL,
@@ -1554,7 +1564,7 @@ void() CVar_Init =
     CVar_AddUI("Voice", "cl_voip_test",           "0",     CVAR_SIDE_CL,
         CVAR_UI_TOGGLE, CVAR_TAB_VOICE, "Mic Test (loopback)",
         0, CVAR_ENUM_NONE, 0, 0);
-    CVar_AddUI("Voice", "cl_voip_showmeter",      "0",     CVAR_SIDE_CL,
+    CVar_AddUI("Voice", "cl_voip_showmeter",      "1",     CVAR_SIDE_CL,
         CVAR_UI_TOGGLE, CVAR_TAB_VOICE, "Engine Meter",
         0, CVAR_ENUM_NONE, 0, 0);
     // Mod-side cvar — gates our custom HUD widget (the green "+VOIP"
@@ -1577,8 +1587,8 @@ void() CVar_Init =
     //   cl_voip_fadeduration     — seconds before the speaker icon
     //                              fully fades after they stop.
     CVar_Add("Client", "cl_voip_overhead",         "1",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_voip_overhead_size",    "12",   CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_voip_overhead_offset",  "48",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_voip_overhead_size",    "8",    CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_voip_overhead_offset",  "36",   CVAR_SIDE_CL);
     CVar_Add("Client", "cl_voip_fadeduration",     "2",    CVAR_SIDE_CL);
 
     // ---------- Client debug ----------
@@ -1606,6 +1616,11 @@ void() CVar_Init =
     // 0.3 s wake threshold + the old carry-handoff seed.
     CVar_Add("Client debug", "cl_physprop_smoothinterp", "1", CVAR_SIDE_CL);
     CVar_Add("Client debug", "cl_physprop_interp_ratio", "1", CVAR_SIDE_CL);  // render delay = this MANY measured intervals. 1 = one interval back (minimum that never renders into the future). Raise for more buffer against packet loss, at the cost of more visual lag.
+    // Relink carried/falling prop collision hulls at prediction rate instead of render
+    // rate (PhysProp_RelinkHullsForPrediction).  0 = the old render-rate-only path,
+    // kept for A/B.  Was unregistered and therefore stuck at 0 — the feature had
+    // never actually run.
+    CVar_Add("Client debug", "cl_physprop_hull_mode", "1", CVAR_SIDE_CL);
     CVar_Add("Vehicles", "cl_car_wheels",        "1",     CVAR_SIDE_CL);  // render prop_car spinning/steering wheels from the wheelmodel key (0 = off / baked wheels)
     CVar_Add("Vehicles", "cl_car_wheel_radius",  "12.64", CVAR_SIDE_CL);  // visual wheel rolling radius (qu) driving the spin rate; match your wheel model
     CVar_Add("Vehicles", "cl_car_wheel_z",       "0",     CVAR_SIDE_CL);  // vertical nudge (qu) of the visual wheels along the car's up axis (tune so tyres meet the ground)
@@ -1722,6 +1737,13 @@ void() CVar_Init =
     CVar_AddUI("Multiplayer", "mp_ph_possess_dist",   "160", CVAR_SIDE_SV,
         CVAR_UI_SCALAR, CVAR_TAB_MULTI | CVAR_TAB_CREATE_GAME, "PH Possess Range",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 32, 512);
+    // 1 = Prop Hunt HIDERS stay weaponless: they cannot pick up a gun (walk-over
+    // or +use) and cannot fire one.  They already SPAWN empty (PlayerSpawn pins
+    // the loadout), but nothing stopped a hider strolling over a dead seeker's
+    // dropped rifle and shooting back, which is not the game.  0 = armed hiders.
+    CVar_AddUI("Multiplayer", "mp_ph_hider_noweapons", "1", CVAR_SIDE_SV,
+        CVAR_UI_TOGGLE, CVAR_TAB_MULTI | CVAR_TAB_CREATE_GAME, "PH Hiders Weaponless",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
     // Defuse mode: when 1, the bomb-carrier can plant the C4 anywhere
     // (testing default).  When 0 + the map has func_bomb_target brushes,
     // plant is gated to inside those volumes.  Maps without bomb_target
@@ -1752,6 +1774,11 @@ void() CVar_Init =
     CVar_Add("Multiplayer", "sv_ragdoll_death_impulse", "220", CVAR_SIDE_SV); // knockback (u/s) along the shot dir seeded into the limbs at death
     CVar_Add("Multiplayer", "sv_ragdoll_hit_force",     "3",   CVAR_SIDE_SV); // bullet shove = shot_dir * damage * this (whole-doll)
     CVar_Add("Multiplayer", "sv_ragdoll_throwspeed",    "700", CVAR_SIDE_SV); // `cmd throwragdollsv` test-spawner launch speed (mp_cheats)
+    // CSQC cosmetic-ragdoll equivalents (client/cl_ragdoll.qc).  Separate from the
+    // sv_ragdoll_* pair above: these drive the client-only doll used when
+    // sv_ragdoll_enable is 0 and the `spawnragdoll` / `throwragdoll` test commands.
+    CVar_Add("Client", "cl_ragdoll_death_impulse",      "220", CVAR_SIDE_CL); // knockback (u/s) along the shot dir seeded into the client doll
+    CVar_Add("Client", "cl_ragdoll_throwspeed",         "500", CVAR_SIDE_CL); // `throwragdoll` launch speed from the eye
     // Server-console trigger cvars — set to non-zero from the server
     // console (or via rcon) to invoke a one-shot cleanup pass.  The
     // server StartFrame (sv_main.qc) detects the non-zero value, runs
@@ -2045,7 +2072,7 @@ void() CVar_Init =
     // Client-only so each player picks their own visibility even on
     // a server that has stamina enabled.  Replaces the old
     // sv_codstamina_bar (0/1) toggle.
-    CVar_Add("Client", "cl_codstamina_bar",             "1",      CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_codstamina_bar",             "0.8",    CVAR_SIDE_CL);
     // Grace window (seconds) for the sprint drain — pmove single-
     // frame FL_ONGROUND drops on clip-brush stairs no longer pause
     // the drain inside this window.  Mirrors the cl_viewfx ground
@@ -2074,13 +2101,13 @@ void() CVar_Init =
     // recover time (~0.4 s for scout / awp burst-fire cadence).
     CVar_Add("Server", "sv_codstamina_fire_suppress_time","0.4",  CVAR_SIDE_SV);
     // Punish-sway amplification scale (client) and fade.  punish_scale
-    // = 3 → 3× normal scope sway amplitude at peak punish.  fade is
+    // = 10 → 10× normal scope sway amplitude at peak punish.  fade is
     // the EMA time constant for the onset (faster ramp-up than the
     // breath envelope so the punish hits hard).  Ramp-DOWN is tied
     // to the stamina refill in cl_codscope.qc — not driven by this
     // cvar.
-    CVar_Add("Client", "cl_codscope_sway_punish_scale", "3.0",    CVAR_SIDE_CL);
-    CVar_Add("Client", "cl_codscope_sway_punish_fade",  "0.20",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_codscope_sway_punish_scale", "10.0",   CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_codscope_sway_punish_fade",  "1.0",    CVAR_SIDE_CL);  // EMA time-constant for punish onset
     // Per-scope fog tweak — base fog now comes from the worldspawn
     // "fog" key ("density r g b [a [bias]]"), pushed to clients via
     // `serverinfo sv_worldfog` from worldspawn(). cl_codscope.qc adds
@@ -2312,7 +2339,7 @@ void() CVar_Init =
     CVar_AddUI("Server", "sv_trust_clientbreak",         "1",      CVAR_SIDE_SV,
         CVAR_UI_TOGGLE, CVAR_TAB_SERVER, "Trust Client Breakable Hits",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
-    CVar_AddUI("Server", "sv_hitbox_expand",             "32",      CVAR_SIDE_SV,
+    CVar_AddUI("Server", "sv_hitbox_expand",             "32",    CVAR_SIDE_BOTH,
         CVAR_UI_SCALAR, CVAR_TAB_SERVER, "",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
     // Pose-refresh keepalive interval in server ticks (1 = every tick).
@@ -2445,7 +2472,7 @@ void() CVar_Init =
         CVAR_UI_TOGGLE, CVAR_TAB_DEBUG, "", 0, CVAR_ENUM_NONE, 0, 0);
     CVar_AddUI("Server debug", "sv_debug_lagcomp",      "0", CVAR_SIDE_SV,
         CVAR_UI_TOGGLE, CVAR_TAB_DEBUG, "", 0, CVAR_ENUM_NONE, 0, 0);
-    CVar_AddUI("Server debug", "sv_debug_camera",       "0", CVAR_SIDE_SV,
+    CVar_AddUI("Server debug", "sv_debug_camera",       "0", CVAR_SIDE_BOTH,
         CVAR_UI_TOGGLE, CVAR_TAB_DEBUG, "", 0, CVAR_ENUM_NONE, 0, 0);
     // sv_debug_hitboxes is 0/1/2 — scalar so all three modes are reachable.
     CVar_AddUI("Server debug", "sv_debug_hitboxes",     "0", CVAR_SIDE_SV,
@@ -2482,11 +2509,16 @@ void() CVar_Init =
         CVAR_UI_TOGGLE, CVAR_TAB_DEBUG, "", 0, CVAR_ENUM_NONE, 0, 0);
     CVar_AddUI("Server debug", "sv_debug_physprops",    "0", CVAR_SIDE_SV,
         CVAR_UI_TOGGLE, CVAR_TAB_DEBUG, "", 0, CVAR_ENUM_NONE, 0, 0);
+    // env_beam endpoint/target resolution + path_corner chain walking.
+    CVar_AddUI("Server debug", "sv_debug_env_beam",     "0", CVAR_SIDE_SV,
+        CVAR_UI_TOGGLE, CVAR_TAB_DEBUG, "", 0, CVAR_ENUM_NONE, 0, 0);
+    CVar_AddUI("Server debug", "sv_debug_spray",        "0", CVAR_SIDE_SV,
+        CVAR_UI_TOGGLE, CVAR_TAB_DEBUG, "", 0, CVAR_ENUM_NONE, 0, 0);
     CVar_AddUI("Server debug", "sv_debug_spawns",       "0", CVAR_SIDE_SV,
         CVAR_UI_TOGGLE, CVAR_TAB_DEBUG, "", 0, CVAR_ENUM_NONE, 0, 0);
     CVar_AddUI("Server debug", "sv_debug_weapons",      "0", CVAR_SIDE_SV,
         CVAR_UI_TOGGLE, CVAR_TAB_DEBUG, "", 0, CVAR_ENUM_NONE, 0, 0);
-    CVar_AddUI("Server debug", "sv_debug_wepswap",      "0", CVAR_SIDE_SV,
+    CVar_AddUI("Server debug", "sv_debug_wepswap",      "0", CVAR_SIDE_BOTH,
         CVAR_UI_TOGGLE, CVAR_TAB_DEBUG, "", 0, CVAR_ENUM_NONE, 0, 0);
 
     // ---------- ODE physics ----------
@@ -2495,7 +2527,7 @@ void() CVar_Init =
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
     // Source-like smoothness: more substeps/frame (was 2), a small contact-overlap
     // layer (the big anti-jitter knob), and a stiffer QuickStep solve.
-    CVar_AddUI("ODE physics", "physics_ode_iterationsperframe", "8",   CVAR_SIDE_SV,
+    CVar_AddUI("ODE physics", "physics_ode_iterationsperframe", "8", CVAR_SIDE_BOTH,
         CVAR_UI_SCALAR, CVAR_TAB_ODE | CVAR_TAB_CREATE_PHYS, "ODE Iter",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 1, 60);
     CVar_AddUI("ODE physics", "physics_ode_contactsurfacelayer", "0.15", CVAR_SIDE_SV,
@@ -2583,7 +2615,7 @@ void() CVar_Init =
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
     // NOTE: the force code multiplies these by 100 now, so values are ~100x smaller
     // than before (128 here ≈ the old 12800).  See PhysProp_TryPushFromTrace.
-    CVar_AddUI("ODE physics", "sv_physprop_hit_force",          "128", CVAR_SIDE_SV,
+    CVar_AddUI("ODE physics", "sv_physprop_hit_force",          "128", CVAR_SIDE_BOTH,
         CVAR_UI_SCALAR, CVAR_TAB_ODE | CVAR_TAB_CREATE_PHYS, "Hit Force",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 2000);
     // Per-(damage × falloff) impulse magnitude applied by
@@ -2595,10 +2627,10 @@ void() CVar_Init =
     // controllable; bump higher for more chaos.  CVar_AddUI (not plain
     // CVar_Add) so it auto-saves to data/server.cfg and sits in the
     // physics tab next to Hit Force, its bullet-knockback sibling.
-    CVar_AddUI("ODE physics", "sv_physprop_explosion_force",   "512", CVAR_SIDE_SV,
+    CVar_AddUI("ODE physics", "sv_physprop_explosion_force",   "512", CVAR_SIDE_BOTH,
         CVAR_UI_SCALAR, CVAR_TAB_ODE | CVAR_TAB_CREATE_PHYS, "Explosion Force",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 2000);  // ×100 in code (512 = old ~51200)
-    CVar_AddUI("ODE physics", "sv_physprop_use_force",          "800", CVAR_SIDE_SV,
+    CVar_AddUI("ODE physics", "sv_physprop_use_force",          "800", CVAR_SIDE_BOTH,
         CVAR_UI_SCALAR, CVAR_TAB_ODE | CVAR_TAB_CREATE_PHYS, "Use Force",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 100000);
     CVar_AddUI("ODE physics", "sv_physprop_use_velmult",        "800", CVAR_SIDE_SV,
@@ -2630,7 +2662,7 @@ void() CVar_Init =
     CVar_Add("ODE physics", "sv_physprop_can_mass",       "2",    CVAR_SIDE_SV);
     // Prop material+weight (scripts/propmaterials.txt, sh_propmaterials.qc): global weight
     // multiplier on the per-material density*volume mass for map prop_physics.  1 = as-authored.
-    CVar_Add("ODE physics", "sv_propmat_mass_scale",      "1",    CVAR_SIDE_SV);
+    CVar_Add("ODE physics", "sv_propmat_mass_scale",      "1",  CVAR_SIDE_BOTH);
     CVar_Add("ODE physics", "sv_physprop_bounce",         "0",    CVAR_SIDE_SV);
     CVar_Add("ODE physics", "sv_physprop_bouncestop",     "0.5",  CVAR_SIDE_SV);
     CVar_Add("ODE physics", "sv_physprop_sleep_speed",    "8",    CVAR_SIDE_SV);
@@ -2684,6 +2716,14 @@ void() CVar_Init =
     CVar_Add     ("ODE physics", "cl_carry_rotate_invert","0",   CVAR_SIDE_CL);
     CVar_Add     ("ODE physics", "cl_carry_dist_step",    "12",  CVAR_SIDE_CL);  // qu per wheel click
     CVar_Add     ("ODE physics", "cl_carry_rotate_sendrate","20",CVAR_SIDE_CL);  // upstream orientation sends per second while rotating
+    // Prop Hunt disguise-rotate gestures (client/cl_prophunt_rotate.qc).  Both are
+    // read with NO inline fallback, so while they went unregistered they read 0 —
+    // holdtime 0 makes `(cltime - press_time) >= holdtime` true on the very first
+    // down-frame, latching HOLD instantly and leaving the TAP (lock toggle) and
+    // DOUBLE-TAP (reset upright) branches unreachable.  The gesture model in that
+    // file's header only works with real values here.
+    CVar_Add     ("ODE physics", "cl_prop_rotate_holdtime","0.25",CVAR_SIDE_CL);  // key held past this = HOLD free-rotate, not a tap
+    CVar_Add     ("ODE physics", "cl_prop_rotate_taptime", "0.3", CVAR_SIDE_CL);  // second press within this of a release = DOUBLE-TAP reset
     // Client: when the LOCAL player carries a prop, the client PREDICTS its hold pose
     // from the local view (zero ping lag).  On drop/throw the predicted→authoritative
     // handoff eases over this time so it doesn't pop (0 = instant snap).
@@ -2730,8 +2770,13 @@ void() CVar_Init =
     CVar_Add("ODE physics", "sv_physprop_impact_min_speed",  "70",   CVAR_SIDE_SV);
     CVar_Add("ODE physics", "sv_physprop_impact_hard_speed", "260",  CVAR_SIDE_SV);
     CVar_Add("ODE physics", "sv_physprop_impact_cooldown",   "0.11", CVAR_SIDE_SV);
-    CVar_Add("ODE physics", "sv_physprop_slide_min_speed",   "60",   CVAR_SIDE_SV);
-    CVar_Add("ODE physics", "sv_physprop_slide_interval",    "0.18", CVAR_SIDE_SV);
+    // _slide_min_speed 35 (was 60): 60 only caught a prop still travelling fast, so most
+    // real slides — a shoved crate settling, a dragged prop — never smoked at all.
+    // _slide_interval 0.09 (was 0.18): ~11 puffs/s, in the same league as the car tailpipe's
+    // 12/s idle, which is what makes the shared metal_impact effect actually read as a plume
+    // rather than an occasional lone puff.  Each tick is one PVS-culled ~13-byte multicast.
+    CVar_Add("ODE physics", "sv_physprop_slide_min_speed",   "35",   CVAR_SIDE_SV);
+    CVar_Add("ODE physics", "sv_physprop_slide_interval",    "0.09", CVAR_SIDE_SV);
     // 1 = scrape-loop volume TRACKS slide speed (re-issues the loop on a notable speed
     // change — restarts the sample, ~inaudible for a rough scrape; throttled+deadbanded).
     // 0 = volume fixed at the speed it had when the scrape started.

@@ -73,7 +73,9 @@ float debris_effect_rock;   // stone chunks  (mode 0)
 float debris_effect_dirt;   // dirt chunks   (mode 1)
 float debris_effect_dust;   // expanding dust cloud (shared)
 float debris_effect_spark;  // hot sparks    (shared)
-float exitsmoke_effect;     // bullet wall-bang EXIT dust puff (weapons.exitsmoke)
+float exitsmoke_effect;     // bullet wall-bang EXIT dust puff (weapons.metal_impact —
+                            // the prop_car tailpipe / prop contact puff; NOT resolved
+                            // through Debris_Resolve, see CSQC_BulletExitSmoke)
 // Per-shot debris-burst counter, capped by cl_impact_debris_per_shot — keeps
 // shotgun pellet loops / penetration from multiplying the debris.  Scoped to a
 // single trigger pull by debris_last_action_id below (NOT CSQC_Impact_ResetShot,
@@ -928,11 +930,15 @@ void(vector pos, vector normal) CSQC_SpawnImpactDebris =
 
 // Bullet wall-bang EXIT dust smoke — spawned where a PENETRATING shot LEAVES the
 // far face (never on entries; the caller gates on a non-zero exit_dir + non-flesh).
-// `dir` is the bullet's SHOT LINE out the far face (eye->exit), so puffs spray along
-// the actual exit angle — an angled shot sprays out at that angle, not perpendicular
-// to the wall.  Escalates VELOCITY (dir magnitude, via the effect's `veladd 1`) AND
-// SIZE (per-puff particle count — a denser plume reads as bigger) across N puffs, each
-// staggered further out; the weapons.exitsmoke recipe owns the spin/expand/fade.
+// `dir` is the bullet's SHOT LINE out the far face (eye->exit), so the plume grows
+// along the actual exit angle — an angled shot leans that way, not perpendicular
+// to the wall.  Escalates SIZE (per-puff particle count — a denser plume reads as
+// bigger) and OFFSET across N puffs; the recipe owns the expand/fade.
+//
+// Uses weapons.metal_impact — the SAME puff as the prop_car tailpipe, the prop
+// slide/bump contact smoke and the Prop Hunt decloak, so every smoke in the game is
+// one look.  (Was weapons.exitsmoke, a smaller pale spinning gfx/smoke puff; that
+// recipe is still in particles/impacts.cfg, now unreferenced.)
 void(vector pos, vector dir) CSQC_BulletExitSmoke =
 {
     if (!cvar("cl_impact_exitsmoke"))
@@ -942,20 +948,38 @@ void(vector pos, vector dir) CSQC_BulletExitSmoke =
     if (d == '0 0 0')
         return;
 
-    exitsmoke_effect = Debris_Resolve(exitsmoke_effect, "weapons.exitsmoke");
-    if (exitsmoke_effect == 0)
+    // metal_impact is `+`-APPEND-ONLY (its base r_part block is commented out at
+    // particles/impacts.cfg:189), so particleeffectquery returns "" for it and
+    // Debris_Resolve — which treats an empty query as "not registered" — would
+    // scrub the id to 0 every call and silently disable this.  Resolve RAW and
+    // guard both invalid values, exactly like Car_DrawExhaust / the contact smoke.
+    float eid = exitsmoke_effect;
+    if (eid <= 0)
+    {
+        eid = particleeffectnum("weapons.metal_impact");
+        if (eid != -1 && eid != 0)
+            exitsmoke_effect = eid;   // only ever cache a VALID id (cfg can exec late)
+    }
+    if (eid <= 0)
         return;
 
     float n = cvar("cl_impact_exitsmoke_count");
     if (n <= 0) n = 4;
 
+    // This recipe carries no `veladd`, so the pointparticles velocity argument is
+    // inert here (p_script.c:5229-5235 — dir only ever scales veladd, and with
+    // areaspread/spawnvel also 0 the axis is unused too); every puff rises on the
+    // recipe's own `velbias 0 0 30`.  The "leaves the far face" read therefore
+    // comes from POSITION, not launch velocity: successive puffs are staggered
+    // further out along the shot line.  If the old outward spray is wanted back,
+    // it needs a `veladd 1` clone of the recipe — adding veladd to +metal_impact
+    // itself would also fling the tailpipe/contact/decloak puffs.
     float i;
     for (i = 0; i < n; i = i + 1)
     {
-        float speed = 25 + (i / n) * 85;          // each successive puff LEAVES FASTER
-        float dens  = 1 + i;                       // ...and THICKER/BIGGER (denser plume)
-        vector ppos = pos + d * (2 + i * 1.5);     // staggered outward ALONG the shot line
-        pointparticles(exitsmoke_effect, ppos, d * speed, dens);
+        float dens  = 1 + i;                       // successive puffs THICKER
+        vector ppos = pos + d * (4 + i * 9);       // ...and further out ALONG the shot line
+        pointparticles(eid, ppos, d, dens);
     }
 };
 
@@ -1378,13 +1402,30 @@ void(vector pos, vector normal, float mat, float metalphys, float action, entity
 
     if (play_ric)
     {
-        if (metalphys)
+        // Material-driven bullet ping.  The FINE sound set is re-derived here from
+        // (ent, pos) — the same pair Chip_WallShader above already samples — so the LOCAL
+        // path (trace in hand) and the REMOTE path (position + the target entnum the wire
+        // ALREADY carries, resolved in cl_main.qc before CSQC_BulletImpactRemote) land on
+        // the same sound with ZERO wire changes.  IMPACT_MAT_* stays the PARTICLE code; it
+        // is far too coarse to key sound off (DEFAULT covers concrete/plaster/cardboard/
+        // plastic/rubber/dirt).  `metalphys` is no longer consulted here: phys props now
+        // resolve through PropMat_For and ping as what they actually are, which is exactly
+        // what the old blanket "every phys prop pings metal" branch is being replaced by.
+        string ricsnd = "";
+        if (mat != IMPACT_MAT_FLESH && mat != IMPACT_MAT_FLESH_LETHAL)
         {
-            r = bound(1, floor(random() * 4) + 1, 4);
-            pointsound(offset_pos, sprintf("sounds/impacts/metal_solid_impact_bullet%g.wav", r), 1, ATTN_NORM);
+            float ricset = MatSnd_SetForImpact(ent, pos, mat);
+            if (ricset >= 0)
+                ricsnd = MatSnd_Pick(ricset, MSND_BULLET);
         }
+        if (ricsnd != "")
+            pointsound(offset_pos, ricsnd, 1, ATTN_NORM);
         else
         {
+            // Fallback ONLY: flesh (unchanged behaviour) and anything that didn't resolve
+            // (e.g. a client with no scripts/materialsounds.txt).  Kept as a FALLBACK, not
+            // a layer — layering ric under every material would muddy 8 distinct timbres
+            // and double the pointsound count on a spray.
             r = floor(random() * 5) + 1;
             r = bound(1, r, 5);
             pointsound(offset_pos, sprintf("sounds/weapons/ric%g.wav", r), 1, ATTN_NORM);

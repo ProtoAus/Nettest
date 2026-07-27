@@ -41,15 +41,29 @@
 // (angles is an engine builtin.)
 .vector sundir;
 .float  sun_brightness;   // legacy god-ray key: unused, declared only so old maps don't warn
-.vector shadowcolor;      // env_sun key: the RGB a fully-shadowed sun pixel is multiplied by (the
-                          //   ambient/sky tint of a shadow). 0-1 (0.5 0.5 0.5 = neutral grey = default),
-                          //   or 0-255 and we normalise. Drives r_shadows_color_r/g/b (defaultwall.glsl).
+.vector shadowcolor;      // env_sun key: MANUAL override of the RGB a fully-shadowed sun pixel is multiplied
+                          //   by. 0-1 (0.5 0.5 0.5 = neutral grey), or 0-255 and we normalise. Wins over the
+                          //   auto calc below. Drives r_shadows_color_r/g/b (defaultwall.glsl).
+// AUTO shadow-tint inputs: copy the SAME values you gave the light compiler (worldspawn _sunlight* keys —
+// the engine hides underscore keys from QC, so they're duplicated here). When set, the shadow tint is
+// COMPUTED as sky/(sky+sun) per channel — see EnvSun_ShadowMul — instead of typed by hand.
+.float  sunlight;         // env_sun: direct sun brightness   (copy worldspawn _sunlight)
+.vector suncolor;         // env_sun: direct sun colour        (copy _sunlight_color; 0-255 or 0-1)
+.float  skylight;         // env_sun: sky/ambient brightness   (copy _sunlight2)
+.vector skycolor;         // env_sun: sky/ambient colour       (copy _sunlight2_color; 0-255 or 0-1)
+.float  shadowdarken;     // env_sun: optional extra darkening of the COMPUTED tint (1=physical/blends with
+                          //   the bake; <1 = punchier but darker than the baked shadows next to it). 0=unset=1.
 
 // Globals - set by env_sun spawn, read by EnvSun_StuffPlayer.
 float  env_sun_active;
 vector env_sun_dir;      // normalized direction toward the sun
 vector env_sun_shadowcolor;      // the shadow tint to push (already normalised to 0-1)
 float  env_sun_shadowcolor_set;  // 1 = the map set a custom tint; 0 = leave the neutral default
+float  env_sun_brightness;       // the map's sun brightness (env_sun "sunlight" key = worldspawn _sunlight);
+                                 //   0 = key absent -> don't push, client keeps its r_shadows_sunbrightness
+                                 //   default.  Drives the SUNLIT-washout of lamp shadows (the engine compares
+                                 //   it against each lamp's `light` value -- same units -- so a lamp brighter
+                                 //   than the sun keeps its shadow on sunlit ground, a weak one loses it).
 
 // ---------------------------------------------------------------------------
 // mangle -> direction TOWARD the sun, using ericw-tools LIGHT's EXACT convention, so an
@@ -75,6 +89,43 @@ vector(vector m) EnvSun_DirFromMangle =
     vector travel = [cos(myaw) * cos(mpitch), sin(myaw) * cos(mpitch), sin(mpitch)];
     if (travel == '0 0 0') return '0.271654 0.323744 0.906308';   // degenerate guard
     return normalize(travel * -1);                                 // -> TOWARD the sun
+};
+
+// Physical shadow tint from the map's sun + sky ambient (the SAME values the light compiler baked with):
+// a fully-shadowed sun pixel is lit by the SKY ambient only; a sunlit one by sky + sun.  The shader
+// MULTIPLIES a sunlit surface by this to make it read as shadowed, so the correct multiplier is
+//     mul = skyRadiance / (skyRadiance + sunRadiance)   per channel
+// which lands the dynamic shadow at exactly the brightness AND hue the BAKED shadows already sit at
+// (they are sky-lit too) — that is what makes the dynamic and baked shadows blend instead of the dynamic
+// one being a random tint.  WHY the user's "type the sky colour as shadowcolor" looked wrong: shadowcolor
+// is a raw MULTIPLIER, so 200 200 255 -> (0.78,0.78,1.0) barely darkens and turns blue; the ratio below
+// is the physically-meaningful value.  NOTE if the sky ambient is strong vs the sun (e.g. _sunlight2 600
+// vs _sunlight 250) the shadows are GENUINELY bright — that is the lighting, not a bug; use shadowdarken
+// to force them darker at the cost of matching the bake.
+// Colours accept 0-255 (Quake convention) or 0-1; unset (0 0 0) = white.
+vector(float sunb, vector sunc, float skyb, vector skyc) EnvSun_ShadowMul =
+{
+    if (sunc == '0 0 0') sunc = '1 1 1';
+    if (skyc == '0 0 0') skyc = '1 1 1';
+    if (sunc_x > 1 || sunc_y > 1 || sunc_z > 1) sunc = sunc * (1 / 255);
+    if (skyc_x > 1 || skyc_y > 1 || skyc_z > 1) skyc = skyc * (1 / 255);
+    vector sunr = sunb * sunc;   // sun radiance per channel
+    vector skyr = skyb * skyc;   // sky/ambient radiance per channel
+    // A real baked shadow does NOT keep the full sky: whatever casts it also occludes the slice of sky AROUND
+    // the sun, so the baked shadow sits a touch darker than the ideal sky/(sky+sun) ratio.  Keep ~85% of the
+    // sky to match -- otherwise the DYNAMIC shadow reads slightly too BRIGHT next to the baked ones.  (Colour
+    // is preserved, just dimmer; use shadowdarken for further taste.)
+    skyr = skyr * 0.85;
+    vector mul = '1 1 1';
+    if (skyr_x + sunr_x > 0.0001) mul_x = skyr_x / (skyr_x + sunr_x);
+    if (skyr_y + sunr_y > 0.0001) mul_y = skyr_y / (skyr_y + sunr_y);
+    if (skyr_z + sunr_z > 0.0001) mul_z = skyr_z / (skyr_z + sunr_z);
+    // never pitch black: a real shadow is lit by SOME sky/bounce, and a near-zero result usually means a
+    // mis-entered value (sky far below sun).  Floor each channel so the shadow can't crush to pure black.
+    if (mul_x < 0.12) mul_x = 0.12;
+    if (mul_y < 0.12) mul_y = 0.12;
+    if (mul_z < 0.12) mul_z = 0.12;
+    return mul;
 };
 
 // Build the cvar-set command string from the cached sun state.
@@ -111,6 +162,14 @@ string() EnvSun_BuildShadowColorCommand =
                    env_sun_shadowcolor_x, env_sun_shadowcolor_y, env_sun_shadowcolor_z);
 };
 
+// Push the sun BRIGHTNESS (r_shadows_sunbrightness, plain engine cvar - no shader flush involved,
+// the engine reads it per frame when building the lamp-shadow atlas).  The engine compares it to each
+// lamp's `light` value to decide how much SUNLIT ground washes that lamp's shadow out.
+string() EnvSun_BuildSunBrightnessCommand =
+{
+    return sprintf("set r_shadows_sunbrightness %f\n", env_sun_brightness);
+};
+
 // Push the sun config to one client.  ALWAYS clears r_sun_colour first
 // (archived cvar, no map-load reset - see header; rays must stay dead).
 // r_sun_dir + r_shadows_throwdirection get the same clear-first treatment: reset to
@@ -136,6 +195,9 @@ void(entity p) EnvSun_StuffPlayer =
     stuffcmd(p, EnvSun_BuildShadowDirCommand());   // fake shadows (r_shadows 2) fall away from it
     if (env_sun_shadowcolor_set)
         stuffcmd(p, EnvSun_BuildShadowColorCommand()); // ambient/sky tint of the shadows (map opted in)
+    if (env_sun_brightness > 0)
+        stuffcmd(p, EnvSun_BuildSunBrightnessCommand()); // sun brightness for the lamp-shadow sunlit washout
+                                                         // (push-only, same trade as the tint NB above)
 };
 
 // Push to every currently-connected player (map-cycle case).
@@ -158,9 +220,20 @@ from it, and the QC shadow/blob code weights toward it.  No visual by itself
           so the dynamic sun matches the baked lightmap.  Default "230 -65 0".
 "angles"  read exactly like "mangle" (a sun has no other meaningful facing).
 "sundir"  explicit toward-the-sun vector "X Y Z"; overrides mangle/angles if set.
-"shadowcolor" the RGB tint of a fully-shadowed sun pixel (r_shadows 2) — set it to the map's
-          ambient/sky colour so shadows sink toward that instead of dead grey.  "0.5 0.5 0.5" =
-          neutral (default).  Accepts 0-1 ("0.35 0.4 0.6") OR 0-255 ("90 102 153"); lower = darker.
+"shadowcolor" MANUAL RGB multiplier for a fully-shadowed sun pixel (r_shadows 2).  "0.5 0.5 0.5" =
+          neutral grey (default).  Accepts 0-1 ("0.35 0.4 0.6") OR 0-255 ("90 102 153"); lower = darker.
+          NOTE this is a raw multiplier, so typing your sky COLOUR here (e.g. "200 200 255") barely
+          darkens and tints blue — for a shadow that matches the bake, prefer the auto keys below.
+--- AUTO shadow tint (recommended): copy the SAME values you gave the light compiler and the shadow
+    colour is COMPUTED as sky/(sky+sun) so dynamic shadows sit at the baked shadows' brightness+hue ---
+"sunlight"  direct sun brightness   — copy worldspawn _sunlight        (e.g. 250)
+"suncolor"  direct sun colour        — copy _sunlight_color             (e.g. "255 230 160"; 0-255 or 0-1)
+"skylight"  sky/ambient brightness   — copy _sunlight2                  (e.g. 600)
+"skycolor"  sky/ambient colour       — copy _sunlight2_color            (e.g. "200 200 255")
+"shadowdarken" optional extra darkening of the computed tint.  1 = physical (blends with the bake);
+          <1 = punchier but darker than the baked shadows beside it.  Leave unset for physical.
+          (If your shadows come out bright, it's because your sky ambient is strong vs the sun — that's
+           the lighting; lower shadowdarken to force them darker.)
 */
 void() env_sun =
 {
@@ -178,17 +251,35 @@ void() env_sun =
     else
         env_sun_dir = '0.271654 0.323744 0.906308';   // ericw LIGHT default sun (_sun_mangle "230 -65 0")
 
-    // Optional shadow TINT.  Forgiving on range: values >1 are read as 0-255 (Quake light-colour
-    // convention) and normalised, so the mapper can type "90 100 150" OR "0.35 0.4 0.6".
+    // Shadow TINT.  Precedence: (1) an explicit shadowcolor is a MANUAL raw multiplier and wins; (2) else
+    // if the map gave us its sun/sky light values, COMPUTE the physical tint = sky/(sky+sun) so dynamic
+    // shadows match the baked ones; (3) else leave the neutral default.
     if (self.shadowcolor != '0 0 0')
     {
+        // manual override.  Forgiving on range: >1 is read as 0-255 and normalised ("90 100 150" or "0.35 0.4 0.6").
         env_sun_shadowcolor = self.shadowcolor;
         if (env_sun_shadowcolor_x > 1 || env_sun_shadowcolor_y > 1 || env_sun_shadowcolor_z > 1)
             env_sun_shadowcolor = env_sun_shadowcolor * (1 / 255);
         env_sun_shadowcolor_set = 1;
     }
+    else if (self.sunlight > 0 && self.skylight > 0)
+    {
+        // auto: derive the shadow tint from the bake's sun + sky ambient (see EnvSun_ShadowMul).  BOTH are
+        // required -- sunlight alone gives sky/(sky+sun)=0 (pitch black) and skylight alone gives 1 (no
+        // shadow); a half-config falls through to the neutral default instead of producing a broken tint.
+        env_sun_shadowcolor = EnvSun_ShadowMul(self.sunlight, self.suncolor, self.skylight, self.skycolor);
+        float dk = self.shadowdarken;
+        if (dk <= 0) dk = 1;   // 0 = unset field -> physical (no extra darkening)
+        env_sun_shadowcolor = env_sun_shadowcolor * dk;
+        env_sun_shadowcolor_set = 1;
+    }
     else
         env_sun_shadowcolor_set = 0;
+
+    // Sun brightness for the lamp-shadow SUNLIT washout (engine r_shadows_sunbrightness).  Reuses the
+    // same "sunlight" key the auto-tint reads (copy worldspawn _sunlight) but needs only that one key.
+    if (self.sunlight > 0)
+        env_sun_brightness = self.sunlight;
 
     EnvSun_StuffAll();
 

@@ -36,7 +36,7 @@ float HUD_TEAMSELECT_SMALL_TEXT_SIZE = 12;
 
 float() TeamMenuMainMenuOpen =
 {
-    return cvar("_nettest_menu_active") > 0;
+    return cvar("_quakers_menu_active") > 0;
 };
 
 float() TeamMenuNeedsSelection =
@@ -53,7 +53,7 @@ float() TeamMenuNeedsSelection =
 // in the menu forever and never spawns).
 float() TeamMenu_IsModServer =
 {
-    return serverkey("modname") == "nettest";
+    return serverkey("modname") == "quakers";
 };
 
 float() TeamMenuIsOpen =

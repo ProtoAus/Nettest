@@ -668,6 +668,7 @@ string sv_info_last_nocarry;          // sv_physprop_nocarry      — prop rider
 string sv_info_last_carry_maxspeed;   // sv_physprop_carry_maxspeed
 string sv_info_last_shiftspeed;
 string sv_info_last_maxspeed;
+string sv_info_last_ph_prop_speed;    // mp_ph_prop_speed — disguised-prop move scale (shared pmove)
 string sv_info_last_accelerate;
 string sv_info_last_airaccelerate;
 string sv_info_last_friction;
@@ -774,6 +775,8 @@ void() SV_UpdateMovementServerInfo =
 	sv_info_push_if_changed("sv_physprop_carry_maxspeed", sv_info_last_carry_maxspeed);
 	sv_info_push_if_changed("sv_shiftspeed",    sv_info_last_shiftspeed);
 	sv_info_push_if_changed("sv_maxspeed",      sv_info_last_maxspeed);
+	sv_info_push_if_changed("mp_ph_prop_speed", sv_info_last_ph_prop_speed);	// disguised-prop move scale — read in the shared pmove, so CSQC needs it via serverinfo
+
 	sv_info_push_if_changed("sv_accelerate",    sv_info_last_accelerate);
 	sv_info_push_if_changed("sv_airaccelerate", sv_info_last_airaccelerate);
 	sv_info_push_if_changed("sv_friction",      sv_info_last_friction);
@@ -1548,6 +1551,8 @@ void() worldspawn =
 	Nav_Reset();		// nettest bots: clear the nav graph before this map's info_node entities spawn
 	Surf_LoadMaterials();	// scripts/surfaceprops.txt -> texture material table (sh_surfaceprops.qc)
 	PropMat_LoadMaterials();	// scripts/propmaterials.txt -> prop material+weight table (sh_propmaterials.qc)
+	MatSnd_LoadSounds();	// scripts/materialsounds.txt -> per-material contact sound sets (sh_matsounds.qc).
+				// MUST precede precache_everything() below, which walks this table.
 
 	// Backdrop latch — the menu backdrop launchers (m_main / m_menu) set
 	// sv_backdrop_pending 1 immediately before `map <menumap>`. Consume it
@@ -1569,7 +1574,7 @@ void() worldspawn =
 	// lets the menu detect "this is our mod's server" and skip
 	// itself entirely on anything else (m_teamselect.qc
 	// TeamMenuIsOpen).
-	localcmd("serverinfo modname nettest\n");
+	localcmd("serverinfo modname quakers\n");
 
 	// Lift the per-client packet-rate cap. cls.maxfps defaults to 72
 	// (cl_main.c:3172-3174 — falls back if serverinfo "maxfps" is unset

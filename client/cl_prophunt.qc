@@ -31,11 +31,59 @@ const float PH_RELEASE_BANNER_TIME = 4.0;	// seconds on screen (last ~1s fades)
 var float ph_seen_phase = -1;
 float ph_release_time;				// cltime the FREEZE->ACTIVE edge landed; 0 = none
 
+// --- Disguise breath cue (LOCAL ONLY) ---------------------------------------
+// A short inhale as you slip into a prop, an exhale as you drop it.  Entirely
+// client-side: nothing is networked and localsound() is listener-relative, so
+// only the player who transforms hears it — it can never give a hider's
+// position away to a seeker standing nearby.
+//
+// Edge-detected off CSQC_PropHunt_LocalDisguised(), the SAME predicate the
+// third-person camera gate uses, so the cue lands on exactly the frame the view
+// switches.  That also means every decloak path is covered for free — voluntary
+// (impulse 7), death, and round restart all clear the hull.
+//
+// Channel 10 is unclaimed (1-4 standard, 5/7/9/11 car, 6 physprop scrape,
+// 8 rain), so the cue can neither cut off nor be cut off by anything else —
+// notably the sniper hold-breath in cl_codscope.qc, which plays these SAME two
+// wavs on the auto channel.
+const float PH_BREATH_CHAN = 10;
+const float PH_BREATH_VOL  = 0.5;
+// -1 = not sampled yet, so connecting (or changing map) while already disguised
+// latches silently instead of firing a phantom cue on the first frame.
+var float ph_breath_disguised = -1;
+
+void() PropHunt_UpdateDisguiseBreath =
+{
+	if (getstatf(STAT_GAMEMODE) != GAMEMODE_PROPHUNT)
+	{
+		ph_breath_disguised = -1;	// re-arm; leaving the mode is not a decloak
+		return;
+	}
+	// Do NOT sample through a prediction gap (map change, teleport, respawn
+	// reset): the predicate reads "undisguised" for a frame or two there, which
+	// would fire a phantom exhale/inhale pair.  Hold the latch instead.
+	if (!predicted_player || !csqc_prediction_valid)
+		return;
+
+	float now_disguised = CSQC_PropHunt_LocalDisguised() ? 1 : 0;
+	if (now_disguised == ph_breath_disguised)
+		return;
+	if (ph_breath_disguised >= 0)	// -1 = first sample: latch, don't play
+		localsound(now_disguised ? "sounds/player/breathin.wav"
+		                         : "sounds/player/breathout.wav",
+		           PH_BREATH_CHAN, PH_BREATH_VOL);
+	ph_breath_disguised = now_disguised;
+};
+
 // Full-screen overlays, called once per frame from the HUD pass (cl_hud.qc)
 // just before the centre-message draw so the round timer / countdown / HUD
 // text still render ON TOP of the blindfold fill.
 void() PropHunt_DrawOverlays =
 {
+	// Runs BEFORE the gamemode gate so the breath latch re-arms when the mode
+	// changes.  Cheap (one statf + one predicate) and self-gating.
+	PropHunt_UpdateDisguiseBreath();
+
 	if (getstatf(STAT_GAMEMODE) != GAMEMODE_PROPHUNT)
 		return;
 

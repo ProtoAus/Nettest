@@ -107,6 +107,9 @@ void() Car_CommonSpawn =
 	float pmass = (self.mass > 0) ? self.mass : Car_Cvar(0, "sv_car_mass", 1200);
 	self.po_material = -1;   // cars keep their own tuned physics (no prop-material)
 	PhysObj_Setup(self, pmass, cvar("sv_physprop_friction"));   // MOVETYPE_PHYSICS + backend body
+	// po_material -1 means PhysObj_Setup resolved no sound set — pin cars to sheet metal so
+	// wall bangs (sh_vehicle_phys.qc) and the grind loop keep their timbre.
+	self.po_sndset = MatSnd_SetIndex("metal");
 	self.use = __NULL__;             // +use handled by the mount gate (sv_use.qc), not .use
 
 	self.think     = Car_Think;

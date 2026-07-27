@@ -9,7 +9,7 @@
 //
 // Pure QC: SQLite is compiled into this build (config_fteqw.h USE_SQLITE -> SQL),
 // exposed via the FTE_SQL builtins (sqlconnect/sqlopenquery/sqlreadfield/...).
-// The DB file is auto-created at  nettest/sqlite/nettest_stats.db  (FS_GAMEONLY
+// The DB file is auto-created at  quakers/sqlite/quakers_stats.db  (FS_GAMEONLY
 // sandbox — we only pass the bare name, the engine builds the path).
 //
 // Compile order: this file is listed in sv_progs.src BEFORE sv_money.qc, so the
@@ -100,7 +100,7 @@ void() Prog_DBInit =
 {
 	if (prog_db_ready)
 		return;
-	prog_db = sqlconnect("", "", "", "nettest_stats", "sqlite");
+	prog_db = sqlconnect("", "", "", "quakers_stats", "sqlite");
 	if (prog_db < 0)
 	{
 		dprint("^1[prog] sqlite unavailable - progression will not persist\n");
@@ -109,7 +109,7 @@ void() Prog_DBInit =
 	sqlopenquery(prog_db, Prog_WriteDone, 0,
 		"CREATE TABLE IF NOT EXISTS players (guid TEXT PRIMARY KEY, name TEXT, xp REAL, level REAL, xp_next REAL, kills REAL, deaths REAL, headshots REAL, wins REAL, playtime REAL, last_seen REAL);");
 	prog_db_ready = 1;
-	dprint("^2[prog] sqlite ready: nettest/sqlite/nettest_stats.db\n");
+	dprint("^2[prog] sqlite ready: quakers/sqlite/quakers_stats.db\n");
 };
 
 // Persist a player's current row (UPDATE; the row is guaranteed by Prog_Load's

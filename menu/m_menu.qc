@@ -813,19 +813,32 @@ void() Menu_RegisterCvars =
 
     // Menu-only cvars that don't belong in the manifest (purely
     // ephemeral or menu-internal).  registercvar is idempotent.
-    registercvar("_nettest_menu_active", "0", 0);
+    registercvar("_quakers_menu_active", "0", 0);
 
     // Crosshair UI toggles registered on the CSQC side (CVAR_SIDE_CL).
     // The manifest's CVar_RegisterMine flagged them BOTH for menu so
     // they're already covered here — no extra wrangling needed.
 
     // Idempotent backstop for the small client_config_cvars list (used
-    // by Menu_SaveClientConfig for data/settings.cfg).  Anything in
-    // there that overlaps the manifest is a no-op; the rest gets a
-    // blank default so the engine knows the cvar exists.
+    // by Menu_SaveClientConfig for data/settings.cfg).
+    //
+    // Seed each one from the MANIFEST rather than "".  CVar_RegisterMine above only
+    // registers CVAR_SIDE_SV rows in the menu VM (deliberately — see its comment), so
+    // the CL-side settings rows are not created by it, and CSQC's own registration
+    // doesn't happen until CSQC_Init on connect.  data/default.cfg used to paper over
+    // that gap, but the mod cvars have moved out of it and into the table, so a ""
+    // here would leave the whole F1 settings screen reading 0/blank at the main menu —
+    // and Menu_SaveClientConfig would then persist those blanks into settings.cfg,
+    // wiping the user's defaults.  48 of the 56 entries are manifest rows; the other
+    // 8 are engine cvars (name, volume, sensitivity, fov, ...) which the engine has
+    // already created with its own defaults, so "" stays correct for them and
+    // registercvar is a no-op either way.
     float i;
     for (i = 0; i < client_config_cvars.length; i++)
-        registercvar(client_config_cvars[i], "", 0);
+    {
+        float ci = CVar_FindIndex(client_config_cvars[i]);
+        registercvar(client_config_cvars[i], (ci >= 0) ? g_cvar_default[ci] : "", 0);
+    }
 };
 
 void() Menu_LoadConfig =
@@ -909,7 +922,7 @@ void() main_menu =
 	// Build tag — bottom-right corner of the screen, dimmed.
 	sui_set_align([SUI_ALIGN_END, SUI_ALIGN_END]);
 	sui_text([-6, -6], MENU_TEXT_SMALL,
-	         "Build: nettest16",
+	         "Build: quakers16",
 	         '0.80 0.80 0.80', 1, 0);
 
 	// --- Floating left-anchored option column ---

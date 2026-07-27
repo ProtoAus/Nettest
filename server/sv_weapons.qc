@@ -1945,7 +1945,8 @@ void(entity drop_ent) W_PhysDropEnable =
     drop_ent.po_sleep_enabled  = TRUE;
     drop_ent.po_is_weapon_drop = TRUE;
     drop_ent.po_stuck_grace    = 2;
-    drop_ent.po_fx_soundset    = 1;   // weapon set: weapon_impact_* + soda_can_scrape
+    // (no po_fx_soundset any more — PhysObj_Setup resolves po_sndset from po_is_weapon_drop
+    //  to the "weapon" set in materialsounds.txt: weapon_impact_* + soda_can_scrape.)
 
     drop_ent.weapon_physdrop_sleeping   = FALSE;
     drop_ent.weapon_physdrop_rest_start = 0;
@@ -2448,6 +2449,12 @@ void() weapon_touch =
     // the Scout on bloodassault spawns within touch range of a team-
     // select camera).
     if (player.player_team == TEAM_NONE || player.is_dead)
+        return;
+
+    // Prop Hunt: hiders stay weaponless (mp_ph_hider_noweapons).  THE choke point for
+    // both pickup routes — walking over a gun lands here via .touch, and the +use route
+    // (SV_TryWeaponPickup / SV_TryWeaponSwap, sv_use.qc) invokes this same function.
+    if (PropHunt_HiderNoWeapons(player))
         return;
 
     slot = pickup.weapon_slot;
@@ -3320,6 +3327,11 @@ void() W_CheckImpulses =
         if (self.reload) self.reload();
         break;
     case WEAPON_IMPULSE_SPECIAL:  // Weapon-specific action (menu "Weapon Special")
+        // Prop Hunt: a disguised hider has no weapon, so Weapon Special is repurposed as
+        // DECLOAK (drop the disguise with a smoke poof).  Self-gates; consumes only when it
+        // acted, so a seeker's real Weapon Special is untouched.
+        if (PropHunt_TryDecloak(self))
+            break;
         if (self.special)
         {
             self.special();
@@ -3407,15 +3419,19 @@ void() W_WeaponFrame =
                                  || self.weapon == WEP_CSSMOKEGRENADE
                                  || self.weapon == WEP_CFC4
                                  || self.weapon == WEP_GRAVITYGUN);
+    // Prop Hunt: a weaponless hider never fires, whatever they are somehow holding
+    // (mid-round team switch, admin give).  Backstop — the pickup block in weapon_touch
+    // is what actually keeps a gun out of their hands.
+    float ph_nofire = PropHunt_HiderNoWeapons(self);
     if ((cvar("sv_trust_clienthits") < 1 || wep_bypasses_cs_notify)
-        && self.button0 && time >= self.attack_finished)
+        && self.button0 && time >= self.attack_finished && !ph_nofire)
     {
         if (self.fire)
             self.fire();
     }
 
     // Check alt-fire button
-    if (self.button1 && time >= self.attack_finished)
+    if (self.button1 && time >= self.attack_finished && !ph_nofire)
     {
         if (self.altfire)
             self.altfire();

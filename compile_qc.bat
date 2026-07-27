@@ -1,6 +1,6 @@
 @echo off
 REM ---------------------------------------------------------------------------
-REM Compile the nettest QC progs: server qwprogs.dat + client csprogs.dat + menu.dat.
+REM Compile the quakers QC progs: server qwprogs.dat + client csprogs.dat + menu.dat.
 REM
 REM All three progs have grown past fteqcc's DEFAULT 2MB string buffer, so all
 REM MUST be built with -max_strings (there is no working pragma equivalent).
@@ -24,5 +24,20 @@ fteqcc64.exe cl_progs.src -max_strings 8388608
 echo.
 echo Compiling menu progs (menu.dat)...
 fteqcc64.exe m_progs.src -max_strings 8388608
+echo.
+REM ---------------------------------------------------------------------------
+REM Package csprogs.dat into a COMPRESSED .pk3 so connecting clients download it
+REM at ~1.6MB instead of the raw ~8MB.  FTE sends a LOOSE csprogs.dat to clients
+REM UNCOMPRESSED, but when it lives inside a (non-'pak'-named) pk3 the server
+REM redirects the download to the whole pk3 and streams it already-compressed
+REM (SV_LocateDownload -> DLERR_SV_REDIRECTPACK; allow_download_packages default 1).
+REM pack_csprogs.py verifies the archive, then removes the loose csprogs.dat (FTE
+REM searches loose files BEFORE pk3s, so a stray bare-fteqcc build's fresh loose
+REM copy would harmlessly override a stale pk3 -> never runs stale code).
+REM If python is missing / packaging fails, the loose csprogs.dat is KEPT and the
+REM server still works (just uncompressed downloads).
+REM ---------------------------------------------------------------------------
+echo Packaging csprogs.dat -^> quakers_csprogs.pk3 (compressed download)...
+python pack_csprogs.py
 echo.
 echo Done.  Restart the server to pick up new progs (csprogs hash changes).

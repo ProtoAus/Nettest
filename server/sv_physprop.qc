@@ -127,45 +127,28 @@ void() phys_barrel_precache =
 	// spawnflood pick one at random via PhysBarrel_RandomModel().  MUST be precached before setmodel.
 	// (The old models/props/barrel.iqm precache is gone: that file does not exist and was never
 	//  setmodel'd — it only produced an "Unable to load" on every map load.)
-	precache_model("models/mega/containers/metal_barrel_mp_1.iqm");
-	precache_model("models/mega/containers/metal_barrel_mp_2.iqm");
-	precache_model("models/mega/containers/metal_barrel_mp_3.iqm");
+	precache_model("models/props/containers/mega/metal_barrel_mp_1.iqm");
+	precache_model("models/props/containers/mega/metal_barrel_mp_2.iqm");
+	precache_model("models/props/containers/mega/metal_barrel_mp_3.iqm");
 	// Cans — same deal as the barrels (random pick, each ships a .acd).  Replaces the old
 	// models/props/can.mdl, which did not exist: spawncan was setmodel'ing a missing file and
 	// spawning an invisible null-model prop.  See PhysCan_RandomModel.
-	precache_model("models/mega/props/tin_can_mp_1_rusty.iqm");
-	precache_model("models/mega/props/tin_can_mp_1_rusty_1.iqm");
-	precache_model("models/bunkers/canned_food_3.iqm");
-	precache_model("models/bunkers/canned_food_4.iqm");
-	precache_model("models/bunkers/canned_food_5.iqm");
+	precache_model("models/props/containers/mega/tin_can_mp_1_rusty.iqm");
+	precache_model("models/props/containers/mega/tin_can_mp_1_rusty_1.iqm");
+	precache_model("models/props/containers/bunkers/canned_food_3.iqm");
+	precache_model("models/props/containers/bunkers/canned_food_4.iqm");
+	precache_model("models/props/containers/bunkers/canned_food_5.iqm");
 	// Carriable filecabinet — IQM only.  The legacy models/props/filecabinet.mdl fallback is gone
 	// (the file does not exist), which is also a collision UPGRADE: HL-studio .mdl can't build an
 	// ODE collision mesh (the engine has no mod_halflife case) so it fell back to a BOX, whereas
 	// the IQM (mod_alias) supports both an ODE collision mesh and NativeTrace player collision —
 	// the player collides with the actual ROTATED mesh.
 	precache_model("models/props/filecabinet/filecabinet.iqm");
-	// Cabinet contact sounds — soft on gentle contact, hard on fast (see
-	// PhysFiles_EmitImpact).  Played server-side via sound() so all players hear.
-	precache_sound("sounds/impacts/metal_box_impact_soft1.wav");
-	precache_sound("sounds/impacts/metal_box_impact_soft2.wav");
-	precache_sound("sounds/impacts/metal_box_impact_soft3.wav");
-	precache_sound("sounds/impacts/metal_box_impact_hard1.wav");
-	precache_sound("sounds/impacts/metal_box_impact_hard2.wav");
-	precache_sound("sounds/impacts/metal_box_impact_hard3.wav");
-	precache_sound("sounds/impacts/metal_box_scrape_rough_loop1.wav");   // looping scrape while sliding
-	precache_sound("sounds/null.wav");                                   // silent sample to cancel the scrape loop
-	// Cabinet +use grab "clunk" (Carry_TryGrab).
-	precache_sound("sounds/impacts/metal_solid_impact_soft1.wav");
-	precache_sound("sounds/impacts/metal_solid_impact_soft2.wav");
-	precache_sound("sounds/impacts/metal_solid_impact_soft3.wav");
-	// Weapon-drop FX sound set (po_fx_soundset 1): impacts + looping scrape.
-	precache_sound("sounds/impacts/weapon_impact_soft1.wav");
-	precache_sound("sounds/impacts/weapon_impact_soft2.wav");
-	precache_sound("sounds/impacts/weapon_impact_soft3.wav");
-	precache_sound("sounds/impacts/weapon_impact_hard1.wav");
-	precache_sound("sounds/impacts/weapon_impact_hard2.wav");
-	precache_sound("sounds/impacts/weapon_impact_hard3.wav");
-	precache_sound("sounds/impacts/soda_can_scrape_rough_loop1.wav");
+	// Prop contact sounds (impact soft/hard, scrape loop, grab clunk, bullet ping) are
+	// precached by MatSnd_PrecacheAll() (sh_matsounds.qc) from scripts/materialsounds.txt
+	// — see precache_everything() in sh_customdefs.qc.  The 18-call hand-list that used to
+	// live here was 1:1 coupled to the deleted PhysObj_FxSound if-ladder.
+	// sounds/null.wav (the scrape-loop canceller) is precached at sh_customdefs.qc's top.
 	// ODE attach is deferred to the first StartFrame tick — the plug_load
 	// localcmd queued in worldspawn hasn't run yet at precache time, so
 	// calling physics_supported(TRUE) here returns 0 and the world's RBE
@@ -242,6 +225,15 @@ void(entity b, float obj_mass, float obj_friction) PhysObj_Setup =
 
 	b.po_is_phys = TRUE;
 
+	// Contact-sound set (scripts/materialsounds.txt) — ONE place for every phys object;
+	// all six spawn paths (barrel / can / cabinet / prop_physics / car / weapon drop)
+	// route through here, and all six assign po_material before calling.  Assigned
+	// UNCONDITIONALLY, not just when unset: .float defaults to 0 and 0 is a VALID set
+	// index, so a "leave it if non-zero" test could never tell "unset" from "set 0".
+	// PropMat_FxSound(-1) is "" -> MatSnd_SetIndex("") is -1 -> MatSnd_Pick falls back to
+	// the table's `default` set.  Cars override this right after the call.
+	b.po_sndset = b.po_is_weapon_drop ? ms_weapon_set : MatSnd_SetForPropMat(b.po_material);
+
 	// +use: free props (barrel/can) get the shove; the cabinet (grabbed in
 	// SV_PlayerTryUse before .use) and weapon drops (+use = pickup-swap) carry no
 	// .use, so +use falls through to their own handling.
@@ -276,10 +268,10 @@ string() PhysBarrel_RandomModel =
 {
 	float pick = floor(random() * 3);
 	if (pick <= 0)
-		return "models/mega/containers/metal_barrel_mp_1.iqm";
+		return "models/props/containers/mega/metal_barrel_mp_1.iqm";
 	if (pick == 1)
-		return "models/mega/containers/metal_barrel_mp_2.iqm";
-	return "models/mega/containers/metal_barrel_mp_3.iqm";
+		return "models/props/containers/mega/metal_barrel_mp_2.iqm";
+	return "models/props/containers/mega/metal_barrel_mp_3.iqm";
 };
 
 // Same idea for the can (spawncan / phys_can).  This replaces the old hardcoded
@@ -291,14 +283,14 @@ string() PhysCan_RandomModel =
 {
 	float pick = floor(random() * 5);
 	if (pick <= 0)
-		return "models/mega/props/tin_can_mp_1_rusty.iqm";
+		return "models/props/containers/mega/tin_can_mp_1_rusty.iqm";
 	if (pick == 1)
-		return "models/mega/props/tin_can_mp_1_rusty_1.iqm";
+		return "models/props/containers/mega/tin_can_mp_1_rusty_1.iqm";
 	if (pick == 2)
-		return "models/bunkers/canned_food_3.iqm";
+		return "models/props/containers/bunkers/canned_food_3.iqm";
 	if (pick == 3)
-		return "models/bunkers/canned_food_4.iqm";
-	return "models/bunkers/canned_food_5.iqm";
+		return "models/props/containers/bunkers/canned_food_4.iqm";
+	return "models/props/containers/bunkers/canned_food_5.iqm";
 };
 
 float(entity playerent, float changedflags) phys_files_Send;   // defined below; used by the barrel spawner
@@ -609,39 +601,23 @@ void(entity prop, vector dir, float bucket) PhysFiles_SmokeAlong =
 	PhysFiles_SmokeEvent(point, normal, bucket);
 };
 
-// Per-object FX sound SET — impact (soft/hard, idx 1-3) + the scrape loop — picked by
-// prop.po_fx_soundset so different objects sound different.  Smoke/spark PARTICLES are
-// universal; only these SOUND paths vary.
-//   setid 0 = metal box (barrel / can / cabinet): metal_box_impact_*, metal_box_scrape
-//   setid 1 = weapon drop                        : weapon_impact_*,    soda_can_scrape
-const float FXSND_IMPACT_SOFT = 0;
-const float FXSND_IMPACT_HARD = 1;
-const float FXSND_SCRAPE      = 2;
-string(float setid, float kind, float idx) PhysObj_FxSound =
-{
-	if (setid == 1)   // weapon drops
-	{
-		if (kind == FXSND_SCRAPE)      return "sounds/impacts/soda_can_scrape_rough_loop1.wav";
-		if (kind == FXSND_IMPACT_HARD) return sprintf("sounds/impacts/weapon_impact_hard%g.wav", idx);
-		return sprintf("sounds/impacts/weapon_impact_soft%g.wav", idx);
-	}
-	// 0 = metal box (default — barrel / can / cabinet)
-	if (kind == FXSND_SCRAPE)      return "sounds/impacts/metal_box_scrape_rough_loop1.wav";
-	if (kind == FXSND_IMPACT_HARD) return sprintf("sounds/impacts/metal_box_impact_hard%g.wav", idx);
-	return sprintf("sounds/impacts/metal_box_impact_soft%g.wav", idx);
-};
+// Per-object contact sounds come from .po_sndset — an index into scripts/materialsounds.txt,
+// resolved once at spawn in PhysObj_Setup (sh_matsounds.qc).  This replaced a hardcoded
+// 2-set if-ladder (PhysObj_FxSound, keyed on .po_fx_soundset) with a HARDCODED 3-variant
+// count; the VARIANT COUNT now comes from the table too, so `wood hard` picks from 20 wavs
+// and `metal hard` from 6 with no code change.  Smoke/spark PARTICLES stay universal; only
+// the SOUND paths vary by material.  Kinds are MSND_HARD / MSND_SOFT / MSND_SCRAPE.
 
-// A real surface impact: a soft or hard sound (by speed, from the object's sound set) +
+// A real surface impact: a soft or hard sound (by speed, from the object's material) +
 // a smoke puff at the struck surface.  Rate-limited by pp_impact_cooldown so a tumbling/
 // bouncing prop makes one sound.  `dir` is the impact direction (approach velocity).
 void(entity prop, float speed, vector dir) PhysFiles_EmitImpact =
 {
 	prop.pp_impact_cooldown = time + pp_cached_impact_cooldown;
 	float hard = (speed >= pp_cached_impact_hard_speed);
-	float n = bound(1, floor(random() * 3) + 1, 3);
-	string snd = PhysObj_FxSound(prop.po_fx_soundset,
-	                             hard ? FXSND_IMPACT_HARD : FXSND_IMPACT_SOFT, n);
-	sound(prop, CHAN_BODY, snd, 1.0, ATTN_NORM);
+	string snd = MatSnd_Pick(prop.po_sndset, hard ? MSND_HARD : MSND_SOFT);
+	if (snd != "")
+		sound(prop, CHAN_BODY, snd, 1.0, ATTN_NORM);
 	PhysFiles_SmokeAlong(prop, dir, hard ? 2 : 1);
 };
 
@@ -669,10 +645,21 @@ void(entity prop, float speed) PhysFiles_StartScrape =
 {
 	prop.pp_slide_active_until = time + 0.2;   // grace before the loop cuts after sliding stops
 	float vol = PhysFiles_ScrapeVol(speed);
-	string scrapesnd = PhysObj_FxSound(prop.po_fx_soundset, FXSND_SCRAPE, 0);
+	// Variant COUNT comes from the material's table rows.  A material with no scrape loop
+	// slides SILENTLY (the dust puffs from PhysFiles_DoSlide still fire, and pp_scrape_active
+	// stays FALSE so PhysFiles_StopScrape correctly no-ops).  glass and rubber ship no scrape
+	// wavs but BORROW one in materialsounds.txt, so in practice this only trips on a missing
+	// or typo'd data file — MatSnd_Pick deliberately has NO kind-fallback for SCRAPE, because
+	// a one-shot forced under SOUNDFLAG_FORCELOOP machine-guns.
+	float nvar = MatSnd_Count(prop.po_sndset, MSND_SCRAPE);
+	if (nvar <= 0)
+		return;
 	if (!prop.pp_scrape_active)
 	{
-		sound(prop, CHAN_PHYSPROP_SCRAPE, scrapesnd,
+		// Latch the variant so the volume re-issue below replays the SAME sample.
+		prop.pp_scrape_var = floor(random() * nvar);
+		if (prop.pp_scrape_var >= nvar) prop.pp_scrape_var = nvar - 1;
+		sound(prop, CHAN_PHYSPROP_SCRAPE, MatSnd_Path(prop.po_sndset, MSND_SCRAPE, prop.pp_scrape_var),
 		      vol, ATTN_NORM, 100, SOUNDFLAG_FORCELOOP | SOUNDFLAG_FOLLOW);
 		prop.pp_scrape_active     = TRUE;
 		prop.pp_scrape_vol        = vol;
@@ -681,7 +668,7 @@ void(entity prop, float speed) PhysFiles_StartScrape =
 	else if (pp_cached_scrape_track && time >= prop.pp_scrape_revol_next
 	         && fabs(vol - prop.pp_scrape_vol) >= 0.12)
 	{
-		sound(prop, CHAN_PHYSPROP_SCRAPE, scrapesnd,
+		sound(prop, CHAN_PHYSPROP_SCRAPE, MatSnd_Path(prop.po_sndset, MSND_SCRAPE, prop.pp_scrape_var),
 		      vol, ATTN_NORM, 100, SOUNDFLAG_FORCELOOP | SOUNDFLAG_FOLLOW);
 		prop.pp_scrape_vol        = vol;
 		prop.pp_scrape_revol_next = time + 0.12;
@@ -1608,7 +1595,7 @@ float(entity playerent, float changedflags) phys_files_Send =
 	WriteByte(MSG_ENTITY, bound(0, rint(self.colormod_z * 255), 255));
 
 	// Skin index (livery swap) — the client mirror renders self.skin, which selects a `<model>_<N>.skin`
-	// file (surface→shader remap).  For the outrun car: 0 = clean, 1 = dirty (models/outrun/car_1.skin).
+	// file (surface→shader remap).  For the outrun car: 0 = clean, 1 = dirty (models/props/misc/outrun/car_1.skin).
 	// MUST be read in the SAME wire position in CSQC_PhysProp_Update (cl_physprop.qc).
 	WriteByte(MSG_ENTITY, bound(0, rint(self.skin), 255));
 
@@ -2109,11 +2096,13 @@ float(entity player, entity prop) Carry_TryGrab =
 	prop.pp_prev_origin    = prop.origin;   // seed so the first steady-carry frame's delta is clean (no false bang)
 	prop.pp_impact_cooldown = time + cvar("sv_carry_grab_time");  // no bang during the pull-in
 	PhysFiles_StopScrape(prop);   // if it was sliding when grabbed, the think stops — kill the loop now
-	// Grab "clunk" — a soft solid-metal thunk as you heft the cabinet.  CHAN_BODY is
-	// free here: the impact detector is suppressed during the pull-in (cooldown set
-	// above), so this is the only CHAN_BODY one-shot on grab.
-	sound(prop, CHAN_BODY, sprintf("sounds/impacts/metal_solid_impact_soft%g.wav",
-	      bound(1, floor(random() * 3) + 1, 3)), 1.0, ATTN_NORM);
+	// Grab "clunk" — a soft contact in the object's OWN material as you heft it.  CHAN_BODY
+	// is free here: the impact detector is suppressed during the pull-in (cooldown set
+	// above), so this is the only CHAN_BODY one-shot on grab.  Was an inline sprintf on
+	// metal_solid_impact_soft1-3 that bypassed the FX sound system entirely.
+	string grabsnd = MatSnd_Pick(prop.po_sndset, MSND_SOFT);
+	if (grabsnd != "")
+		sound(prop, CHAN_BODY, grabsnd, 1.0, ATTN_NORM);
 	prop.pp_was_touching = FALSE; // first carry contact is a fresh bang, not a continued drag
 	// Disable gravity while carried (FTE: gravity scale in (0, 0.01] = OFF).  The
 	// velocity servo positions the prop, so gravity is just a downward disturbance —

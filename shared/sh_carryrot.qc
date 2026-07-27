@@ -286,6 +286,20 @@ void CarryRot_SpinBasis(vector F, vector U, vector axis, float deg)
     CarryRot_Ortho(rF, rU);
 }
 
+// Prop Hunt: compose a disguised player's stored carry-frame basis (ph_rel_fwd/up)
+// into world .angles at frame yaw `yaw0` (= v_angle_y + 180 live, or ph_locked_yaw +
+// 180 while committed).  Shared so the server hitbox pin / visual proxy and the CSQC
+// predraw all build the identical orientation.  Falls back to a plain upright facing
+// (angles_y = yaw0 - 180, i.e. v_angle_y) when the basis is unset/degenerate — e.g. a
+// proxy that hasn't yet received a pose, so it renders exactly like the old flat yaw.
+vector PH_PoseAngles(vector relF, vector relU, float yaw0)
+{
+    if (relF * relF < 0.5)
+        return [0, yaw0 - 180, 0];
+    return CarryRot_Angles(CarryRot_FromFrame(relF, yaw0),
+                           CarryRot_FromFrame(relU, yaw0));
+}
+
 // Interpolate between two bases -> crot_oF / crot_oU.
 // A per-component EULER lerp (Carry_AnglesLerp) is wrong for this: from an arbitrary
 // tumbled start pose it takes visibly wrong paths, and a 0<->180 roll passes straight

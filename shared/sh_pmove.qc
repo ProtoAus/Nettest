@@ -327,44 +327,109 @@ float(string name, float fallback) PM_ReadMovevar;
 float() PM_TryEngageSlide;
 
 // Footstep sound catalogue — a flat byte enum so CSQC_EVENT_FOOTSTEP_SOUND
-// can carry a 1-byte index instead of the full ~24-byte sound path.
-// Layout: step1..step4, waterstep1..waterstep10, ladder1..ladder4, metal_box_footstep1..4.
-// Keep FS_SoundName() below in lock-step with this layout.
-const float FS_SOUND_STEP_BASE    = 0;
-const float FS_SOUND_STEP_COUNT   = 4;
-const float FS_SOUND_WATER_BASE   = 4;
-const float FS_SOUND_WATER_COUNT  = 10;
-const float FS_SOUND_LADDER_BASE  = 14;
-const float FS_SOUND_LADDER_COUNT = 4;
-const float FS_SOUND_METAL_BASE   = 18;   // walking on the phys_files cabinet
-const float FS_SOUND_METAL_COUNT  = 4;
-const float FS_SOUND_COUNT        = 22;
+// can carry a 1-byte index instead of the full ~30-byte sound path.
+//
+// THIS ENUM IS THE WIRE CONTRACT.  The byte written in PM_EmitStepSound is decoded by
+// FS_SoundName() on the receiver, so the layout MUST be compile-time identical in both
+// VMs.  That is exactly why footsteps are NOT in scripts/materialsounds.txt: a client
+// with a stale (or missing — scripts/*.txt are loose files, in no pk3) data file would
+// decode the same byte into a different wav, or none at all.  Bases 0..21 are FROZEN so
+// old bytes keep decoding correctly; new sets only ever append.
+//
+// A material only gets its own footstep set if it ships REAL, purpose-recorded footstep
+// wavs: metal, wood, glass, plaster.  Everything else — cardboard, concrete, plastic,
+// rubber, dirt, and any unmatched surface — keeps the generic sounds/player/step1-4.
+// (An earlier pass borrowed those materials' *_impact_soft wavs as footsteps; they are
+// recorded as an OBJECT BEING SET DOWN, not as a footfall, and since `concrete` owns the
+// `*` catch-all in surfaceprops.txt that replaced the default footstep everywhere.
+// Reverted deliberately — do NOT reintroduce it.  Material accuracy for footsteps is only
+// worth having where a real footstep recording exists.)
+const float FS_SOUND_STEP_BASE       = 0;
+const float FS_SOUND_STEP_COUNT      = 4;
+const float FS_SOUND_WATER_BASE      = 4;
+const float FS_SOUND_WATER_COUNT     = 10;
+const float FS_SOUND_LADDER_BASE     = 14;
+const float FS_SOUND_LADDER_COUNT    = 4;
+const float FS_SOUND_METAL_BASE      = 18;
+const float FS_SOUND_METAL_COUNT     = 4;
+const float FS_SOUND_WOOD_BASE       = 22;
+const float FS_SOUND_WOOD_COUNT      = 4;
+const float FS_SOUND_GLASS_BASE      = 26;
+const float FS_SOUND_GLASS_COUNT     = 4;
+const float FS_SOUND_PLASTER_BASE    = 30;
+const float FS_SOUND_PLASTER_COUNT   = 4;
+const float FS_SOUND_COUNT           = 34;   // still one byte
 
 string(float idx) FS_SoundName =
 {
-    if (idx >= FS_SOUND_STEP_BASE && idx < FS_SOUND_STEP_BASE + FS_SOUND_STEP_COUNT)
-        return strcat("sounds/player/step", itos(idx - FS_SOUND_STEP_BASE + 1), ".wav");
-    if (idx >= FS_SOUND_WATER_BASE && idx < FS_SOUND_WATER_BASE + FS_SOUND_WATER_COUNT)
-        return strcat("sounds/player/waterstep", itos(idx - FS_SOUND_WATER_BASE + 1), ".wav");
-    if (idx >= FS_SOUND_LADDER_BASE && idx < FS_SOUND_LADDER_BASE + FS_SOUND_LADDER_COUNT)
-        return strcat("sounds/player/ladder", itos(idx - FS_SOUND_LADDER_BASE + 1), ".wav");
-    if (idx >= FS_SOUND_METAL_BASE && idx < FS_SOUND_METAL_BASE + FS_SOUND_METAL_COUNT)
-        return strcat("sounds/impacts/metal_box_footstep", itos(idx - FS_SOUND_METAL_BASE + 1), ".wav");
+    if (idx >= FS_SOUND_STEP_BASE      && idx < FS_SOUND_STEP_BASE      + FS_SOUND_STEP_COUNT)
+        return strcat("sounds/player/step",      itos(idx - FS_SOUND_STEP_BASE      + 1), ".wav");
+    if (idx >= FS_SOUND_WATER_BASE     && idx < FS_SOUND_WATER_BASE     + FS_SOUND_WATER_COUNT)
+        return strcat("sounds/player/waterstep", itos(idx - FS_SOUND_WATER_BASE     + 1), ".wav");
+    if (idx >= FS_SOUND_LADDER_BASE    && idx < FS_SOUND_LADDER_BASE    + FS_SOUND_LADDER_COUNT)
+        return strcat("sounds/player/ladder",    itos(idx - FS_SOUND_LADDER_BASE    + 1), ".wav");
+    if (idx >= FS_SOUND_METAL_BASE     && idx < FS_SOUND_METAL_BASE     + FS_SOUND_METAL_COUNT)
+        return strcat("sounds/impacts/metal/metal_box_footstep",   itos(idx - FS_SOUND_METAL_BASE   + 1), ".wav");
+    if (idx >= FS_SOUND_WOOD_BASE      && idx < FS_SOUND_WOOD_BASE      + FS_SOUND_WOOD_COUNT)
+        return strcat("sounds/impacts/wood/wood_box_footstep",     itos(idx - FS_SOUND_WOOD_BASE    + 1), ".wav");
+    if (idx >= FS_SOUND_GLASS_BASE     && idx < FS_SOUND_GLASS_BASE     + FS_SOUND_GLASS_COUNT)
+        return strcat("sounds/impacts/glass/glass_sheet_step",     itos(idx - FS_SOUND_GLASS_BASE   + 1), ".wav");
+    if (idx >= FS_SOUND_PLASTER_BASE   && idx < FS_SOUND_PLASTER_BASE   + FS_SOUND_PLASTER_COUNT)
+        return strcat("sounds/impacts/plaster/drywall_footstep",   itos(idx - FS_SOUND_PLASTER_BASE + 1), ".wav");
     return "sounds/player/step1.wav";   // safe fallback on out-of-range idx
 };
 
-// Map a surfaceprops footstep-set name (Surf_FootstepName) to a FS_SOUND_* set.  Only "metal"
-// and the generic step set exist today; adding a set = new wavs + a FS_SOUND_*_BASE/COUNT + a
-// case here + the material's footstep token in scripts/surfaceprops.txt.
+// Precache the whole catalogue, derived from FS_SoundName so the enum above stays the
+// ONLY place a footstep path is written.  Replaces the hand-list in sh_customdefs.qc
+// (which compiles FIRST, hence the forward declaration there).
+void() FS_PrecacheAll =
+{
+    float i;
+    for (i = 0; i < FS_SOUND_COUNT; i = i + 1)
+        precache_sound(FS_SoundName(i));
+};
+
+// Map a sound-set name — surfaceprops col 3 (Surf_SoundSet) or propmaterials col 8
+// (PropMat_FxSound) — to a FS_SOUND_* set.  Only the four materials with real footstep
+// recordings have one; everything else (cardboard, concrete, plastic, rubber, dirt, "",
+// unknown) falls through to the generic step set.  Adding a set = new footstep wavs + a
+// FS_SOUND_*_BASE/COUNT + a case in FS_SoundName + a case here.
 float(string setname) PM_FootstepBase =
 {
-    if (setname == "metal") return FS_SOUND_METAL_BASE;
-    return FS_SOUND_STEP_BASE;
+    if (setname == "metal")     return FS_SOUND_METAL_BASE;
+    if (setname == "wood")      return FS_SOUND_WOOD_BASE;
+    if (setname == "glass")     return FS_SOUND_GLASS_BASE;
+    if (setname == "plaster")   return FS_SOUND_PLASTER_BASE;
+    // legacy / alias tokens that may still appear in a hand-edited data file
+    if (setname == "ceramic")                               return FS_SOUND_GLASS_BASE;
+    if (setname == "electrical" || setname == "electronic") return FS_SOUND_METAL_BASE;
+    if (setname == "weapon")                                return FS_SOUND_METAL_BASE;
+    return FS_SOUND_STEP_BASE;   // cardboard/concrete/plastic/rubber/dirt/"" /unknown
 };
 float(string setname) PM_FootstepCount =
 {
-    if (setname == "metal") return FS_SOUND_METAL_COUNT;
+    float b = PM_FootstepBase(setname);
+    if (b == FS_SOUND_METAL_BASE)     return FS_SOUND_METAL_COUNT;
+    if (b == FS_SOUND_WOOD_BASE)      return FS_SOUND_WOOD_COUNT;
+    if (b == FS_SOUND_GLASS_BASE)     return FS_SOUND_GLASS_COUNT;
+    if (b == FS_SOUND_PLASTER_BASE)   return FS_SOUND_PLASTER_COUNT;
     return FS_SOUND_STEP_COUNT;
+};
+
+// Is the entity under our feet one of the unified phys objects?  The SERVER has the
+// authoritative .po_is_phys flag (set in PhysObj_Setup); the CLIENT's mirrors ALL carry
+// classname "phys_files" (cl_physprop.qc) regardless of their server classname, so that
+// is the CSQC-side equivalent.  Weapon drops are excluded on BOTH sides (server via
+// po_is_weapon_drop, client because drops are "csqc_dropped_weapon") — too small to
+// stand on, and excluding them keeps SSQC/CSQC in exact lock-step.
+float(entity e) PM_GroundIsPhysObj =
+{
+    if (!e || e == world) return FALSE;
+#ifdef SSQC
+    return (e.po_is_phys && !e.po_is_weapon_drop);
+#else
+    return (e.classname == "phys_files");
+#endif
 };
 
 // ============================================================================
@@ -2626,6 +2691,7 @@ float pm_mv_cache_eye_height;
 float pm_mv_cache_gravity;
 float pm_mv_cache_maxspeed;
 float pm_mv_cache_shiftspeed;
+float pm_mv_cache_ph_prop_speed;   // mp_ph_prop_speed — disguised-prop maxspeed scale
 float pm_mv_cache_wepswap_transition;
 float pm_mv_cache_stopspeed;
 float pm_mv_cache_friction;
@@ -2692,6 +2758,7 @@ void() PM_RefreshMovevarCache =
     pm_mv_cache_gravity             = PM_ReadMovevarUncached("sv_gravity", 800);
     pm_mv_cache_maxspeed            = PM_ReadMovevarUncached("sv_maxspeed", 270);
     pm_mv_cache_shiftspeed          = PM_ReadMovevarUncached("sv_shiftspeed", 1.0);
+    pm_mv_cache_ph_prop_speed       = PM_ReadMovevarUncached("mp_ph_prop_speed", 1.0);
     pm_mv_cache_wepswap_transition  = PM_ReadMovevarUncached("sv_wepswap_speed_transition", 0.15);
     pm_mv_cache_stopspeed           = PM_ReadMovevarUncached("sv_stopspeed", 100);
     pm_mv_cache_friction            = PM_ReadMovevarUncached("sv_friction", 4);
@@ -2741,6 +2808,7 @@ float(string name, float fallback) PM_ReadMovevar =
     if (name == "sv_gravity")                  return pm_mv_cache_gravity;
     if (name == "sv_maxspeed")                 return pm_mv_cache_maxspeed;
     if (name == "sv_shiftspeed")               return pm_mv_cache_shiftspeed;
+    if (name == "mp_ph_prop_speed")            return pm_mv_cache_ph_prop_speed;
     if (name == "sv_wepswap_speed_transition") return pm_mv_cache_wepswap_transition;
     if (name == "sv_stopspeed")                return pm_mv_cache_stopspeed;
     if (name == "sv_friction")                 return pm_mv_cache_friction;
@@ -2834,6 +2902,19 @@ void PM_ReadMovevars()
     mv_maxspeed          = PM_ReadMovevar("sv_maxspeed", 270);
     mv_shiftspeed        = PM_ReadMovevar("sv_shiftspeed", 1.0);
 #endif
+
+    // Prop Hunt: a disguised hider lumbers at mp_ph_prop_speed of normal (default 0.5).
+    // ph_hull_height rides Wire B, so it is present on the server player AND the client's
+    // predicted player, and the multiplier is a pushed movevar read identically on both sides
+    // (PM_ReadMovevar → cache on CSQC / cvar on SSQC) — so the slowed cap is prediction-safe.
+    // Scales the wishspeed cap only (ground/air/water all clamp to mv_maxspeed); sprint still
+    // multiplies on top of the reduced base.
+    if (self.ph_hull_height > 0)
+    {
+        float ph_ms = PM_ReadMovevar("mp_ph_prop_speed", 1.0);
+        if (ph_ms > 0)
+            mv_maxspeed = mv_maxspeed * ph_ms;
+    }
 
     // Per-weapon weight scaling.  self is the player entity in both
     // SSQC and CSQC (= predicted_player during prediction), so reading
@@ -4949,16 +5030,24 @@ void() PM_UpdateStepSound =
         // gdir isn't in scope here, so recompute it (mirrors PM_CategorizePosition).
         vector gdir = self.gravshift_active ? self.gravitydir : '0 0 -1';
         traceline(pm_origin, pm_origin + gdir * 8192, MOVE_NOMONSTERS, self);
-        string fset = Surf_FootstepName(Surf_MaterialAtPoint(trace_ent, trace_endpos));
+        string fset = Surf_SoundSet(Surf_MaterialAtPoint(trace_ent, trace_endpos));
+        // Standing ON a physics prop → that PROP's material wins over the floor below it.
+        // pm_ground_ent was captured in PM_CategorizePosition.  This was a hardcoded
+        // phys_files/phys_barrel/phys_can classname test that forced METAL; now every prop
+        // sounds like what it is — and because CSQC mirrors ALL carry classname "phys_files"
+        // while the server keeps the real one, this also FIXES a prediction desync: standing
+        // on a prop_physics used to play metal locally and the floor material to everyone else.
+        entity ge = self.pm_ground_ent;
+        if (PM_GroundIsPhysObj(ge))
+        {
+            string gm = MatSnd_ModelPath(ge);
+            if (gm != "" && substring(gm, 0, 1) != "*")   // "*N" = inline BSP submodel, not a prop
+            {
+                string pset = PropMat_FxSound(PropMat_For(gm));
+                if (pset != "") fset = pset;
+            }
+        }
         snd_idx = PM_FootstepBase(fset) + floor(random() * PM_FootstepCount(fset));
-        // Standing on a metal phys prop → metal footsteps instead (overrides the surface below).
-        // pm_ground_ent was captured in PM_CategorizePosition; the cabinet/barrel/can keep their
-        // classname both server-side (sv_physprop.qc) and as the CSQC mirror, so SSQC + CSQC agree.
-        // (Dropped weapons are intentionally excluded — too small to stand on.)
-        if (self.pm_ground_ent.classname == "phys_files"
-            || self.pm_ground_ent.classname == "phys_barrel"
-            || self.pm_ground_ent.classname == "phys_can")
-            snd_idx = FS_SOUND_METAL_BASE + floor(random() * FS_SOUND_METAL_COUNT);
     }
     else
     {

@@ -13,9 +13,13 @@
 // Impact_ClassifyLocal) + footstep sound (sh_pmove.qc).
 //
 // File format (scripts/surfaceprops.txt), one material per line:
-//   mat <name> <footstep-set> <impact-mat> <texture-patterns...>
-//     footstep-set : metal|concrete|wood|dirt|...  (sh_pmove maps it to a sound set)
-//     impact-mat   : default|metal|wood|glass|flesh  (-> IMPACT_MAT_*)
+//   mat <name> <soundset> <impact-mat> <texture-patterns...>
+//     soundset     : a set name in scripts/materialsounds.txt (sh_matsounds.qc).
+//                    Drives BOTH the footstep set (sh_pmove.qc PM_FootstepBase)
+//                    and the bullet-impact ric (cl_bulletimpact.qc).  "dirt"
+//                    ships no wavs: generic footsteps + concrete rics via sndalias.
+//     impact-mat   : default|metal|wood|glass|flesh  (-> IMPACT_MAT_*).  PARTICLE
+//                    code only - deliberately coarse, NOT the sound key.
 //     patterns     : foo* (prefix) | *foo (suffix) | *foo* (substring) | foo (exact) | * (any)
 //   First matching pattern wins, so list SPECIFIC before GENERAL.  Unmatched
 //   textures fall back to the last material loaded (or IMPACT_MAT_DEFAULT if the
@@ -108,6 +112,15 @@ string(float mat) Surf_FootstepName =
 {
     if (mat < 0 || mat >= sp_mat_count) return "";
     return sp_mat_footstep[mat];
+};
+
+// material index -> SOUND-SET name (a set in scripts/materialsounds.txt).
+// Same column as Surf_FootstepName: col 3 is now "which material sound family is
+// this surface", which drives the footstep set AND the bullet-impact ric
+// (cl_bulletimpact.qc via MatSnd_SetForImpact).  "" => nothing resolves.
+string(float mat) Surf_SoundSet =
+{
+    return Surf_FootstepName(mat);
 };
 
 // material index -> display name (for the debug readout).

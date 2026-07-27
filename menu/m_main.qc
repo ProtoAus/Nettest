@@ -156,7 +156,7 @@ void() m_init =
 	setcursormode(TRUE,"gfx/xhair", [16, 16], cvar("vid_conautoscale"));
 	menu_font = loadfont("hud", "gfx/RobotoEB", "8 12 16 18 24 36 48 60 72", -1, 0, 0);
 	current_menu = MENU_MAIN;
-	localcmd("set _nettest_menu_active 0\n");
+	localcmd("set _quakers_menu_active 0\n");
 
 	// UI sound effects for the floating main menu — hover-enter
 	// plays click.ogg, click registers play submit.ogg.  See
@@ -416,14 +416,14 @@ void() m_close =
 	Menu_SaveConfig();
 	setkeydest(0);
 	menu_active = FALSE;
-	localcmd("set _nettest_menu_active 0\n");
+	localcmd("set _quakers_menu_active 0\n");
 };
 
 void() m_open =
 {
 	setkeydest(2);
 	menu_active = TRUE;
-	localcmd("set _nettest_menu_active 1\n");
+	localcmd("set _quakers_menu_active 1\n");
 };
 
 float(float evtype, float scanx, float chary, float devid) Menu_InputEvent =
@@ -509,5 +509,5 @@ void(float wantmode) m_toggle =
 void() m_shutdown =
 {
 	Menu_SaveConfig();
-	localcmd("set _nettest_menu_active 0\n");
+	localcmd("set _quakers_menu_active 0\n");
 };

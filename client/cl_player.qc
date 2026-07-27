@@ -3197,11 +3197,14 @@ float() PlayerVis_LerpDuration =
 .vector vis_prev_origin;
 // Prop Hunt "march" bob: the disguise predraw returns before the normal
 // locomotion bookkeeping (vis_prev_origin at ~:4017), so the prop-waddle keeps
-// its OWN distance-phase accumulator + previous-origin here.  ph_bob_phase
-// advances by horizontal distance travelled (mirrors the leg cadence) → a
-// sin() roll rock + |sin()| vertical hop, both speed-scaled.  Cosmetic only.
+// its OWN distance-phase accumulator here.  ph_bob_phase advances by distance
+// travelled derived from SPEED x dt (NOT the origin delta — the proxy origin is
+// velocity-extrapolated and micro-corrects each snapshot, which stuttered the
+// cadence) → a sin() roll rock about the DIRECTION OF TRAVEL + a |sin()| vertical
+// hop, both speed-scaled.  Cosmetic only.
 .float  ph_bob_phase;
-.vector ph_bob_prev_origin;
+.vector ph_bob_prev_origin;   // (retained; no longer read by the bob)
+.float  ph_bob_prev_time;     // cltime of the last bob step (for the speed x dt phase advance)
 .float vis_last_anim_top;
 .float vis_last_anim_bottom;
 .float vis_aim_yaw;          // server-sent aim direction (never modified by predraw)
@@ -3800,54 +3803,72 @@ float() CSQC_PlayerVisual_Predraw =
 		// (Player_VisualProxy_Sync freezes it while ph_yaw_locked).  Local +
 		// unlocked: the live camera yaw so your own prop doesn't lag the mouse
 		// by a round-trip in third person.
-		float show_yaw = self.vis_aim_yaw;
+		// ---- PROP ORIENTATION (full 3-axis pose) ----
+		// Local owner: a client-PREDICTED zero-ping pose (the PropRot module drives the
+		// basis while you hold the rotate key; loose = yaw-follows-view, committed =
+		// frozen).  Everyone else: the server-composed full pose (PH_PoseAngles) already
+		// sits on self.angles from the Wire-A POSE section — leave it be.
 		if (self.vis_owner_entnum == player_localentnum && !self.vis_is_dead
-		    && predicted_player && csqc_prediction_valid && !predicted_player.ph_yaw_locked)
+		    && csqc_prediction_valid && PropRot_HaveLocalPose())
 		{
 			vector ph_va = getproperty(VF_CL_VIEWANGLES);
-			show_yaw = ph_va_y;
+			self.angles = PropRot_LocalPoseAngles(ph_va_y);
 		}
-		self.angles_x = 0;
-		self.angles_y = show_yaw;
-		self.angles_z = 0;
 
 		// ---- PROP MARCH BOB ----
-		// A funny South-Park waddle: rock the prop left/right (roll) with a small
-		// per-step vertical hop, cadence + amplitude tied to movement speed — the
-		// way the player model's legs cycle faster when you move faster.  Purely
-		// cosmetic: it touches ONLY the render angles/origin (restored below), never
-		// the collision hull (the separate predicted entity) or the networked origin.
-		// Runs for every viewer (local third-person + remote) since self.velocity is
-		// populated on both.  Skipped on a corpse (a dead prop shouldn't waddle) and
-		// when cl_prop_bob is off.
+		// Rock the prop left/right (roll) + a small per-step vertical hop, cadence +
+		// amplitude tied to movement speed — a South-Park waddle layered ON TOP of the
+		// base pose above.  DAMPED as the prop tilts off upright (a lying prop shouldn't
+		// waddle).  Purely cosmetic: touches only render angles/origin (restored below),
+		// never the collision hull or the networked origin.  Runs for every viewer.
 		float bob_hop = 0;
 		if (cvar("cl_prop_bob") && !self.vis_is_dead)
 		{
 			vector bob_vel = self.velocity; bob_vel_z = 0;
 			float bob_speed = vlen(bob_vel);
 
-			// Phase advances by HORIZONTAL distance travelled (total 2D, so
-			// strafing waddles too), matching the leg foot-clock's distance basis.
-			vector bob_d = self.origin - self.ph_bob_prev_origin; bob_d_z = 0;
-			self.ph_bob_prev_origin = self.origin;
-			float bob_dist = bound(0, vlen(bob_d), 64);	// clamp teleport / respawn / PVS-rejoin spikes
+			// Phase advances by horizontal distance travelled, but from SPEED x dt rather
+			// than the frame-to-frame origin delta: the visual proxy is velocity-extrapolated
+			// between snapshots (~:2802) and its origin micro-corrects on each one, which made
+			// sampling the origin stutter the cadence.  Speed is smooth, so speed*dt is smooth.
+			float bob_dt = bound(0, cltime - self.ph_bob_prev_time, 0.1);	// clamp hitches / first frame
+			self.ph_bob_prev_time = cltime;
 
 			float bob_stride = cvar("cl_prop_bob_stride");
 			if (bob_stride <= 0) bob_stride = 40;
-			self.ph_bob_phase = self.ph_bob_phase + bob_dist / bob_stride;
+			self.ph_bob_phase = self.ph_bob_phase + (bob_speed * bob_dt) / bob_stride;
 
 			// Amplitude eases in with speed (same 0..250 scale the leg twist uses)
 			// so a still prop is dead upright and a sprinting one rocks fully.
 			float bob_amp = bound(0, bob_speed / 250, 1);
 			float bob_s   = sin(self.ph_bob_phase);
-			self.angles_z = cvar("cl_prop_bob_roll") * bob_amp * bob_s;	// roll rock (deg)
-			bob_hop = cvar("cl_prop_bob_hop") * bob_amp * fabs(bob_s);	// hop peaks at each roll extreme
+			// Uprightness from the base pose's true (mesh) up vector: full standing,
+			// ->0 lying on its side, so a posed-flat prop neither rocks nor hops.
+			CarryRot_Axes(self.angles);
+			float bob_up = bound(0, crot_Z_z, 1);
+
+			// WADDLE ALIGNED TO TRAVEL.  Rock the prop left/right about its DIRECTION OF
+			// MOTION, not its facing — so it always "marches forward" the way it is actually
+			// moving (strafing too), instead of rocking about a fixed facing axis.  Spin the
+			// base-pose basis (crot_X/crot_Z, set by CarryRot_Axes just above) about the unit
+			// horizontal travel vector.  Below a walking speed the travel direction is
+			// meaningless (and amp ~0), so leave the pose flat.
+			float bob_roll = cvar("cl_prop_bob_roll") * bob_amp * bob_s * bob_up;	// signed rock (deg)
+			if (bob_speed > 8 && bob_roll != 0)
+			{
+				vector bob_fwd = bob_vel * (1 / bob_speed);	// unit horizontal travel dir
+				vector bob_pF  = crot_X;
+				vector bob_pU  = crot_Z;
+				CarryRot_SpinBasis(bob_pF, bob_pU, bob_fwd, bob_roll);	// -> crot_oF / crot_oU
+				self.angles = CarryRot_Angles(crot_oF, crot_oU);
+			}
+			bob_hop = cvar("cl_prop_bob_hop") * bob_amp * fabs(bob_s) * bob_up;	// hop peaks at each roll extreme
 		}
 		else
 		{
-			// Keep prev-origin fresh while idle/dead so the first moving frame
-			// after standing still doesn't see a huge distance delta.
-			self.ph_bob_prev_origin = self.origin;
+			// Keep the bob clock fresh while idle/dead so the first moving frame after
+			// standing still doesn't advance the phase by a huge dt.
+			self.ph_bob_prev_time = cltime;
 		}
 
 		self.scale = (self.vis_disguise_scale > 0) ? self.vis_disguise_scale : 1;
@@ -3862,13 +3883,34 @@ float() CSQC_PlayerVisual_Predraw =
 		self.renderflags &= ~(RF_EXTERNALMODEL | RF_FPFADE);	// no fp-body treatment on a prop
 		if (self.vis_weapon_ent)
 			self.vis_weapon_ent.alpha = -1;	// never show a gun stuck to a crate
-		BlobShadow_Emit(self);	// BEFORE the hop offset → the ground shadow stays planted
-		// March hop: nudge the RENDER origin up, draw, then restore immediately.  The
-		// disguise branch doesn't run the normal vis_prev_origin bookkeeping and the
-		// proxy is velocity-extrapolated between snapshots (~:2802), so an un-restored
-		// offset would accumulate into drift.  Restore-after-addentity keeps it render-only.
+		BlobShadow_Emit(self);	// at the collision origin (feet) → the ground shadow stays planted
+		// FLOOR-CONTACT RE-GROUND + march hop.  A tilted prop pivots about the player's
+		// feet, so its mesh would otherwise sink/float; shift the RENDER origin so the
+		// rotated box rests its BOTTOM on the floor and centres its footprint on the pivot
+		// (the tilted analogue of the possess feet-plant), then add the hop, draw, restore.
+		// Render-only (save/restore) — never touches the collision hull or the networked
+		// origin; the proxy is velocity-extrapolated between snapshots (~:2802) so an
+		// un-restored shift would drift.  Uses the disguise hull box (self.mins/maxs) as
+		// the prop box.  NOTE (Phase 1): the SERVER hitmesh is still anchored at the feet,
+		// so hitreg on a heavily-posed prop can lag the visual until Phase 2 grounds the
+		// collision too.  Upright → cofs/rhalf cancel to ~0, so a standing prop is unmoved.
+		// Use the PH HULL box (from the IDENTITY wire), NOT self.mins/maxs: the setmodelindex
+		// above resets bounds to the raw MODEL box on a fresh-disguise frame (bounds aren't
+		// re-setsize'd until the next snapshot), which would flicker the X/Y centring.  The
+		// hull fields are always current, so this is transient-free.
+		vector pg_hmins = PH_HullMins(self);
+		vector pg_hmaxs = PH_HullMaxs(self);
+		vector pg_cofs  = CarryRot_CenterOfs(self.angles, pg_hmins, pg_hmaxs);
+		vector pg_rhalf = CarryRot_RotatedHalf(self.angles, (pg_hmaxs - pg_hmins) * 0.5);
 		vector bob_base_org = self.origin;
-		self.origin_z = self.origin_z + bob_hop;
+		self.origin_x = self.origin_x - pg_cofs_x;
+		self.origin_y = self.origin_y - pg_cofs_y;
+		// Put the rotated box's BOTTOM at the ground.  The possess feet-plant keeps the hull
+		// bottom (origin_z + minz) on the floor, so the intended ground offset is minz; the
+		// rotated box's lowest point is at cofs_z - rhalf_z.  Shift = minz - cofs_z + rhalf_z,
+		// which is EXACTLY 0 when upright (cofs_z = minz + h/2, rhalf_z = h/2) for ANY minz —
+		// so a standing prop is unmoved regardless of where its model origin sits.
+		self.origin_z = self.origin_z + pg_hmins_z - pg_cofs_z + pg_rhalf_z + bob_hop;
 		addentity(self);
 		self.origin = bob_base_org;
 		return PREDRAW_NEXT;

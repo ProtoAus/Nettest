@@ -979,7 +979,15 @@ const float GAMEMODE_PROPHUNT    = 6;
 .float ph_hull_halfxy;			// dequantized hull half-width (1..16, never wider than the player hull)
 .float ph_hull_minz;			// hull bottom relative to origin (-64..63)
 .float ph_hull_height;			// hull height (4..72)
-.float ph_yaw_locked;			// +reload rotation lock: shown prop yaw frozen
+.float ph_yaw_locked;			// rotation COMMITTED flag: 0 = loose (yaw follows view), 1 = world-absolute pose held
+// Free 3-axis prop orientation, stored as a forward/up BASIS in the carry frame
+// (yaw0 = v_angle_y + 180), exactly like a carried prop's carry_rel_fwd/up.  Shared
+// so CSQC can predict the local player's pose zero-ping while holding the rotate key.
+// Composed to .angles via CarryRot_FromFrame + CarryRot_Angles (sh_carryrot.qc).
+// Seeded upright ('-1 0 0' fwd / '0 0 1' up) on PropHunt_Possess — the '-1' faces the
+// pose to angles_y = v_angle_y (matches the old flat facing; see PropHunt_Possess).
+.vector ph_rel_fwd;
+.vector ph_rel_up;
 
 vector(entity e) PH_HullMins =
 {
@@ -1023,6 +1031,12 @@ const float ROUND_PHASE_FREEZE    = 1;
 const float ROUND_PHASE_ACTIVE    = 2;
 const float ROUND_PHASE_ROUND_END = 3;
 const float ROUND_PHASE_MAP_END   = 4;
+
+// Forward decls — precache_everything() below calls into units that compile LATER.
+// This file is line 3 in both .src files; sh_matsounds.qc is line 10 and sh_pmove.qc
+// is line 20 (cl) / 150 (sv).  Missing these is a hard fteqcc error, not a silent bug.
+void() MatSnd_PrecacheAll;   // shared/sh_matsounds.qc — scripts/materialsounds.txt sound sets
+void() FS_PrecacheAll;       // shared/sh_pmove.qc     — the FS_SOUND_* footstep catalogue
 
 #ifdef SSQC
 void(entity owner) phys_barrel_spawn_infront;
@@ -1106,35 +1120,17 @@ void() precache_everything =
 	precache_sound("sounds/player/use.wav");
 	precache_sound("sounds/player/spray.wav");
 	precache_sound("sounds/player/weapondrop.wav");
-	precache_sound("sounds/player/step1.wav");
-	precache_sound("sounds/player/step2.wav");
-	precache_sound("sounds/player/step3.wav");
-	precache_sound("sounds/player/step4.wav");
-	// Metal footsteps for walking ON the filing-cabinet prop (phys_files) and the
-	// cabinet's OBB bullet-impact ricochets — both VMs precache (footstep multicast +
-	// CSQC pointsound).  See PM_UpdateStepSound (sh_pmove.qc) + CSQC_BulletImpact.
-	precache_sound("sounds/impacts/metal_box_footstep1.wav");
-	precache_sound("sounds/impacts/metal_box_footstep2.wav");
-	precache_sound("sounds/impacts/metal_box_footstep3.wav");
-	precache_sound("sounds/impacts/metal_box_footstep4.wav");
-	precache_sound("sounds/impacts/metal_solid_impact_bullet1.wav");
-	precache_sound("sounds/impacts/metal_solid_impact_bullet2.wav");
-	precache_sound("sounds/impacts/metal_solid_impact_bullet3.wav");
-	precache_sound("sounds/impacts/metal_solid_impact_bullet4.wav");
-	precache_sound("sounds/player/ladder1.wav");
-	precache_sound("sounds/player/ladder2.wav");
-	precache_sound("sounds/player/ladder3.wav");
-	precache_sound("sounds/player/ladder4.wav");
-	precache_sound("sounds/player/waterstep1.wav");
-	precache_sound("sounds/player/waterstep2.wav");
-	precache_sound("sounds/player/waterstep3.wav");
-	precache_sound("sounds/player/waterstep4.wav");
-	precache_sound("sounds/player/waterstep5.wav");
-	precache_sound("sounds/player/waterstep6.wav");
-	precache_sound("sounds/player/waterstep7.wav");
-	precache_sound("sounds/player/waterstep8.wav");
-	precache_sound("sounds/player/waterstep9.wav");
-	precache_sound("sounds/player/waterstep10.wav");
+	// Footsteps: the WHOLE FS_SOUND_* catalogue, derived from FS_SoundName() so the enum
+	// in sh_pmove.qc stays the ONLY place a footstep path is written.  Covers the generic
+	// step / waterstep / ladder sets AND all 8 material sets.  Both VMs (SSQC multicasts
+	// the byte and puts the names in the soundlist; CSQC plays them by name via
+	// localsound/pointsound).  Replaces the step1-4 / metal_box_footstep1-4 / ladder1-4 /
+	// waterstep1-10 literals that used to be listed here by hand.
+	FS_PrecacheAll();
+	// Per-material contact sounds (scripts/materialsounds.txt): server = every kind,
+	// client = bullet rics only.  Replaces the metal_solid_impact_bullet1-4 literals here
+	// and the 18-call hand-list that used to live in sv_physprop.qc.
+	MatSnd_PrecacheAll();
 	precache_sound("sounds/player/fallpain1.wav");
 	precache_sound("sounds/player/fallpain2.wav");
 	// sv_sliding random one-shot pool — PM_TryEngageSlide picks one of

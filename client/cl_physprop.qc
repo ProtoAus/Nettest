@@ -48,14 +48,14 @@ void() CSQC_PhysProp_ResolveIndexes =
     // MUST match PhysBarrel_RandomModel / PhysCan_RandomModel + phys_barrel_precache
     // (sv_physprop.qc) — a model missing from the precache list resolves 0 and is simply
     // never matched, which is safe (the type just falls back to the generic hit path).
-    pp_idx_barrel_1 = (float)getmodelindex("models/mega/containers/metal_barrel_mp_1.iqm");
-    pp_idx_barrel_2 = (float)getmodelindex("models/mega/containers/metal_barrel_mp_2.iqm");
-    pp_idx_barrel_3 = (float)getmodelindex("models/mega/containers/metal_barrel_mp_3.iqm");
-    pp_idx_can_1    = (float)getmodelindex("models/mega/props/tin_can_mp_1_rusty.iqm");
-    pp_idx_can_2    = (float)getmodelindex("models/mega/props/tin_can_mp_1_rusty_1.iqm");
-    pp_idx_can_3    = (float)getmodelindex("models/bunkers/canned_food_3.iqm");
-    pp_idx_can_4    = (float)getmodelindex("models/bunkers/canned_food_4.iqm");
-    pp_idx_can_5    = (float)getmodelindex("models/bunkers/canned_food_5.iqm");
+    pp_idx_barrel_1 = (float)getmodelindex("models/props/containers/mega/metal_barrel_mp_1.iqm");
+    pp_idx_barrel_2 = (float)getmodelindex("models/props/containers/mega/metal_barrel_mp_2.iqm");
+    pp_idx_barrel_3 = (float)getmodelindex("models/props/containers/mega/metal_barrel_mp_3.iqm");
+    pp_idx_can_1    = (float)getmodelindex("models/props/containers/mega/tin_can_mp_1_rusty.iqm");
+    pp_idx_can_2    = (float)getmodelindex("models/props/containers/mega/tin_can_mp_1_rusty_1.iqm");
+    pp_idx_can_3    = (float)getmodelindex("models/props/containers/bunkers/canned_food_3.iqm");
+    pp_idx_can_4    = (float)getmodelindex("models/props/containers/bunkers/canned_food_4.iqm");
+    pp_idx_can_5    = (float)getmodelindex("models/props/containers/bunkers/canned_food_5.iqm");
     // Filecabinet is a single IQM (the legacy .mdl fallback is gone — it never existed on disk).
     // Its bullet hit-test is a rotated oriented-box (see CSQC_PhysProp_RayBox), accurate when it tips.
     pp_idx_phys_files  = (float)getmodelindex("models/props/filecabinet/filecabinet.iqm");
@@ -1222,6 +1222,10 @@ void(entity car) Car_DrawDriver =
 // Resolved "weapons.metal_impact" effect id for the exhaust, cached once it comes back VALID
 // (>0).  Never caches a failure — see the resolve comment in Car_DrawExhaust.
 float g_car_exhaust_eid;
+// SAME effect, same caching rule, for the PROP contact smoke (CSQC_EVENT_PHYSPROP_IMPACT
+// buckets 0/1/2 in cl_main.qc, which compiles later).  A separate global so a failed
+// resolve in one path can never poison the other.
+float g_prop_smoke_eid;
 
 // Tailpipe exhaust — a metal-impact smoke puff (the one bullets use on metal) re-emitted each frame at
 // the recomputed tailpipe world-point, so it tracks the interpolated car with zero lag.  Rate scales with

@@ -24,6 +24,12 @@ entity(entity corpse, vector shotdir) CSQC_SpawnCorpseRagdoll;
 // here so cl_player/cl_weapons/cl_main can gate on them (ragdoll pattern).
 float() CSQC_PropHunt_LocalDisguised;	// local player currently disguised (third-person gate)
 void() PropHunt_DrawOverlays;			// seeker blindfold + hider hints (HUD pass)
+// Prop-rotate module (cl_prophunt_rotate.qc, compiles after cl_main-side helpers) —
+// the disguise predraw in cl_player.qc reads the local client-predicted pose from it.
+float()      PropRot_HaveLocalPose;			// 1 = a local disguise pose exists to render
+vector(float view_yaw) PropRot_LocalPoseAngles;	// composed 3-axis .angles for the local prop
+float(float evtype, float scanx, float chary, float devid) PropRot_InputEvent;	// CSQC_InputEvent hook
+void(float notmenu) PropRot_Frame;			// per-frame guard/timers (CSQC_UpdateView hook)
 
 // nettest interactive water ripples: an entity crossing / wading a liquid surface spawns an
 // expanding ring on the tessellated water (addwaterripple).  Per-entity latch + throttle fields,

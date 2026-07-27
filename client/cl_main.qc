@@ -285,13 +285,19 @@ noref void(float apiver, string enginename, float enginever) CSQC_Init =
 	// every particleeffectnum() call uses the "weapons.foo" prefix syntax
 	// which auto-loads particles/weapons.cfg on first miss (p_script.c:668).
 
+	// Material tables FIRST — precache_everything() walks the sound-set table
+	// (MatSnd_PrecacheAll).  These only do fopen/tokenize/strzone and depend on
+	// nothing precached above, so they are safe this early.  (They used to sit
+	// AFTER precache_everything(), which would have silently precached nothing.)
+	Surf_LoadMaterials();       // scripts/surfaceprops.txt   -> texture material table (sh_surfaceprops.qc)
+	PropMat_LoadMaterials();    // scripts/propmaterials.txt  -> prop material+weight table (sh_propmaterials.qc)
+	MatSnd_LoadSounds();        // scripts/materialsounds.txt -> per-material contact sound sets (sh_matsounds.qc)
+
 	precache_everything();
 	CSQC_PrecacheShells();
 	CSQC_PrecacheBreakables();
 	CSQC_BulletHolesInit();
 	CSQC_BlobShadow_ReregisterShaders();   // blob-shadow shader (also re-registered on vid_restart)
-	Surf_LoadMaterials();       // scripts/surfaceprops.txt -> texture material table (sh_surfaceprops.qc)
-	PropMat_LoadMaterials();    // scripts/propmaterials.txt -> prop material+weight table (sh_propmaterials.qc)
 	CSQC_TracersInit();
 	CSQC_Rope_Init();
 	CSQC_Scorch_Precache();
@@ -327,6 +333,8 @@ noref void(float apiver, string enginename, float enginever) CSQC_Init =
 	registercommand("surf_reloadmaterials"); // reload scripts/surfaceprops.txt live
 	registercommand("prop_material");        // print the phys-prop material + weight under the crosshair
 	registercommand("propmat_reloadmaterials"); // reload scripts/propmaterials.txt live (client table)
+	registercommand("matsnd_reloadsounds");  // reload scripts/materialsounds.txt live (client table)
+	registercommand("matsnd_dump");          // print the loaded sound sets / kinds / variant counts
 	registercommand("spawnragdoll");         // client-side Box3D ragdoll test (cl_ragdoll.qc)
 	registercommand("throwragdoll");         // launch a ragdoll in the aim direction (cl_ragdoll_throwspeed)
 	registercommand("throwsoldier");         // QUICK TEST: throw the Ratslayer soldier.md5mesh with its own doll
@@ -1111,6 +1119,10 @@ void(float width, float height, float menushown) CSQC_UpdateView =
 	// force-drop, death, spectate, prop removed).
 	Inspect_Frame(menushown);
 
+	// Prop Hunt rotation: seed/unseed on (un)disguise, promote pending taps -> lock toggle,
+	// hold -> free rotate, and unlock the view on every disguise-loss exit path.
+	PropRot_Frame(menushown);
+
 	// (nettest death ragdolls are now freed by their own CSQC_RagdollFreeThink, scheduled in
 	// CSQC_Ent_Remove — a drain here proved re-entrant with the render and still crashed.)
 
@@ -1302,8 +1314,9 @@ float(string cmd) CSQC_ConsoleCommand =
 			traceline(vorg, vorg + v_forward * 8192, MOVE_NOMONSTERS, world);
 			string tn = Surf_TexAtPoint(trace_ent, trace_endpos);   // Q1: resolve from the hit point
 			float  mi = Surf_MaterialFor(tn);
-			print(sprintf("surf: tex=\"%s\" -> material=%s  (impact_mat=%g footstep=\"%s\")\n",
-				tn, Surf_MatName(mi), Surf_ImpactMat(mi), Surf_FootstepName(mi)));
+			print(sprintf("surf: tex=\"%s\" -> material=%s  (impact_mat=%g soundset=\"%s\" -> set %g)\n",
+				tn, Surf_MatName(mi), Surf_ImpactMat(mi), Surf_SoundSet(mi),
+				MatSnd_SetIndex(Surf_SoundSet(mi))));
 			return TRUE;
 		}
 		case "surf_reloadmaterials":
@@ -1326,15 +1339,28 @@ float(string cmd) CSQC_ConsoleCommand =
 				return TRUE;
 			}
 			float pmi = PropMat_For(mn);
-			print(sprintf("prop: \"%s\" -> material=%s  mass=%g friction=%g restit=%g dampx=%g\n",
+			print(sprintf("prop: \"%s\" -> material=%s  mass=%g friction=%g restit=%g dampx=%g  sndset=%s\n",
 				mn, PropMat_Name(pmi), PropMat_Mass(pmi, trace_ent),
-				PropMat_Friction(pmi), PropMat_Restit(pmi), PropMat_DampMult(pmi)));
+				PropMat_Friction(pmi), PropMat_Restit(pmi), PropMat_DampMult(pmi),
+				MatSnd_SetName(MatSnd_SetForPropMat(pmi))));
 			return TRUE;
 		}
 		case "propmat_reloadmaterials":
 			PropMat_LoadMaterials();
 			print(sprintf("propmaterials reloaded: %g materials, %g patterns\n",
 				pm_mat_count, pm_pat_count));
+			return TRUE;
+		case "matsnd_reloadsounds":
+			// Client-side only: precache_sound after the server has spawned is invalid,
+			// so the SERVER picks scripts/materialsounds.txt up on map change.  CSQC
+			// precache_sound is legal post-init, so new bullet wavs land immediately.
+			MatSnd_LoadSounds();
+			MatSnd_PrecacheAll();
+			print(sprintf("materialsounds reloaded: %g sets, %g rows, %g aliases\n",
+				ms_set_count, ms_row_n, ms_alias_n));
+			return TRUE;
+		case "matsnd_dump":
+			MatSnd_Dump();
 			return TRUE;
 		case "spawnragdoll":	// client-side Box3D ragdoll test (explicit skel_ragupdate, self-diagnosing)
 			CSQC_SpawnRagdollTest();
@@ -1633,6 +1659,13 @@ float(float evtype, float scanx, float chary, float devid) CSQC_InputEvent =
 				return TRUE;
 		}
 	}
+
+	// Prop Hunt: while disguised, the Reload key drives prop rotation (tap = lock toggle,
+	// hold = free 3-axis rotate, double-tap = reset) — consumes the key so it never
+	// reloads.  Sits before carry-inspect (a disguised hider can't be carrying, but this
+	// keeps the disguise unambiguously in charge of the key).  Inert unless disguised.
+	if (PropRot_InputEvent(evtype, scanx, chary, devid))
+		return TRUE;
 
 	// Carry inspect mode (hold Reload while carrying a prop → the mouse rotates the prop
 	// and the wheel pushes/pulls it, instead of turning the player).  Sits LAST, just
@@ -2209,11 +2242,43 @@ void() CSQC_Parse_Event =
 				if (cm_sid != -1 && cm_sid != 0) pointparticles(cm_sid, pp_pos, pp_norm * 12,  1);
 			}
 			else
-			{   // prop physprop_smoke path (buckets 0 slide / 1 soft / 2 hard) — unchanged
-				float pp_sid = particleeffectnum("weapons.physprop_smoke");
+			{   // PROP bang/slide (buckets 0 slide / 1 soft / 2 hard).  Swapped from
+				// weapons.physprop_smoke to weapons.metal_impact — the SAME puff the
+				// prop_car tailpipe emits (Car_DrawExhaust, cl_physprop.qc) and the car
+				// buckets above already use.  Darker, slower, buoyant.
+				//
+				// metal_impact is a "+"-APPEND-ONLY effect: its base `r_part metal_impact`
+				// block is COMMENTED OUT in particles/impacts.cfg, so particleeffectquery
+				// returns "" for it and Impact_NormalizeEffect scrubs the validated global
+				// impact_effect_metal to 0.  Use the RAW particleeffectnum result guarded
+				// != -1 && != 0, exactly like the car buckets and Car_DrawExhaust, and only
+				// ever cache a VALID id.
+				float pp_sid = g_prop_smoke_eid;
+				if (pp_sid <= 0)
+				{
+					pp_sid = particleeffectnum("weapons.metal_impact");
+					if (pp_sid != -1 && pp_sid != 0)
+						g_prop_smoke_eid = pp_sid;
+				}
 				if (pp_sid != -1 && pp_sid != 0)
-					pointparticles(pp_sid, pp_pos, pp_norm * (pp_bucket == 2 ? 30 : 12),
-					               pp_bucket == 2 ? 2 : 1);
+				{
+					// DENSITY IS THE WHOLE POINT HERE.  metal_impact only reads as the
+					// tailpipe plume when it is emitted like one: Car_DrawExhaust runs
+					// 12-72 puffs/SECOND at a launch speed of 40-120 (cl_physprop.qc).
+					// A first pass at 1 puff per 0.18s slide tick at speed 5 was ~1/10th
+					// that density and barely moving, so the swap looked like nothing had
+					// changed at all — the particle has friction 1, so launch speed IS
+					// roughly how far it travels, and at 5 it just sat on the contact
+					// point as a dark blob.  Counts are a pure client-side multiplier on
+					// the effect's own `count 1`, so raising them costs ZERO bandwidth;
+					// the event RATE is the server's sv_physprop_slide_interval.
+					//   bucket 0 slide : a steady stream off the scraping face
+					//   bucket 1 soft  : one modest puff
+					//   bucket 2 hard  : a real burst
+					float pp_spd = (pp_bucket == 2) ? 55 : ((pp_bucket == 1) ? 32 : 24);
+					float pp_cnt = (pp_bucket == 2) ?  6 : ((pp_bucket == 1) ?  3 :  3);
+					pointparticles(pp_sid, pp_pos, pp_norm * pp_spd, pp_cnt);
+				}
 			}
 			break;
 		}
@@ -2229,11 +2294,31 @@ void() CSQC_Parse_Event =
 			dc_pos_y = readcoord();
 			dc_pos_z = readcoord();
 			float dc_size = readbyte();
-			float dc_sid = particleeffectnum("weapons.physprop_smoke");
+			// ONE burst, from the SAME effect as the prop_car tailpipe and the prop
+			// slide/bump contact smoke (weapons.metal_impact) so every prop smoke in
+			// the game is one look.  Shares g_prop_smoke_eid with the contact path
+			// (cl_physprop.qc) — same effect, same "+"-append-only caveat: the base
+			// r_part block is commented out in particles/impacts.cfg, so the validated
+			// global impact_effect_metal is 0 and only the RAW particleeffectnum result
+			// is usable.  Guard != -1 && != 0 and only ever cache a VALID id.
+			float dc_sid = g_prop_smoke_eid;
+			if (dc_sid <= 0)
+			{
+				dc_sid = particleeffectnum("weapons.metal_impact");
+				if (dc_sid != -1 && dc_sid != 0)
+					g_prop_smoke_eid = dc_sid;
+			}
 			if (dc_sid != -1 && dc_sid != 0)
 			{
-				float dc_count = bound(8, ceil(dc_size / 3), 24);
-				pointparticles(dc_sid, dc_pos, '0 0 24', dc_count);
+				// dc_size is the disguise hull HEIGHT (4..72), and it drives BOTH the
+				// particle count and the launch speed, so a cabinet genuinely poofs
+				// bigger than a tincan instead of just denser.  A single emit: splitting
+				// the burst across the hull's vertical span read as two separate puffs.
+				// Counts are lower than the old physprop_smoke burst because these
+				// particles are ~2x the size (scale 20->60 vs 12->27).
+				float dc_count = bound(6, ceil(dc_size / 4), 18);
+				float dc_up    = bound(20, dc_size * 0.7, 52);
+				pointparticles(dc_sid, dc_pos, '0 0 1' * dc_up, dc_count);
 			}
 			break;
 		}

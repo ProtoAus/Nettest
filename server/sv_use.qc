@@ -57,6 +57,12 @@ float(entity e) SV_IsPickableWeapon =
     if (e.touch != weapon_touch) return FALSE;
     if (e.solid == SOLID_NOT) return FALSE;
     if (e.weapon_solid_time > time) return FALSE;
+    // Prop Hunt: a weaponless hider must not have their +use CONSUMED by a gun they can
+    // never pick up — returning FALSE here lets the use fall through to the door/button
+    // behind it.  weapon_touch is the authoritative block; this is the UX half.
+    // (`self` is the using player on every path that reaches here — SV_TryWeaponPickup
+    // and SV_TryWeaponSwap are both called from SV_PlayerTryUse with self = player.)
+    if (PropHunt_HiderNoWeapons(self)) return FALSE;
     return TRUE;
 };
 
@@ -212,8 +218,10 @@ void() SV_PlayerTryUse =
         Carry_Drop(self);
         return;
     }
-    // Prop Hunt hiders never hand-carry props (their +use means "become it",
-    // and a hider lugging a crate around would give the disguise away anyway).
+    // Hiders don't take THIS generic grab path: an UNdisguised hider's +use means
+    // "become it" (handled above in PropHunt_TryPossess), and a DISGUISED hider's grab
+    // is done inside PropHunt_TryPossess too (it picks up a carriable prop matching its
+    // possess trace), so control never reaches here for them.
     if (!PropHunt_IsHider(self))
     {
         vector grab_end;

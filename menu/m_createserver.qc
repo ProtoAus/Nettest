@@ -657,7 +657,16 @@ float(string spec) create_server_map_game =
 	if (strstrofs(p, "half-life 2") >= 0)    return 6;	// HL2 (Source)
 	if (strstrofs(p, "cstrike") >= 0)        return 2;	// CS 1.6 (GoldSrc cstrike gamedir)
 	if (strstrofs(p, "valve") >= 0)          return 3;	// Half-Life
-	if (strstrofs(p, "nettest") >= 0)        return 1;	// this mod
+	// This mod's own maps.  BOTH spellings are matched on purpose: the engine writes the tag for
+	// non-addon (i.e. our own) maps as a HARDCODED literal — common/fs.c FS_IndexAddonMaps does
+	//     ctx.tag = "nettest";
+	// — so it did NOT follow the nettest->quakers gamedir rename.  Matching only "quakers" made
+	// every one of our maps fall through to the `return 6` default and get filed under HL2, which
+	// emptied the Net tab in the Create Server menu.  Accepting both keeps this working against a
+	// stock engine build and a fixed one.  The durable fix is engine-side: derive that tag from the
+	// live gamedir instead of a string literal, then this line can drop "nettest".
+	if (strstrofs(p, "quakers") >= 0)        return 1;	// this mod
+	if (strstrofs(p, "nettest") >= 0)        return 1;	// this mod, pre-rename engine tag
 	return 6;	// HL2 / other Source
 };
 
