@@ -102,7 +102,7 @@ float(float id) Impact_NormalizeEffect =
 };
 
 // One-shot resolve — called from Impact_GetEffectFor on first use.  The
-// particles/weapons.cfg load happens earlier, in data/default.cfg, via the
+// particles/weapons.cfg load happens earlier, in cfg/default.cfg, via the
 // menu VM's Menu_LoadConfig (which runs after PScript_InitParticles has
 // set pe_script_enabled and before any CSQC loads).  By the time this
 // function runs on first shot, every effect is already registered.
@@ -189,9 +189,12 @@ void(vector pos, vector normal, float mat) Impact_SpawnParticles =
     if (q <= 0)
         return;
 
-    // Per-shot particle-effect cap.  Smoke / spark spawns from
-    // penetration exits stack up fast — cap stops one shot from
-    // blowing up the particle budget at higher impact_quality.
+    // Per-shot particle-effect cap.  A penetrating shot fires this
+    // once per surface it passes through, so they stack up fast —
+    // the cap stops one shot blowing up the particle budget at
+    // higher impact_quality.  (It does NOT reach the exit SMOKE:
+    // CSQC_BulletExitSmoke is called from CSQC_FireImpactCosmetics,
+    // outside this function, and has its own cl_impact_exitsmoke*.)
     // bh_shotgun_blast bypasses the cap for the shotgun pellet loop
     // — same latch CSQC_PredictedShotgunImpact uses for the bullet-
     // hole cap so each pellet draws its own impact FX.
@@ -949,18 +952,25 @@ void(vector pos, vector dir) CSQC_BulletExitSmoke =
         return;
 
     // metal_impact is `+`-APPEND-ONLY (its base r_part block is commented out at
-    // particles/impacts.cfg:189), so particleeffectquery returns "" for it and
+    // particles/impacts.cfg:190), so particleeffectquery returns "" for it and
     // Debris_Resolve — which treats an empty query as "not registered" — would
-    // scrub the id to 0 every call and silently disable this.  Resolve RAW and
-    // guard both invalid values, exactly like Car_DrawExhaust / the contact smoke.
+    // scrub the id to 0 every call and silently disable this.  Resolve RAW.
+    //
+    // ONLY 0 MEANS FAILURE.  Engine contract, PF_cs_particleeffectnum
+    // (pr_csqc.c:3775-3777): "0 for error, non-0 for success. >0 match server,
+    // <0 are client-only."  A particle-SCRIPT effect is client-only, so it always
+    // comes back NEGATIVE (the search loop returns -i, i starting at 1); a positive
+    // id only ever comes from a server precache, and nothing in this mod calls
+    // particleeffectnum server-side.  So `<= 0` rejects every id we can ever get,
+    // and `!= -1` throws away the perfectly valid first client slot.  Test `!= 0`.
     float eid = exitsmoke_effect;
-    if (eid <= 0)
+    if (eid == 0)
     {
         eid = particleeffectnum("weapons.metal_impact");
-        if (eid != -1 && eid != 0)
+        if (eid != 0)
             exitsmoke_effect = eid;   // only ever cache a VALID id (cfg can exec late)
     }
-    if (eid <= 0)
+    if (eid == 0)
         return;
 
     float n = cvar("cl_impact_exitsmoke_count");

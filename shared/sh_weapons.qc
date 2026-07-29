@@ -850,6 +850,79 @@ void(string modelname) Hitbox_RegisterModel =
 // in server/sv_weapons.qc, declared here so callers compiled earlier
 // in sv_progs.src — sh_weapon_logic.qc, sh_weapon_standard.qc — see
 // the symbol without a per-file forward decl).
+// ---- Prop Hunt: rotation-safe trace hit volume (SHARED) --------------------------
+//
+// A disguised hider wears the prop's MODEL and weapon traces are MOVE_HITMODEL, so hit
+// detection is already per-triangle against the prop mesh — props register no
+// addmodelhitbox boxes, so Mod_Trace falls through to the mesh loop and mesh accuracy
+// comes for free.  What was broken is the volume that GATES that refinement: the engine
+// treats the entity bbox as a hard cull volume — "The bounding box MUST be set to
+// completely encompass the entity or those extra areas will be non-solid (leaving a hole
+// for things to go through)" (MOVE_HITMODEL, sv_defs.qc).  The disguise hull is the
+// possess box, which enclosed the prop UPRIGHT; rotate the prop and its mesh hangs
+// outside that box, so every shot at the part hanging out passed straight through.
+//
+// The old code did not merely fail to grow the box — W_PlayersExpandHitboxes SKIPPED
+// disguised players outright ("a tincan's hitbox is exactly the tincan").  That is the
+// right instinct about the flat sv_hitbox_expand padding, which is a player-anatomy
+// limb-reach allowance with no business on a crate, but it left the enclosing volume too
+// small for any pose that is not dead upright.
+//
+// The fix mirrors W_PhysDropsExpandTraceBboxes (server/sv_weapons.qc), which already
+// solves exactly this for dropped weapons: swap in a trace-only AABB that encloses the
+// hull box AT THIS ORIENTATION, trace, restore inside the same QC frame.  Nothing else —
+// pmove, ODE, pushers, the possess room test — ever observes the inflated size.
+//
+// SHARED because both sides must agree: sv_trust_clienthits defaults to 1, making the
+// CLIENT the damage authority, and before this the two disagreed outright — the CSQC
+// twin had no disguise check at all, so it applied to a disguised hider the very padding
+// the server refused to.
+//
+// KNOWN GAP, unchanged here: the RENDER re-grounds a tilted prop so its rotated box
+// rests on the floor (disguise predraw, cl_player.qc) while the server entity stays
+// anchored at the player's feet, so the trace samples the mesh at the un-shifted pivot.
+// Upright the two offsets cancel exactly, so the common case is correct; a heavily posed
+// prop can still hitreg slightly off from where it is drawn.  Closing that is NOT a
+// bookend fix: W_PlayersExpandHitboxes runs BEFORE Lagcomp_StartRewind, whose setorigin
+// would overwrite any shift applied here.
+void(entity e) PH_ExpandTraceBbox =
+{
+    // CarryRot_CenterOfs / CarryRot_RotatedHalf both go through CarryRot_Axes, which
+    // CALLS MAKEVECTORS (sh_carryrot.qc says so in as many words).  Callers of the
+    // expand bookend compute their trace direction from v_forward, so save and restore
+    // the builtin globals rather than trusting every call site to have finished with them.
+    vector sv_f = v_forward, sv_r = v_right, sv_u = v_up;
+
+    // MESH box, not the collision hull.  The collision hull is deliberately capped at
+    // player width (so a bulky disguise can still tuck into a corner), which makes it
+    // narrower than the prop actually is — enclosing THAT would leave the crate's own
+    // edges non-solid to gunfire even standing upright.
+    vector hmn = PH_MeshMins(e);
+    vector hmx = PH_MeshMaxs(e);
+    // World-axis enclosure of the mesh box at the shown pose: the rotated centre offset
+    // plus the 8-corner projected half-extent.  Same two helpers the disguise predraw
+    // uses to re-ground the drawn prop, so the box tracks the drawn silhouette instead
+    // of a guess — and it is exactly the projection the engine broadphase does when it
+    // links a rotated physics box (server/world.c).
+    vector cofs  = CarryRot_CenterOfs(e.angles, hmn, hmx);
+    vector rhalf = CarryRot_RotatedHalf(e.angles, (hmx - hmn) * 0.5);
+
+    e.ph_trace_mins_save = e.mins;
+    e.ph_trace_maxs_save = e.maxs;
+    e.ph_trace_inflated  = TRUE;
+    setsize(e, cofs - rhalf, cofs + rhalf);
+
+    v_forward = sv_f; v_right = sv_r; v_up = sv_u;
+};
+
+void(entity e) PH_RestoreTraceBbox =
+{
+    if (!e.ph_trace_inflated)
+        return;
+    setsize(e, e.ph_trace_mins_save, e.ph_trace_maxs_save);
+    e.ph_trace_inflated = FALSE;
+};
+
 #ifdef SSQC
 void() W_PlayersExpandHitboxes;
 void() W_PlayersRestoreHitboxes;
@@ -888,7 +961,16 @@ void() W_PlayersExpandHitboxes =
                 p.subblend2frac  = p.vis_trace_subblend2frac;
             }
 
-            if (expand > 0)
+            // Prop Hunt: a disguised hider gets a rotation-safe enclosure instead of the
+            // flat limb padding — which is what the SERVER has always done for it, while
+            // this side silently applied the padding anyway.  Under the default
+            // sv_trust_clienthits 1 that made the CLIENT (the damage authority) disagree
+            // with the server about the hit volume on every disguised target.
+            if (p.ph_disguise_modelindex)
+            {
+                PH_ExpandTraceBbox(p);
+            }
+            else if (expand > 0)
             {
                 vector mn = p.mins;
                 vector mx = p.maxs;
@@ -905,12 +987,15 @@ void() W_PlayersRestoreHitboxes =
 {
     float expand = serverkeyfloat("sv_hitbox_expand");
     if (expand <= 0) expand = cvar("sv_hitbox_expand");
-    if (expand <= 0) return;
+    // NOTE: no early-out on expand<=0 — the disguised path below inflated regardless.
 
     entity p = findchain(classname, "player_visual_proxy");
     while (p)
     {
-        if (!p.vis_is_dead && p.solid == SOLID_BBOX)
+        if (p.ph_trace_inflated)
+            PH_RestoreTraceBbox(p);
+        else if (expand > 0 && !p.vis_is_dead && p.solid == SOLID_BBOX
+                 && !p.ph_disguise_modelindex)
         {
             vector mn = p.mins;
             vector mx = p.maxs;

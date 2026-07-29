@@ -81,7 +81,9 @@ void(vector pos) CSQC_EnvExplosionSpawnSparks =
     float spark_id = impact_effect_metal;
     if (spark_id == 0)
         spark_id = particleeffectnum("weapons.metal_impact");
-    if (spark_id == -1 || spark_id == 0)
+    // 0 is the only failure value — a client-side effect id is NEGATIVE, so -1 is a
+    // valid first client slot rather than an error (pr_csqc.c:3775-3777).
+    if (spark_id == 0)
         return;
 
     float i = 0;

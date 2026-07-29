@@ -569,7 +569,7 @@ void(string id, vector pos, vector size, __inout vector scrollofs) bind_list =
 //  Config Save/Load
 // =============================================
 
-// Client-only cvars — persisted to data/settings.cfg, loaded on menu init.
+// Client-only cvars — persisted to cfg/settings.cfg, loaded on menu init.
 // Order mirrors the Settings menu sectioning so the generated cfg
 // reads top-to-bottom in the same groups: General, Crosshair, Graphics,
 // Perf & Net. Engine cvars (sys_*, vid_*, gl_*, r_renderscale,
@@ -616,7 +616,7 @@ string client_config_cvars[] =
     "cl_muzzleflash_light",
     "cl_muzzleflash_light_scale",
     // Dynamic-light mode (RTLight vs lightmap rebuild) — persisted so a user's
-    // dlights_fast/dlights_classic choice survives restarts (see data/default.cfg).
+    // dlights_fast/dlights_classic choice survives restarts (see cfg/default.cfg).
     "r_shadow_realtime_dlight",
     "r_shadow_realtime_dlight_shadows",
     "r_dynamic",
@@ -664,14 +664,14 @@ string client_config_cvars[] =
 
 void() Menu_SaveClientConfig =
 {
-    float f = fopen("data/settings.cfg", FILE_WRITE);
+    float f = fopen("cfg/settings.cfg", FILE_WRITE);
     if (f < 0)
     {
-        print("Menu_SaveClientConfig: failed to open data/settings.cfg\n");
+        print("Menu_SaveClientConfig: failed to open cfg/settings.cfg\n");
         return;
     }
 
-    fputs(f, "// data/settings.cfg — client settings (auto-generated)\n\n");
+    fputs(f, "// cfg/settings.cfg — client settings (auto-generated)\n\n");
 
     // Cvars
     float i;
@@ -761,20 +761,20 @@ void() Menu_SaveServerConfig =
 
     // rcon_password has a special recovery path: if it came back empty,
     // first try the offline-stash cvar (sv_rcon_password_shadow), then
-    // the previous data/server.cfg.  Done before the writer runs so
+    // the previous cfg/server.cfg.  Done before the writer runs so
     // the live cvar carries the recovered value into the dump.
     if (cvar_string("rcon_password") == "")
     {
         string rp = cvar_string("sv_rcon_password_shadow");
         if (rp == "")
-            rp = Menu_ReadConfigValue("data/server.cfg", "rcon_password");
+            rp = Menu_ReadConfigValue("cfg/server.cfg", "rcon_password");
         if (rp != "")
             cvar_set("rcon_password", rp);
     }
 
     // Single source of truth: shared/sh_cvar_table.qc.  Filtered to
     // SV-side entries with CVAR_FLAG_SAVE_TO_SERVER_CFG.
-    CVar_WriteServerCfg("data/server.cfg");
+    CVar_WriteServerCfg("cfg/server.cfg");
 };
 
 // Called from the Settings menu "Back" / apply path — saves both client and binds.
@@ -795,7 +795,7 @@ void(string name, string def) menu_register_default =
 };
 
 // Restore manifest defaults for any SV-side cvar that came back empty
-// after data/server.cfg exec.  Walks the manifest in
+// after cfg/server.cfg exec.  Walks the manifest in
 // shared/sh_cvar_table.qc — adding a new cvar there is automatically
 // included here.
 void() Menu_FixupEmptyDefaults =
@@ -807,7 +807,7 @@ void() Menu_RegisterCvars =
 {
     // Populate the manifest, then registercvar() every entry so the
     // menu VM doesn't auto-create cvars on first read and the engine
-    // sees the intended defaults before data/*.cfg is exec'd.
+    // sees the intended defaults before cfg/*.cfg is exec'd.
     CVar_Init();
     CVar_RegisterMine();
 
@@ -820,12 +820,12 @@ void() Menu_RegisterCvars =
     // they're already covered here — no extra wrangling needed.
 
     // Idempotent backstop for the small client_config_cvars list (used
-    // by Menu_SaveClientConfig for data/settings.cfg).
+    // by Menu_SaveClientConfig for cfg/settings.cfg).
     //
     // Seed each one from the MANIFEST rather than "".  CVar_RegisterMine above only
     // registers CVAR_SIDE_SV rows in the menu VM (deliberately — see its comment), so
     // the CL-side settings rows are not created by it, and CSQC's own registration
-    // doesn't happen until CSQC_Init on connect.  data/default.cfg used to paper over
+    // doesn't happen until CSQC_Init on connect.  cfg/default.cfg used to paper over
     // that gap, but the mod cvars have moved out of it and into the table, so a ""
     // here would leave the whole F1 settings screen reading 0/blank at the main menu —
     // and Menu_SaveClientConfig would then persist those blanks into settings.cfg,
@@ -847,20 +847,24 @@ void() Menu_LoadConfig =
     // warnings, then apply persisted client + server settings.
     Menu_RegisterCvars();
 
-    // Mod-author client defaults (binds, graphics, audio).  Only execs on
-    // game instances with a menu VM — i.e. clients and listen servers.
-    // Dedicated servers don't run the menu so they skip this entirely.
-    // Loaded FIRST so user-saved data/settings.cfg can override it.
-    localcmd("exec data/default.cfg\n");
+    // NOTE: cfg/default.cfg is deliberately NOT exec'd here any more.
+    //
+    // It used to be, back when the mod's client defaults lived in their own file
+    // (cfg/default.cfg) separate from the boot-critical gamedir-root default.cfg.  Those two
+    // are now one file in cfg/, which the ENGINE execs at boot — still before this point, so
+    // the "defaults first, user settings second" ordering below is unchanged.
+    //
+    // Re-exec'ing it here would be actively harmful: the merged file carries the `seta vid_*`
+    // block, so every menu-VM init would reset the player's saved resolution and fullscreen
+    // state back to 1024x768 windowed.
+    localcmd("exec cfg/settings.cfg\n");
 
-    localcmd("exec data/settings.cfg\n");
-
-    // Also load data/server.cfg at menu init so the Create Server menu
+    // Also load cfg/server.cfg at menu init so the Create Server menu
     // populates its text fields with persisted server settings instead of
     // hard-coded defaults.  Cvars are engine-global, so setting them here
     // (menu VM) means the server VM sees the same values when it later
     // exec's the same file in worldspawn — harmless re-apply.
-    localcmd("exec data/server.cfg\n");
+    localcmd("exec cfg/server.cfg\n");
     // localcmd is queued — Menu_FixupEmptyDefaults is invoked at save time
     // (see Menu_SaveServerConfig) and first-open of the Create Server menu
     // instead, when we can be sure the exec has already run.
@@ -891,6 +895,8 @@ void() mm_flush_name =
 // Forward decls — defined in their respective files (compiled after this).
 void(vector menu_size) Sprays_DrawPanel;
 void(vector menu_size) Playermodels_DrawPanel;
+void(vector menu_size) Update_DrawPanel;	// menu/m_update.qc
+void() Update_KickAutoCheck;
 
 void() main_menu =
 {
@@ -919,6 +925,12 @@ void() main_menu =
 	// the same baseline. See menu/m_playermodels.qc.
 	Playermodels_DrawPanel(menu_root_size);
 
+	// Update status — top-right corner, its own top-anchored frame so it
+	// cannot disturb the bottom-anchored block height computed below.
+	// Draws nothing at all when there is no update news.
+	// See menu/m_update.qc.
+	Update_DrawPanel(menu_root_size);
+
 	// Build tag — bottom-right corner of the screen, dimmed.
 	sui_set_align([SUI_ALIGN_END, SUI_ALIGN_END]);
 	sui_text([-6, -6], MENU_TEXT_SMALL,
@@ -934,6 +946,13 @@ void() main_menu =
 	// drop shadow, hold-darken, click sound, and SUI hit-zone
 	// registration sized to the actual text width.
 	float backdrop_mode = (serverkey("sv_backdrop") == "1");
+
+	// Kick the one automatic update check, but ONLY from the real main menu with the map
+	// backdrop — never from the ESC menu mid-game, where a "restart to finish" prompt would
+	// be both useless and alarming. Guarded once-per-session inside Update_KickAutoCheck,
+	// and again in the engine, which also honours update_autocheck.
+	if (backdrop_mode)
+		Update_KickAutoCheck();
 
 	// Compute block height for vertical centring.  Main block is
 	// always 3 big rows + 2 small gaps + the gap-before-Quit + the

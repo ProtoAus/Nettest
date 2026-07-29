@@ -479,7 +479,7 @@ const float  PLAYERGIB_LAUNCH_Z_JITTER     = 70;
 float playergib_bloodsplat_id;
 float playergib_bloodsplat_resolved;
 
-// The weapons particle set is loaded at menu-VM init (data/default.cfg
+// The weapons particle set is loaded at menu-VM init (cfg/default.cfg
 // execs particles/weapons.cfg into the "weapons" namespace).  By the
 // time CSQC runs these resolvers, every effect is registered, so a
 // single lookup returns a valid slot index.  Zero means the CSQC slot

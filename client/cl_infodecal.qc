@@ -114,7 +114,14 @@ string(string texname, float rmode) CSQC_InfoDecal_BuildShader =
     float  is_wad    = (substring(texname, 0, 1) == "{");
     string stem      = is_wad ? substring(texname, 1, strlen(texname) - 1) : texname;
     string base      = is_wad ? strcat("waddecal_", stem) : texname;
-    string maptarget = is_wad ? sprintf("gfx/decals/%s.png", stem) : texname;
+    //Extensionless: decals ship as BC7 .dds inside their pack pk3s (2026-07-28) and FTE's loader
+    //walks its own extension list, so .dds or .png both resolve with no QC edit.
+    //
+    //`stem` INCLUDES the category folder -- a map names the texture "{Source/srclock01", so this
+    //resolves gfx/decals/Source/srclock01. The pk3s therefore mirror that structure; do not
+    //flatten them (learned the hard way on 2026-07-28: flattening silently kills every decal
+    //whose name carries a category, which is nearly all of them).
+    string maptarget = is_wad ? sprintf("gfx/decals/%s", stem) : texname;
 
     // GoldSrc rendermode -> blend.  4 = Solid (alpha-test, opaque); 3/5 = Glow/
     // Additive; else Normal/Color/Texture (alpha blend).  Suffix keeps modes apart.
@@ -446,13 +453,13 @@ void(float isnew) CSQC_InfoDecal_Update =
         float s = escale * cvar("cl_infodecal_scale");
         if (s <= 0) s = 1;
 
-        // Aspect-correct half-extents from the decal PNG.
+        // Aspect-correct half-extents from the decal image (extensionless -- see :117).
         float half_w = SPRAY_QUAD_HALF * s;
         float half_h = SPRAY_QUAD_HALF * s;
         if (substring(texname, 0, 1) == "{")
         {
             string stem = substring(texname, 1, strlen(texname) - 1);
-            string pic  = sprintf("gfx/decals/%s.png", stem);
+            string pic  = sprintf("gfx/decals/%s", stem);
             precache_pic(pic);
             vector sz = drawgetimagesize(pic);
             if (sz_x > 0 && sz_y > 0)

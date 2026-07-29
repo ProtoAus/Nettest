@@ -1220,7 +1220,8 @@ void(entity car) Car_DrawDriver =
 };
 
 // Resolved "weapons.metal_impact" effect id for the exhaust, cached once it comes back VALID
-// (>0).  Never caches a failure — see the resolve comment in Car_DrawExhaust.
+// (NON-ZERO — a particle-script effect id is NEGATIVE, see Car_DrawExhaust).  Never caches
+// a failure.
 float g_car_exhaust_eid;
 // SAME effect, same caching rule, for the PROP contact smoke (CSQC_EVENT_PHYSPROP_IMPACT
 // buckets 0/1/2 in cl_main.qc, which compiles later).  A separate global so a failed
@@ -1254,13 +1255,19 @@ void(entity car) Car_DrawExhaust =
     // stick forever = "no smoke"), but re-running the string lookup every frame after it has succeeded bought
     // nothing.  metal_impact is a "+"-append-only effect so impact_effect_metal itself is 0 (query-validated)
     // → the particleeffectnum fallback is the one that actually yields a usable slot.
+    //
+    // ONLY 0 IS FAILURE.  particleeffectnum returns <0 for a client-side (particle-script)
+    // effect and >0 only for a server precache — pr_csqc.c:3775-3777.  Every id this mod
+    // ever resolves is therefore NEGATIVE, so the cache test must be `== 0` (with `<= 0` it
+    // was always true and the string lookup ran every frame anyway, defeating the cache),
+    // and -1 is a valid first client slot, not an error code.
     float eid = g_car_exhaust_eid;
-    if (eid <= 0)
+    if (eid == 0)
     {
         Impact_ResolveAll();
         eid = impact_effect_metal;
-        if (eid == 0 || eid == -1) eid = particleeffectnum("weapons.metal_impact");
-        if (eid == 0 || eid == -1) return;
+        if (eid == 0) eid = particleeffectnum("weapons.metal_impact");
+        if (eid == 0) return;
         g_car_exhaust_eid = eid;   // only ever cache a VALID id
     }
 

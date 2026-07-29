@@ -172,8 +172,10 @@ void(entity pl) PropHunt_ClearDisguise =
 		return;
 	pl.ph_disguise_modelindex = 0;
 	pl.ph_hull_halfxy   = 0;
+	pl.ph_mesh_halfxy   = 0;
 	pl.ph_hull_minz     = 0;
 	pl.ph_hull_height   = 0;
+	pl.ph_mesh_height   = 0;
 	pl.ph_yaw_locked    = 0;
 	pl.ph_locked_yaw    = 0;
 	pl.ph_rel_fwd       = '0 0 0';
@@ -199,9 +201,42 @@ void(entity pl, entity prop) PropHunt_Possess =
 	// -- quantize (wire format: 3 bytes) --
 	float halfxy = max(max(fabs(prop.mins_x), fabs(prop.maxs_x)),
 	                   max(fabs(prop.mins_y), fabs(prop.maxs_y)));
-	halfxy = bound(1, ceil(halfxy), 16);	// never wider than the standing hull
+	// TWO half-widths, on purpose — see ph_mesh_halfxy in sh_customdefs.qc.
+	//
+	// mesh_halfxy is where the prop's geometry really is; it feeds the trace enclosure
+	// (so a wide crate is shootable across its whole visible width, at any rotation) and
+	// the render's floor-grounding.  A full byte on a wire that only moves when the
+	// disguise changes, so it is free.
+	//
+	// halfxy is what the PLAYER COLLIDES WITH, and stays capped at the standing player
+	// hull.  Letting it follow the prop was tried and reverted: a big prop then could not
+	// tuck into a corner, which removes the point of being a big prop.  Hiding beats
+	// physical plausibility here.
+	//
+	// SQUARE both times, not a simplification: the engine hull is an AABB, and only a
+	// square cross-section stays correct as the prop spins about Z.
+	float mesh_halfxy = bound(1, ceil(halfxy), 255);	// full byte; true footprint
+	halfxy = bound(1, ceil(halfxy), 16);				// never wider than the standing hull
 	float minz   = bound(-64, floor(prop.mins_z), 63);
-	float height = bound(4, ceil(prop.maxs_z - prop.mins_z), 72);
+
+	// Height splits the same way, and for the same reason.  The COLLISION hull is capped
+	// at the live standing player height, so becoming a tall prop never makes you taller
+	// than you already were — you keep fitting under every lip and vent you could use
+	// before.  The MESH height keeps the prop's true extent so the trace enclosure still
+	// covers the part of a tall prop that rises above your head; without that split,
+	// capping the hull would make the top of every tall prop unshootable.
+	//
+	// Player height read from the derived hull rather than a literal 72: sv_hull_height is
+	// configurable (56 = default proportions, 72 = GoldSrc) and the old hard 72 let a prop
+	// out-grow the player on any server not running the taller hull.  Falls back to 72 if
+	// PM_ReadMovevars has not populated the globals yet (no pmove has run this map).
+	float player_h = PM_MAXS_z - PM_MINS_z;
+	if (player_h < 4)
+		player_h = 72;
+	// Both anchored at the SAME minz, so the two boxes share a base and only differ in how
+	// far up they reach.  That keeps the feet-plant below valid for both.
+	float mesh_height = bound(4, ceil(prop.maxs_z - prop.mins_z), 255);	// full byte; true extent
+	float height      = bound(4, mesh_height, player_h);				// never taller than the player
 
 	// -- HP from prop volume; health FRACTION preserved across re-possess so
 	//    switching props can never heal you --
@@ -236,8 +271,10 @@ void(entity pl, entity prop) PropHunt_Possess =
 	// -- commit --
 	pl.ph_disguise_modelindex = prop.modelindex;
 	pl.ph_hull_halfxy    = halfxy;
+	pl.ph_mesh_halfxy    = mesh_halfxy;
 	pl.ph_hull_minz      = minz;
 	pl.ph_hull_height    = height;
+	pl.ph_mesh_height    = mesh_height;
 	pl.ph_disguise_scale = (prop.scale > 0) ? prop.scale : 1;
 	pl.ph_disguise_skin  = prop.skin;
 	pl.ph_maxhealth      = new_max;

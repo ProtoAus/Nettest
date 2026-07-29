@@ -9,5 +9,6 @@ menu/m_playermodels.qc
 menu/m_settings.qc
 menu/m_createserver.qc
 menu/m_loading.qc
+menu/m_update.qc
 menu/m_serverbrowser.qc
 menu/m_main.qc

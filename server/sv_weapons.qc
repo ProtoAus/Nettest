@@ -661,21 +661,31 @@ string(float hitgroup) W_HitgroupName =
 // so we don't need to know the normal vs ducking hull values here.
 void() W_PlayersExpandHitboxes =
 {
+    // NOTE: no early-out on expand<=0.  A disguised hider needs its rotation-safe
+    // trace volume regardless of the limb-padding cvar — the two are unrelated.
     float expand = cvar("sv_hitbox_expand");
-    if (expand <= 0) return;
 
     entity p = player_chain_head;
     while (p)
     {
-        // Prop Hunt: no limb-reach padding on a disguised hider — a tincan's
-        // hitbox is exactly the tincan.  (Restore below skips the same set.)
-        if (!p.is_dead && p.solid == SOLID_SLIDEBOX && !p.ph_disguise_modelindex)
+        if (!p.is_dead && p.solid == SOLID_SLIDEBOX)
         {
-            vector mn = p.mins;
-            vector mx = p.maxs;
-            mn_x -= expand; mn_y -= expand; mn_z -= expand;
-            mx_x += expand; mx_y += expand; mx_z += expand;
-            setsize(p, mn, mx);
+            if (p.ph_disguise_modelindex)
+            {
+                // Prop Hunt: still no limb-reach padding on a disguised hider — a
+                // tincan's hitbox is exactly the tincan — but the box must ENCLOSE the
+                // rotated prop mesh or MOVE_HITMODEL culls the shot before it reaches a
+                // triangle.  See PH_ExpandTraceBbox (shared/sh_weapons.qc).
+                PH_ExpandTraceBbox(p);
+            }
+            else if (expand > 0)
+            {
+                vector mn = p.mins;
+                vector mx = p.maxs;
+                mn_x -= expand; mn_y -= expand; mn_z -= expand;
+                mx_x += expand; mx_y += expand; mx_z += expand;
+                setsize(p, mn, mx);
+            }
         }
         p = p.player_chain_next;
     }
@@ -684,12 +694,17 @@ void() W_PlayersExpandHitboxes =
 void() W_PlayersRestoreHitboxes =
 {
     float expand = cvar("sv_hitbox_expand");
-    if (expand <= 0) return;
 
     entity p = player_chain_head;
     while (p)
     {
-        if (!p.is_dead && p.solid == SOLID_SLIDEBOX && !p.ph_disguise_modelindex)
+        // The disguised path restores from an absolute save, so it is exact and needs
+        // no condition beyond its own latch.  The padding path stays delta math against
+        // the same predicate the expand used.
+        if (p.ph_trace_inflated)
+            PH_RestoreTraceBbox(p);
+        else if (expand > 0 && !p.is_dead && p.solid == SOLID_SLIDEBOX
+                 && !p.ph_disguise_modelindex)
         {
             vector mn = p.mins;
             vector mx = p.maxs;
@@ -1831,7 +1846,7 @@ float PHYSDROP_SLEEP_DELAY;
 // Fallback used by W_PhysDropRefreshCvars below.  cvar() returns 0
 // both for "set to 0 by admin" and "cvar string is empty" — distinguish
 // via cvar_string() and substitute the default only when the string
-// is literally "" (unregistered, or blanked by a stale data/server.cfg
+// is literally "" (unregistered, or blanked by a stale cfg/server.cfg
 // exec).  Without this, dedicated servers were spawning weapons with
 // zeroed mass / friction / sleep thresholds because registercvar
 // didn't override values the engine already knew about.

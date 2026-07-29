@@ -466,8 +466,13 @@ vector PM_CurrentMaxs()
     // Prop Hunt disguise: the prop's quantized hull, replicated to CSQC via the
     // prediction proxy (Wire B) — keys on ph_hull_height (the modelindex does
     // NOT ride that wire), and BOTH sides dequantize the same bytes, so the
-    // predicted hull is bit-identical to the server's.  Overrides duck (the
-    // hull is already at most player-size; ducking as a crate is meaningless).
+    // predicted hull is bit-identical to the server's.  Overrides duck (the hull is
+    // already at most player-size; ducking as a crate is meaningless).
+    //
+    // COLLISION hull, capped at player width even for a huge prop — see ph_mesh_halfxy
+    // (sh_customdefs.qc) for why hit traces use a different, true-footprint box.  Sizing
+    // movement to the real prop was tried and reverted: a big prop could no longer hide
+    // in a corner, which is the entire point of being one.
     if (self.ph_hull_height > 0)
         return PH_HullMaxs(self);
     if (self.flags & FL_DUCKING)
@@ -492,10 +497,14 @@ vector PM_CurrentMins()
     return PM_MINS;
 }
 
-// Keep the player entity at its true movement hull.  Expanded hit volume
-// lives on a separate hit-proxy entity (see Player_HitProxy_Ensure in
-// sv_player.qc) so weapon traces can reach outstretched limbs without
-// inflating player-vs-player collision.
+// Keep the player entity at its true movement hull.
+//
+// (The old comment here described a separate hit-proxy entity created by a
+// Player_HitProxy_Ensure in sv_player.qc.  No such function exists anywhere in the
+// tree — that design was replaced by the expand/restore bookends, which inflate the
+// real player entity around a trace and restore it in the same QC frame:
+// W_PlayersExpandHitboxes / W_PlayersRestoreHitboxes in server/sv_weapons.qc and
+// shared/sh_weapons.qc, plus PH_ExpandTraceBbox for disguised prop hulls.)
 void(entity e, vector mn, vector mx) SetHitboxSize =
 {
     setsize(e, mn, mx);

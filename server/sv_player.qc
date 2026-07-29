@@ -1297,6 +1297,13 @@ float(entity playerent, float changedflags) Player_Visual_SendEntity =
 		WriteByte(MSG_ENTITY, self.vps_last_ph_hull_halfxy);
 		WriteByte(MSG_ENTITY, self.vps_last_ph_hull_minz + 64);	// -64..63 biased to a byte
 		WriteByte(MSG_ENTITY, self.vps_last_ph_hull_height);
+		// TRUE footprint + height, separate from the collision box above: the collision
+		// hull is deliberately capped at PLAYER size on both axes so a bulky prop can
+		// still hide in a corner and duck under the same geometry, but hit traces and the
+		// render's floor-grounding need to know where the mesh really is.  Both share
+		// ph_hull_minz as their base.  See ph_mesh_halfxy (sh_customdefs.qc).
+		WriteByte(MSG_ENTITY, self.vps_last_ph_mesh_halfxy);
+		WriteByte(MSG_ENTITY, self.vps_last_ph_mesh_height);
 		WriteByte(MSG_ENTITY, rint(self.vps_last_ph_scale * 16));	// 0 -> reader treats as 1.0
 		WriteByte(MSG_ENTITY, self.vps_last_ph_skin);
 	}
@@ -1581,6 +1588,8 @@ void(entity player) Player_VisualProxy_Sync =
 	    || vis.vps_last_life_serial != next_life_serial
 	    || vis.vps_last_disguise_mi != player.ph_disguise_modelindex
 	    || vis.vps_last_ph_hull_halfxy != player.ph_hull_halfxy
+	    || vis.vps_last_ph_mesh_halfxy != player.ph_mesh_halfxy
+	    || vis.vps_last_ph_mesh_height != player.ph_mesh_height
 	    || vis.vps_last_ph_hull_minz != player.ph_hull_minz
 	    || vis.vps_last_ph_hull_height != player.ph_hull_height
 	    || vis.vps_last_ph_scale != player.ph_disguise_scale
@@ -1617,6 +1626,8 @@ void(entity player) Player_VisualProxy_Sync =
 	vis.vps_last_life_serial  = next_life_serial;
 	vis.vps_last_disguise_mi     = player.ph_disguise_modelindex;
 	vis.vps_last_ph_hull_halfxy  = player.ph_hull_halfxy;
+	vis.vps_last_ph_mesh_halfxy  = player.ph_mesh_halfxy;
+	vis.vps_last_ph_mesh_height  = player.ph_mesh_height;
 	vis.vps_last_ph_hull_minz    = player.ph_hull_minz;
 	vis.vps_last_ph_hull_height  = player.ph_hull_height;
 	vis.vps_last_ph_scale        = player.ph_disguise_scale;
@@ -1783,33 +1794,42 @@ float(entity playerent, float changedflags) PM_PredictionProxy_SendEntity =
 
 	if (changedflags & PM_SF_AMMO)
 	{
-		// Compact slot-ammo bitmask. Primary/secondary ammo is canonical;
-		// utilities remain separate because utility inventory is multi-carry.
-		float m0 = self.pm_ammo_mb0;
-		float m1 = self.pm_ammo_mb1;
+		// FULL SEND, NOT A SUB-DELTA.  The pm_ammo_mb* mask is a CHANGE
+		// DETECTOR ONLY (it decides whether PM_SF_AMMO gets set at all);
+		// it must never select which bytes go on the wire.
+		//
+		// Why: SendFlags are tracked per-client and survive packet loss —
+		// the engine re-invokes SendEntity with PM_SF_AMMO still pending
+		// when a datagram is dropped or the packet overflows (see the
+		// SZ_Clear in sv_send.c, which discards the WHOLE packet).  But
+		// the mask lives on the ENTITY and was consumed by the first
+		// attempt, so the resend used to write "nothing changed" and the
+		// client was left holding its previous values forever.  On a
+		// FIRST life those values are zero, which is the "join a fresh
+		// server, handgun shows 0/0, fixed by the next round" bug — the
+		// next PlayerSpawn is the only thing that re-arms the mask.
+		//
+		// The whole section is 12 bytes and only rides a real ammo
+		// change, so unconditional writes cost at most ~10 bytes over
+		// the old sub-delta and make a dropped ammo update self-healing.
+		WriteByte(MSG_ENTITY, self.slot_primary_mag);
+		WriteByte(MSG_ENTITY, self.slot_primary_ammo);
+		WriteByte(MSG_ENTITY, self.slot_primary_aux);
+		WriteByte(MSG_ENTITY, self.slot_secondary_mag);
+		WriteByte(MSG_ENTITY, self.slot_secondary_ammo);
+		WriteByte(MSG_ENTITY, self.slot_secondary_aux);
+		WriteByte(MSG_ENTITY, self.ammo_hlgrenade);
+		WriteByte(MSG_ENTITY, self.ammo_snowball);
+		WriteByte(MSG_ENTITY, self.ammo_cshegrenade);
+		WriteByte(MSG_ENTITY, self.ammo_csflashbang);
+		WriteByte(MSG_ENTITY, self.ammo_cssmokegrenade);
+		WriteByte(MSG_ENTITY, self.ammo_cfc4);
 
-		WriteByte(MSG_ENTITY, m0);
-		WriteByte(MSG_ENTITY, m1);
-
-		if (m0 &   1) WriteByte(MSG_ENTITY, self.slot_primary_mag);
-		if (m0 &   2) WriteByte(MSG_ENTITY, self.slot_primary_ammo);
-		if (m0 &   4) WriteByte(MSG_ENTITY, self.slot_primary_aux);
-		if (m0 &   8) WriteByte(MSG_ENTITY, self.slot_secondary_mag);
-		if (m0 &  16) WriteByte(MSG_ENTITY, self.slot_secondary_ammo);
-		if (m0 &  32) WriteByte(MSG_ENTITY, self.slot_secondary_aux);
-		if (m0 &  64) WriteByte(MSG_ENTITY, self.ammo_hlgrenade);
-		if (m0 & 128) WriteByte(MSG_ENTITY, self.ammo_snowball);
-
-		if (m1 &   1) WriteByte(MSG_ENTITY, self.ammo_cshegrenade);
-		if (m1 &   2) WriteByte(MSG_ENTITY, self.ammo_csflashbang);
-		if (m1 &   4) WriteByte(MSG_ENTITY, self.ammo_cssmokegrenade);
-		if (m1 &   8) WriteByte(MSG_ENTITY, self.ammo_cfc4);
-
-		// Consume the mask now that we've written all pending fields —
-		// PM_SyncPredictionProxy accumulates bits with |= across multiple
-		// sync calls per tick, so without this clear the next delta would
-		// re-send the same fields.  Safe because SendEntity runs once per
-		// delta (pm_prediction_proxy uses drawonlytoclient = one player).
+		// Consume the detector.  PM_SyncPredictionProxy accumulates bits
+		// with |= across multiple sync calls per tick, so without this
+		// clear PM_SF_AMMO would stay latched and re-send every frame.
+		// Losing these bits to a dropped packet is now harmless — the
+		// engine's own PM_SF_AMMO retry carries the full section.
 		self.pm_ammo_mb0 = 0;
 		self.pm_ammo_mb1 = 0;
 		self.pm_ammo_mb2 = 0;
@@ -2206,6 +2226,44 @@ void() W_GiveStartingAmmo =
 	self.ammo_cshegrenade = 0;
 	self.ammo_csflashbang = 0;
 	self.ammo_cssmokegrenade = 0;
+	self.mag_csusp = 0;            self.ammo_csusp = 0;
+	// Crossfire register bank.  These were missing from the wipe above, so a
+	// cf* weapon that is NOT in any slot after this call keeps last loadout's
+	// count in its legacy register.  W_SlotAmmo_LoadLegacy masks that most of
+	// the time (equipping re-seeds the register from the slot), which is why
+	// it never showed up as an obvious bug — but anything reading the legacy
+	// field before an equip sees a ghost count.  Kept in the same order as the
+	// .float declarations so a new cf weapon is easy to slot in.
+	self.mag_cfaug = 0;            self.ammo_cfaug = 0;
+	self.mag_cfawm = 0;            self.ammo_cfawm = 0;
+	self.mag_cfbarrett = 0;        self.ammo_cfbarrett = 0;
+	self.mag_cfddeagle = 0;        self.ammo_cfddeagle = 0;
+	self.mag_cfelite = 0;          self.ammo_cfelite = 0;
+	self.mag_cffamas = 0;          self.ammo_cffamas = 0;
+	self.mag_cfgalil = 0;          self.ammo_cfgalil = 0;
+	self.mag_cfglock = 0;          self.ammo_cfglock = 0;
+	self.mag_cfks23 = 0;           self.ammo_cfks23 = 0;
+	self.mag_cfm249 = 0;           self.ammo_cfm249 = 0;
+	self.mag_cfm3 = 0;             self.ammo_cfm3 = 0;
+	self.mag_cfm4 = 0;             self.ammo_cfm4 = 0;
+	self.mag_cfm700 = 0;           self.ammo_cfm700 = 0;
+	self.mag_cfm9 = 0;             self.ammo_cfm9 = 0;
+	self.mag_cfmac10 = 0;          self.ammo_cfmac10 = 0;
+	self.mag_cfmauser = 0;         self.ammo_cfmauser = 0;
+	self.mag_cfmk23 = 0;           self.ammo_cfmk23 = 0;
+	self.mag_cfmp5 = 0;            self.ammo_cfmp5 = 0;
+	self.mag_cfmsg90 = 0;          self.ammo_cfmsg90 = 0;
+	self.mag_cfp228 = 0;           self.ammo_cfp228 = 0;
+	self.mag_cfpsg1 = 0;           self.ammo_cfpsg1 = 0;
+	self.mag_cfrevolver = 0;       self.ammo_cfrevolver = 0;
+	self.mag_cfscar = 0;           self.ammo_cfscar = 0;
+	self.mag_cfsg552 = 0;          self.ammo_cfsg552 = 0;
+	self.mag_cfsl8 = 0;            self.ammo_cfsl8 = 0;
+	self.mag_cfspas12 = 0;         self.ammo_cfspas12 = 0;
+	self.mag_cfsvd = 0;            self.ammo_cfsvd = 0;
+	self.mag_cftype89 = 0;         self.ammo_cftype89 = 0;
+	self.mag_cfump45 = 0;          self.ammo_cfump45 = 0;
+	self.mag_cfvector = 0;         self.ammo_cfvector = 0;
 	self.snowball_has_slingshot = FALSE;
 	self.snowball_use_slingshot = FALSE;
 	W_SlotAmmo_ClearSlots(self);

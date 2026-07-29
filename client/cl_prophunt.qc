@@ -152,5 +152,28 @@ void() PropHunt_DrawOverlays =
 			vector hsz = [12, 12];
 			drawstring([g_width * 0.5 - stringwidth(hint, TRUE, hsz) * 0.5, g_height * 0.72], hint, hsz, '0.9 0.85 0.5', 0.9, 0);
 		}
+
+		// PERSISTENT ROTATION-LOCK READOUT.
+		//
+		// In third person the two states read as swapped, and no amount of fixing the
+		// pose changes that: while UNLOCKED the prop's yaw is composed in the frame the
+		// chase camera also yaws with, so it looks FROZEN to you while it turns for
+		// everyone else — and a LOCKED prop, being world-absolute, appears to turn as
+		// the camera orbits it.  Both are correct in the world; only the owner's view
+		// is ambiguous.  So state it in words rather than leaving the player to infer
+		// it from a picture that says the opposite.
+		//
+		// Reads the CLIENT-predicted flag for zero-ping feedback.  Safe to trust now
+		// that PropRot_SyncLock converges it on the server's ph_yaw_locked — before
+		// that the two could sit inverted for the rest of the life.
+		if (CSQC_PropHunt_LocalDisguised())
+		{
+			float  lk  = PropRot_IsLocked();
+			string ls  = lk ? "ROTATION LOCKED" : "ROTATION FOLLOWS VIEW";
+			vector lc  = lk ? '0.5 0.9 1' : '0.9 0.85 0.5';
+			vector lsz = [11, 11];
+			drawstring([g_width * 0.5 - stringwidth(ls, TRUE, lsz) * 0.5, g_height * 0.76],
+			           ls, lsz, lc, 0.75, 0);
+		}
 	}
 };

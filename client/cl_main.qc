@@ -367,7 +367,7 @@ noref void(float apiver, string enginename, float enginever) CSQC_Init =
 	// All custom cvars are registered from a single shared table —
 	// edit shared/sh_cvar_table.qc CVar_Init() to change defaults or
 	// add new cvars. The table is the source of truth for the auto-
-	// generated data/allcommands.cfg too.
+	// generated cfg/allcommands.cfg too.
 	CVar_Init();
 	CVar_RegisterMine();
 };
@@ -2208,7 +2208,10 @@ void() CSQC_Parse_Event =
 			float bs_id = impact_effect_metal;
 			if (bs_id == 0)
 				bs_id = particleeffectnum("weapons.metal_impact");
-			if (bs_id != -1 && bs_id != 0)
+			// != 0 is the WHOLE test.  particleeffectnum returns <0 for a client-side
+				// (particle-script) effect, >0 only for a server precache, 0 for failure —
+				// pr_csqc.c:3775-3777.  -1 is a valid FIRST client slot, not an error code.
+				if (bs_id != 0)
 				pointparticles(bs_id, bs_pos, bs_norm * 200, 1);
 			break;
 		}
@@ -2230,16 +2233,16 @@ void() CSQC_Parse_Event =
 			if (pp_bucket == 3)
 			{   // CAR hard wall hit: exhaust/"gas-pipe" smoke + a spark burst at the contact
 				cm_sid = particleeffectnum("weapons.metal_impact");   // dark exhaust puff (Car_DrawExhaust reuses it)
-				if (cm_sid != -1 && cm_sid != 0) pointparticles(cm_sid, pp_pos, pp_norm * 30,  2);
+				if (cm_sid != 0) pointparticles(cm_sid, pp_pos, pp_norm * 30,  2);
 				cs_sid = particleeffectnum("weapons.debris_spark");   // thin additive scrape streaks
-				if (cs_sid != -1 && cs_sid != 0) pointparticles(cs_sid, pp_pos, pp_norm * 200, 1);
+				if (cs_sid != 0) pointparticles(cs_sid, pp_pos, pp_norm * 200, 1);
 			}
 			else if (pp_bucket == 4)
 			{   // CAR grind tick: thin sparks + a small smoke wisp (streams every sv_car_grind_interval)
 				cs_sid = particleeffectnum("weapons.debris_spark");
-				if (cs_sid != -1 && cs_sid != 0) pointparticles(cs_sid, pp_pos, pp_norm * 120, 1);
+				if (cs_sid != 0) pointparticles(cs_sid, pp_pos, pp_norm * 120, 1);
 				cm_sid = particleeffectnum("weapons.metal_impact");
-				if (cm_sid != -1 && cm_sid != 0) pointparticles(cm_sid, pp_pos, pp_norm * 12,  1);
+				if (cm_sid != 0) pointparticles(cm_sid, pp_pos, pp_norm * 12,  1);
 			}
 			else
 			{   // PROP bang/slide (buckets 0 slide / 1 soft / 2 hard).  Swapped from
@@ -2251,16 +2254,18 @@ void() CSQC_Parse_Event =
 				// block is COMMENTED OUT in particles/impacts.cfg, so particleeffectquery
 				// returns "" for it and Impact_NormalizeEffect scrubs the validated global
 				// impact_effect_metal to 0.  Use the RAW particleeffectnum result guarded
-				// != -1 && != 0, exactly like the car buckets and Car_DrawExhaust, and only
-				// ever cache a VALID id.
+				// != 0 ONLY: the engine returns <0 for a client-side (particle-script) effect,
+				// >0 only for a server precache, 0 for failure — pr_csqc.c:3775-3777.  So every
+					// id we can get here is NEGATIVE: `<= 0` rejects all of them, and -1 is a
+					// valid FIRST client slot, not an error.  Only ever cache a VALID id.
 				float pp_sid = g_prop_smoke_eid;
-				if (pp_sid <= 0)
+				if (pp_sid == 0)
 				{
 					pp_sid = particleeffectnum("weapons.metal_impact");
-					if (pp_sid != -1 && pp_sid != 0)
+					if (pp_sid != 0)
 						g_prop_smoke_eid = pp_sid;
 				}
-				if (pp_sid != -1 && pp_sid != 0)
+				if (pp_sid != 0)
 				{
 					// DENSITY IS THE WHOLE POINT HERE.  metal_impact only reads as the
 					// tailpipe plume when it is emitted like one: Car_DrawExhaust runs
@@ -2300,15 +2305,17 @@ void() CSQC_Parse_Event =
 			// (cl_physprop.qc) — same effect, same "+"-append-only caveat: the base
 			// r_part block is commented out in particles/impacts.cfg, so the validated
 			// global impact_effect_metal is 0 and only the RAW particleeffectnum result
-			// is usable.  Guard != -1 && != 0 and only ever cache a VALID id.
+			// is usable.  Guard != 0 ONLY — a client-side effect id is NEGATIVE
+				// (pr_csqc.c:3775-3777), so -1 is valid and `<= 0` rejects everything.
+				// Only ever cache a VALID id.
 			float dc_sid = g_prop_smoke_eid;
-			if (dc_sid <= 0)
+			if (dc_sid == 0)
 			{
 				dc_sid = particleeffectnum("weapons.metal_impact");
-				if (dc_sid != -1 && dc_sid != 0)
+				if (dc_sid != 0)
 					g_prop_smoke_eid = dc_sid;
 			}
-			if (dc_sid != -1 && dc_sid != 0)
+			if (dc_sid != 0)
 			{
 				// dc_size is the disguise hull HEIGHT (4..72), and it drives BOTH the
 				// particle count and the launch speed, so a cabinet genuinely poofs

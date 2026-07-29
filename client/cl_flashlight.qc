@@ -30,7 +30,7 @@
 //  permutation.
 //
 //  Cookie file layout (style 1 only): 6 cubemap faces at
-//  <folder>/flashlight_{px,nx,py,ny,pz,nz}.tga (or .png/.jpg).
+//  gfx/cubemap/flashlight_{px,nx,py,ny,pz,nz}.tga (or .png/.jpg).
 //  The flashlight pattern goes on +X (forward in Quake convention,
 //  matches v_forward); other five faces black. FTE's image loader
 //  (image.c:13981) tries px/nx scheme AND rt/lf/bk/ft/up/dn —
@@ -46,11 +46,15 @@
 //  Client-only — not networked. Other players don't see the beam.
 // ============================================================
 
-// NOTE: Folder is `cubemap/` (singular) on this install. FTE doesn't
-// search subpaths — the cubemapname must literally prefix the file
-// path, so changing this string changes which folder the cubemap is
-// loaded from. If you rename the folder to `cubemaps/`, update here.
-const string FLASHLIGHT_COOKIE_SHADER = "cubemap/flashlight";
+// NOTE: this string IS the path prefix, not a folder to search in.
+// R_LoadReplacementTexture hands it to Image_LoadCubemapTextureData,
+// which builds each face as sprintf("%s_%s%s", <this>, "px", ".tga")
+// (image.c:14102) with no base directory of its own — so the folder
+// the cookie loads from is whatever this string says, and moving the
+// files means editing this line in the same commit.
+// Lived at `cubemap/` until 2026-07-28; now under gfx/ with the rest
+// of the loose image content.
+const string FLASHLIGHT_COOKIE_SHADER = "gfx/cubemap/flashlight";
 const string FLASHLIGHT_TOGGLE_SOUND  = "sounds/player/flashlight.wav";
 
 // Forward of the view origin where the dlight sits, so the

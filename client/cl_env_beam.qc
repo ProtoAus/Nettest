@@ -89,8 +89,13 @@ float() CSQC_EnvBeam_Predraw;
 // path with particles disabled).
 void(vector pos) CSQC_EnvBeam_SpawnSparks =
 {
+    // != 0 is the WHOLE test.  particleeffectnum returns <0 for a client-side
+    // (particle-script) effect, >0 only for a server precache, and 0 for failure —
+    // pr_csqc.c:3775-3777.  weapons.metal_impact is a particle-script effect, so its
+    // id is always NEGATIVE: the old `<= 0` rejected every id it could ever get and
+    // these sparks never once rendered.
     float spark_id = particleeffectnum("weapons.metal_impact");
-    if (spark_id <= 0)
+    if (spark_id == 0)
         return;
     float i = 0;
     while (i < 6)

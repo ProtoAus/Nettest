@@ -16,7 +16,7 @@ void() main =
 void() PlayerSpawn;  // forward declaration (defined in sv_player.qc)
 
 // Keep in sync with menu/m_menu.qc server_config_cvars[] so the
-// in-game save path writes the same data/server.cfg shape as Create
+// in-game save path writes the same cfg/server.cfg shape as Create
 // Server / menu-side saves.
 string sv_servercfg_cvars[] =
 {
@@ -114,7 +114,7 @@ string(string line) SV_MapListEntryFromLine =
 
 string() SV_NextMapFromCycleFile =
 {
-	filestream f = fopen("data/maps.txt", FILE_READ);
+	filestream f = fopen("cfg/maps.txt", FILE_READ);
 	if (f < 0)
 		return "";
 
@@ -258,19 +258,19 @@ void(string cfgpath) SV_ApplyConfigFile =
 
 void() SV_ApplyServerConfigFile =
 {
-	SV_ApplyConfigFile("data/server.cfg");
+	SV_ApplyConfigFile("cfg/server.cfg");
 };
 
 void() SV_WriteServerConfigFile =
 {
-	filestream f = fopen("data/server.cfg", FILE_WRITE);
+	filestream f = fopen("cfg/server.cfg", FILE_WRITE);
 	if (f < 0)
 	{
-		print("sv_saveconfig: fopen data/server.cfg FAILED\n");
+		print("sv_saveconfig: fopen cfg/server.cfg FAILED\n");
 		return;
 	}
 
-	fputs(f, "// data/server.cfg — server settings (auto-generated)\n\n");
+	fputs(f, "// cfg/server.cfg — server settings (auto-generated)\n\n");
 
 	float i;
 	for (i = 0; i < sv_servercfg_cvars.length; i = i + 1)
@@ -280,12 +280,12 @@ void() SV_WriteServerConfigFile =
 		if (name == "rcon_password" && val == "")
 			val = cvar_string("sv_rcon_password_shadow");
 		if (name == "rcon_password" && val == "")
-			val = SV_ReadConfigValue("data/server.cfg", name);
+			val = SV_ReadConfigValue("cfg/server.cfg", name);
 		fputs(f, sprintf("set %s \"%s\"\n", name, val));
 	}
 
 	fclose(f);
-	print("sv_saveconfig: wrote data/server.cfg\n");
+	print("sv_saveconfig: wrote cfg/server.cfg\n");
 };
 
 void() SV_ApplyMapConfigFile =
@@ -928,7 +928,7 @@ void() SV_UpdateMovementServerInfo =
 	sv_info_push_if_changed("sv_hitbox_expand",     sv_info_last_hitbox_expand);
 };
 
-// Post-config fixup: if the persisted data/server.cfg snapshot leaves any
+// Post-config fixup: if the persisted cfg/server.cfg snapshot leaves any
 // registered cvar empty when it should have a real default, restore it
 // from the shared cvar table. Runs once.
 float sv_cfg_fixed_up;
@@ -1230,7 +1230,7 @@ void() StartFrame =
 	}
 
 	// Admin trigger: "sv_saveconfig 1" snapshots the current live server
-	// settings into data/server.cfg, mirroring the menu-side save path.
+	// settings into cfg/server.cfg, mirroring the menu-side save path.
 	if (cvar("sv_saveconfig"))
 	{
 		cvar_set("sv_saveconfig", "0");
@@ -1238,7 +1238,7 @@ void() StartFrame =
 	}
 
 	// Admin trigger: `sv_writecvars 1` (or alias command `writecvars`)
-	// overwrites data/allcommands.cfg from the shared cvar table
+	// overwrites cfg/allcommands.cfg from the shared cvar table
 	// (shared/sh_cvar_table.qc CVar_Init). Same self-resetting
 	// cvar-toggle pattern as sv_roundrestart.
 	if (cvar("sv_writecvars"))
@@ -1592,7 +1592,7 @@ void() worldspawn =
 	// applied per-client in SV_RateForClient (sv_main.c:5354). Setting
 	// them to 0 disables the clamp entirely, so each client's own
 	// `rate` userinfo (default.cfg pushes 100000) is what actually
-	// applies. data/engine_tweaks.cfg has these listed too but that
+	// applies. cfg/engine_tweaks.cfg has these listed too but that
 	// file isn't auto-exec'd anywhere — pushing from QC is the only
 	// reliable place that survives across map loads + server.cfg
 	// reloads.
@@ -1601,16 +1601,21 @@ void() worldspawn =
 
 	// Load the rigid-body physics plugin before precache_everything() so that
 	// phys_barrel_precache()'s physics_supported(TRUE) call sees it.
-	// data/default.cfg used to handle this, but that file is client-only
+	// cfg/default.cfg used to handle this, but that file is client-only
 	// now, so dedicated servers rely on this localcmd instead.
 	// plug_load is idempotent — loading a plugin already loaded is a no-op.
 	//
-	// nettest: the backend is selectable. Box3D (the new multicore backend,
-	// fteplug_box3d) is the default; set `sv_physics_engine ode` in server.cfg to
-	// use the original ODE backend instead. Only ONE physics plugin can be active
-	// at a time (whichever registers first wins). default.cfg / ftesrv.cfg still
-	// `plug_load ode` at startup, so we must plug_close the OTHER backend first,
-	// else the desired one's RegisterPhysicsEngine fails with "already active".
+	// nettest: the backend is selectable. Box3D (fteplug_box3d) is THE backend — every
+	// prop, ragdoll and vehicle runs on it — and it is the only physics plugin the
+	// release ships (see PLATFORM_ENGINE_FILES in launcher/publish.py).
+	//
+	// `sv_physics_engine ode` is a DEV-ONLY escape hatch and it is not safe on a normal
+	// install: only one physics plugin can be active at a time (whichever registers
+	// first wins), so selecting ODE has to plug_close box3d BEFORE loading it — and if
+	// fteplug_ode_* is not beside the exe, that load fails and the server is left with
+	// NO physics backend at all rather than falling back. Use it only on a machine that
+	// still has the ODE plugin, and expect to restart to get back.
+	//
 	// This runs at server init before any physics body exists, so closing is safe.
 	if (cvar_string("sv_physics_engine") == "ode")
 	{
@@ -1619,7 +1624,9 @@ void() worldspawn =
 	}
 	else
 	{
-		localcmd("plug_close ode\n");
+		// No plug_close ode here any more: nothing loads it at boot (cfg/default.cfg and
+		// cfg/ftesrv.cfg plug_load box3d/hl2/cod only) and the release does not ship it,
+		// so the close was tidying up a backend that was never there.
 		localcmd("plug_load box3d\n");
 		// Box3D is "the multicore backend" but ships single-threaded (physics_box3d_threads
 		// default 1).  Fork/join the contact solver across cores so a dense settling pile
@@ -1681,7 +1688,7 @@ void() worldspawn =
 	// All custom cvars are registered from a single shared table —
 	// edit shared/sh_cvar_table.qc CVar_Init() to change defaults or
 	// add new cvars. The table is the source of truth for the auto-
-	// generated data/allcommands.cfg too.
+	// generated cfg/allcommands.cfg too.
 	CVar_Init();
 	CVar_RegisterMine();
 
@@ -1689,7 +1696,7 @@ void() worldspawn =
 	// with the mod's intended defaults (e.g., sv_accelerate "10",
 	// sv_maxspeed "320"). registercvar() above can't override an
 	// already-registered cvar, so force-set the mod's defaults here.
-	// data/server.cfg is applied immediately after this block, so admins
+	// cfg/server.cfg is applied immediately after this block, so admins
 	// who want to override still get their value applied.
 	cvar_set("sv_accelerate",    "5");
 	cvar_set("sv_airaccelerate", "150");
@@ -1714,18 +1721,18 @@ void() worldspawn =
 	// modern shooter (can't look at your feet, can't aim at high targets
 	// from below). Open it up to the full ±90.  Empty string also works
 	// — sv_user.c falls back to the -70/80 defaults — so we set the cvar
-	// explicitly. Admins can still override via data/server.cfg.
+	// explicitly. Admins can still override via cfg/server.cfg.
 	cvar_set("sv_minpitch",      "-90");
 	cvar_set("sv_maxpitch",      "90");
 
 	// Tickrate default — 64 Hz (CS-standard). FTE's engine baseline is
 	// 60 Hz and older install configs may have 100 Hz cached from
-	// prior defaults. data/server.cfg is applied immediately after this
+	// prior defaults. cfg/server.cfg is applied immediately after this
 	// block so admins can still override.
 	cvar_set("sv_mintic",        "0.015625");
 	cvar_set("sv_maxtic",        "0.015625");
 
-	// Now apply persisted overrides from data/server.cfg directly.
+	// Now apply persisted overrides from cfg/server.cfg directly.
 	// The menu-generated file is a cvar snapshot, so reading it here
 	// avoids relying on an engine-side `exec` path that may be deferred
 	// or unavailable during first-map worldspawn.

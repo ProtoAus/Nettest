@@ -3205,6 +3205,116 @@ float() PlayerVis_LerpDuration =
 .float  ph_bob_phase;
 .vector ph_bob_prev_origin;   // (retained; no longer read by the bob)
 .float  ph_bob_prev_time;     // cltime of the last bob step (for the speed x dt phase advance)
+
+// ---- Prop Hunt: prop POSE interpolation (remote viewers) ----
+//
+// The POSE wire (CSQC_PlayerVisual_Update) delivers .angles as three raw floats with no
+// previous sample and no timestamp, and the disguise predraw applied them as a HARD
+// SNAP — so a rotating prop stepped once per packet for everyone but its owner, while
+// the very same entity's ORIGIN went through a full extrapolate-and-decay smoother a
+// few hundred lines below.  Two upstream gates thin the stream further
+// (cl_carry_rotate_sendrate, sv_carry_rot_maxrate), so the steps are coarse and get
+// coarser with ping.
+//
+// Keep the last two received poses as BASES and blend them.  Bases, not Euler angles:
+// a prop pose is full 3-axis, and a per-component angle lerp gimbals, wraps at +-180,
+// and drags a 0<->180 roll straight through "lying on its side".  CarryRot_Nlerp
+// (sh_carryrot.qc) is the basis blend the carry/drop code already uses for exactly this.
+//
+// Timing mirrors the proven physprop path (PhysProp_RenderDelay / PhysProp_InterpFrac,
+// cl_physprop.qc): sample at a render time trailing by an EMA of the MEASURED packet
+// interval, rather than by the instantaneous gap — one dropped packet doubles the gap,
+// and letting that drive the delay is itself a visible lurch.
+.vector ph_pose_prev_fwd, ph_pose_prev_up;   // basis received at ph_pose_prev_time
+.vector ph_pose_cur_fwd,  ph_pose_cur_up;    // basis received at ph_pose_cur_time
+.float  ph_pose_prev_time, ph_pose_cur_time; // cltime each arrived
+.float  ph_pose_interval;                    // EMA of the arrival gap (the render-delay source)
+.float  ph_pose_have;                        // 1 = at least one pose recorded
+.vector ph_vel_smooth;                       // low-passed wire velocity (march-bob cadence)
+
+const float PH_POSE_EMA           = 0.15;    // EMA weight per accepted interval sample
+const float PH_POSE_DELAY_DEFAULT = 0.05;    // assumed gap before one is measured (20 Hz send rate)
+const float PH_POSE_DELAY_MIN     = 0.004;
+const float PH_POSE_DELAY_MAX     = 0.25;
+
+// Record a freshly received world pose.  Called from the POSE section of
+// CSQC_PlayerVisual_Update, i.e. exactly once per arriving snapshot for this proxy.
+void(entity e, vector world_angles) PlayerVis_RecordPose =
+{
+	// CarryRot_Axes CALLS MAKEVECTORS (sh_carryrot.qc warns about exactly this).  We run
+	// from inside CSQC_Ent_Update, which does not currently read v_forward across this
+	// point — but the wire reader is edited often and a silently clobbered builtin global
+	// is a miserable bug to find, so put the fence up now.
+	vector sv_f = v_forward, sv_r = v_right, sv_u = v_up;
+
+	CarryRot_Axes(world_angles);        // -> crot_X (model +X), crot_Z (model +Z)
+	if (!e.ph_pose_have)
+	{
+		// First sample: park prev on top of cur so the frac math below sees dt=0 and
+		// sits on cur.  Never blend from a pose we never actually had.
+		e.ph_pose_prev_fwd  = crot_X;
+		e.ph_pose_prev_up   = crot_Z;
+		e.ph_pose_prev_time = cltime;
+		e.ph_pose_have      = 1;
+	}
+	else
+	{
+		e.ph_pose_prev_fwd  = e.ph_pose_cur_fwd;
+		e.ph_pose_prev_up   = e.ph_pose_cur_up;
+		e.ph_pose_prev_time = e.ph_pose_cur_time;
+
+		// Only sane gaps feed the average: a sub-millisecond double-send would drive the
+		// delay to zero (rendering into the future), and a multi-second silence is a
+		// join / teleport / respawn, not a stream rate.
+		float gap = cltime - e.ph_pose_cur_time;
+		if (gap > 0.0005 && gap < 0.5)
+		{
+			if (e.ph_pose_interval <= 0)
+				e.ph_pose_interval = gap;
+			else
+				e.ph_pose_interval += (gap - e.ph_pose_interval) * PH_POSE_EMA;
+		}
+	}
+	e.ph_pose_cur_fwd  = crot_X;
+	e.ph_pose_cur_up   = crot_Z;
+	e.ph_pose_cur_time = cltime;
+
+	v_forward = sv_f; v_right = sv_r; v_up = sv_u;
+};
+
+// How far in the past this prop is drawn.
+float(entity e) PlayerVis_PoseDelay =
+{
+	float d = e.ph_pose_interval;
+	if (d <= 0) d = PH_POSE_DELAY_DEFAULT;
+	float ratio = cvar("cl_prop_interp_ratio");
+	if (ratio < 1) ratio = 1;           // below 1 would render into the future
+	return bound(PH_POSE_DELAY_MIN, d * ratio, PH_POSE_DELAY_MAX);
+};
+
+// Smoothed render pose.  `fallback` is used only when nothing has been recorded yet.
+vector(entity e, vector fallback) PlayerVis_PoseAngles =
+{
+	if (!e.ph_pose_have)
+		return fallback;
+	// A/B switch.  Note this still returns the recorded basis rather than e.angles:
+	// the march bob below WRITES e.angles and the old code read it back the next frame,
+	// so the roll fed itself between snapshots.  Recomposing from the wire basis every
+	// frame is what stops that, and it should hold in both modes.
+	if (!cvar("cl_prop_smoothrot"))
+		return CarryRot_Angles(e.ph_pose_cur_fwd, e.ph_pose_cur_up);
+
+	float dt = e.ph_pose_cur_time - e.ph_pose_prev_time;
+	if (dt <= 0.0001)
+		return CarryRot_Angles(e.ph_pose_cur_fwd, e.ph_pose_cur_up);
+
+	float f = (cltime - PlayerVis_PoseDelay(e) - e.ph_pose_prev_time) / dt;
+	f = bound(0, f, 1);
+	CarryRot_Nlerp(e.ph_pose_prev_fwd, e.ph_pose_prev_up,
+	               e.ph_pose_cur_fwd,  e.ph_pose_cur_up, f);
+	return CarryRot_Angles(crot_oF, crot_oU);
+};
+
 .float vis_last_anim_top;
 .float vis_last_anim_bottom;
 .float vis_aim_yaw;          // server-sent aim direction (never modified by predraw)
@@ -3806,14 +3916,22 @@ float() CSQC_PlayerVisual_Predraw =
 		// ---- PROP ORIENTATION (full 3-axis pose) ----
 		// Local owner: a client-PREDICTED zero-ping pose (the PropRot module drives the
 		// basis while you hold the rotate key; loose = yaw-follows-view, committed =
-		// frozen).  Everyone else: the server-composed full pose (PH_PoseAngles) already
-		// sits on self.angles from the Wire-A POSE section — leave it be.
+		// frozen).  Everyone else: the server-composed full pose, INTERPOLATED between
+		// the last two snapshots — it used to be applied as a hard snap straight off the
+		// wire, which is what made another player's rotation step visibly with ping.
+		//
+		// Composed into a local and assigned ONCE.  Both branches must recompute from
+		// their own source every frame and never read self.angles back: the march bob
+		// below writes self.angles, and the old code let that output become the next
+		// frame's input, so the roll compounded between snapshots.
 		if (self.vis_owner_entnum == player_localentnum && !self.vis_is_dead
 		    && csqc_prediction_valid && PropRot_HaveLocalPose())
 		{
 			vector ph_va = getproperty(VF_CL_VIEWANGLES);
 			self.angles = PropRot_LocalPoseAngles(ph_va_y);
 		}
+		else
+			self.angles = PlayerVis_PoseAngles(self, self.angles);
 
 		// ---- PROP MARCH BOB ----
 		// Rock the prop left/right (roll) + a small per-step vertical hop, cadence +
@@ -3824,15 +3942,26 @@ float() CSQC_PlayerVisual_Predraw =
 		float bob_hop = 0;
 		if (cvar("cl_prop_bob") && !self.vis_is_dead)
 		{
-			vector bob_vel = self.velocity; bob_vel_z = 0;
-			float bob_speed = vlen(bob_vel);
-
 			// Phase advances by horizontal distance travelled, but from SPEED x dt rather
 			// than the frame-to-frame origin delta: the visual proxy is velocity-extrapolated
 			// between snapshots (~:2802) and its origin micro-corrects on each one, which made
 			// sampling the origin stutter the cadence.  Speed is smooth, so speed*dt is smooth.
 			float bob_dt = bound(0, cltime - self.ph_bob_prev_time, 0.1);	// clamp hitches / first frame
 			self.ph_bob_prev_time = cltime;
+
+			// ...except .velocity ITSELF arrives as a per-packet snap for every proxy
+			// (including our own — this is the wire value, not the predicted one), so
+			// "speed" stepped at the send rate and the cadence hitched every time it did.
+			// Low-pass it.  The filter only shapes the bob PHASE; nothing physical reads
+			// ph_vel_smooth, so a little lag here costs nothing and buys a continuous
+			// stride.  Frame-rate independent: k = dt/tau, clamped so a hitch can't
+			// overshoot past the target.
+			float bob_tau = cvar("cl_prop_bob_smooth");
+			if (bob_tau <= 0) bob_tau = 0.08;
+			self.ph_vel_smooth += (self.velocity - self.ph_vel_smooth) * bound(0, bob_dt / bob_tau, 1);
+
+			vector bob_vel = self.ph_vel_smooth; bob_vel_z = 0;
+			float bob_speed = vlen(bob_vel);
 
 			float bob_stride = cvar("cl_prop_bob_stride");
 			if (bob_stride <= 0) bob_stride = 40;
@@ -3867,8 +3996,11 @@ float() CSQC_PlayerVisual_Predraw =
 		else
 		{
 			// Keep the bob clock fresh while idle/dead so the first moving frame after
-			// standing still doesn't advance the phase by a huge dt.
+			// standing still doesn't advance the phase by a huge dt.  Snap the velocity
+			// filter to the wire value for the same reason — re-entering the bob with a
+			// stale ph_vel_smooth would ramp the cadence in from the wrong speed.
 			self.ph_bob_prev_time = cltime;
+			self.ph_vel_smooth    = self.velocity;
 		}
 
 		self.scale = (self.vis_disguise_scale > 0) ? self.vis_disguise_scale : 1;
@@ -3898,8 +4030,12 @@ float() CSQC_PlayerVisual_Predraw =
 		// above resets bounds to the raw MODEL box on a fresh-disguise frame (bounds aren't
 		// re-setsize'd until the next snapshot), which would flicker the X/Y centring.  The
 		// hull fields are always current, so this is transient-free.
-		vector pg_hmins = PH_HullMins(self);
-		vector pg_hmaxs = PH_HullMaxs(self);
+		// MESH box, not the collision hull: this is grounding the drawn geometry, and the
+		// collision hull is capped at player width on purpose (bulky props must still fit
+		// in a corner).  Upright the shift cancels to 0 either way, so this only matters
+		// once the prop is posed off-axis — where the hull would ground the wrong volume.
+		vector pg_hmins = PH_MeshMins(self);
+		vector pg_hmaxs = PH_MeshMaxs(self);
 		vector pg_cofs  = CarryRot_CenterOfs(self.angles, pg_hmins, pg_hmaxs);
 		vector pg_rhalf = CarryRot_RotatedHalf(self.angles, (pg_hmaxs - pg_hmins) * 0.5);
 		vector bob_base_org = self.origin;
@@ -4909,6 +5045,11 @@ void() CSQC_PlayerVisual_Update =
 		self.angles_y = readfloat();
 		self.angles_z = readfloat();
 		self.vis_aim_yaw = self.angles_y;  // preserve original aim before predraw modifies it
+		// Two-snapshot pose ring for the Prop Hunt disguise interpolator.  Recorded for
+		// every proxy, not just disguised ones: the disguise flag rides the IDENTITY
+		// section, which can arrive in a LATER update than the first pose, and a proxy
+		// that starts interpolating from "no history" pops on its first rotation.
+		PlayerVis_RecordPose(self, self.angles);
 		self.velocity_x = readcoord();
 		self.velocity_y = readcoord();
 		self.velocity_z = readcoord();
@@ -5008,6 +5149,12 @@ void() CSQC_PlayerVisual_Update =
 		self.ph_hull_halfxy = readbyte();
 		self.ph_hull_minz   = readbyte() - 64;
 		self.ph_hull_height = readbyte();
+		// TRUE footprint + height — separate from the collision box above.  Collision
+		// stays capped at PLAYER size on both axes (hide in a corner, duck under the same
+		// geometry); these are where the mesh really is, read only by the trace enclosure
+		// and the render's floor-grounding.  Both share ph_hull_minz.  See ph_mesh_halfxy.
+		self.ph_mesh_halfxy = readbyte();
+		self.ph_mesh_height = readbyte();
 		float ph_scale_b    = readbyte();
 		self.vis_disguise_scale = (ph_scale_b > 0) ? ph_scale_b / 16 : 1;
 		self.vis_disguise_skin  = readbyte();
@@ -5675,26 +5822,26 @@ noref void(float isnew) CSQC_Ent_Update =
 
 	if (changedflags & PM_SF_AMMO)
 	{
-		// Compact slot-ammo bitmask + utility counts. Matches the server
-		// write order in PM_PredictionProxy_SendEntity exactly.
-		// Fields whose bit is clear keep their cached value (server
-		// skipped writing them because they didn't change this send).
-		float m0 = readbyte();
-		float m1 = readbyte();
-
-		if (m0 &   1) self.slot_primary_mag    = readbyte();
-		if (m0 &   2) self.slot_primary_ammo   = readbyte();
-		if (m0 &   4) self.slot_primary_aux    = readbyte();
-		if (m0 &   8) self.slot_secondary_mag  = readbyte();
-		if (m0 &  16) self.slot_secondary_ammo = readbyte();
-		if (m0 &  32) self.slot_secondary_aux  = readbyte();
-		if (m0 &  64) self.ammo_hlgrenade      = readbyte();
-		if (m0 & 128) self.ammo_snowball       = readbyte();
-
-		if (m1 &   1) self.ammo_cshegrenade    = readbyte();
-		if (m1 &   2) self.ammo_csflashbang    = readbyte();
-		if (m1 &   4) self.ammo_cssmokegrenade = readbyte();
-		if (m1 &   8) self.ammo_cfc4           = readbyte();
+		// Slot ammo + utility counts — a FULL section, not a sub-delta.
+		// Matches the server write order in PM_PredictionProxy_SendEntity
+		// exactly.  There used to be two leading mask bytes selecting
+		// which fields followed; that made a dropped/overflowed packet
+		// unrecoverable, because the server-side mask was consumed by
+		// the first attempt while the engine's PM_SF_AMMO retry carried
+		// an empty section (the "first join = 0/0 handgun" bug).  The
+		// whole thing is 12 bytes and only rides a real ammo change.
+		self.slot_primary_mag    = readbyte();
+		self.slot_primary_ammo   = readbyte();
+		self.slot_primary_aux    = readbyte();
+		self.slot_secondary_mag  = readbyte();
+		self.slot_secondary_ammo = readbyte();
+		self.slot_secondary_aux  = readbyte();
+		self.ammo_hlgrenade      = readbyte();
+		self.ammo_snowball       = readbyte();
+		self.ammo_cshegrenade    = readbyte();
+		self.ammo_csflashbang    = readbyte();
+		self.ammo_cssmokegrenade = readbyte();
+		self.ammo_cfc4           = readbyte();
 
 		W_SlotAmmo_LoadCurrent(self);
 	}

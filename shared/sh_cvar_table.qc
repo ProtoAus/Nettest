@@ -7,9 +7,9 @@
 //  - CVar_RegisterMine() iterates the table and registercvar()'s
 //    only the entries flagged for the current VM (CL or SV).
 //  - CVar_ForceDefaults() (SSQC only) re-applies the table's
-//    defaults to any cvar blanked by data/server.cfg exec.
+//    defaults to any cvar blanked by cfg/server.cfg exec.
 //  - CVar_WriteAllCommandsCfg() (SSQC only) overwrites
-//    data/allcommands.cfg from the table, preserving section
+//    cfg/allcommands.cfg from the table, preserving section
 //    headers. Triggered by `sv_writecvars 1` in the console
 //    (the cvar self-resets to 0 after writing — same admin-
 //    trigger pattern as sv_roundrestart in StartFrame).
@@ -22,7 +22,7 @@ const float CVAR_SIDE_SV   = 2;
 const float CVAR_SIDE_BOTH = 3;
 
 // The cvar registry (g_cvar_* parallel arrays below) is what auto-generates
-// data/allcommands.cfg and the settings menu — it must list every cvar with
+// cfg/allcommands.cfg and the settings menu — it must list every cvar with
 // its default.  QuakeC has no dynamic arrays, so the arrays are STATICALLY
 // sized to this cap, and CVar_Add's overflow guard SILENTLY drops everything
 // past it (a dropped cl_ads_* shows up as the "cl_ads_<weapon> missing" bug).
@@ -140,7 +140,7 @@ void(string section, string name, string def, float side,
     g_cvar_ui_max  [i] = ui_max;
 };
 
-// CVar_AddSaved — like CVar_Add, but ALSO persisted to data/server.cfg by
+// CVar_AddSaved — like CVar_Add, but ALSO persisted to cfg/server.cfg by
 // CVar_WriteServerCfg (no menu UI).  Use for server-side cvars that should be
 // admin-saveable but aren't worth a Create-Server menu entry (e.g. sv_carry_*).
 void(string section, string name, string def, float side) CVar_AddSaved =
@@ -164,24 +164,38 @@ float(string name) CVar_FindIndex =
 };
 
 // Register a per-weapon ADS pose override set: <prefix>_pitch/yaw/roll/
-// forward/right/down, defaulted to the shared baseline so a weapon's ADS
-// is unchanged until tuned.  cl_viewfx.qc reads them via the weapon's
+// forward/right/down.  cl_viewfx.qc reads them via the weapon's
 // weapon_ads_prefix field.
+//
+// These used to be registered at a generic baseline here and then OVERRIDDEN by
+// 93 `set cl_ads_*` lines in cfg/default.cfg — which meant the real, tuned sight
+// alignment for 29 guns lived in a cfg while the table advertised numbers nobody
+// used.  They survived the cvar purge only because cvar_audit.py cannot see names
+// built with strcat (it says so in its own header).  The tuned values now live
+// here; default.cfg carries no cl_ads_* at all.
+void(string prefix, string pitch, string yaw, string roll,
+     string fwd, string right, string down) ADS_RegisterPose =
+{
+    CVar_Add("Client", strcat(prefix, "_pitch"),   pitch, CVAR_SIDE_CL);
+    CVar_Add("Client", strcat(prefix, "_yaw"),     yaw,   CVAR_SIDE_CL);
+    CVar_Add("Client", strcat(prefix, "_roll"),    roll,  CVAR_SIDE_CL);
+    CVar_Add("Client", strcat(prefix, "_forward"), fwd,   CVAR_SIDE_CL);
+    CVar_Add("Client", strcat(prefix, "_right"),   right, CVAR_SIDE_CL);
+    CVar_Add("Client", strcat(prefix, "_down"),    down,  CVAR_SIDE_CL);
+};
+
+// Baseline pose — for a weapon that has never been tuned.  Must stay in sync
+// with the shared cl_ads_* fallback set registered in CVar_Init.
 void(string prefix) ADS_RegisterPoseCvars =
 {
-    CVar_Add("Client", strcat(prefix, "_pitch"),   "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", strcat(prefix, "_yaw"),     "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", strcat(prefix, "_roll"),    "0",    CVAR_SIDE_CL);
-    CVar_Add("Client", strcat(prefix, "_forward"), "-5",   CVAR_SIDE_CL);
-    CVar_Add("Client", strcat(prefix, "_right"),   "6.69", CVAR_SIDE_CL);
-    CVar_Add("Client", strcat(prefix, "_down"),    "2",    CVAR_SIDE_CL);
+    ADS_RegisterPose(prefix, "0", "0", "0", "-5", "6.69", "2");
 };
 
 // ============================================================
 //  ===  DEFAULT ZONE — edit here to change any default.  ===
 //
 //  Order within sections is the order the writer emits to
-//  data/allcommands.cfg. Group new entries under an existing
+//  cfg/allcommands.cfg. Group new entries under an existing
 //  section header or add a new section by passing a new label.
 // ============================================================
 void() CVar_Init =
@@ -458,48 +472,49 @@ void() CVar_Init =
     CVar_Add("Client", "cl_ads_right",     "6.69", CVAR_SIDE_CL);
     CVar_Add("Client", "cl_ads_down",      "2",    CVAR_SIDE_CL);
 
-    // Per-weapon ADS pose overrides.  Each defaults to the shared pose
-    // above, so a weapon's ADS is unchanged until tuned to align that
-    // model's sights.  The weapon's Equip sets weapon_ads_prefix to the
-    // matching prefix; cl_viewfx.qc reads it.
-    ADS_RegisterPoseCvars("cl_ads_mp5");
-    ADS_RegisterPoseCvars("cl_ads_vector");
-    ADS_RegisterPoseCvars("cl_ads_type89");
-    ADS_RegisterPoseCvars("cl_ads_ump45");
-    ADS_RegisterPoseCvars("cl_ads_m249");
-    ADS_RegisterPoseCvars("cl_ads_ks23");
-    ADS_RegisterPoseCvars("cl_ads_m4");
-    ADS_RegisterPoseCvars("cl_ads_galil");
-    ADS_RegisterPoseCvars("cl_ads_glock");
-    ADS_RegisterPoseCvars("cl_ads_elite");
-    ADS_RegisterPoseCvars("cl_ads_p228");
-    ADS_RegisterPoseCvars("cl_ads_msg90");
-    ADS_RegisterPoseCvars("cl_ads_sg552");
-    ADS_RegisterPoseCvars("cl_ads_sl8");
-    ADS_RegisterPoseCvars("cl_ads_mk23");
+    // Per-weapon ADS pose overrides — sight alignment for each viewmodel.  The
+    // weapon's Equip sets weapon_ads_prefix to the matching prefix; cl_viewfx.qc
+    // reads it, falling back to the shared cl_ads_* set above.
+    //
+    //                                  pitch    yaw      roll     forward  right    down
+    ADS_RegisterPose("cl_ads_mp5",       "-1.5",  "0",     "0",     "-4.5",  "2.44",  "0.2");
+    ADS_RegisterPose("cl_ads_vector",    "0",     "0",     "0",     "-5",    "8.6",   "3.75");
+    ADS_RegisterPose("cl_ads_type89",    "2.5",   "0",     "0",     "-5",    "8.55",  "2.75");
+    ADS_RegisterPose("cl_ads_ump45",     "0",     "0",     "0",     "-5",    "7.74",  "2.05");
+    ADS_RegisterPose("cl_ads_m249",      "0.5",   "0",     "0",     "-5",    "7.155", "3.83");
+    ADS_RegisterPose("cl_ads_ks23",      "0",     "0",     "0",     "-5",    "6.13",  "1.8");
+    ADS_RegisterPose("cl_ads_m4",        "1.35",  "0",     "0",     "-5",    "6.72",  "3.5");
+    ADS_RegisterPose("cl_ads_galil",     "0",     "1.85",  "0",     "-5",    "5.61",  "1.7");
+    ADS_RegisterPose("cl_ads_glock",     "0",     "0",     "0",     "-5",    "5",     "1.9");
+    ADS_RegisterPose("cl_ads_elite",     "0",     "0",     "-15",   "-9",    "8.9",   "-0.85");
+    ADS_RegisterPose("cl_ads_p228",      "0",     "0",     "0",     "-5",    "8.5",   "2.95");
+    ADS_RegisterPose("cl_ads_msg90",     "0",     "0",     "-15",   "-5",    "6.1",   "-1.2");
+    ADS_RegisterPose("cl_ads_sg552",     "0",     "0",     "0",     "-5",    "8.8",   "0.9");
+    ADS_RegisterPose("cl_ads_sl8",       "0",     "0",     "-15",   "-6",    "4.75",  "-1");
+    ADS_RegisterPose("cl_ads_mk23",      "1",     "0",     "0",     "-5",    "4.3",   "1.4");
     // Remaining ADS weapons — every gun gets its own pose set.
-    ADS_RegisterPoseCvars("cl_ads_mac10");
-    ADS_RegisterPoseCvars("cl_ads_famas");
-    ADS_RegisterPoseCvars("cl_ads_m9");
-    ADS_RegisterPoseCvars("cl_ads_anaconda");
-    ADS_RegisterPoseCvars("cl_ads_ddeagle");
-    ADS_RegisterPoseCvars("cl_ads_scar");
-    ADS_RegisterPoseCvars("cl_ads_mauser");
-    ADS_RegisterPoseCvars("cl_ads_spas12");
-    ADS_RegisterPoseCvars("cl_ads_winchester");
-    ADS_RegisterPoseCvars("cl_ads_barrett");
-    ADS_RegisterPoseCvars("cl_ads_m700");
-    ADS_RegisterPoseCvars("cl_ads_awm");
-    ADS_RegisterPoseCvars("cl_ads_psg1");
-    ADS_RegisterPoseCvars("cl_ads_dragunov");
-    ADS_RegisterPoseCvars("cl_ads_aug");
-    ADS_RegisterPoseCvars("cl_ads_ak47");
-    ADS_RegisterPoseCvars("cl_ads_hdak47");
-    ADS_RegisterPoseCvars("cl_ads_awp");
-    ADS_RegisterPoseCvars("cl_ads_deagle");
-    ADS_RegisterPoseCvars("cl_ads_m4a1");
-    ADS_RegisterPoseCvars("cl_ads_scout");
-    ADS_RegisterPoseCvars("cl_ads_usp");
+    ADS_RegisterPose("cl_ads_mac10",     "0",     "0",     "0",     "-5",    "5.7",   "2.2");
+    ADS_RegisterPose("cl_ads_famas",     "0",     "0",     "0",     "-5",    "8.85",  "0.9");
+    ADS_RegisterPoseCvars("cl_ads_m9");                 // untuned — baseline pose
+    ADS_RegisterPose("cl_ads_anaconda",  "2",     "0",     "0",     "-5",    "6.8",   "1.78");
+    ADS_RegisterPoseCvars("cl_ads_ddeagle");            // untuned
+    ADS_RegisterPose("cl_ads_scar",      "-1",    "0",     "0",     "-5",    "7.05",  "0.7");
+    ADS_RegisterPose("cl_ads_mauser",    "-1.5",  "0",     "0",     "-5",    "4.9",   "0.65");
+    ADS_RegisterPose("cl_ads_spas12",    "0",     "0",     "0",     "-5",    "5.8",   "1");
+    ADS_RegisterPose("cl_ads_winchester","0",     "0",     "0",     "-5",    "6.9",   "1.9");
+    ADS_RegisterPose("cl_ads_barrett",   "0",     "0",     "-15",   "-8",    "7.2",   "1");
+    ADS_RegisterPose("cl_ads_m700",      "0",     "0",     "-15",   "-7.5",  "8.2",   "1");
+    ADS_RegisterPoseCvars("cl_ads_awm");                // untuned
+    ADS_RegisterPose("cl_ads_psg1",      "0",     "0",     "-15",   "-9",    "8.8",   "1.25");
+    ADS_RegisterPose("cl_ads_dragunov",  "0",     "0",     "-15",   "-2.5",  "5.5",   "0");
+    ADS_RegisterPose("cl_ads_aug",       "0",     "0",     "-15",   "-8",    "7",     "-1.4");
+    ADS_RegisterPoseCvars("cl_ads_ak47");               // untuned
+    ADS_RegisterPoseCvars("cl_ads_hdak47");             // untuned
+    ADS_RegisterPoseCvars("cl_ads_awp");                // untuned
+    ADS_RegisterPose("cl_ads_deagle",    "0",     "0",     "0",     "-2",    "4.15",  "1.35");
+    ADS_RegisterPoseCvars("cl_ads_m4a1");               // untuned
+    ADS_RegisterPoseCvars("cl_ads_scout");              // untuned
+    ADS_RegisterPose("cl_ads_usp",       "0",     "0",     "0",     "-5",    "9",     "4.9");
 
     // Weapon-lower pose — drives the off-screen viewmodel offset when
     // the player is grappling or (with sv_codladders 1) climbing a
@@ -1465,6 +1480,20 @@ void() CVar_Init =
     CVar_Add("Client", "cl_prop_bob_roll",        "4",     CVAR_SIDE_CL);
     CVar_Add("Client", "cl_prop_bob_hop",         "1.5",   CVAR_SIDE_CL);
     CVar_Add("Client", "cl_prop_bob_stride",      "20",    CVAR_SIDE_CL);
+    // Seconds of low-pass on the wire velocity that drives the march-bob cadence.  The
+    // proxy's .velocity arrives as a per-packet snap, which stepped the stride; 0 uses
+    // the 0.08 default.  Cosmetic only — nothing physical reads the filtered value.
+    CVar_Add("Client", "cl_prop_bob_smooth",      "0.08",  CVAR_SIDE_CL);
+    // Prop Hunt disguise POSE interpolation (client/cl_player.qc, PlayerVis_PoseAngles).
+    // 1 = blend the last two received poses with CarryRot_Nlerp so another player's prop
+    // rotates continuously instead of stepping once per packet.  0 = the old hard snap
+    // to the newest pose, for A/B.  Ratio is the render delay in MEASURED packet
+    // intervals — 1 is the minimum that never renders into the future; raise it for more
+    // buffer against packet loss at the cost of visual lag.  (Mirrors
+    // cl_physprop_smoothinterp / cl_physprop_interp_ratio, which solve the same problem
+    // for physics props.)
+    CVar_Add("Client", "cl_prop_smoothrot",       "1",     CVAR_SIDE_CL);
+    CVar_Add("Client", "cl_prop_interp_ratio",    "1",     CVAR_SIDE_CL);
     CVar_Add("Client", "cl_menu_backdrop",        "1",     CVAR_SIDE_CL);
     // Scoreboard backdrop blur — when 1, HUD_DrawScoreboard runs a
     // 2-pass separable Gaussian blur of $currentrender via two
@@ -1523,7 +1552,7 @@ void() CVar_Init =
     // menu's "Voice" tab can render widgets, and the existing per-client
     // settings.cfg writer persists user picks across launches.
     //
-    // Defaults overlap with data/default.cfg's `set` lines for engine
+    // Defaults overlap with cfg/default.cfg's `set` lines for engine
     // cvars (the QC manifest's registercvar() is a no-op for cvars the
     // engine pre-registered, so default.cfg is what actually applies
     // them on a fresh install — these defaults are documentation /
@@ -1799,7 +1828,7 @@ void() CVar_Init =
     CVar_AddUI("Server", "cleandecals",               "0",  CVAR_SIDE_SV,
         CVAR_UI_TOGGLE, 0, "",
         0, CVAR_ENUM_NONE, 0, 0);
-    // Server-side VoIP toggles.  All three persist into data/server.cfg
+    // Server-side VoIP toggles.  All three persist into cfg/server.cfg
     // (the CVar_WriteServerCfg writer keys off CVAR_FLAG_SAVE_TO_SERVER_CFG)
     // and surface in the F2 server panel + Create Server menu.
     //   sv_voip        — master receive; if 0, voice packets dropped.
@@ -2425,7 +2454,7 @@ void() CVar_Init =
         0, CVAR_ENUM_NONE, 0, 0);
     // Engine-pre-registered cvars (FTE registers these; we restate their
     // defaults so the cfg captures the mod's intended values and
-    // CVar_ForceDefaults can rescue them after data/server.cfg exec).
+    // CVar_ForceDefaults can rescue them after cfg/server.cfg exec).
     CVar_AddUI("Server", "sv_antilag",                   "3",      CVAR_SIDE_SV,
         CVAR_UI_SCALAR, CVAR_TAB_SERVER, "",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 3);
@@ -2625,7 +2654,7 @@ void() CVar_Init =
     // props through the skybox because the radial spread compounds
     // with ODE's mass/damping.  512 keeps the blasts visceral but
     // controllable; bump higher for more chaos.  CVar_AddUI (not plain
-    // CVar_Add) so it auto-saves to data/server.cfg and sits in the
+    // CVar_Add) so it auto-saves to cfg/server.cfg and sits in the
     // physics tab next to Hit Force, its bullet-knockback sibling.
     CVar_AddUI("ODE physics", "sv_physprop_explosion_force",   "512", CVAR_SIDE_BOTH,
         CVAR_UI_SCALAR, CVAR_TAB_ODE | CVAR_TAB_CREATE_PHYS, "Explosion Force",
@@ -2986,7 +3015,7 @@ void(string path) CVar_WriteServerCfg =
 };
 
 // Re-apply the table's default to any server-side cvar whose value
-// got blanked by data/server.cfg's exec (replaces the long if-empty
+// got blanked by cfg/server.cfg's exec (replaces the long if-empty
 // chain that used to live in SV_FixupEmptyDefaults / Menu_FixupEmptyDefaults).
 //
 // Defined outside any #ifdef so SSQC and the menu VM can both call
@@ -3004,17 +3033,17 @@ void() CVar_ForceDefaults =
 };
 
 #ifdef SSQC
-// Overwrite data/allcommands.cfg from the table. Triggered by
+// Overwrite cfg/allcommands.cfg from the table. Triggered by
 // `sv_writecvars 1` in the server console (StartFrame catches it
 // and calls here, then resets the cvar to 0 — same admin-trigger
 // pattern as sv_roundrestart). SSQC has no registercommand so
 // the cvar-toggle is the standard hook.
 void() CVar_WriteAllCommandsCfg =
 {
-    filestream f = fopen("data/allcommands.cfg", FILE_WRITE);
+    filestream f = fopen("cfg/allcommands.cfg", FILE_WRITE);
     if (f < 0)
     {
-        bprint(PRINT_HIGH, "sv_writecvars: fopen data/allcommands.cfg FAILED\n");
+        bprint(PRINT_HIGH, "sv_writecvars: fopen cfg/allcommands.cfg FAILED\n");
         return;
     }
 
@@ -3035,6 +3064,6 @@ void() CVar_WriteAllCommandsCfg =
     }
 
     fclose(f);
-    bprint(PRINT_HIGH, "sv_writecvars: wrote data/allcommands.cfg\n");
+    bprint(PRINT_HIGH, "sv_writecvars: wrote cfg/allcommands.cfg\n");
 };
 #endif

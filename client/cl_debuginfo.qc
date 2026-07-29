@@ -2211,7 +2211,7 @@ void() CSQC_DrawDebugPanels =
     float y = 8;
 
     // Render the debug overlays with the same font the engine console uses
-    // (data/default.cfg sets con_textfont "gfx/RobotoEB") — that's what the
+    // (cfg/default.cfg sets con_textfont "gfx/RobotoEB") — that's what the
     // "hud" slot is loaded with in CSQC_Init, so point drawfont at it here
     // and restore afterwards so other drawstring callers are unaffected.
     float prev_font = drawfont;

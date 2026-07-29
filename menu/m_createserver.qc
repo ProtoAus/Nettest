@@ -46,7 +46,7 @@ float create_server_nomapweapons;
 // emits hitmarker), 1 = trust client claims (client predicts hitmarker
 // locally, server suppresses its own emit to dedupe).  Mode 2 (full trust,
 // no sanity checks) is power-user — not exposed in the menu, set via
-// console / data/server.cfg if needed.
+// console / cfg/server.cfg if needed.
 float create_server_trust_clienthits;
 // Voice / VoIP server-side toggles.  voip_record cycles through
 // 0=off / 1=record-all / 2=spectators-only (matches engine sv_voip_record
@@ -59,7 +59,7 @@ float create_server_tab;    // 0 = server, 1 = game, 2 = movement
 float create_server_tickrate_index;
 float create_server_game_filter;	// map-list filter: 0=All 1=Nettest 2=CS 3=HL 4=CoD1 5=CoD2 6=Source
 string create_server_game_labels[7] = { "Net", "CS", "HL", "CoD1", "CoD2", "HL2", "CSS" };
-// Which game categories actually have maps in the offline index (data/maps_index.txt),
+// Which game categories actually have maps in the offline index (cfg/maps_index.txt),
 // keyed by game id (1..7).  Built once by create_server_scan_avail(); the filter row only
 // draws tabs for games that are present, so e.g. the CoD tabs vanish without CoD content.
 float  create_server_game_has_maps[8];
@@ -259,13 +259,13 @@ void() create_server_seed_fields =
 
 	// Ensure non-UI server cvars have their proper defaults before we
 	// read them into UI state.  Handles the case where a prior save
-	// wrote empty strings to data/server.cfg.
+	// wrote empty strings to cfg/server.cfg.
 	Menu_FixupEmptyDefaults();
 
 	menu_seed_text_from_cvar("hostname", "", create_server_name_text, create_server_name_cursor);
 
 	// Seed from the cvar, but bump anything below 4 up to the mod default
-	// (16). Keeps old installs whose data/server.cfg still has the legacy
+	// (16). Keeps old installs whose cfg/server.cfg still has the legacy
 	// "2" from breaking back down every time the menu is opened.
 	maxplayers_text = cvar_string("maxclients");
 	if (maxplayers_text == "" || stof(maxplayers_text) < 4)
@@ -281,7 +281,7 @@ void() create_server_seed_fields =
 	{
 		create_server_rcon_password_text = cvar_string("sv_rcon_password_shadow");
 		if (create_server_rcon_password_text == "")
-			create_server_rcon_password_text = Menu_ReadConfigValue("data/server.cfg", "rcon_password");
+			create_server_rcon_password_text = Menu_ReadConfigValue("cfg/server.cfg", "rcon_password");
 		create_server_rcon_password_cursor = strlen(create_server_rcon_password_text);
 	}
 	// Port defaults to 27500 — never seed from the live sv_port cvar because
@@ -644,7 +644,7 @@ float(string id, vector pos, vector size, strbuf options, __inout float selected
 };
 
 // Bucket a map by its SOURCE GAME spec (the fs_addons.txt dir it came from, as written into
-// data/maps_index.txt by the engine's `fs_indexmaps`).  This is the reliable signal — the spec is
+// cfg/maps_index.txt by the engine's `fs_indexmaps`).  This is the reliable signal — the spec is
 // the real game dir, so CS:S ("...Counter-Strike Source/cstrike") and CS1.6 ("...Half-Life/cstrike")
 // are distinguished even though both end in "cstrike" and share map names (de_dust2).
 // Returns the game id used by create_server_game_filter (1..7).
@@ -670,13 +670,37 @@ float(string spec) create_server_map_game =
 	return 6;	// HL2 / other Source
 };
 
-// Read the engine-built OFFLINE map index (data/maps_index.txt — one "<sourcespec>\t<mapname>"
+// Can this game's maps actually be LOADED by the engine we are running?
+//
+// Some source games are only readable through an engine PLUGIN: CoD needs fteplug_cod for
+// .d3dbsp / .iwd, HL2 and CS:Source need fteplug_hl2 for VBSP / VPK / VMT.  Without the
+// plugin those maps are unplayable — the engine reports "Unrecognised model format VBSP" —
+// so listing them is a trap, and indexing + mounting their content is wasted work.
+//
+// QC has no way to ask which plugins are loaded: FTE registers neither a cvar nor a command
+// per plugin (common/plugin.c keeps the list internal).  So the gate comes from the file
+// that DECIDES the plugin set — cfg/default.cfg, which does the plug_load calls and sets
+// these two flags right beside them.  Missing cvar reads as 1 (present), so a hand-edited or
+// older config keeps today's behaviour instead of silently hiding maps that do work.
+//
+// Applied at three points, which together are "skip the whole process": the availability
+// scan (no tab), the index read (no list entries), and the lazy mount (no fs_useaddons).
+float(float gid) create_server_game_plugin_ok =
+{
+	if (gid == 4 || gid == 5)		// CoD1 / CoD2
+		return cvar("fs_have_cod") ? TRUE : FALSE;
+	if (gid == 6 || gid == 7)		// HL2 / CS:Source
+		return cvar("fs_have_hl2") ? TRUE : FALSE;
+	return TRUE;				// our own maps, GoldSrc HL / CS 1.6 — base engine handles these
+};
+
+// Read the engine-built OFFLINE map index (cfg/maps_index.txt — one "<sourcespec>\t<mapname>"
 // line per map, written by `fs_indexmaps`; no game is mounted to build it).  Add the maps whose
 // source game matches the active filter (0 = All).  Replaces the old search_begin scan, which
 // only saw MOUNTED games and shadowed same-named maps (the missing-CS:S-maps bug).
 void(float filter) create_server_read_index =
 {
-	float fh = fopen("data/maps_index.txt", FILE_READ);
+	float fh = fopen("cfg/maps_index.txt", FILE_READ);
 	if (fh < 0)
 		return;
 	string line = fgets(fh);
@@ -693,8 +717,10 @@ void(float filter) create_server_read_index =
 		{
 			string spec = substring(line, 0, tab);
 			string mapname = substring(line, tab + 1, n - tab - 1);
+			float gid = create_server_map_game(spec);
 			if (mapname != "" &&
-			    (filter == 0 || create_server_map_game(spec) == filter) &&
+			    create_server_game_plugin_ok(gid) &&
+			    (filter == 0 || gid == filter) &&
 			    !menu_buf_contains(create_server_maps, mapname))
 				bufstr_add(create_server_maps, mapname, FALSE);
 		}
@@ -714,7 +740,7 @@ void() create_server_scan_avail =
 		create_server_game_has_maps[gid] = 0;
 	create_server_game_has_maps[1] = 1;	// Net = the running mod, always available
 
-	float fh = fopen("data/maps_index.txt", FILE_READ);
+	float fh = fopen("cfg/maps_index.txt", FILE_READ);
 	if (fh >= 0)
 	{
 		string line = fgets(fh);
@@ -731,8 +757,12 @@ void() create_server_scan_avail =
 			{
 				string spec = substring(line, 0, tab);
 				string mapname = substring(line, tab + 1, n - tab - 1);
-				if (mapname != "")
-					create_server_game_has_maps[create_server_map_game(spec)] = 1;
+				// Reuses the loop's `gid` declared at the top of this function.
+				// A game whose plugin is absent never gets a tab, however many maps
+				// the index holds for it — they cannot be loaded.
+				gid = create_server_map_game(spec);
+				if (mapname != "" && create_server_game_plugin_ok(gid))
+					create_server_game_has_maps[gid] = 1;
 			}
 			line = fgets(fh);
 		}
@@ -745,7 +775,7 @@ void() create_server_scan_avail =
 // game so de_dust2 resolves to the right one (CS:S vs CS1.6).  Returns "" if not found.
 string(string mapname, float filter) create_server_index_spec_for =
 {
-	float fh = fopen("data/maps_index.txt", FILE_READ);
+	float fh = fopen("cfg/maps_index.txt", FILE_READ);
 	if (fh < 0)
 		return "";
 	string result = "";
@@ -788,6 +818,12 @@ string(string spec) create_server_deps_for_spec =
 {
 	string base = "\"steam:Half-Life/valve\" \"steam:Half-Life/cstrike\"";
 	float gid = create_server_map_game(spec);
+	// No plugin, no mount.  Such a map is already filtered out of the list, so this only
+	// fires if one is reached some other way (a console `map`, a stale saved selection) —
+	// and mounting a Source/CoD tree we cannot parse just costs searchpath work for
+	// content nothing can read.
+	if (!create_server_game_plugin_ok(gid))
+		return base;
 	if (gid == 7)               // CS:Source -> base + HL2 content + the CS:S cstrike dir
 		return strcat(base, " \"steam:Half-Life 2/hl2\" \"steam:Counter-Strike Source/cstrike\"");
 	if (gid == 6)               // HL2 -> base + hl2
@@ -1007,7 +1043,7 @@ void() create_server_launch =
 	cvar_set("physics_ode_worldquickstep",  create_server_odequick ? "1" : "0");
 	cvar_set("physics_ode_autodisable",     create_server_odeautodisable ? "1" : "0");
 
-	// Save only the server cvars to data/server.cfg.
+	// Save only the server cvars to cfg/server.cfg.
 	// sv_main.qc applies this file on worldspawn to pick up the values.
 	Menu_SaveServerConfig();
 

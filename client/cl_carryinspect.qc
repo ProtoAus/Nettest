@@ -30,7 +30,7 @@ float csqc_inspect_settle_until;// keep re-sending the final pose until this clt
 
 // Is this key the one that activates inspect mode?  Matched on the BIND STRING, because
 // reload is an edge-only impulse (WEAPON_IMPULSE_RELOAD = 6) — there is no +reload button
-// to test.  "impulse 6" is what data/default.cfg binds AND what the settings-menu
+// to test.  "impulse 6" is what cfg/default.cfg binds AND what the settings-menu
 // rebinder writes (m_menu.qc bindlist), so rebinding Reload just works.
 // EXACT compare, never a substring: "impulse 60" would false-match.
 // "+proprotate" is also honoured so a dedicated key can be bound without touching Reload.

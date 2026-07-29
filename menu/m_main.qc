@@ -112,13 +112,13 @@ string(string path) Menu_PickMapFromListedFile =
     return chosen;
 };
 
-// Single source of truth for the map cycle: data/maps.txt — used by the
+// Single source of truth for the map cycle: cfg/maps.txt — used by the
 // menu backdrop picker, the F2 rcon panel, and the server's round-end
 // cycle. The legacy gamedir-level maps.txt fallback was removed so admins
 // don't have to keep two copies in sync.
 string() Menu_PickMapFromFile =
 {
-    return Menu_PickMapFromListedFile("data/maps.txt");
+    return Menu_PickMapFromListedFile("cfg/maps.txt");
 };
 
 // Boot the menu-backdrop listen server on `menumap`.  m_init calls this UNLESS the engine flagged
@@ -173,9 +173,20 @@ void() m_init =
 
 	Menu_LoadConfig();
 
-	// nettest (P26): build data/maps_index.txt now (offline, cheap — no game is mounted) so the
+	// Which format plugins this build actually has.  cfg/default.cfg sets these next to its
+	// plug_load lines (that file is the one place the plugin set is decided); these
+	// registercvar calls are only the fallback for a config that predates them, and they
+	// default to 1 = present so an old/hand-edited cfg keeps showing maps that do work.
+	// create_server_game_plugin_ok (m_createserver.qc) reads them to skip indexing, listing
+	// and mounting CoD / Source maps the engine could not parse anyway.
+	registercvar("fs_have_hl2", "1", 0);
+	registercvar("fs_have_cod", "1", 0);
+
+	// nettest (P26): build cfg/maps_index.txt now (offline, cheap — no game is mounted) so the
 	// create-server menu has its per-game map list ready. With fs_lazyaddons 1 the external games
 	// aren't mounted at boot, so the menu reads this index instead of scanning mounted searchpaths.
+	// (The engine walks every fs_addons.txt entry here; QC can't narrow that, so the
+	// plugin gate above applies when the index is READ, not when it is built.)
 	localcmd("fs_indexmaps\n");
 
 	// Background map — start a local listen server on this map so the main
@@ -185,7 +196,7 @@ void() m_init =
 	// main menu, because the engine auto-closes it when transitioning into
 	// a map load.  Blank cl_menumap to disable the whole thing.
 	//
-	// Map picked from data/maps.txt first (with legacy maps.txt fallback),
+	// Map picked from cfg/maps.txt first (with legacy maps.txt fallback),
 	// so the backdrop and the live server map cycle can share one editable
 	// pool file. cl_menumap is used as the fallback when both files are
 	// missing / empty, and still disables the backdrop when set to "none".

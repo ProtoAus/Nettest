@@ -202,8 +202,10 @@ void(vector menu_size) Sprays_DrawPanel =
                         spray_list_count);
     else
         label = "(no sprays found)";
-    sui_text([0, label_y + (arrow_row_h - 10) * 0.5],
-             [10, 10, 0], label, '0.85 0.85 0.9', 1.0, 0);
+    // 12, not 10: menu_font only rasterises 8 12 16 18 24 36 48 60 72 (m_main.qc:157), so an
+    // off-list size gets bilinear-scaled and reads blurry. See menu/m_menu.qc:26-33.
+    sui_text([0, label_y + (arrow_row_h - 12) * 0.5],
+             [12, 12, 0], label, '0.85 0.85 0.9', 1.0, 0);
 
     sui_pop_frame();
 };

@@ -204,7 +204,7 @@ void() CSQC_ThrowTrail_Tick =
     // poisons its precache slot with P_INVALID if the "weapons" namespace isn't
     // loaded at the moment of the FIRST lookup (engine pr_csqc.c ~3769: the
     // validity guard is commented out, so a miss is cached for the whole session;
-    // see also data/default.cfg's header note).  On a listen server the namespace
+    // see also cfg/default.cfg's header note).  On a listen server the namespace
     // is briefly empty right after the local server spawns the map, so resolving
     // on frame 1 (before any throw) hit that window and killed the trail for the
     // session (it worked on dedicated, where no such reset happens).  Deferring

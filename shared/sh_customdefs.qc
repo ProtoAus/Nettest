@@ -976,7 +976,7 @@ const float GAMEMODE_PROPHUNT    = 6;
 // On CSQC the same fieldnames live on the visual proxy (hitgroup normalize +
 // render) and on predicted_player (hull/eye for prediction).
 .float ph_disguise_modelindex;	// server modelindex of the copied prop (0 = undisguised)
-.float ph_hull_halfxy;			// dequantized hull half-width (1..16, never wider than the player hull)
+.float ph_hull_halfxy;			// dequantized COLLISION hull half-width (1..16, never wider than the player hull)
 .float ph_hull_minz;			// hull bottom relative to origin (-64..63)
 .float ph_hull_height;			// hull height (4..72)
 .float ph_yaw_locked;			// rotation COMMITTED flag: 0 = loose (yaw follows view), 1 = world-absolute pose held
@@ -988,6 +988,40 @@ const float GAMEMODE_PROPHUNT    = 6;
 // pose to angles_y = v_angle_y (matches the old flat facing; see PropHunt_Possess).
 .vector ph_rel_fwd;
 .vector ph_rel_up;
+
+// The prop's TRUE square half-footprint, unclamped by the player hull.
+//
+// This is deliberately NOT ph_hull_halfxy.  Those two numbers answer different questions
+// and briefly got conflated:
+//   ph_hull_halfxy — what the PLAYER COLLIDES WITH.  Capped at the standing player hull,
+//                    because becoming a big prop must not stop you tucking into a corner.
+//                    Widening this made bulky disguises nearly unhideable, which is the
+//                    whole point of the mode.
+//   ph_mesh_halfxy — where the prop's GEOMETRY actually is.  Used only to build the
+//                    trace-time enclosure (PH_ExpandTraceBbox) and to ground the drawn
+//                    prop; never for movement, never for the possess room test.
+//
+// So a wide crate collides like a player and shoots like a crate.  Rides the visual-proxy
+// IDENTITY wire (one byte, sent only when the disguise changes), so it costs nothing per
+// snapshot.  0 = not set: PH_Mesh* falls back to the collision hull.
+.float ph_mesh_halfxy;
+
+// Same split on the vertical: the prop's TRUE height, where ph_hull_height is capped at
+// the standing player height so becoming a tall prop never makes you taller than you
+// already were (you keep fitting under the same lips and vents).  Without this the cap
+// would also shrink the trace enclosure and leave the top of every tall prop unshootable.
+//
+// Shares ph_hull_minz as its base — both boxes are anchored at the prop's bottom and only
+// differ in reach — so this costs one byte, not two.
+.float ph_mesh_height;
+
+// Trace-only hit volume bookkeeping — see PH_ExpandTraceBbox (shared/sh_weapons.qc),
+// which swaps in an AABB that encloses the rotated prop for the duration of a weapon
+// trace and restores it inside the same QC frame.  Absolute saves rather than delta
+// math so the restore is exact no matter what the expand computed.
+.vector ph_trace_mins_save;
+.vector ph_trace_maxs_save;
+.float  ph_trace_inflated;
 
 vector(entity e) PH_HullMins =
 {
@@ -1003,6 +1037,47 @@ vector(entity e) PH_HullMaxs =
 	m_x = e.ph_hull_halfxy;
 	m_y = e.ph_hull_halfxy;
 	m_z = e.ph_hull_minz + e.ph_hull_height;
+	return m;
+};
+
+// The prop's GEOMETRY box — its true footprint and true height, neither of them clamped to
+// the player hull.  Use for anything that must match where the prop's mesh actually is: the
+// trace enclosure and the render's floor-grounding.  NEVER for movement, the possess room
+// test, or PM_CurrentMins/Maxs — those are collision, and collision stays player-sized on
+// purpose so a bulky disguise can still hide in a corner and duck under the same geometry.
+//
+// Shares ph_hull_minz: both boxes are anchored at the prop's bottom and differ only in how
+// far out and up they reach.
+//
+// Each axis falls back to the collision hull when its mesh field is unset (an undisguised
+// player, or a proxy whose IDENTITY section has not landed yet), so the box is never larger
+// than something we actually know about.
+//
+// KNOWN LIMIT, pre-existing and unchanged: ph_hull_minz is quantized to [-64, 63], so a prop
+// whose base sits further than that below its own origin has the BOTTOM of its mesh box
+// clipped.  Nothing in the current prop set comes close.
+float(entity e) PH_MeshHalfXY =
+{
+	return (e.ph_mesh_halfxy > e.ph_hull_halfxy) ? e.ph_mesh_halfxy : e.ph_hull_halfxy;
+};
+float(entity e) PH_MeshHeight =
+{
+	return (e.ph_mesh_height > e.ph_hull_height) ? e.ph_mesh_height : e.ph_hull_height;
+};
+vector(entity e) PH_MeshMins =
+{
+	vector m;
+	m_x = -PH_MeshHalfXY(e);
+	m_y = m_x;
+	m_z = e.ph_hull_minz;
+	return m;
+};
+vector(entity e) PH_MeshMaxs =
+{
+	vector m;
+	m_x = PH_MeshHalfXY(e);
+	m_y = m_x;
+	m_z = e.ph_hull_minz + PH_MeshHeight(e);
 	return m;
 };
 

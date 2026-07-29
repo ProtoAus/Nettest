@@ -575,6 +575,8 @@ void(entity attacker, entity victim) Killcam_SV_SendTrack;
 // Visual-proxy dirty-diff caches (live ON the proxy, Player_VisualProxy_Sync)
 .float vps_last_disguise_mi;
 .float vps_last_ph_hull_halfxy;
+.float vps_last_ph_mesh_halfxy;
+.float vps_last_ph_mesh_height;
 .float vps_last_ph_hull_minz;
 .float vps_last_ph_hull_height;
 .float vps_last_ph_scale;

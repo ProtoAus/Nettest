@@ -48,6 +48,28 @@ float  prot_locked;         // 0 = loose (yaw follows the view), 1 = committed w
 float  prot_locked_yaw0;    // frozen view yaw (v_angle_y) while committed
 float  prot_have;           // 1 = seeded (currently disguised)
 
+// --- server-lock reconciliation ---
+//
+// prot_locked is a PREDICTION of the server's ph_yaw_locked, and the two used to be
+// allowed to drift apart forever: nothing on the client ever read the server's value,
+// even though it has always ridden the prediction-proxy wire (sv_player.qc writer ->
+// cl_player.qc reader -> predicted_player.ph_yaw_locked).  Any single missed gesture —
+// a dropped sendevent, the server's rate gate, or the impulse-6 fallback firing on a
+// frame this module didn't consume the key — left the client showing one state while
+// the world showed the other, permanently.  That is the "lock is backwards" report:
+// with the two exactly out of phase, pressing Reload appears to do the opposite thing.
+//
+// So: the server is the authority and we converge on it.  A local toggle opens a short
+// window in which our own value wins (otherwise the in-flight RTT would immediately
+// bounce us back and then flip again when the echo lands).  If the server has not
+// agreed by the time the window shuts, the gesture was lost — adopt the server's value.
+float  prot_lock_want;          // the state our last local toggle asked for
+float  prot_lock_pending_until; // cltime the ack window shuts (0 = not waiting)
+
+// Generous vs ping, short vs human reaction: a gesture still unacknowledged after this
+// long is lost, not late, and holding a wrong local state is worse than a re-press.
+const float PROT_LOCK_ACK_TIME = 1.0;
+
 // Is this key the rotate key?  Matched on the bind STRING (reload is an edge-only
 // impulse 6 with no button to test) — same as cl_carryinspect.qc.
 float PropRot_IsRotateBind(float scan)
@@ -66,16 +88,36 @@ float PropRot_IsRotateBind(float scan)
 // inert (no hold, no local pose; the un-consumed reload key even spammed the server-side
 // impulse-6 lock fallback, which is what flickered the pose locked/unlocked).  Find our own
 // proxy (vis_owner_entnum == our slot) and test IT instead.
+// Our LIVE visual proxy, or world.
+//
+// findfloat() returns the FIRST entity carrying the value, and a detached corpse proxy
+// keeps vis_owner_entnum (mp_deadbodies defaults to 1, and a prop-hunt corpse is the
+// prop lying where it died).  So after your first death the lookup could hand back the
+// CORPSE, the vis_is_dead test below would reject it, and this module reported "not
+// disguised" while you very much were — which silently disabled the whole thing: the
+// rotate key stopped being consumed, fell through to the server's impulse-6 fallback,
+// and the SERVER toggled its lock while prot_locked stayed put.  Two states exactly out
+// of phase is precisely the "lock reads backwards" symptom.  Walk past the corpses.
+entity PropRot_MyProxy()
+{
+    entity p = findfloat(world, vis_owner_entnum, player_localentnum);
+    while (p)
+    {
+        if (p.classname == "player_visual_proxy" && !p.vis_is_dead)
+            return p;
+        p = findfloat(p, vis_owner_entnum, player_localentnum);
+    }
+    return world;
+}
+
 float PropRot_Disguised()
 {
     if (!player_localentnum)         return FALSE;
     if (getstati(STAT_HEALTH) <= 0)  return FALSE;
     if (Spectate_IsActive())         return FALSE;
-    entity proxy = findfloat(world, vis_owner_entnum, player_localentnum);
+    entity proxy = PropRot_MyProxy();
     if (!proxy)                                    return FALSE;
-    if (proxy.classname != "player_visual_proxy")  return FALSE;
     if (!proxy.ph_disguise_modelindex)             return FALSE;
-    if (proxy.vis_is_dead)                          return FALSE;
     return TRUE;
 }
 
@@ -85,19 +127,97 @@ float PropRot_HaveLocalPose()
 {
     return prot_have;
 }
+float PropRot_IsLocked()
+{
+    return prot_locked;
+}
 vector PropRot_LocalPoseAngles(float view_yaw)
 {
     float yaw0 = (prot_locked ? prot_locked_yaw0 : view_yaw) + 180;
     return PH_PoseAngles(prot_rel_fwd, prot_rel_up, yaw0);
 }
 
+// Re-anchor the stored basis so the SHOWN world pose is unchanged, then adopt `newlock`.
+// `frame_yaw` is the view yaw that defines the live (loose) frame.  Mirror of the
+// server's PropHunt_ToggleLock (sv_prophunt.qc) — same no-snap re-anchor, minus the send.
+void PropRot_SetLock(float newlock, float frame_yaw)
+{
+    newlock = newlock ? 1 : 0;
+    if (newlock == prot_locked)
+        return;
+    if (prot_locked)
+    {
+        // committed -> loose: re-express the frozen world pose in the LIVE view frame so
+        // it continues from exactly where it is, then resumes yaw-following.
+        float lyaw0 = prot_locked_yaw0 + 180;
+        float vyaw0 = frame_yaw + 180;
+        vector wF = CarryRot_FromFrame(prot_rel_fwd, lyaw0);
+        vector wU = CarryRot_FromFrame(prot_rel_up,  lyaw0);
+        prot_rel_fwd = CarryRot_ToFrame(wF, vyaw0);
+        prot_rel_up  = CarryRot_ToFrame(wU, vyaw0);
+        prot_locked  = 0;
+    }
+    else
+    {
+        prot_locked      = 1;
+        prot_locked_yaw0 = frame_yaw;   // freeze the frame; the basis is already the shown pose
+    }
+}
+
+// Adopt a WORLD-space pose (the server's, taken off our visual proxy) into the local
+// carry-frame basis.  Exact inverse of PH_PoseAngles: express the world model axes in
+// the frame and they compose straight back to the same orientation.
+//
+// While COMMITTED the frame yaw is arbitrary — the composed world pose does not depend
+// on it — so we freeze at the live view and re-derive the basis to suit.  That is what
+// lets us match a server-side lock without networking ph_locked_yaw: an impulse-6
+// fallback toggle freezes the frame at the SERVER's view yaw, which the client never
+// receives, but re-deriving from the pose the server is SHOWING lands on the identical
+// orientation regardless of which frame it was stored in.
+void PropRot_AdoptWorldBasis(vector wF, vector wU, float locked, float frame_yaw)
+{
+    prot_locked      = locked ? 1 : 0;
+    prot_locked_yaw0 = frame_yaw;
+    float yaw0 = frame_yaw + 180;
+    CarryRot_Ortho(CarryRot_ToFrame(wF, yaw0), CarryRot_ToFrame(wU, yaw0));
+    prot_rel_fwd = crot_oF;
+    prot_rel_up  = crot_oU;
+}
+
+// Arm the ack window after a locally-initiated lock change.
+void PropRot_MarkLockPending()
+{
+    prot_lock_want          = prot_locked;
+    prot_lock_pending_until = cltime + PROT_LOCK_ACK_TIME;
+}
+
 void PropRot_Seed()
 {
-    prot_rel_fwd = '-1 0 0';   // matches PropHunt_Possess: upright pose == old flat facing
-    prot_rel_up  = '0 0 1';
-    prot_locked  = 0;
+    entity proxy = PropRot_MyProxy();
+    vector va    = (vector)getproperty(VF_CL_VIEWANGLES);
+    float  srv   = (predicted_player && predicted_player.ph_yaw_locked) ? 1 : 0;
+
+    // Seed from the pose the SERVER is actually showing, and from ITS lock flag — not
+    // from a hard-coded upright/loose constant.  The entry gate here is time-based
+    // rather than a fresh edge, so this can re-fire mid-life (a frame where the proxy
+    // lookup came up empty is enough), and the old constant seed snapped a carefully
+    // posed prop back to standing and silently dropped the lock every time it did.
+    //
+    // ph_pose_cur_* is the RAW WIRE basis recorded in CSQC_PlayerVisual_Update —
+    // deliberately not proxy.angles, which the disguise predraw overwrites with the
+    // march bob (and, for our own proxy, with this module's own output) every frame.
+    if (proxy && proxy.ph_pose_have)
+        PropRot_AdoptWorldBasis(proxy.ph_pose_cur_fwd, proxy.ph_pose_cur_up, srv, va_y);
+    else
+    {
+        prot_rel_fwd     = '-1 0 0';   // matches PropHunt_Possess: upright == old flat facing
+        prot_rel_up      = '0 0 1';
+        prot_locked      = srv;
+        prot_locked_yaw0 = va_y;
+    }
     prot_have    = 1;
     prot_pending_tap = 0;
+    prot_lock_pending_until = 0;
     // If the rotate key is ALREADY physically held as the disguise begins (holding R while
     // pressing +use to possess), mark this press dead so the time-based hold-promote in
     // PropRot_Frame can't fire on it — a fresh release + press is required.  (Entry here is
@@ -136,24 +256,8 @@ void PropRot_SendGesture(float mode, float frame_yaw)
 void PropRot_DoLockToggle()
 {
     vector va = (vector)getproperty(VF_CL_VIEWANGLES);
-    if (prot_locked)
-    {
-        // UNLOCK with no-snap re-anchor (mirror of PropHunt_ToggleLock server-side):
-        // re-express the frozen world pose in the LIVE view frame so it continues from
-        // exactly where it is, then resumes yaw-following.
-        float lyaw0 = prot_locked_yaw0 + 180;
-        float vyaw0 = va_y + 180;
-        vector wF = CarryRot_FromFrame(prot_rel_fwd, lyaw0);
-        vector wU = CarryRot_FromFrame(prot_rel_up,  lyaw0);
-        prot_rel_fwd = CarryRot_ToFrame(wF, vyaw0);
-        prot_rel_up  = CarryRot_ToFrame(wU, vyaw0);
-        prot_locked  = 0;
-    }
-    else
-    {
-        prot_locked      = 1;
-        prot_locked_yaw0 = va_y;   // freeze the frame; the basis is already the shown pose
-    }
+    PropRot_SetLock(!prot_locked, va_y);
+    PropRot_MarkLockPending();
     PropRot_SendGesture(1, va_y);   // server re-anchors to the SAME frame we did
 }
 
@@ -163,6 +267,7 @@ void PropRot_DoReset()
     prot_rel_fwd = '-1 0 0';
     prot_rel_up  = '0 0 1';
     prot_locked  = 0;
+    PropRot_MarkLockPending();
     PropRot_SendGesture(2, va_y);
 }
 
@@ -177,6 +282,7 @@ void PropRot_EnterHold()
     prot_locked      = 1;
     prot_locked_yaw0 = va_y;
     prot_dirty       = TRUE;
+    PropRot_MarkLockPending();
 }
 
 void PropRot_ExitHold()
@@ -188,6 +294,9 @@ void PropRot_ExitHold()
     // Converge the server on the final pose despite its rate gate (see cl_carryinspect.qc).
     PropRot_Send(TRUE);
     prot_settle_until = cltime + 0.4;
+    // Re-arm the ack window from the RELEASE, not from hold-entry: a long pose can
+    // easily outlive PROT_LOCK_ACK_TIME, and the settle re-sends run after this point.
+    PropRot_MarkLockPending();
 }
 
 void PropRot_Rotate(float dx, float dy)
@@ -204,6 +313,45 @@ void PropRot_Rotate(float dx, float dy)
     prot_rel_fwd = crot_oF;
     prot_rel_up  = crot_oU;
     prot_dirty   = TRUE;
+}
+
+// Converge prot_locked on the server's ph_yaw_locked (see the prot_lock_* header note).
+//
+// Runs every frame while disguised, but only ACTS when the two disagree and we have
+// nothing in flight — so the steady state costs one compare, and a divergence heals
+// within a snapshot instead of lasting the rest of the life.
+void PropRot_SyncLock()
+{
+    if (!prot_have || !predicted_player)
+        return;
+    if (prot_mode)
+        return;     // mid-pose: the hold IS the authority, and it re-sends continuously
+
+    float srv = predicted_player.ph_yaw_locked ? 1 : 0;
+
+    if (prot_lock_pending_until > 0)
+    {
+        if (srv == prot_lock_want)
+            prot_lock_pending_until = 0;              // server agreed — stop waiting
+        else if (cltime < prot_lock_pending_until)
+            return;                                   // still in flight; our value wins
+        else
+            prot_lock_pending_until = 0;              // window shut unacked -> gesture lost
+    }
+
+    if (srv == prot_locked)
+        return;
+
+    // Adopt the server's POSE, not merely its flag.  A lock we did not initiate (the
+    // impulse-6 fallback) froze the frame at the server's view yaw, which we never
+    // receive — so re-deriving the basis from the orientation the server is actually
+    // showing is the only way to land on the identical world pose.
+    entity proxy = PropRot_MyProxy();
+    vector va    = (vector)getproperty(VF_CL_VIEWANGLES);
+    if (proxy && proxy.ph_pose_have)
+        PropRot_AdoptWorldBasis(proxy.ph_pose_cur_fwd, proxy.ph_pose_cur_up, srv, va_y);
+    else
+        PropRot_SetLock(srv, va_y);
 }
 
 // Per-frame guard + timers.  Called from CSQC_UpdateView.
@@ -240,6 +388,8 @@ void PropRot_Frame(float notmenu)
 
     if (!prot_have)
         return;
+
+    PropRot_SyncLock();
 
     // A press held past the threshold becomes a free HOLD rotate.  Entering cancels any
     // armed tap (the key is clearly not a tap) so no stray lock toggle fires on release.

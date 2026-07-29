@@ -126,7 +126,7 @@ var float sv_enum_entry_idx = -1;
 float  sv_tickrate_values[] = { 64, 66, 72, 85, 100, 128, 200, 300 };
 string sv_tickrate_labels[] = { "64 (CS:GO)", "66 (CS:S)", "72 (Quake)", "85 (CS:GO)", "100 (CS:S)", "128 (CS:GO)", "200 (FTE)", "300 (FTE)" };
 
-// Map-cycle dropdown data. Loaded from data/maps.txt so the F2 Rcon
+// Map-cycle dropdown data. Loaded from cfg/maps.txt so the F2 Rcon
 // panel can target the same pool file the server uses for end-of-map
 // rotation.
 strbuf sv_cycle_maps;
@@ -283,7 +283,7 @@ void() Server_LoadCycleMaps =
     sv_cycle_maps_loaded = TRUE;
     sv_cycle_map_selected = 0;
 
-    filestream f = fopen("data/maps.txt", FILE_READ);
+    filestream f = fopen("cfg/maps.txt", FILE_READ);
 
     if (f >= 0)
     {

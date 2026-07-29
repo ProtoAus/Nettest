@@ -683,6 +683,12 @@ float(float hitgroup) W_HitgroupDamageMultiplier =
 {
     switch (hitgroup)
     {
+    // Prop Hunt / non-anatomy targets.  W_HitgroupClassify flattens every disguised
+    // hider (and every non-player) to GENERIC, so this is THE prop-hunt damage
+    // multiplier: flat body damage, no zone bonuses, anywhere on the prop.  Spelled out
+    // as its own case rather than riding `default` so it reads as the deliberate
+    // balance decision it is, and so a future zone tweak can't quietly change it.
+    case HITGROUP_GENERIC:  return 1.0;
     case HITGROUP_HEAD:     return 4.0;
     case HITGROUP_CHEST:    return 1.0;
     case HITGROUP_STOMACH:  return 1.25;

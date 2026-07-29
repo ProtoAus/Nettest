@@ -202,8 +202,10 @@ void(vector menu_size) Playermodels_DrawPanel =
                            g_playermodel_names[g_playermodel_selected],
                            g_playermodel_selected + 1,
                            PLAYERMODEL_COUNT);
-    sui_text([0, label_y + (arrow_row_h - 10) * 0.5],
-             [10, 10, 0], label, '0.85 0.85 0.9', 1.0, 0);
+    // 12, not 10: menu_font only rasterises 8 12 16 18 24 36 48 60 72 (m_main.qc:157), so an
+    // off-list size gets bilinear-scaled and reads blurry. See menu/m_menu.qc:26-33.
+    sui_text([0, label_y + (arrow_row_h - 12) * 0.5],
+             [12, 12, 0], label, '0.85 0.85 0.9', 1.0, 0);
 
     sui_pop_frame();
 };
