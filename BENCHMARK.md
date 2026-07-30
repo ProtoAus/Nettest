@@ -172,12 +172,41 @@ Re-issue `setpos` + `cl_setangles` before each sample rather than trusting that 
 
 ---
 
+### 2.8 `setpos` forces noclip, which zeroes the prediction workload
+
+`Cmd_SetPos_f` (`sv_user.c`) sets `movetype = MOVETYPE_NOCLIP` unconditionally and prints
+`noclip on`. The mod's pmove then takes an early exit — `sh_pmove.qc:5311-5316` runs
+`PM_NoclipMove(); pm_onground = FALSE; goto done;`, skipping `PM_NudgePosition`,
+`PM_CategorizePosition` and the whole general-movement path. `PM_NoclipMove` moves the origin
+directly **with no collision traces at all.**
+
+So from a `setpos` viewpoint the 66 `SOLID_PHYSICS_TRIMESH` props are never traced against, and the
+`Prediction` bucket reads far lower than it does in normal play. The desktop figure of 17 µs was
+measured this way and therefore does **not** characterise walking around.
+
+- Rendering buckets are unaffected — noclip does not change what is drawn from a given viewpoint,
+  and for those it is an advantage (no gravity, no ground friction, the position is perfectly stable).
+- **To measure `Prediction`, walk to the spot on foot instead** (or clear noclip after positioning)
+  and confirm `pm_movetype` is not 5 before believing the number.
+
+---
+
 ## 3. Reference viewpoint
 
+Requires cheats — `Cmd_SetPos_f` early-returns with "Cheats are not allowed on this server" unless
+`SV_MayCheat()` passes.
+
 ```
-setpos 20 320 211
-cl_setangles 2.8 121.8 0
+sv_cheats 1                     // or +set sv_cheats 1 on the command line
+setpos 20 320 211               // position only; also silently enables noclip (see 2.8)
+cl_setangles 2.8 121.8 0        // angles -- setpos cannot do this (see 2.3)
+cl_debug_move 1                 // verify, then set back to 0 before sampling
 ```
+
+Expected readout: `Pos: 20 320 211`, `View Ang: 2.8 121.8 0.0`.
+
+Turn `cl_debug_move` back to **0** before taking any sample — it is a per-frame QC draw and lands in
+the `QC UpdateView` bucket you are trying to measure.
 
 Map `fy_killzone`, all 66 `prop_physics` present. Sanity check: `Draw Calls` ≈ 340,
 `Draw Indicies` ≈ 2.0 M. An order of magnitude below that means you are in the menu backdrop
@@ -262,7 +291,7 @@ Decomposition, sampled with `sys_framepacing_drain 0` so the pacing bucket does 
 | `Transparent Batches` | 90.86 | |
 | `Entity setup` | 70.79 | |
 | `Postproc/resolve` | 23.38 | |
-| `Prediction` | 16.70 | |
+| `Prediction` | 16.70 | **noclip figure — not valid for normal play, see 2.8** |
 | `RT Lights` | 2.26 | |
 
 Reconciles with `Total refresh` to ~1 µs. Counters: `Draw Calls` ≈ 340, `Draw Indicies` ≈ 2.0 M,
