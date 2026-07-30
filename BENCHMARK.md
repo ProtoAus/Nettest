@@ -63,23 +63,43 @@ never from screenshots.
 
 ### bench.cfg template
 
+**Do not quote the deferred command.** `Cmd_In_f` does `Cmd_ShiftArgs(1,false); cmd = Cmd_Args()`
+(`common/cmd.c`), and `Cmd_Args()` **preserves the quote characters**. So `defer 30 "cl_idlefps 0"`
+pushes one quoted token into the cbuf and dies as `Unknown command "cl_idlefps 0"`. It fails
+per-command while the run still completes and quits cleanly — **it looks like a successful benchmark
+that produced no numbers.**
+
+`ruleset_allow_in 1` must be set **un-deferred, at the top**: `Cmd_In_f` is
+`if (ruleset_allow_in.ival || !delay)`, so with a nonzero delay and the ruleset off it registers
+nothing and prints nothing. A silent no-op, not an error.
+
 ```
 // Delays are SECONDS from exec. The client is not connected for the first ~15s;
 // commands fired earlier fail with `Can't "cmd", not connected`.
-// The N100 loads slower than the reference desktop — scale these UP and verify
-// from the log rather than assuming they landed.
+// Slower machines load slower -- scale these UP and verify from the log.
+ruleset_allow_in 1
 
-defer 30 "cl_idlefps 0"
-defer 30 "cl_maxfps 0"
-defer 30 "r_speeds 2"
-defer 31 "setpos 20 320 211"
-defer 32 "cl_setangles 2.8 121.8 0"
-defer 35 "r_speeds_dump"
-defer 36 "quit"
+defer 30 cl_idlefps 0
+defer 30 cl_maxfps 0
+defer 30 r_speeds 2
+defer 31 cmd jointeam red 0          // MUST spawn in -- see below
+defer 36 setpos 20 320 211
+defer 37 cl_setangles 2.8 121.8 0
+defer 46 r_speeds_dump               // leave ~9s at 50fps, not 2s -- see 2.6
+defer 47 quit
 ```
 
-`defer` is `Cmd_In_f` and is **disabled when `ruleset_allow_in` is 0** — check that before assuming
-a silent chain means a silent failure elsewhere.
+**Always `grep qconsole.log` for `Unknown command` before believing any result.**
+
+### You must spawn in
+
+`+map` alone leaves you on the **team-select screen, whose camera drifts in position**. That inflates
+frame times 16–41% and blows run-to-run spread to 36–52% (measured; fixing the origin brought spread
+back to 0.5–9.5%). `timerefresh` sweeps yaw, so it normalises *angle* but not *origin* and does not
+rescue this.
+
+The failure mimics the thermal drift in 2.5 closely enough to be explained away. `cmd jointeam red 0`
+after the connect window, then verify position before sampling.
 
 `r_speeds_dump` prints the whole sample table as text (`µs/frame`, 100-frame average) plus the quant
 counters. It requires `r_speeds 2` or higher and is one-shot: it sets a flag consumed by the next
@@ -160,10 +180,14 @@ longer a session runs (thermals, on a 6 W part especially).
 Several small effects quoted during the desktop session (e.g. a 29 µs difference between two
 `r_props_shadowdist` values) were inside this noise floor and should not have been quoted as real.
 
-### 2.6 The sample is a 100-frame rolling average
+### 2.6 The sample is a 100-frame rolling average — scale the wait to the framerate
 
-`cl_screen.c:110` divides by `frameinterval = 100`. After changing anything, **wait ≥ 2 s** before
-sampling or you get a blend of both configurations.
+`cl_screen.c:110` divides by `frameinterval = 100`. That is **100 frames, not 2 seconds**. At 450 fps
+it is ~0.2 s; at 50 fps it is ~2 s, and on a machine slower still it is longer again.
+
+Wait for **at least 4–5× the window** after changing anything, or the sample is a blend of both
+configurations. On the N100 at ~50 fps, 9 s (~450 frames) was used. Do not copy the "2 s" figure
+onto slow hardware.
 
 ### 2.7 Do not move
 
@@ -299,6 +323,61 @@ Reconciles with `Total refresh` to ~1 µs. Counters: `Draw Calls` ≈ 340, `Draw
 
 Note `QC UpdateView` is the mod's HUD pass and does **not** appear in `2d Elements` — it runs inside
 `CSQC_UpdateView`. `Lightmap updates` is genuinely 0 at `r_dynamic 0`; do not treat it as missing data.
+
+---
+
+## 5b. RESULT — Intel N100 / UHD Gen12, 2026-07-30. H1 answered: hard GPU-bound.
+
+Windows 11, windowed 1024x768, focused. `GL_RENDERER: Intel(R) UHD Graphics`, driver
+31.0.101.4502. Local `m-rel` build at `c9305a2`. Angle uncontrolled (the installed csprogs predates
+`cl_setangles`), so **absolute buckets are not comparable to §5** — `Draw Indicies` was 4.53 M
+against §5's 2.0 M. The A/B delta is valid; the absolutes are not.
+
+| | `r_renderscale 2` | `r_renderscale 1` |
+|---|---|---|
+| Total refresh (mean of 3) | 18502.83 µs → **54.04 fps** | 11008.94 µs → **90.83 fps** |
+| spread | 6.6% | 6.9% |
+
+**Renderscale delta 7493.89 µs — 75× the ~100 µs CPU-bound threshold, and 510× the reference
+desktop's 14.7 µs.** The §4 prediction that the desktop result would fail on a 24-EU part is
+confirmed.
+
+The mechanism was measured, not inferred. 88% of the delta lands in one bucket:
+
+| bucket | rs2 | rs1 | delta | share of delta |
+|---|---|---|---|---|
+| **Frame pacing** | 10013.96 | 2508.72 | **7505.24** | **88%** |
+| QC UpdateView | 7849.69 | 6994.40 | 855.29 | 10% |
+| Shadow generation | 4503.01 | 4066.29 | 436.72 | 5% |
+| Opaque Batches | 1269.98 | 1135.01 | 134.97 | 2% |
+| Postproc/resolve | 115.75 | 9.82 | 105.93 | 1% |
+
+**`Frame pacing` is a GPU-backpressure meter.** At `sys_framepacing_drain 2` it is the CPU blocking
+on the N−1 GPU fence, so it captures exactly the stall that 2.4 says child buckets structurally
+cannot see. Quadrupling the pixels quadrupled the wait while CPU buckets barely moved.
+`Postproc/resolve` scaling 11.8× corroborates — it is the one stage that scales on both source and
+destination.
+
+**Consequence: `r_renderscale 2` must not be the shipped default on hardware like this.** Dropping to
+1 buys +68% frames.
+
+### Caveat on the shadow finding
+
+The report flags `Shadow generation` as the disproportionate grower (23.4% of frame here vs 12% on
+the desktop) and recommends `r_shadows_res 8192 → 2048`. **Check the config before acting on this.**
+`r_shadows_res` defaults to `"2048"` in engine code (`gl/gl_shadow.c`, bounded 256–8192), so 8192 is
+a `settings.cfg` value on that machine — and `cfg/` is not version controlled. If the desktop ran
+2048 and the laptop ran 8192, the 15.5× shadow growth is partly a **configuration difference, not a
+hardware one**, and the "disproportionate grower" conclusion does not stand as written. Re-measure
+both machines at the same `r_shadows_res` before treating shadows as the low-end target.
+
+Note also the internal tension in the recommendation: if ~76% of shadow cost is *resolution-
+independent* cascade generation, then lowering the resolution cannot address that 76%.
+
+### Still open on this machine
+
+`H2` (the `sys_framepacing_drain` sweep) is now runnable for the first time — the cvar exists in a
+local build and is absent from the shipped exe. `H4` (1% lows) still unmeasured anywhere.
 
 ---
 
