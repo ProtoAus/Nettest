@@ -3236,6 +3236,9 @@ const float PH_POSE_EMA           = 0.15;    // EMA weight per accepted interval
 const float PH_POSE_DELAY_DEFAULT = 0.05;    // assumed gap before one is measured (20 Hz send rate)
 const float PH_POSE_DELAY_MIN     = 0.004;
 const float PH_POSE_DELAY_MAX     = 0.25;
+// Longest window a single prev->cur blend may span.  Only bites after an idle pause,
+// where the true gap is arbitrarily large — see PlayerVis_PoseAngles.
+const float PH_POSE_DT_MAX        = 0.2;
 
 // Record a freshly received world pose.  Called from the POSE section of
 // CSQC_PlayerVisual_Update, i.e. exactly once per arriving snapshot for this proxy.
@@ -3248,6 +3251,32 @@ void(entity e, vector world_angles) PlayerVis_RecordPose =
 	vector sv_f = v_forward, sv_r = v_right, sv_u = v_up;
 
 	CarryRot_Axes(world_angles);        // -> crot_X (model +X), crot_Z (model +Z)
+
+	// IGNORE KEEPALIVE REPEATS.  This is what made the first version of this
+	// interpolator do nothing visible.
+	//
+	// sv_pose_keepalive_ticks defaults to 1, so a POSE section arrives EVERY server tick
+	// (~64 Hz) whether or not the orientation moved — it exists to keep the ORIGIN interp
+	// ring fresh for a player standing still.  But the prop's basis only changes at the
+	// rotate send rate (cl_carry_rotate_sendrate, 20 Hz), and while +reload is held the
+	// frame yaw is frozen too, so the composed angles are genuinely identical on ~2 of
+	// every 3 ticks.
+	//
+	// Recording all of them made prev and cur the same pose most of the time and drove the
+	// measured interval down to the TICK rate, so the blend window collapsed to ~15 ms
+	// while the real updates were 50 ms apart.  The lerp ran, blended a pose into itself,
+	// then crossed the whole way in one tick when a distinct pose finally landed — i.e. it
+	// reproduced the original snap almost exactly.  Advancing the ring only on a real
+	// change makes prev→cur span the true update interval, which is the window the blend
+	// and the render delay both need.
+	if (e.ph_pose_have
+	    && crot_X * e.ph_pose_cur_fwd > 0.99999      // < ~0.26 deg on either axis
+	    && crot_Z * e.ph_pose_cur_up  > 0.99999)
+	{
+		v_forward = sv_f; v_right = sv_r; v_up = sv_u;
+		return;
+	}
+
 	if (!e.ph_pose_have)
 	{
 		// First sample: park prev on top of cur so the frac math below sees dt=0 and
@@ -3308,7 +3337,17 @@ vector(entity e, vector fallback) PlayerVis_PoseAngles =
 	if (dt <= 0.0001)
 		return CarryRot_Angles(e.ph_pose_cur_fwd, e.ph_pose_cur_up);
 
-	float f = (cltime - PlayerVis_PoseDelay(e) - e.ph_pose_prev_time) / dt;
+	// Cap the blend window.  Now that the ring only advances on a real change, a prop that
+	// sat still for ten seconds and then starts turning has a ten-second gap between its
+	// two samples — and anchoring on that would put f at ~1 immediately and snap to the
+	// new pose, undoing the fix for the very first step of every rotation.  The displayed
+	// pose IS prev (nothing moved in between), so blending across a normal-length window
+	// is correct; clamping just stops a long idle from degenerating into a jump.
+	if (dt > PH_POSE_DT_MAX)
+		dt = PH_POSE_DT_MAX;
+	float t0 = e.ph_pose_cur_time - dt;
+
+	float f = (cltime - PlayerVis_PoseDelay(e) - t0) / dt;
 	f = bound(0, f, 1);
 	CarryRot_Nlerp(e.ph_pose_prev_fwd, e.ph_pose_prev_up,
 	               e.ph_pose_cur_fwd,  e.ph_pose_cur_up, f);

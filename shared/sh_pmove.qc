@@ -695,6 +695,14 @@ float PM_MoveScale()
     if (self.flags & FL_DUCKING)
         return PM_DUCKING_MULTIPLIER;
 
+    // Prop Hunt: a disguised hider never enters FL_DUCKING at all (PM_CheckDuck skips the
+    // whole state machine — see the note there), but holding crouch should still slow you
+    // down.  Read the button directly so the speed penalty survives without the hull
+    // change that came with it.  Prediction-safe: both sides run this file and read the
+    // same input_buttons and the same replicated ph_hull_height.
+    if (self.ph_hull_height > 0 && (input_buttons & PM_BTN_DUCK))
+        return PM_DUCKING_MULTIPLIER;
+
     return 1;
 }
 
@@ -808,6 +816,38 @@ void PM_CheckDuck()
     {
         if ((self.flags & FL_DUCKING) || self.pm_in_duck)
             PM_UnDuck();
+        return;
+    }
+
+    // ---- Prop Hunt: a disguised hider does not duck at all ----
+    //
+    // Ducking as a crate never did anything useful — PM_CurrentMins/Maxs return the prop
+    // hull ahead of the FL_DUCKING branch, so the hull was identical either way — but the
+    // rest of the machine still ran, and it could TRAP you.  PM_UnDuck's room test uses
+    // the literal standing PLAYER box (PM_MINS / PM_MAXS), not the current hull.  A prop
+    // parked under a lip, on a shelf or in a vent — exactly where you hide — has less
+    // than the player's full standing height overhead, so that test failed every frame
+    // and the duck could never be released: stuck crouched as a prop for the rest of the
+    // life.  (Fixing the test to use the prop hull would leave a duck that changes
+    // nothing; removing the state is both simpler and what the mode wants.)
+    //
+    // The part worth keeping is the slowdown, which PM_MoveScale now applies straight off
+    // the button while disguised.
+    //
+    // Clear directly instead of calling PM_UnDuck(): there is no hull to make room for
+    // and no duck origin shift to undo — the prop hull is the same ducked or not — so
+    // both the room test and the origin compensation would be wrong here.
+    if (self.ph_hull_height > 0)
+    {
+        if ((self.flags & FL_DUCKING) || self.pm_in_duck)
+        {
+            self.flags       &= ~FL_DUCKING;
+            self.pm_in_duck   = FALSE;
+            self.pm_duck_msec = 0;
+            self.view_ofs     = PM_VIEW_OFS;
+            self.pm_eye_h     = PM_VIEW_OFS_z;
+            PM_SyncHull();
+        }
         return;
     }
 
