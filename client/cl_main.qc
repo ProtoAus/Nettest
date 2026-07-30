@@ -45,7 +45,10 @@ void() CSQC_Ent_Remove =
 	// Active-prop chain — OUTSIDE the is-car block: every phys_files mirror can be in it, not just cars.
 	// A removed entity left linked would keep the relink walking freed memory.
 	if (self.classname == "phys_files")
+	{
 		PhysProp_ActiveUnlink(self);
+		PhysProp_AllUnlink(self);
+	}
 
 	if (self.classname == "player_visual_proxy")
 	{
@@ -313,6 +316,7 @@ noref void(float apiver, string enginename, float enginever) CSQC_Init =
 	precache_pic("gfx/scope.png");
 	precache_pic("gfx/360hitindicator.png");
 	HUD_VoIP_PrecachePics();
+	registercommand("cl_setangles");         // aim the camera from the console (setpos's angles do not stick)
 	registercommand("spectate");
 	registercommand("spec");
 	registercommand("firstperson");
@@ -682,6 +686,10 @@ void(float in_menu_backdrop) CSQC_UpdateViewSpectator =
 	else
 		setsensitivityscaler(0);
 
+	// Prop render cull — see the alive path. The spectator camera is already applied above, so
+	// VF_ORIGIN is this frame's eye and the sweep culls against where the SPECTATOR is looking.
+	PhysProp_CullSweep();
+
 	addentities(MASK_ENGINE);
 	// nettest killcam slow-mo: while DEAD, keep recording the death AFTERMATH (your
 	// corpse's death anim) here — the alive-path Killcam_Record below never runs once
@@ -989,6 +997,10 @@ void() CSQC_UpdateViewAliveScene =
 	// Paint team-colour tints on player entities BEFORE the engine adds
 	// them for this frame — .colormod reaches the shader as e_colourident.
 	CSQC_ApplyTeamTints();
+
+	// Prop render cull — self-throttled to 10 Hz, so this is a compare-and-return on most frames.
+	// MUST run before addentities: it works by toggling .drawmask, which is what addentities reads.
+	PhysProp_CullSweep();
 
 	//autoadd entities received from servers for drawing
 	addentities(MASK_ENGINE);
@@ -1302,6 +1314,29 @@ float(string cmd) CSQC_ConsoleCommand =
 	tokenize(cmd);
 	switch(argv(0))
 	{
+		case "cl_setangles":
+			// cl_setangles <pitch> <yaw> <roll> -- aim the camera from the console.
+			//
+			// Needed because the engine's `setpos x y z p y r` does NOT stick: it sets the
+			// player edict's .angles + fixangle, the server sends one svc_setangle
+			// (sv_send.c clears fixangle straight after, so it is a single shot), and then
+			// our own prediction immediately overwrites the view from pred_cmd_angles
+			// (cl_player.qc).  Net result is the position moves and the aim silently
+			// snaps back -- which is exactly why sv_player.qc needs PM_SyncPredictionProxy
+			// for teleports.
+			//
+			// VF_CL_VIEWANGLES is the client's real angle accumulator (not VF_ANGLES, which
+			// is only the render camera and gets rebuilt from bob/sway/kick every frame), so
+			// writing it here survives prediction and is what a repeatable benchmark needs.
+			if (argv(1) == "")
+			{
+				vector cur = (vector)getproperty(VF_CL_VIEWANGLES);
+				print(sprintf("cl_setangles %.1f %.1f %.1f\n", cur_x, cur_y, cur_z));
+				return TRUE;
+			}
+			setproperty(VF_CL_VIEWANGLES,
+				[stof(argv(1)), stof(argv(2)), stof(argv(3))]);
+			return TRUE;
 		case "carvals":
 			// F3 car panel: the server's carget reply with the driven car's real current values.
 			Tune_StoreCarVals(cmd);

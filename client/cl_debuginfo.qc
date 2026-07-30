@@ -694,6 +694,19 @@ float(float x, float y) CSQC_DrawDebugMove =
     float tspeed = vlen(vel);
 
     y = dbg_line(x, y, "Pos", sprintf("%.0f %.0f %.0f", predicted_player.origin_x, predicted_player.origin_y, predicted_player.origin_z), DBG_VALUE_COL);
+
+    // view_angles, NOT getproperty(VF_ANGLES): VF_ANGLES is the final camera after bob,
+    // sniper sway, gunkick and killcam smoothing have been folded in, so it changes every
+    // frame while standing still and can't be typed back in.  view_angles is the raw aim,
+    // which is exactly what setpos restores (it writes .angles + FIXANGLE_FIXED).
+    vector va = view_angles;
+    y = dbg_line(x, y, "View Ang", sprintf("%.1f %.1f %.1f  (pitch yaw roll)", va_x, va_y, va_z), DBG_VALUE_COL);
+    // Ready to paste into the console -- reproduces this exact spot AND aim.  Needs sv_cheats 1,
+    // and note setpos forces MOVETYPE_NOCLIP on arrival.
+    y = dbg_line(x, y, "setpos", sprintf("%.0f %.0f %.0f %.1f %.1f %.1f",
+        predicted_player.origin_x, predicted_player.origin_y, predicted_player.origin_z,
+        va_x, va_y, va_z), DBG_VALUE_COL);
+
     y = dbg_line(x, y, "Vel", sprintf("%.0f %.0f %.0f", vel_x, vel_y, vel_z), DBG_VALUE_COL);
     y = dbg_line(x, y, "H Speed", sprintf("%.1f u/s", hspeed), (hspeed > 300) ? DBG_WARN_COL : DBG_VALUE_COL);
     y = dbg_line(x, y, "Speed", sprintf("%.1f u/s", tspeed), DBG_VALUE_COL);

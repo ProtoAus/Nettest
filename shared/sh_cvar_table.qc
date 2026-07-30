@@ -1416,6 +1416,55 @@ void() CVar_Init =
     // in first person (your networked proxies are already in your PVS). NEVER culls the
     // spectated target or a killcam-posed proxy.
     CVar_Add("Client", "r_players_pvscull",       "1",     CVAR_SIDE_CL);
+    // Physics-prop render cull — the same idea again, for the prop_physics mirrors, which until
+    // now had NO cull of any kind: every prop on the map was handed to the engine every frame
+    // (drawmask MASK_ENGINE, CSQC_PhysProp_Update), and a prop-dense open map is where that hurts
+    // most — fy_killzone is 66 props / ~272k triangles, every one of them also a shadow caster.
+    // Applied by PhysProp_CullSweep at 10 Hz, never per frame, so it does not disturb the
+    // "settled props cost ~0" predraw unhook. Cars, carried props and MOVING props are never culled.
+    //   r_props_pvscull 1 (default): don't draw a prop that is behind walls / out of the
+    //     potentially-visible set. checkpvs is fail-safe (reports visible when the map has no vis
+    //     data) so it NEVER hides a prop in your line of sight — no pop-in.
+    //   r_props_maxdist 0 (default off): also drop props past this many units. Opt-in, because a
+    //     distant prop can pop in at the radius boundary — the hysteresis softens that, it does
+    //     not remove it.
+    //     SIZE IT TO THE MAP, NOT TO A HABIT. The effective hide threshold is maxdist +
+    //     PP_CULL_HYST (192), so a radius anywhere near the map's own diagonal is a strict no-op.
+    //     Measured on fy_killzone (world 1296x2936x480, diagonal 3245): the greatest distance from
+    //     ANY point in the map to ANY prop is 2951, so maxdist 3000 culled exactly zero props —
+    //     Ent Batches and Draw Indicies were byte-identical with it on and off.
+    //     The useful rule: pick a radius below the largest prop-to-prop span, not below the map
+    //     size. On fy_killzone that span is 1200, and maxdist 1000 culls ~56% of props averaged
+    //     over the map while a player standing among the props culls none of them.
+    //   r_props_shadowdist 0 (default off): props past this many units are still DRAWN but stop
+    //     casting shadows (EF_NOSHADOW). Far less visible than dropping the prop outright, and the
+    //     shadow caster walks are what scale worst — they iterate cl_visedicts with no PVS test.
+    //     EF_NOSHADOW is also the FIRST rejection in the engine's caster classification loop
+    //     (gl_shadow.c ~4583), so a flagged prop skips both the classification AND all 6-7 atlas
+    //     face walks, not just the depth passes.
+    //
+    //     ⚠ THE EFFECTIVE RADIUS IS (value + 192), NOT value.  PP_CULL_HYST is added on the
+    //     "currently casting" edge so a prop hovering at the boundary can't flip EF_NOSHADOW on and
+    //     off at the 10Hz sweep rate.  This has now caused the same sizing mistake TWICE — first
+    //     r_props_maxdist 3000 on a map whose farthest prop is 2951, then r_props_shadowdist 1200
+    //     on a viewpoint whose farthest prop is 1371 (effective 1392). Both culled exactly zero and
+    //     both looked like the feature was broken.  MEASURE the farthest prop distance first, then
+    //     subtract 192 before setting this.  On fy_killzone from mid-map, 43 of 72 props sit beyond
+    //     1024 units, so ~800 is the first value that excludes a useful number of them.
+    CVar_Add("Client", "r_props_pvscull",         "1",     CVAR_SIDE_CL);
+    CVar_Add("Client", "r_props_maxdist",         "0",     CVAR_SIDE_CL);
+    // Default 1000 (effective 1192 with PP_CULL_HYST).  Measured on fy_killzone from mid-map,
+    // r_renderscale 2, pacing off:  Total refresh 2289.58 -> 2021.20us (-268us, 11.7% of frame,
+    // 436.8 -> 494.8 fps) and Shadow generation 453.16 -> 242.52us.  Shadowmap Sides drops 7 -> 3,
+    // which is most of the win -- excluding distant props means fewer lamp cells get allocated at
+    // all.  Both sub-buckets fall together (classify 219.75 -> 102.19, entdraw 204.18 -> 123.59)
+    // because EF_NOSHADOW is the first rejection in the engine's classification loop, so a flagged
+    // prop is skipped before any of the per-caster work, not merely omitted from the depth passes.
+    // 800 saves only 29us more for 200 units less margin, so 1000 is the better trade.
+    // No visible difference at the tested viewpoint -- but that is ONE static viewpoint; a long
+    // sightline onto a mid-distance prop casting against a wall could pop as you approach. Set 0
+    // to disable if that shows up in play.
+    CVar_Add("Client", "r_props_shadowdist",      "1000",  CVAR_SIDE_CL);
     // Mirror the viewmodel horizontally for left-handed weapon view.
     // XOR'd against the per-weapon `weapon_viewmodel_flip` default so a
     // model that is already left-handed in its source data flips back

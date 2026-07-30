@@ -549,6 +549,14 @@ void(entity e, vector col) CSQC_DrawPhysOBB =
 .entity pp_active_next;
 .float  pp_active_linked;
 
+// All-props chain (EVERY phys_files mirror, moving OR settled) — drives the render cull sweep.
+// The active chain above cannot be reused for that: it is deliberately moving-only, and the props
+// that most need culling are exactly the settled ones it drops.  Own link field, NOT .chain.
+.entity pp_all_next;
+.float  pp_all_linked;
+.float  pp_cull_hidden;     // 1 = the sweep has drawmask'd this prop out (hysteresis state)
+.float  pp_cull_noshadow;   // 1 = the sweep set EF_NOSHADOW, so only the sweep may clear it again
+
 // Debug colour for a prop's OBB / label.  With sv_debug_physprops on the server sends the AUTHORITATIVE
 // rest state, so these are facts rather than the velocity guess this used to make:
 //   YELLOW = carried / just-dropped passthrough (non-solid to players)
@@ -1412,6 +1420,180 @@ void(entity p) PhysProp_ActiveUnlink =
     p.pp_active_linked = FALSE;
 };
 
+// ---------------------------------------------------------------------------
+// ALL-PROPS CHAIN + RENDER CULL SWEEP
+//
+// Every phys_files mirror sets .drawmask = MASK_ENGINE (CSQC_PhysProp_Update) and until now there
+// was no cull of ANY kind on it — no distance, no PVS, no LOD.  addentities(MASK_ENGINE) therefore
+// hands the engine every prop on the map every frame, and BE_GenModelBatches walks the lot.  On a
+// prop-dense open map that is the largest single thing the mod hands the renderer: fy_killzone is
+// 66 props / ~272k triangles, all of them also shadow casters.
+//
+// Deliberately NOT done in .predraw.  A settled prop UNHOOKS its predraw (see the settle branch of
+// CSQC_PhysProp_Predraw, "400 resting props cost ~0") precisely so resting props cost no QC call at
+// all; re-hooking one per prop per frame to run a cull would spend more than the cull saves.
+//
+// Instead a sweep runs at PP_CULL_INTERVAL (NOT per frame) and toggles .drawmask.  66 props at
+// 10 Hz is ~660 tests/second — nothing — and the per-frame cost stays exactly zero.  A prop with
+// drawmask 0 is skipped by addentities, so it never reaches cl_visedicts, which also drops it out
+// of the shadow caster walks (those iterate cl_visedicts raw, with no PVS test of their own).
+//
+// Linked on the first snapshot, unlinked in CSQC_Ent_Remove.
+// ---------------------------------------------------------------------------
+entity g_pp_all_head;
+
+const float PP_CULL_INTERVAL = 0.1;   // 10 Hz.  Fast enough that a sprinting player never outruns
+                                      // the sweep, slow enough that the sweep itself is free.
+const float PP_CULL_HYST     = 192;   // distance hysteresis, applied BOTH ways, so a prop sitting
+                                      // exactly on the radius cannot flicker in and out.
+
+float pp_cull_next_time;
+
+void(entity p) PhysProp_AllLink =
+{
+    if (p.pp_all_linked)
+        return;
+    p.pp_all_next   = g_pp_all_head;
+    g_pp_all_head   = p;
+    p.pp_all_linked = TRUE;
+};
+
+void(entity p) PhysProp_AllUnlink =
+{
+    if (!p.pp_all_linked)
+        return;
+    if (g_pp_all_head == p)
+        g_pp_all_head = p.pp_all_next;
+    else
+    {
+        entity q = g_pp_all_head;
+        while (q)
+        {
+            if (q.pp_all_next == p)
+            {
+                q.pp_all_next = p.pp_all_next;
+                break;
+            }
+            q = q.pp_all_next;
+        }
+    }
+    p.pp_all_next   = world;
+    p.pp_all_linked = FALSE;
+};
+
+// Undo whatever the sweep did to this prop.  Split out so the "culling was turned off at runtime"
+// path and the per-prop "came back into view" path can never drift apart — turning the cvars off
+// mid-game MUST restore every prop, or they stay invisible until the next map.
+void(entity e) PhysProp_CullShow =
+{
+    if (e.pp_cull_hidden)
+    {
+        e.drawmask       = MASK_ENGINE;
+        e.pp_cull_hidden = FALSE;
+    }
+    if (e.pp_cull_noshadow)
+    {
+        // Clear ONLY our own bit — never assume we own the whole field.
+        e.effects          = e.effects - (e.effects & EF_NOSHADOW);
+        e.pp_cull_noshadow = FALSE;
+    }
+};
+
+void() PhysProp_CullSweep =
+{
+    if (cltime < pp_cull_next_time)
+        return;
+    pp_cull_next_time = cltime + PP_CULL_INTERVAL;
+
+    // Cvars are read HERE, at 10 Hz — never per frame.  This is the whole point of the sweep.
+    float use_pvs    = cvar("r_props_pvscull");
+    float maxdist    = cvar("r_props_maxdist");
+    float shadowdist = cvar("r_props_shadowdist");
+
+    vector eye = getproperty(VF_ORIGIN);
+
+    entity e     = g_pp_all_head;
+    float  guard = 0;
+    while (e)
+    {
+        guard = guard + 1;
+        if (guard > 4096) break;      // paranoia: a corrupt link must never spin the frame
+
+        // Never cull a car (its predraw stays hooked even when parked so a parked car still draws
+        // its wheels), a prop somebody is carrying, or a prop that is currently MOVING — a moving
+        // prop is client-predicted and few in number (0-5), so culling it buys nothing and risks
+        // the hull and the model disagreeing.
+        if (e.pp_is_car || e.pp_carrier > 0 || e.pp_active_linked)
+        {
+            PhysProp_CullShow(e);
+            e = e.pp_all_next;
+            continue;
+        }
+
+        float hide     = FALSE;
+        float noshadow = FALSE;
+
+        if (maxdist > 0 || use_pvs || shadowdist > 0)
+        {
+            // Measure to the prop's CENTRE, not its origin: a tall prop's origin sits at its base,
+            // which would bias every distance test by its own height.
+            vector c = e.origin + (e.mins + e.maxs) * 0.5;
+            float  d = vlen(c - eye);
+
+            if (maxdist > 0)
+            {
+                // Hysteresis: a hidden prop must come well INSIDE the radius before it is shown,
+                // and a shown prop must go well OUTSIDE before it is hidden.
+                float lim = maxdist + (e.pp_cull_hidden ? (0 - PP_CULL_HYST) : PP_CULL_HYST);
+                if (d > lim)
+                    hide = TRUE;
+            }
+
+            // checkpvs is fail-safe (reports visible when the map has no vis data), so this can
+            // never hide a prop that is actually in your line of sight.
+            if (!hide && use_pvs && !checkpvs(eye, e))
+                hide = TRUE;
+
+            // Same hysteresis as the hide test above, keyed off this test's OWN state bit.
+            // Without it a prop hovering near the radius flips EF_NOSHADOW on and off at the
+            // sweep rate (10Hz) as you walk, and a shadow popping in and out is far more
+            // noticeable than one that is simply absent.  The hide test got this treatment
+            // when it was written and this one did not, which was an oversight, not a
+            // judgement that shadows need it less.
+            if (!hide && shadowdist > 0)
+            {
+                float slim = shadowdist + (e.pp_cull_noshadow ? (0 - PP_CULL_HYST) : PP_CULL_HYST);
+                if (d > slim)
+                    noshadow = TRUE;
+            }
+        }
+
+        if (hide)
+        {
+            if (!e.pp_cull_hidden)
+            {
+                e.drawmask       = 0;
+                e.pp_cull_hidden = TRUE;
+            }
+        }
+        else
+        {
+            // ONE restore path, shared with the exempt-prop branch above and with the
+            // "cvars turned off mid-game" case.  This used to be re-implemented inline here,
+            // which is exactly the drift PhysProp_CullShow's comment promises to prevent.
+            PhysProp_CullShow(e);
+            // Shadow budgeting only matters for props we are actually drawing.
+            if (noshadow)
+            {
+                e.effects          = e.effects | EF_NOSHADOW;
+                e.pp_cull_noshadow = TRUE;
+            }
+        }
+
+        e = e.pp_all_next;
+    }
+};
+
 // Re-pose every MOVING prop's collision hull immediately before the client runs prediction.
 //
 // The hull is otherwise positioned ONLY by CSQC_PhysProp_Predraw, which runs from addentities at
@@ -1730,7 +1912,11 @@ void(float isnew) CSQC_PhysProp_Update =
     self.colormod  = cmod;
     self.skin      = skn;            // livery swap: selects <model>_<N>.skin (0 = clean, 1 = dirty, …)
     self.movetype  = MOVETYPE_NONE;  // origin is wire-authoritative (no engine integrate)
-    self.drawmask  = MASK_ENGINE;    // engine renders the CSQC entity
+    // Respect the cull sweep.  A snapshot must NOT un-hide a prop the sweep culled, or every
+    // distant prop that is still streaming would flicker back in on each update and the cull
+    // would silently do nothing for exactly the props it exists to drop.
+    self.drawmask  = self.pp_cull_hidden ? 0 : MASK_ENGINE;   // engine renders the CSQC entity
+    PhysProp_AllLink(self);          // all-props chain — the cull sweep walks this
 
     // Captured BEFORE the assignment below — a carrier change is what re-seeds the
     // predicted orientation (see the rel block further down).
