@@ -330,6 +330,9 @@ noref void(float apiver, string enginename, float enginever) CSQC_Init =
 	registercommand("sv_defaultmelee");
 	registercommand("sv_defaultutility");
 	registercommand("radio");
+	registercommand("vote");                 // trigger_vote answer: `vote yes` / `vote no`
+	                                         // (F1/F2 work without a bind; this is for
+	                                         // players who want their own keys)
 	registercommand("buymenu");
 	registercommand("carvals");               // F3 car panel: server's carget reply (driven car's real values)
 	registercommand("impactdebris");
@@ -608,7 +611,7 @@ void() CSQC_DrawTeamDebugServerPanels =
 	// Wrap the scoreboard draw inside this same sui_begin/end so
 	// only one bracket exists per frame (sui_begin is not re-entrant).
 	float mute_active = hud_voipmute_mode && HUD_ScoreboardVisible() && !TeamMenuIsOpen();
-	if (TeamMenuIsOpen() || Debug_PanelOpen() || Server_PanelOpen() || Tune_PanelOpen() || mute_active)
+	if (TeamMenuIsOpen() || Debug_PanelOpen() || Server_PanelOpen() || Tune_PanelOpen() || NPC_PanelOpen() || mute_active)
 	{
 		float prev_font = drawfont;
 		drawfont = hud_font;
@@ -622,6 +625,8 @@ void() CSQC_DrawTeamDebugServerPanels =
 			TeamMenuDraw();
 			sui_menu_nav();
 		}
+		if (NPC_PanelOpen())
+			NPC_PanelDraw();
 		if (Debug_PanelOpen())
 		{
 			Debug_PanelDraw();
@@ -766,6 +771,10 @@ void(float in_menu_backdrop) CSQC_UpdateViewSpectator =
 			HUD_DrawScoreboard();
 		CSQC_DrawTeamDebugServerPanels();
 		CSQC_EnvHud_Draw();
+		// Dead players still get a vote — the server counts every connected
+		// real client, not just the living ones, so the prompt has to be
+		// reachable from the spectator HUD too.
+		Vote_Draw();
 	}
 };
 
@@ -781,6 +790,18 @@ float() CSQC_UpdateViewAliveCamera =
 	// the engine's authoritative view.  Skip the CSQC override while in team-select
 	// and let the engine render from the real player entity.
 	float in_team_select = getstati(STAT_PLAYERTEAM) <= TEAM_NONE;
+
+	// Sven trigger_camera cutscene.  FIRST, and returns — the chase-cam and
+	// prop_car blocks further down both write VF_ORIGIN unconditionally, so
+	// anything that runs after them loses.  The player's body is untouched
+	// (the server never moved it), so prediction carries on underneath and
+	// the view simply comes from somewhere else for a while.
+	if (Cutscene_Active())
+	{
+		Cutscene_ApplyView();
+		return in_team_select;
+	}
+	Cutscene_Reset();   // next cutscene starts snapped, not sliding in from here
 
 	if (predicted_player && csqc_prediction_valid && !in_team_select)
 	{
@@ -1179,6 +1200,27 @@ void(float width, float height, float menushown) CSQC_UpdateView =
 	if (spike_debug)
 		spike_t_state = gettime(0);
 
+	// A cutscene outranks the death cam / spectator.  The server only binds a
+	// DEAD player to a camera flagged Force View, so reaching here already
+	// means the map asked for the cutscene to play over the death screen.
+	//
+	// Gated on Spectate_IsActive() as well, so this ONLY handles the dead
+	// case: an alive player in a cutscene must fall through to the normal
+	// path below and be picked up by the branch at the top of
+	// CSQC_UpdateViewAliveCamera, which keeps the whole interp / scene / HUD
+	// tail intact instead of duplicating it here.
+	if (Spectate_IsActive() && Cutscene_Active())
+	{
+		Cutscene_ApplyView();
+		Cutscene_UpdateCursorMode();
+		CSQC_UpdateViewAliveSensitivity(FALSE);
+		CSQC_EnvSound_UpdateListener();
+		CSQC_UpdateViewAliveScene();
+		CSQC_UpdateViewAliveHud(in_menu_backdrop);
+		Cutscene_DrawCursor();
+		return;
+	}
+
 	if (Spectate_IsActive())
 	{
 		CSQC_UpdateViewSpectator(in_menu_backdrop);
@@ -1230,6 +1272,13 @@ void(float width, float height, float menushown) CSQC_UpdateView =
 	if (spike_debug)
 		spike_t_scene = gettime(0);
 	CSQC_UpdateViewAliveHud(in_menu_backdrop);
+	Vote_Draw();
+	// Cursor for a MOUSE_CURSOR cutscene.  Drawn after the HUD so it sits on
+	// top, and the mode update is here rather than in the view branch so it
+	// still runs on the frame the cutscene ENDS (which is what releases the
+	// cursor back to the game).
+	Cutscene_UpdateCursorMode();
+	Cutscene_DrawCursor();
 	if (spike_debug)
 	{
 		spike_t_hud = gettime(0);
@@ -1312,6 +1361,12 @@ void(string alias_name, string cvarname) CSQC_SetDefaultWeaponAlias =
 float(string cmd) CSQC_ConsoleCommand =
 {
 	tokenize(cmd);
+
+	// trigger_vote answer.  Handled ahead of the switch because Vote_ConsoleCommand
+	// does its own argv(0) test and owns the usage message.
+	if (Vote_ConsoleCommand(cmd))
+		return TRUE;
+
 	switch(argv(0))
 	{
 		case "cl_setangles":
@@ -1565,6 +1620,19 @@ float(string cmd) CSQC_ConsoleCommand =
 
 float(float evtype, float scanx, float chary, float devid) CSQC_InputEvent =
 {
+	// Cutscene cursor (trigger_camera MOUSE_CURSOR).  Takes only the mouse —
+	// movement, typing and the console all still work — but it must see the
+	// mouse before the panels below, because a click meant for a
+	// trigger_cameratarget must not also reach +attack.  Self-gating: returns
+	// FALSE instantly unless a cursor cutscene is actually up.
+	if (Cutscene_InputEvent(evtype, scanx, chary, devid))
+		return TRUE;
+
+	// Vote prompt: consumes only its own answer keys, so gameplay input keeps
+	// working while a vote is live.  Also self-gating.
+	if (Vote_InputEvent(evtype, scanx, chary, devid))
+		return TRUE;
+
 	// Debug panel: when open it absorbs all input (clicks, mouse,
 	// scroll, ESC + F1 internally close).  Must run BEFORE the F1
 	// open-toggle below so F1 inside the panel hits the close path
@@ -1589,6 +1657,13 @@ float(float evtype, float scanx, float chary, float devid) CSQC_InputEvent =
 			return TRUE;
 	}
 
+	// NPC test bench on F4.
+	if (NPC_PanelOpen())
+	{
+		if (NPC_PanelInputEvent(evtype, scanx, chary, devid))
+			return TRUE;
+	}
+
 	// F1 opens the debug panel from gameplay.
 	if (evtype == IE_KEYDOWN && scanx == K_F1)
 	{
@@ -1600,6 +1675,14 @@ float(float evtype, float scanx, float chary, float devid) CSQC_InputEvent =
 	if (evtype == IE_KEYDOWN && scanx == K_F2)
 	{
 		Server_PanelToggle();
+		return TRUE;
+	}
+
+	// F4 opens the NPC test bench.  F1/F2/F3 are cvars/server/car tuning, so
+	// this is the next free slot in the same family.
+	if (evtype == IE_KEYDOWN && scanx == K_F4)
+	{
+		NPC_PanelToggle();
 		return TRUE;
 	}
 
@@ -1732,7 +1815,7 @@ float(float evtype, float scanx, float chary, float devid) CSQC_InputEvent =
 // POINTSOUND is a string → rough average. Use for the debug bandwidth HUD.
 float(float ev) _net_event_bytes =
 {
-	if (ev == CSQC_EVENT_IMPACT)          return 23;  // svc+ev+pos[3 coord]+normal[3 byte]+mat byte+target entnum (short)+shooter entnum (byte)+is_entry (byte)+action (byte)
+	if (ev == CSQC_EVENT_IMPACT)          return 24;  // svc+ev+pos[3 coord]+normal[3 byte]+mat byte+target entnum (short)+shooter entnum (SHORT)+is_entry (byte)+action (byte)
 	if (ev == CSQC_EVENT_SHELL)           return 39;
 	if (ev == CSQC_EVENT_MAGDROP)         return 27;
 	if (ev == CSQC_EVENT_POINTSOUND)      return 34;
@@ -1744,6 +1827,7 @@ float(float ev) _net_event_bytes =
 	if (ev == CSQC_EVENT_SERVER_HITBOXES) return 63;  // 2 svc hdr + 55 fixed payload + 8 (f1t+bf1t)
 	if (ev == CSQC_EVENT_GLASS_GIBS)      return 35;  // +5 throw bytes vs prior
 	if (ev == CSQC_EVENT_PLAYER_GIBS)     return 32;  // 2 + 12 + 12 + 1 + 2 + 1 + 2 svc/event hdr
+	if (ev == CSQC_EVENT_MONSTER_GIBS)    return 32;  // same shape: gibset byte replaces the victim slot
 	if (ev == CSQC_EVENT_DEBRIS_GIBS)     return 39;  // +5 throw bytes vs prior
 	if (ev == CSQC_EVENT_KILLFEED)        return 7;   // 2 svc hdr + 5 kill-feed bytes
 	if (ev == CSQC_EVENT_WEAPON_PICKUP_SOUND) return 15;  // 2 svc hdr + 1 exclude + 12 origin
@@ -1752,9 +1836,10 @@ float(float ev) _net_event_bytes =
 	if (ev == CSQC_EVENT_FOOTSTEP_SOUND)         return 17;  // 2 svc hdr + 1 exclude + 1 vol + 1 snd_idx + 12 origin
 	if (ev == CSQC_EVENT_SLIDE_SOUND)            return 16;  // 2 svc hdr + 1 exclude + 1 variant + 12 origin
 	if (ev == CSQC_EVENT_DEATH_DROP)             return 61;  // 2 svc hdr + 1 weapon + 1 slot + 24 origin/vel + ~32 model path (variable)
-	if (ev == CSQC_EVENT_GRENADE_EXPLODE)        return 16;  // 2 svc hdr + 1 exclude + 12 origin + 1 sample byte
-	if (ev == CSQC_EVENT_GRENADE_BOUNCE)         return 16;  // 2 svc hdr + 1 exclude + 12 origin + 1 sample byte
-	if (ev == CSQC_EVENT_HL_BEAM)                return 28;  // 2 svc hdr + 1 exclude + 1 type + 24 start/end coords
+	if (ev == CSQC_EVENT_GRENADE_EXPLODE)        return 17;  // 2 svc hdr + 2 exclude (short) + 12 origin + 1 sample byte
+	if (ev == CSQC_EVENT_GRENADE_BOUNCE)         return 17;  // 2 svc hdr + 2 exclude (short) + 12 origin + 1 sample byte
+	if (ev == CSQC_EVENT_HL_BEAM)                return 29;  // 2 svc hdr + 2 exclude/owner (short) + 1 type + 24 start/end coords
+	if (ev == CSQC_EVENT_SHOCKWAVE)              return 22;  // 2 svc hdr + 12 centre + 2 radius (short) + 1 life + 1 width + 3 colour + 1 kind
 	if (ev == CSQC_EVENT_SNOWSPLAT)              return 21;  // 2 svc hdr + 1 exclude + 1 flags + 12 origin + 3 normal bytes + 2 entnum
 	if (ev == CSQC_EVENT_PAINTSPLAT)             return 23;  // 2 svc hdr + 1 exclude + 12 origin + 3 normal + 3 color + 2 target
 	if (ev == CSQC_EVENT_CSGRENADE_EXPLODE)      return 17;  // 2 svc hdr + 1 exclude + 1 type + 12 origin + 1 sample
@@ -1766,9 +1851,10 @@ float(float ev) _net_event_bytes =
 	if (ev == CSQC_EVENT_ENV_EXPLOSION)          return 17;  // 2 svc hdr + 12 origin + 2 magnitude + 1 spawnflags
 	if (ev == CSQC_EVENT_SPRAY)                  return 53;  // 2 svc hdr + 2 sid + 1 owner + 12 pos + 12 normal + 12 eye + ~12 name (avg)
 	if (ev == CSQC_EVENT_SPRAY_REMOVE)           return 4;   // 2 svc hdr + 2 sid
-	if (ev == CSQC_EVENT_PLAYER_FLINCH)          return 5;   // 2 svc hdr + 1 victim slot + 1 hitgroup + 1 attacker slot
+	if (ev == CSQC_EVENT_PLAYER_FLINCH)          return 6;   // 2 svc hdr + 1 victim slot + 1 hitgroup + 2 attacker entnum (short)
 	if (ev == CSQC_EVENT_ENV_FADE)               return 14;  // 2 svc hdr + rgba bytes + 2 floats + 1 flags
 	if (ev == CSQC_EVENT_ENV_MESSAGE)            return 34;  // 2 svc hdr + variable title key string
+	if (ev == CSQC_EVENT_GAME_TEXT)              return 70;  // 2 svc hdr + 1 chan + 8 x/y coord + 1 effect + 6 colour + 16 four floats + ~36 message string (variable)
 	if (ev == CSQC_EVENT_DAMAGE_VIEWKICK)        return 6;   // 2 svc hdr + 2 signed shorts
 	if (ev == CSQC_EVENT_RADIO_CALL)             return 34;  // 2 svc hdr + ~32 voice-path string (variable)
 	if (ev == CSQC_EVENT_KILL_REWARD)            return 5;   // 2 svc hdr + 2 short reward + 1 headshot byte
@@ -1829,7 +1915,15 @@ void() CSQC_Parse_Event =
 			// anchor the ribbon's start at the shooter's eye position.
 			// 0 / out-of-range falls back to no-tracer (CSQC_BulletImpactRemote
 			// skips the spawn when it can't resolve the shooter).
-			float rem_shooter = readbyte();
+			//
+			// SHORT, matching W_ImpactEffectSend.  This was a byte on both sides,
+			// which was fine while only players shot; a monster's edict number
+			// passes 255 routinely and truncating it anchors the tracer on a
+			// different entity.  Server and client ship together, so widening
+			// both ends at once is safe - but they MUST move together, since a
+			// reader that is one byte short desynchronises every event after it
+			// in the same packet, not just this one.
+			float rem_shooter = readshort();
 			// is_entry: 1 = entry/primary impact (draw the tracer), 0 = penetration
 			// EXIT (decal only — drawing it too gave the "two tracer lines" double).
 			float rem_entry = readbyte();
@@ -2001,7 +2095,7 @@ void() CSQC_Parse_Event =
 			// animation" symptom.
 			float flinch_slot     = readbyte();
 			float flinch_hg       = readbyte();
-			float flinch_attacker = readbyte();
+			float flinch_attacker = readshort();	// SHORT — attacker may be a monster, see sv_weapons.qc
 			float flinch_dur  = cvar("cl_player_flinch_time");
 			if (flinch_dur <= 0)
 				break;   // disabled
@@ -2036,6 +2130,11 @@ void() CSQC_Parse_Event =
 		case CSQC_EVENT_ENV_MESSAGE:
 		{
 			CSQC_EnvMessage_Parse();
+			break;
+		}
+		case CSQC_EVENT_GAME_TEXT:
+		{
+			CSQC_GameText_Parse();
 			break;
 		}
 		case CSQC_EVENT_DAMAGE_FLASH:
@@ -2129,7 +2228,8 @@ void() CSQC_Parse_Event =
 			// pattern in this codebase — dimension_send doesn't filter
 			// multicasts the way you'd expect, so the explicit byte is
 			// load-bearing.)
-			float ge_exclude = readbyte();
+			// SHORT since monsters throw grenades: see W_HLGrenadeExplode.
+			float ge_exclude = readshort();
 			vector ge_pos;
 			ge_pos_x = readcoord();
 			ge_pos_y = readcoord();
@@ -2154,7 +2254,7 @@ void() CSQC_Parse_Event =
 			// CSQC_EVENT_GRENADE_EXPLODE — shooter skips because the
 			// CSQC fake's CSQC_FakeHLGrenadeBounce already played the
 			// bounce locally.
-			float gbn_exclude = readbyte();
+			float gbn_exclude = readshort();
 			vector gbn_pos;
 			gbn_pos_x = readcoord();
 			gbn_pos_y = readcoord();
@@ -2322,6 +2422,26 @@ void() CSQC_Parse_Event =
 			}
 			break;
 		}
+		case CSQC_EVENT_MONSTER_MODELS:
+		{
+			CSQC_MonsterModels_Parse();
+			break;
+		}
+		case CSQC_EVENT_VOTE_START:
+		{
+			CSQC_Vote_ParseStart();
+			break;
+		}
+		case CSQC_EVENT_VOTE_UPDATE:
+		{
+			CSQC_Vote_ParseUpdate();
+			break;
+		}
+		case CSQC_EVENT_VOTE_END:
+		{
+			CSQC_Vote_ParseEnd();
+			break;
+		}
 		case CSQC_EVENT_PROP_DECLOAK:
 		{
 			// Prop Hunt: a disguised hider died. A smoke puff swallows the prop
@@ -2380,6 +2500,11 @@ void() CSQC_Parse_Event =
 		case CSQC_EVENT_HL_BEAM:
 		{
 			HLBeam_Parse();
+			break;
+		}
+		case CSQC_EVENT_SHOCKWAVE:
+		{
+			CSQC_Shockwave_Parse();
 			break;
 		}
 		case CSQC_EVENT_SNOWSPLAT:
@@ -2456,6 +2581,32 @@ void() CSQC_Parse_Event =
 				                    gb_throw_mode, gb_throw_dir, gb_throw_force);	// D: no live gibs in the killcam
 			break;
 		}
+		case CSQC_EVENT_MONSTER_GIBS:
+		{
+			vector mg_pos, mg_dir;
+			mg_pos_x = readcoord(); mg_pos_y = readcoord(); mg_pos_z = readcoord();
+			mg_dir_x = readcoord(); mg_dir_y = readcoord(); mg_dir_z = readcoord();
+			float mg_count = readbyte();
+			float mg_dmg   = readshort();
+			float mg_set   = readbyte();
+
+			// No dedupe against a predicted spawn, unlike the player path: nothing
+			// on the client predicts a monster's death, so the server broadcast is
+			// the only source and doubling up is impossible.
+			if (mg_set == 1)
+			{
+				csqc_gib_model    = "models/agibs.mdl";
+				csqc_gib_variants = 4;
+			}
+			else
+			{
+				csqc_gib_model    = "models/gibs/human/hgibs.mdl";
+				csqc_gib_variants = 11;
+			}
+			CSQC_SpawnPlayerGibs(mg_pos, mg_dir, mg_count, mg_dmg);
+			break;
+		}
+
 		case CSQC_EVENT_PLAYER_GIBS:
 		{
 			vector pg_pos, pg_dir;

@@ -1945,6 +1945,299 @@ void() CVar_Init =
     // spawn (map load), so a map restart is needed for a change to take effect.
     CVar_Add("Server", "sv_door_proximity", "0", CVAR_SIDE_SV);
 
+    // Evaluate the `master` key (multisource / game_team_master) on func_door and
+    // func_door_rotating.  1 (default) = Half-Life behaviour: a mastered door
+    // refuses +use, target-chain and DAMAGE until its master is satisfied.
+    //
+    // This defaulted to 0 while the GoldSrc trigger chains were still being built,
+    // because a multisource that nobody can satisfy reports LOCKED and turns
+    // "opens when it shouldn't" into "cannot be opened, ever".  Both halves of
+    // that risk have since been measured and closed:
+    //   * 279 of the 1152 multisource masters in the corpus have NO input entity
+    //     at all; ms_register already makes those permanently permissive (HL
+    //     parity), so they cannot lock anything.
+    //   * of the classes feeding the remaining 877 inputs, every one is
+    //     implemented except item_security (28 instances) — and ms_register now
+    //     skips gs_unimplemented inputs, so those cannot lock a gate either.
+    // What is left is doors whose masters we CAN satisfy, which is the point.
+    //
+    // The visible symptom of leaving it off: th_ep1_01 hangs a func_breakable
+    // padlock on a cellar func_door_rotating mastered by "padlockmstr2", and with
+    // the gate ignored you could simply +use the door and walk past the padlock.
+    // Read per activation, so a change takes effect immediately (no map restart).
+    CVar_Add("Server", "sv_door_master", "1", CVAR_SIDE_SV);
+
+    // multisource AND-gate strictness.  1 (default) = HL semantics: inputs
+    // are pre-registered at map load by ms_register and ONLY those inputs
+    // count, so a two-button gate needs both buttons.  0 = the old lazy
+    // behaviour, where a node was allocated on first fire and the gate
+    // therefore opened as soon as any single input reported.
+    //
+    // Kept as an escape hatch: if a map soft-locks behind a gate whose
+    // inputs we fail to register, dropping this to 0 restores the previous
+    // (permissive, wrong, but never-stuck) behaviour without a rebuild.
+    // Read per fire, so it takes effect immediately.
+    CVar_Add("Server", "sv_multisource_strict", "1", CVAR_SIDE_SV);
+
+    // Honour Half-Life's rule that a door accepts a player's direct +use ONLY
+    // when SF_DOOR_USE_ONLY (256) is set.  1 (default) = HL behaviour on
+    // GoldSrc (BSP30) maps; native BSP29 maps are never affected either way.
+    //
+    // Without this, a player could +use hl_c01_a1's scripted entry doors and
+    // skip the opening cutscene.  Set to 0 if a BSP30 map of your own was
+    // authored expecting every door to be pressable — note dualshitfire.bsp is
+    // BSP30 and has 11 doors, of which only `secret_bussy` carries 256.
+    // Read per press, so it takes effect immediately.
+    CVar_Add("Server", "sv_door_use_only", "1", CVAR_SIDE_SV);
+
+    // Print every func_breakable whose GoldSrc spawnflags were translated
+    // into our vocabulary by Break_NormaliseFlags.  Native maps must print
+    // NOTHING — that is the regression guard for the flag remap.
+    CVar_Add("Server", "sv_debug_breakables", "0", CVAR_SIDE_SV);
+
+    // target_cdaudio track -> media path.  Sven's media/tracklist.txt starts at
+    // 1 = "empty", so track N is Half-Life<N-1>.mp3 — the %i is fed track-1.
+    // Set empty to fall back to the engine's own `cd loop N` instead, which is
+    // what a real CD or a mounted Quake soundtrack wants.
+    CVar_Add("Server", "sv_cdaudio_pathfmt", "media/Half-Life%02i.mp3", CVAR_SIDE_SV);
+
+    // ambient_generic playmode 1/5 ("Play Once") cut-off, in seconds.  The
+    // server cannot measure a sample's length (soundlength() is CSQC-only), so
+    // a one-shot is silenced after this long instead of at its true end.
+    // Raise it if a map has long one-shot ambients getting clipped.
+    CVar_Add("Server", "sv_ambient_playonce_maxlen", "10", CVAR_SIDE_SV);
+
+    // Strip .mp3 / .flac from ambient_generic sample paths so FTE's built-in
+    // .wav/.opus/.ogg fallback can pick up a replacement dropped beside the
+    // original.  Was needed because the exact-path load SUCCEEDS for an mp3 and
+    // only the DECODE failed, so the fallback would otherwise never run.
+    //
+    // NOW DEFAULTS OFF, because the engine decodes mp3 natively (minimp3,
+    // registered from S_Init via snd_minimp3.c).  Leaving it on actively
+    // silences every mp3: it rewrites "pizza_ya_san/tam-n06.mp3" to
+    // "pizza_ya_san/tam-n06", which no longer resolves to anything, so the
+    // decoder never sees the file it can now handle.  Set to 1 only if you are
+    // deliberately shipping .ogg/.wav replacements for the mp3s a map names.
+    CVar_Add("Server", "sv_sound_strip_undecodable", "0", CVAR_SIDE_SV);
+
+    // Keep entities whose classname has no spawn function as inert
+    // pass-through relays instead of dropping them (see
+    // SV_OnEntityNoSpawnFunction in sv_goldsrc_compat.qc).  1 (default)
+    // preserves target chains routed through unimplemented GoldSrc entities,
+    // which on a campaign map is the difference between "a cosmetic entity is
+    // missing" and "the map soft-locks".  0 restores the drop behaviour.
+    CVar_Add("Server", "sv_compat_unknown_relay", "1", CVAR_SIDE_SV);
+
+    // squadmaker: actually place the monster bodies it describes.  0 (default)
+    // runs the spawner logic — counts, delays, target chains, counters — but
+    // produces no body, because this build has no NPC AI and pizza_ya_san1
+    // alone has 97 spawners; filling a map with monsters that stand still is
+    // worse than an empty one.  Flip to 1 once AI lands: the same code path
+    // then routes through Monster_Spawn (sv_monsters.qc) unchanged.
+    CVar_Add("Server", "sv_squadmaker_spawn", "0", CVAR_SIDE_SV);
+
+    // Per-monster construction trace (model, solidity) at map load.
+    CVar_Add("Server", "sv_debug_monsters", "0", CVAR_SIDE_SV);
+
+    // Brush movers (door/button/momentary) re-link after SetMovedir zeroes .angles.
+    // Prints the world box before/after that re-link; a box centred near (0,0,0)
+    // instead of wrapping the brush is the "invisible until it moves" bug.
+    CVar_Add("Server", "sv_debug_brushlink", "0", CVAR_SIDE_SV);
+
+    // Differential A* check at map load: runs N random node-to-node queries through
+    // BOTH the live binary-heap search and a reference linear-scan A*, and asserts
+    // the optimal COST agrees and that every returned path is genuinely connected.
+    // Costs nothing at 0; a few hundred trials is a second or two on a big graph.
+    CVar_Add("Server", "sv_nav_selftest", "0", CVAR_SIDE_SV);
+
+    // Attribution for the node-linking pass: how many candidate pairs were thrown
+    // away, by which test, and how many a step-up allowance or a bare line-of-sight
+    // test would have kept.  This is what tells apart "the pathfinder is broken"
+    // from "the graph is in twenty pieces so there was never a path to find".
+    CVar_Add("Server", "sv_nav_linkdebug", "0", CVAR_SIDE_SV);
+
+    // How far apart two nav nodes may be and still be considered for a link.  Half-
+    // Life's own node graph has no such limit; ours needs one because the link pass
+    // is all-pairs and every candidate costs a trace.  Too small shatters the graph
+    // into disconnected rooms (measured: at 384 a 98-node map was 22 pieces, the
+    // largest holding 20% of the nodes).  0 = use the built-in default.
+    CVar_Add("Server", "sv_nav_linkdist", "0", CVAR_SIDE_SV);
+
+    // Second-chance link test: anything the straight box sweep rejects is retried by
+    // simulating a walk along it, stepping up and down at every footfall the way
+    // walkmove() does.  Also the only test that can see a ledge or a hole, which a
+    // sweep through the air cannot.
+    CVar_Add("Server", "sv_nav_linkwalk", "0", CVAR_SIDE_SV);
+
+    // Diagnostic: rebuild the link set at a series of radii during one map load and
+    // report the connectivity each gives.  Leaves the graph at the configured
+    // radius when it finishes.  Costs several seconds of build; never ship it on.
+    CVar_Add("Server", "sv_nav_linksweep", "0", CVAR_SIDE_SV);
+
+    // Require continuous ground beneath a link before accepting it.  The box sweep
+    // that gates links travels through the air, so it reads a pit as perfectly
+    // clear; nothing else in the build has ever checked that a monster following
+    // the link would have anything to stand on.
+    CVar_Add("Server", "sv_nav_linkfloor", "1", CVAR_SIDE_SV);
+
+    // A* searches serviced per frame from the path request queue.  Requests are
+    // deduplicated per requester, so this caps cost without ever losing a request:
+    // a wave of 50 monsters simply gets its paths over the next several frames
+    // instead of running 50 searches inside one StartFrame.
+    CVar_Add("Server", "sv_nav_budget", "2", CVAR_SIDE_SV);
+
+    // One-shot dump at worldspawn of what the SERVER can read out of a Half-Life
+    // .mdl: sequence count, activity->sequence lookup, durations and anim events.
+    // The whole monster animation layer depends on this data reaching SSQC, so it
+    // is worth being able to re-measure on any map or model without a rebuild.
+    CVar_Add("Server", "sv_monster_probe", "0", CVAR_SIDE_SV);
+
+    // --- monster AI (sv_ai_*.qc) -------------------------------------------
+    // Master switch.  0 builds AI classes as the inert bodies they were before
+    // B2, which keeps a one-cvar way back if a Sven map turns out to depend on
+    // its monsters standing still.
+    CVar_Add("Server", "sv_ai_enable", "1", CVAR_SIDE_SV);
+
+    // How far a monster can notice a player.  Half-Life's own default, and it
+    // also bounds the cheap proximity test that keeps dormant monsters free —
+    // raising it makes every idle monster on the map wake more often.
+    CVar_Add("Server", "sv_ai_sight", "1024", CVAR_SIDE_SV);
+
+    // Line-of-sight traces the whole AI layer may spend per FRAME, shared by
+    // every monster.  When it runs out a monster is told "cannot see" for that
+    // tick and re-checks on the next one, which is the safe direction to fail:
+    // noticing a player a tenth of a second late is invisible, shooting through
+    // a wall is not.
+    CVar_Add("Server", "sv_ai_traces", "24", CVAR_SIDE_SV);
+
+    // Per-tick counters (thinks, traces, walkmoves, walkmove failures) plus
+    // placement and task-chain warnings.
+    CVar_Add("Server", "sv_ai_debug", "0", CVAR_SIDE_SV);
+
+    // Validate the schedule/task table at worldspawn: unbuilt schedule ids,
+    // tasks running past the end of their own schedule, unknown opcodes, and
+    // fail-schedules pointing at schedules that were never built.  Every one of
+    // those produces a monster that silently stops behaving rather than an
+    // error, which is why it is worth a boot-time check.
+    CVar_Add("Server", "sv_ai_selftest", "0", CVAR_SIDE_SV);
+
+    // Half-Life's skill.cfg values for the one class B2 implements
+    // (sk_headcrab_health1 / sk_headcrab_dmg_bite1).  Cvars rather than
+    // constants because Sven maps are balanced across a range of them.
+    CVar_Add("Server", "sv_ai_headcrab_health", "10", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_headcrab_dmg", "10", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_zombie_health", "50", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_cockroach_health", "1", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_islave_health", "60", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_houndeye_health", "20", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_houndeye_dmg", "15", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_grunt_health", "50", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_grunt_dmg", "8", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_barney_health", "35", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_barney_dmg", "10", CVAR_SIDE_SV);
+    // How long a talking ally stays hostile after a player provokes it.
+    // Half-Life never forgives (barney.cpp sets bits_MEMORY_PROVOKED and nothing
+    // ever clears it), which in a co-op mod means one stray round costs you the
+    // escort for the rest of the map.  SET THIS TO 0 FOR HL PARITY - the grudge
+    // then has no expiry at all.
+    CVar_Add("Server", "sv_ai_grudge_time", "30", CVAR_SIDE_SV);
+    // How much slower a shooter fires at long range.  0 is exactly Half-Life
+    // (no distance term and no jitter at all); 1 adds up to AI_RANGE_CADENCE_MAX
+    // seconds at the edge of the monster's own range.  See AI_ArmAttackCooldown.
+    CVar_Add("Server", "sv_ai_range_cadence", "1", CVAR_SIDE_SV);
+    // Use Half-Life's per-activity SetYawSpeed tables instead of this mod's
+    // single hand-picked figure per class.  0 falls back to the old numbers;
+    // the x2 in AI_ChangeYaw applies either way, because that one is a
+    // straight bug fix rather than a tuning choice.
+    CVar_Add("Server", "sv_ai_yawspeed_hl", "1", CVAR_SIDE_SV);
+    // Do dead NPCs drop a usable weapon?  1 = real pickup (Half-Life's own
+    // behaviour), 0 = nothing.
+    CVar_Add("Server", "sv_ai_dropweapons", "1", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_agrunt_health", "90", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_agrunt_dmg", "8", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_bullsquid_health", "40", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_bullsquid_dmg", "10", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_pitdrone_health", "60", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_pitdrone_dmg", "12", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_gonome_health", "200", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_voltigore_health", "200", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_turret_health", "50", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_turret_dmg", "8", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_leech_health", "8", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_leech_dmg", "8", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_ichthyosaur_health", "200", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_ichthyosaur_dmg", "35", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_controller_health", "60", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_controller_dmg", "12", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_barnacle_health", "25", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_barnacle_dmg", "10", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_scientist_health", "20", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_garg_health", "800", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_garg_dmg", "50", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_garg_stomp_dmg", "50", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_babygarg_health", "400", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_stukabat_health", "60", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_stukabat_dmg", "15", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_kingpin_health", "250", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_kingpin_dmg", "30", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_bigmomma_health", "1000", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_bigmomma_dmg", "50", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_bigmomma_mortar_dmg", "40", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_grunt_grenades", "3", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_spawnfollow", "0", CVAR_SIDE_SV);
+    // Headless-only: fires two spaced player hits at the nearest ally so the
+    // grudge escalation can be measured without a human. See AI_ProvokeTest.
+    CVar_Add("Server", "sv_ai_provoketest", "0", CVAR_SIDE_SV);
+    // Spawns ONE projectile owned by world, so the replicated (non-predicted)
+    // send path can be read on a client.  Value is PROJ_TYPE_* PLUS ONE, so 1 is
+    // the HL grenade.  See W_ProjTest.
+    CVar_Add("Server", "sv_proj_test", "0", CVAR_SIDE_SV);
+    // Puts a connecting client straight onto a team instead of leaving them in
+    // team select.  For headless runs, where nobody can press the button.
+    CVar_Add("Server", "sv_autojoin", "0", CVAR_SIDE_SV);
+    // Fires each of the four HL equipment weapons once, two seconds apart, then
+    // reports what is left alive in the world.  See W_HLEquipTest.
+    CVar_Add("Server", "sv_hlequip_test", "0", CVAR_SIDE_SV);
+    // BULLET_MONSTER_9MM, sk_9mm_bullet2.  Her cone tightens with sustained fire
+    // rather than her damage climbing — see ASN_SPREAD_* in mon_grunt.qc.
+    CVar_Add("Server", "sv_ai_assassin_dmg", "5", CVAR_SIDE_SV);
+    // Kills one monster, then proves the corpse rules on the body: bullets must
+    // bleed it and never gib it, club damage must chip it and eventually gib.
+    CVar_Add("Server", "sv_ai_corpsetest", "0", CVAR_SIDE_SV);
+    // Spawns one of each reported-broken shooter around the first live player and
+    // prints the damage each one lands.  See AI_FireTest (sv_ai_gibs.qc).
+    CVar_Add("Server", "sv_ai_firetest", "0", CVAR_SIDE_SV);
+    // The firetest's other half: places subjects OUT of range so they have to walk
+    // in, and reads distance moved plus the shared animation-event counters.  A
+    // firetest run reports walkmove=0 by design, which left the whole locomotion
+    // half of the event pump - footsteps included - with no number on it at all.
+    CVar_Add("Server", "sv_ai_walktest", "0", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_bigmomma_maxcrabs", "10", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_bigmomma_crabgap", "8", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_apache_health", "250", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_apache_dmg", "10", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_osprey_health", "400", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_zombie_dmg_slash", "20", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_zombie_dmg_both", "40", CVAR_SIDE_SV);
+
+    // Drop n headcrabs in a ring around the first player, then reset to 0.  The
+    // only way to get monsters in front of a player on demand — the corpus puts
+    // them where its maps put them.
+    CVar_Add("Server", "sv_ai_spawntest", "0", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_spawnclass", "monster_headcrab", CVAR_SIDE_SV);
+    // A second class, interleaved with the first.  The only way to test the
+    // faction matrix headlessly: it takes two different classes side by side.
+    CVar_Add("Server", "sv_ai_spawnclass2", "", CVAR_SIDE_SV);
+
+    // Debug: override every monster's locomotion mode as it spawns.
+    // 0 = leave the class alone (ground), 1 = fly, 2 = swim, 3 = static.
+    // The only way to exercise the volume-movement path before a class that uses
+    // it exists — a flying headcrab is a monster whose behaviour is already known.
+    CVar_Add("Server", "sv_ai_forcemode", "0", CVAR_SIDE_SV);
+
+    // trigger_camera: per-cutscene trace of binds, path steps and releases.
+    CVar_Add("Server", "sv_debug_cutscene", "0", CVAR_SIDE_SV);
+
     // ---------- Economy / buy menu (mp_cash*) ----------
     // CS-style cash.  Server-authoritative — the client greys out
     // unaffordable buy-menu items from the synced money stat, never these.
@@ -2218,6 +2511,26 @@ void() CVar_Init =
     // the door is in lockstep with this rate by default — see
     // cl_brushsync_lookahead for the forward-extrapolation budget.
     CVar_Add("Server", "sv_func_tickrate",         "64",            CVAR_SIDE_SV);
+
+    // func_pushable buoyancy scale (server/sv_func_pushable.qc).  Sven's
+    // "Buoyancy" keyvalue has no documented units, so it is read as a DENSITY
+    // RATIO through this multiplier: how many times its own weight of water the
+    // crate displaces when fully under.  >1 floats and settles at 1/ratio
+    // submerged, so the 0.1 default turns Sven's usual 20 into 2.0 = half
+    // submerged, and de_rats' 25 into 2.5.  0 makes every crate sink (which is
+    // also what a crate with no buoyancy key does).
+    CVar_Add("Server", "sv_pushable_buoyancy",     "0.1",           CVAR_SIDE_SV);
+    // How hard a floating crate is damped, as the classic damping ratio zeta
+    // (same meaning and spelling as sv_prop_buoyancy_damping): 1 = arrives at
+    // the waterline and stops dead, 0.35 = a couple of visible bobs, 0.1 =
+    // wallows.  Expressed as a ratio rather than a drag constant because the
+    // spring stiffness depends on each crate's height and buoyancy, so a fixed
+    // constant would feel right for one crate and wrong for every other.
+    CVar_Add("Server", "sv_pushable_buoyancy_damping", "0.35",      CVAR_SIDE_SV);
+    // Per-tick readout for a pushable: origin, velocity, ground contact,
+    // submerged fraction, the waterline it found and its own base height.  The
+    // settle behaviour is the part a headless server CAN be asked about.
+    CVar_Add("Server", "sv_debug_pushable",        "0",             CVAR_SIDE_SV);
 
     // Debug trace for door / mover wedge handling.  When 1, each
     // tick prints: the brush's look-ahead origin (where it WILL be
@@ -2834,6 +3147,10 @@ void() CVar_Init =
     CVar_Add("ODE physics", "sv_props_enable",           "1",  CVAR_SIDE_SV);
     CVar_Add("ODE physics", "sv_props_physics",          "1",  CVAR_SIDE_SV);
     CVar_Add("ODE physics", "sv_props_default_halfsize", "16", CVAR_SIDE_SV);
+    // Thickness given to a model that is FLAT in one axis but real in the other two
+    // (single-sided quads: facade panels, notepads). Only the degenerate axis is padded;
+    // default_halfsize above still owns the all-axes-zero case. 2 units ~ 5cm.
+    CVar_Add("ODE physics", "sv_props_min_extent",       "2",  CVAR_SIDE_SV);
     // 1 = NON-SOLID decorative props (prop_detail: bushes/grass/scatter) get EF_NOSHADOW
     // at spawn, so they never enter the r_shadows-2 fake-sun depth pass (which re-renders
     // EVERY caster in the ortho box each frame with no PVS).  Cosmetic only — the sun N.L

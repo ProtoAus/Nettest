@@ -67,6 +67,18 @@ const float EBEAM_NET_DECAL_END_CL    = 64;
 const float EBEAM_PATH_SEGMENTS = 16;
 const float EBEAM_RING_SEGMENTS = 28;
 
+// Ceiling on how many times the sprite tiles along one beam.  GoldSrc uses
+// length*0.01 unbounded, which on a 4000-unit beam is 40 repeats; every repeat
+// costs vertices in the walk below, and th_ep1_00 alone draws 129 beams per
+// frame.  32 keeps the worst case at ~70 verts a beam while leaving every rain
+// streak in the corpus (512 units -> 5.12) far under the cap.
+const float EBEAM_MAX_REPEATS   = 32;
+
+// Sub-samples per repeat for a beam with NoiseAmplitude set.  A straight beam
+// only needs its repeat boundaries, but a jittering one needs enough vertices
+// along the length to read as lightning rather than a bent stick.
+const float EBEAM_SUBDIV_NOISY  = 4;
+
 .float  eb_netflags;
 .vector eb_start_pos;
 .vector eb_end_pos;
@@ -77,6 +89,7 @@ const float EBEAM_RING_SEGMENTS = 28;
 .float  eb_noise;          // 0..1 normalized amplitude
 .float  eb_scroll;         // tex U units per second
 .float  eb_framestart;
+.float  eb_framerate;      // frames/sec for multi-frame beam sprites (0 = static)
 .float  eb_end_sprite_idx; // env_laser EndSprite modelindex (0 = none)
 .float  eb_active_last;    // for spark-burst trigger on rising edge
 
@@ -134,8 +147,9 @@ void() CSQC_EnvBeam_Update =
     self.eb_brightness = readbyte() / 255;
     self.eb_width      = readbyte() * 0.1;       // BoltWidth is in 1/10 units
     self.eb_noise      = readbyte() / 255;
-    self.eb_scroll     = readbyte();
+    self.eb_scroll     = readbyte() - 128;       // signed, biased on the wire
     self.eb_framestart = readbyte();
+    self.eb_framerate  = readbyte();
     self.eb_end_sprite_idx = readshort();
 
     // Position the entity at the midpoint so PVS culling has something
@@ -168,6 +182,133 @@ void() CSQC_EnvBeam_Update =
     // via R_BeginPolygon.  Clear the model slot in case this CSQC entity
     // slot was previously used for something else.
     setmodel(self, "");
+};
+
+// Resolve the shader to draw this beam's ribbon with.
+//
+// THE SPRITE'S PIXELS ARE ONLY REACHABLE THROUGH spriteframe().
+//
+// This used to build a name like "ebeam_nm_rain" and look it up in
+// scripts/env_beam.shader, where the block said `map sprites/nm_rain`.  That
+// can never work: `map <name>` asks FTE's image loader for
+// sprites/nm_rain.tga/.png/.jpg/..., and the rain streak does not exist as a
+// standalone image — it lives inside sprites/nm_rain.spr.  The lookup failed
+// silently and the stage fell back to a blank white texture, so all 129 of
+// th_ep1_00's rain beams drew as flat white bars.  Scrolling a uniform white
+// texture produces no visible motion, which is exactly the reported symptom:
+// the rain rendered, but sat there.
+//
+// What actually holds those pixels is the shader FTE synthesises per sprite
+// frame in Mod_LoadSpriteFrameShader (gl_model.c:6648): it registers a shader
+// named "<modelpath>_<frame>.tga" and binds the decoded frame to its $diffuse.
+// spriteframe() hands back that name, and R_BeginPolygon takes it directly —
+// which is what the builtin is documented for.
+//
+// The generated shader already carries `rgbgen vertex` + `alphagen vertex`
+// (SPRITE_SHADER_MAIN), so the per-vertex colour and alpha we pass survive.
+// Its blend mode follows gl_blendsprites and defaults to an alpha TEST with
+// depthwrite, which would give a hard-edged, depth-writing rain streak — so
+// the caller passes DRAWFLAG_ADD.  BEF_FORCEADDITIVE clears the alpha-test and
+// depthwrite bits outright (gl_backend.c:3140) and forces SRC_ALPHA/ONE, which
+// is correct for every HL beam sprite: they are all authored additive.
+//
+// Frame selection: HL cycles a beam sprite's frames at `framerate` starting
+// from `framestart`.  sprites/lgtning.spr has 3, and none of them animated
+// before because framestart was read and dropped and framerate never crossed
+// the wire at all.  For a single-frame sprite like nm_rain this is a no-op.
+//
+// Falls back to the untextured "ebeam" block when there is no sprite, or when
+// the model turns out not to be a sprite (spriteframe returns "" for a .mdl),
+// so an unknown texture key still draws something rather than vanishing.
+string(entity beam) CSQC_EnvBeam_ShaderName =
+{
+    if (beam.eb_sprite_idx <= 0)
+        return "ebeam";
+
+    string path = modelnameforindex(beam.eb_sprite_idx);
+    if (path == "" || !path)
+        return "ebeam";
+
+    // spriteframe() returns "" for an out-of-range frame rather than clamping,
+    // so wrap against the sprite's real frame count.  A rate of 0 (the default,
+    // and every rain beam) just sits on framestart.
+    float nframes = modelframecount(beam.eb_sprite_idx);
+    if (nframes < 1)
+        nframes = 1;
+
+    float frame = beam.eb_framestart;
+    if (beam.eb_framerate > 0)
+        frame = frame + floor(time * beam.eb_framerate);
+    frame = frame - floor(frame / nframes) * nframes;    // wrap into 0..nframes-1
+
+    string sh = spriteframe(path, frame, time);
+    if (sh == "" || !sh)
+        return "ebeam";          // not a sprite (a .mdl "texture" key, say)
+
+    // "_beam", not the sprite's own shader.  The stock one is registered as
+    // "defaultsprite#MASK=0.666" at the default gl_blendsprites 0, and that MASK
+    // is a discard inside the fragment program testing the TEXTURE's alpha —
+    // nm_rain.spr peaks at 96/255, so every texel of the rain was thrown away
+    // and the beams drew as nothing.  It also depth-writes, which an additive
+    // ribbon must not.  Mod_LoadSpriteFrameShader registers this second shader
+    // over the same image with blendfunc add, rgbgen/alphagen vertex and no
+    // mask; see the comment there.
+    return strcat(sh, "_beam");
+};
+
+// One ribbon vertex.  `frac` is 0..1 along the beam (drives the SHADE_START /
+// SHADE_END alpha ramp), `tex_t` is the texcoord along the beam and MUST already
+// be inside [0,1] — see the long note in the predraw about IF_CLAMP.
+//
+// S is left at 0 here; R_EndPolygonRibbon's texcoordbias puts the other edge of
+// the ribbon at S=1.
+void(vector pos, float frac, float tex_t) CSQC_EnvBeam_Vertex =
+{
+    // SHADE_START fades alpha from 1 (at the end) to 0 (at the start);
+    // SHADE_END fades from 1 (at the start) to 0 (at the end).  Spec:
+    // SHADE_START wins if both flags are set.
+    float alpha = self.eb_brightness;
+    if (self.eb_netflags & EBEAM_NET_SHADE_START_CL)
+        alpha = alpha * frac;
+    else if (self.eb_netflags & EBEAM_NET_SHADE_END_CL)
+        alpha = alpha * (1 - frac);
+
+    vector tc;
+    tc_x = 0;
+    tc_y = tex_t;
+    tc_z = 0;
+    R_PolygonVertex(pos, tc, self.eb_color, alpha);
+};
+
+// NoiseAmplitude displacement for a point `frac` of the way along a beam of
+// length `len`.  Endpoints stay pinned.  Amplitude scales with beam length so
+// long beams look as "shaky" as short ones at the same NoiseAmplitude — which
+// matches the HL spec note that longer beams are visibly more affected by the
+// same value.
+//
+// The seed is derived from the POSITION along the beam rather than a vertex
+// index, because the tiling walk emits duplicate vertices at every repeat
+// boundary: index-seeded jitter would displace the two copies differently and
+// tear the ribbon open at each seam.
+vector(vector pos, float frac, float len, float jitter_tick) CSQC_EnvBeam_Jitter =
+{
+    if (self.eb_noise <= 0) return pos;
+    if (frac <= 0)          return pos;
+    if (frac >= 1)          return pos;
+
+    float falloff = 4 * frac * (1 - frac);   // 0 at the ends, 1 at the midpoint
+    float amp     = self.eb_noise * len * 0.1 * falloff;
+
+    // Quantised to a 60Hz tick so the beam doesn't flicker faster on a
+    // high-refresh display: per-frame jitter at 240Hz looks like white noise,
+    // at 60Hz it reads as the coherent crackle GoldSrc had.  self.entnum is
+    // mixed in so two beams at the same position don't jitter identically.
+    float seed_base = jitter_tick + floor(frac * 64) * 17 + self.entnum * 113;
+    vector jitter;
+    jitter_x = EnvBeam_HashNoise(seed_base + 1.7) * amp;
+    jitter_y = EnvBeam_HashNoise(seed_base + 3.3) * amp;
+    jitter_z = EnvBeam_HashNoise(seed_base + 5.1) * amp;
+    return pos + jitter;
 };
 
 // Build a "ring" path: a horizontal ellipse between the two endpoints.
@@ -203,14 +344,37 @@ float() CSQC_EnvBeam_Predraw =
     if (vlen(self.eb_end_pos - self.eb_start_pos) < 1)
         return PREDRAW_NEXT;
 
-    // Dedicated "ebeam" shader (scripts/env_beam.shader) — uses
-    // $whiteimage as the texture with rgbgen vertex + blendfunc add
-    // explicitly declared, so the per-vertex colour we pass actually
-    // reaches the fragment output.  Going through spriteframe()
-    // previously picked up an auto-generated sprite shader using
-    // rgbgen identitylighting which collapsed to black on non-surface
-    // ribbon geometry.  DRAWFLAG_TWOSIDED disables backface culling.
-    R_BeginPolygon("ebeam", DRAWFLAG_TWOSIDED);
+    // Per-sprite shader out of scripts/env_beam.shader.  Each block declares
+    // rgbgen vertex + blendfunc add explicitly, so the per-vertex colour we
+    // pass actually reaches the fragment output — going through spriteframe()
+    // instead picks up an auto-generated sprite shader using
+    // rgbgen identitylighting, which collapses to black on non-surface ribbon
+    // geometry.
+    //
+    // Resolving the mapper's actual sprite (rather than a hand-written shader
+    // that could never reach the .spr's pixels) is what makes rain look like
+    // rain: nm_rain.spr is an 8x48 additive streak, and drawing it with a blank
+    // white texture produced one solid bar from cloud to ground that no amount
+    // of scrolling could animate.  See CSQC_EnvBeam_ShaderName.
+    //
+    // DRAWFLAG_ADD forces the additive blend every HL beam sprite expects,
+    // overriding the alpha-test-plus-depthwrite the generated sprite shader
+    // uses at the default gl_blendsprites 0.  DRAWFLAG_TWOSIDED disables
+    // backface culling — the ribbon is viewed from arbitrary angles.
+    // DRAWFLAG_ADD is load-bearing, not decorative.  The ribbon resolves to the
+    // engine's SPRITE_SHADER_BEAM, whose `blendfunc add` compiles to
+    // GL_ONE/GL_ONE (gl_shader.c) -- which DISCARDS the fragment alpha.  Both
+    // renderamt (eb_brightness) and the SHADE_START/SHADE_END ramp are carried
+    // in vertex alpha by CSQC_EnvBeam_Vertex, so without this flag both were
+    // silently thrown away and every beam drew at 100% of the sprite's raw
+    // colour.  nm_rain.spr is pure cyan (R=0 in every used palette entry,
+    // brightest (0,132,156)) at renderamt 100, so the rain drew 2.55x too bright
+    // at its brightest point and 5.1x too bright averaged along the beam --
+    // clipping G and B with R pinned at 0, i.e. "too blue".
+    //
+    // DRAWFLAG_ADD sets BEF_FORCEADDITIVE, which the backend rewrites to
+    // SRC_ALPHA/ONE -- GoldSrc's exact beam blend, colour x brightness x shade.
+    R_BeginPolygon(CSQC_EnvBeam_ShaderName(self), DRAWFLAG_ADD | DRAWFLAG_TWOSIDED);
 
     // Quantize the noise-jitter seed to a 60Hz tick so the beam doesn't
     // flicker faster on high-refresh displays.  Per-frame jitter at 240Hz
@@ -219,77 +383,150 @@ float() CSQC_EnvBeam_Predraw =
     // refresh — only the random-jitter seed advances at 60Hz.
     float jitter_tick = floor(time * 60);
 
-    // Texture U coordinate scrolls along the beam by eb_scroll * time.
-    // HL scrolls at "0..100" mapping to "fast scroll" — we use the
-    // raw value as units-per-second, so 100 = one full texture wrap
-    // per (eb_width)-length segment per second.  Tunable.
-    float scroll_u = -self.eb_scroll * time * 0.1;
+    // The texture scrolls ALONG the beam.  GoldSrc's TextureScroll is in tenths
+    // of a texture-repeat per second (Xash's own comment: "Scroll speed 3.5 --
+    // scrolls 3.5/sec, 1.0 is the entire texture"), which is what the 0.1 is.
+    // The value is signed; -20 scrolls downward, i.e. falling rain.
+    //
+    // Only the FRACTIONAL part matters.  Every repeat draws the same texture, so
+    // scrolling by a whole repeat is a no-op, and keeping the offset in [0,1)
+    // is what lets the tiling walk below stay inside the texture (see there).
+    float scroll_rate = cvar("cl_beam_scroll");
+    if (scroll_rate <= 0) scroll_rate = 1;
+    // SIGN.  The vertex walk below makes T increase monotonically from the START
+    // vertex to the END vertex: T(f) = frac(scroll_t + f * beam_reps).  So a
+    // texture feature at row V sits at f = (V - scroll_t) / beam_reps, and
+    // d(f)/d(scroll_t) is NEGATIVE -- an offset that GROWS over time drags the
+    // image BACKWARD, toward the start vertex.
+    //
+    // th_ep1_00's 124 rain beams all author TextureScroll -20, and every one of
+    // them runs start ABOVE end by exactly 416 units (measured from the
+    // referenced info_targets: 416->0 x28, -1064->-1480 x30, -1370->-1786 x64).
+    // Falling rain therefore needs the offset to SHRINK.  The unary minus that
+    // used to be here turned -20 into +2 repeats/sec of RISING offset and
+    // scrolled all 124 rain beams upward, out of the floor and into the sky.
+    //
+    // This is a global convention change, not a rain-only one: of 1349 beams
+    // across the corpus only 127 have negative TextureScroll, so the other 1222
+    // (902 of them at +35) also reverse.  That is intended -- the negation was
+    // simply wrong, and rain is the one case where ground truth is measurable.
+    //
+    // The [0,1) wrap on the next line is unaffected: floor() handles negatives,
+    // e.g. -2.3 - floor(-2.3) = 0.7, and the mapping is periodic in scroll_t.
+    float scroll_t = self.eb_scroll * time * 0.1 * scroll_rate;
+    scroll_t = scroll_t - floor(scroll_t);
 
-    float seg_count = (self.eb_netflags & EBEAM_NET_RING_CL)
-                      ? EBEAM_RING_SEGMENTS
-                      : EBEAM_PATH_SEGMENTS;
+    // Repeats along the beam, proportional to its LENGTH, exactly as GoldSrc's
+    // R_DrawSegs does (`length *= 0.01; vStep = length * div;`).
+    float beam_reps = vlen(self.eb_end_pos - self.eb_start_pos) * 0.01;
+    if (beam_reps < 0.5)
+        beam_reps = 0.5;        // GoldSrc keeps some texture on very short beams
+    if (beam_reps > EBEAM_MAX_REPEATS)
+        beam_reps = EBEAM_MAX_REPEATS;
+
+    // Sub-samples per texture repeat.  A straight beam only needs its repeat
+    // boundaries; a noisy one needs enough vertices along the length for the
+    // jitter to read as lightning rather than a bent stick.
+    float sub = (self.eb_noise > 0) ? EBEAM_SUBDIV_NOISY : 1;
+
+    // ---------------------------------------------------------------------
+    //  Vertex walk
+    //
+    // TEXCOORD AXES ARE S=ACROSS, T=ALONG, which is the opposite of what this
+    // function used to do.  GoldSrc's R_DrawSegs emits glTexCoord2f(0, vLast)
+    // and glTexCoord2f(1, vLast): S is pinned to the two edges of the ribbon
+    // and T accumulates down its length.  sprites/nm_rain.spr is an 8x48 image
+    // whose single rain streak runs down the 48-pixel axis and whose 8-pixel
+    // axis is empty except for one column — transposing the two smeared that
+    // one column along the whole beam and squashed the streak across its width.
+    //
+    // T IS KEPT INSIDE [0,1] BY SUBDIVIDING, NOT BY LETTING IT RUN PAST 1.
+    // Sprite frames are uploaded with IF_CLAMP (gl_model.c's
+    // Mod_LoadSpriteFrame), which becomes GL_CLAMP_TO_EDGE, so any coordinate
+    // outside [0,1] samples the border texel forever.  nm_rain's first and last
+    // rows are fully transparent, so the old "T = scroll + t*reps" — which is
+    // almost always well past 1 — clamped every fragment to alpha 0 and the
+    // rain vanished outright.  We cannot ask for a repeating copy either:
+    // Image_FindTexture keys its cache on IF_CLAMP among other flags, so a
+    // non-clamped request misses the sprite's pixels and tries (and fails) to
+    // load a file of that name.
+    //
+    // So the tiling is done in GEOMETRY: walk the beam in texture space, and at
+    // every integer boundary emit the vertex twice — once closing the previous
+    // repeat at T=1, once opening the next at T=0.  Both copies sit at the same
+    // point, so the quad between them has zero area and draws nothing; every
+    // other quad spans exactly one in-range slice of the texture.  Scrolling is
+    // then just moving where the boundaries land, which is why scroll_t above
+    // only keeps its fractional part.
+    // ---------------------------------------------------------------------
     float i;
-    vector prev_pos;
 
-    for (i = 0; i <= seg_count; i++)
+    if (self.eb_netflags & EBEAM_NET_RING_CL)
     {
-        float t = i / seg_count;
-        vector pos;
-
-        if (self.eb_netflags & EBEAM_NET_RING_CL)
+        // Rings are a closed ellipse, not a straight run; keep them on a plain
+        // even subdivision and just let the texture wrap over the whole loop.
+        for (i = 0; i <= EBEAM_RING_SEGMENTS; i++)
         {
-            pos = CSQC_EnvBeam_RingPoint(self.eb_start_pos, self.eb_end_pos, t);
+            float t = i / EBEAM_RING_SEGMENTS;
+            vector pos = CSQC_EnvBeam_RingPoint(self.eb_start_pos, self.eb_end_pos, t);
+            CSQC_EnvBeam_Vertex(pos, t, t - floor(t));
         }
-        else
-        {
-            pos = self.eb_start_pos + (self.eb_end_pos - self.eb_start_pos) * t;
+    }
+    else
+    {
+        vector dir = self.eb_end_pos - self.eb_start_pos;
+        float  len = vlen(dir);
 
-            // Random noise jitter — endpoints stay pinned (t=0 and t=1
-            // get zero jitter).  Amplitude scales with beam length so
-            // long beams look as "shaky" as short ones at the same
-            // NoiseAmplitude value — matches the HL spec note that
-            // longer beams are visibly more affected by the same value.
-            if (self.eb_noise > 0 && t > 0 && t < 1)
+        float t_end = scroll_t + beam_reps;    // texture coord at the far end
+        float tcur  = scroll_t;                // texture coord at the near end
+        float guard = 0;                       // hard stop; see EBEAM_MAX_REPEATS
+
+        // Opening vertex.
+        CSQC_EnvBeam_Vertex(self.eb_start_pos, 0, tcur - floor(tcur));
+
+        while (tcur < t_end)
+        {
+            guard = guard + 1;
+            if (guard > EBEAM_MAX_REPEATS + 2)
+                break;
+
+            float tnext = floor(tcur) + 1;      // next repeat boundary
+            float closes = TRUE;                // does this span end on one?
+            if (tnext >= t_end)
             {
-                float falloff = 4 * t * (1 - t);   // 0 at ends, 1 at midpoint
-                float amp = self.eb_noise * vlen(self.eb_end_pos - self.eb_start_pos) * 0.1 * falloff;
-                // Hash-seed per (tick, segment, axis) so jitter is
-                // deterministic within a 60Hz tick window AND unique
-                // per segment.  Mix in self.entnum so two beams at
-                // the same position don't jitter identically.
-                float seed_base = jitter_tick + i * 17 + self.entnum * 113;
-                vector jitter;
-                jitter_x = EnvBeam_HashNoise(seed_base + 1.7) * amp;
-                jitter_y = EnvBeam_HashNoise(seed_base + 3.3) * amp;
-                jitter_z = EnvBeam_HashNoise(seed_base + 5.1) * amp;
-                pos = pos + jitter;
+                tnext  = t_end;
+                closes = FALSE;
             }
+
+            // Sub-samples inside this repeat.  j runs to `sub` so the last one
+            // lands exactly on tnext.
+            float j;
+            for (j = 1; j <= sub; j++)
+            {
+                float ts   = tcur + (tnext - tcur) * (j / sub);
+                float frac = (ts - scroll_t) / beam_reps;    // 0..1 along the beam
+                vector pos = self.eb_start_pos + dir * frac;
+                pos = CSQC_EnvBeam_Jitter(pos, frac, len, jitter_tick);
+                CSQC_EnvBeam_Vertex(pos, frac, ts - floor(tcur));
+            }
+
+            if (closes)
+            {
+                // Duplicate the boundary vertex with the texcoord wrapped back
+                // to 0.  Zero-length span, so nothing is drawn between the two.
+                float frac = (tnext - scroll_t) / beam_reps;
+                vector pos = self.eb_start_pos + dir * frac;
+                pos = CSQC_EnvBeam_Jitter(pos, frac, len, jitter_tick);
+                CSQC_EnvBeam_Vertex(pos, frac, 0);
+            }
+            tcur = tnext;
         }
-
-        // Per-vertex shading: SHADE_START fades alpha from 1 (at end)
-        // to 0 (at start); SHADE_END fades from 1 (at start) to 0 (at
-        // end).  Spec: SHADE_START wins if both flags set.
-        float alpha = self.eb_brightness;
-        if (self.eb_netflags & EBEAM_NET_SHADE_START_CL)
-            alpha = alpha * t;                  // bright at end
-        else if (self.eb_netflags & EBEAM_NET_SHADE_END_CL)
-            alpha = alpha * (1 - t);            // bright at start
-
-        // Texcoord: U along the beam, V across (set to 0 — the ribbon
-        // builder duplicates each vertex with V=0 and V=1 sides).
-        // V is provided via the texcoordbias arg to R_EndPolygonRibbon.
-        vector tc;
-        tc_x = scroll_u + t * 4;     // tile the sprite ~4× along the beam length
-        tc_y = 0;
-        tc_z = 0;
-        R_PolygonVertex(pos, tc, self.eb_color, alpha);
-
-        prev_pos = pos;
     }
 
-    // Half-width of the ribbon (eb_width is the full width key in
-    // world units; HL's BoltWidth is *0.1, applied during update).
-    R_EndPolygonRibbon(self.eb_width * 0.5, '0 1 0');
+    // Half-width of the ribbon (eb_width is the full width key in world units;
+    // HL's BoltWidth is *0.1, applied during update).  The bias is on S now,
+    // not T — one edge of the ribbon gets S=0, the other S=1.
+    R_EndPolygonRibbon(self.eb_width * 0.5, '1 0 0');
 
     // env_laser EndSprite — a billboarded sprite quad at the end
     // point.  Drawn additively with the beam's tint so the end glow
@@ -302,12 +539,15 @@ float() CSQC_EnvBeam_Predraw =
         string end_name = modelnameforindex(self.eb_end_sprite_idx);
         if (end_name != "" && end_name != __NULL__)
         {
-            // Same "ebeam" shader for the end sprite quad — a solid
-            // billboarded square in the beam colour.  Mapper's
-            // EndSprite key is precached server-side (so the protocol
-            // can ship a non-zero modelindex), but the visual is the
-            // unified vertex-colored additive shader.
-            R_BeginPolygon("ebeam", DRAWFLAG_TWOSIDED);
+            // Draw the mapper's actual EndSprite, via the same
+            // spriteframe() route the ribbon uses — this used to hard-code
+            // the untextured "ebeam" block, so all 52 EndSprites in the
+            // corpus rendered as a flat coloured square rather than the
+            // glow the mapper picked.
+            string end_shader = spriteframe(end_name, 0, time);
+            if (end_shader == "" || !end_shader)
+                end_shader = "ebeam";
+            R_BeginPolygon(end_shader, DRAWFLAG_ADD | DRAWFLAG_TWOSIDED);
 
             // Build screen-aligned billboard via the camera right/up
             // vectors at the end position.  Read them via the engine's

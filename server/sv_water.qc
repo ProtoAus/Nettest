@@ -71,6 +71,30 @@ void() func_water =
 
     func_door();
 
-    // Belt-and-suspenders: even with PASS_THROUGH, force solid here.
-    self.solid = SOLID_NOT;
+    // SOLID_BSP, not SOLID_NOT — and this is the opposite of what it looks like.
+    //
+    // A negative .skin makes FTE treat every brush in the model as a VOLUME of
+    // that content rather than as geometry: World_ClipMoveToEntity only lets the
+    // brush block a trace when the trace's own contents mask includes the forced
+    // contents (engine world.c:1327), and a mask is built from the mover's solid
+    // type and NEVER includes water.  So a player, a bullet and a grenade all
+    // pass straight through exactly as before.
+    //
+    // What SOLID_NOT cost us was visibility, not permeability.  Contents queries
+    // walk the LINKED entities (World_ContentsOfLinks) and skip SOLID_NOT
+    // outright — and the engine does not even link a SOLID_NOT entity into the
+    // area grid.  So the water was unreachable: pointcontents/pointcontentsmask
+    // both returned "empty" inside de_rats' pools and the player walked along the
+    // bottom instead of swimming.  Being linked is the whole fix.
+    //
+    // PASS_THROUGH above still does the useful half of what SOLID_NOT did — it
+    // stops func_door spawning a proximity +use trigger on the pool.
+    self.solid = SOLID_BSP;
+    // RELINK.  Assigning .solid does not move an entity into the area grid --
+    // linking happens inside setmodel/setorigin, and func_door ran those while
+    // PASS_THROUGH still had this brush SOLID_NOT, which World_LinkEdict skips
+    // outright (world.c:641).  Without this the brush stays absent from the grid
+    // and every contents query keeps answering "empty" no matter what .solid
+    // says afterwards -- which is exactly the bug this whole change is fixing.
+    setorigin(self, self.origin);
 };

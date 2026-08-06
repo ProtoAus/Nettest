@@ -172,11 +172,46 @@ void() FuncTrackTrain_FaceTarget =
         new_angles_x = 0;
     new_angles_z = 0;     // bank-on-turns not implemented; pin roll
 
+    // +180 YAW.  Not a hack — Half-Life does exactly this, with the comment
+    // "The train actually points west", in CFuncTrackTrain::Next() right after
+    // its UTIL_VecToAngles call.  GoldSrc's func_tracktrain brushes are modelled
+    // facing -X, so a raw vectoangles() of the direction of travel points the
+    // model's tail down the track: th_ep1_00's intro truck drove the whole route
+    // backwards, boot first.
+    //
+    // Unconditional rather than GoldSrc-gated, because func_tracktrain IS a
+    // GoldSrc-compat entity — no map in quakers/maps places one, so there is no
+    // native authoring convention to preserve, and a mapper building one for
+    // this FGD should follow the same convention as every reference map.
+    new_angles_y = new_angles_y + 180;
+
     self.angles = new_angles;
 };
 
 void() func_tracktrain_move_tick =
 {
+    // DELIBERATELY NO `train_state == 0` BAIL HERE.
+    //
+    // It looks like an obvious missing guard: func_tracktrain_use's stop path
+    // zeroes velocity and train_state but cannot cancel this already-scheduled
+    // think, so the tick re-arms velocity ~1/64 s later and the train keeps
+    // driving with train_state reading 0.  Adding the bail does make the stop
+    // real -- and it breaks th_ep1_00's intro.
+    //
+    // Measured (sv_debug_func_train, forced autostart): the truck drives
+    // pu1 -> pu2 -> pu3 -> pu3a -> pu4 -> pu5 -> pu5a -> pu5b cleanly, and on
+    // arriving at pu5b the map fires
+    //     [tracktrain pickup] use state=1 useType=3 current="pu5c"
+    //     [tracktrain pickup] use stop at origin=-1256 -2968 0
+    // useType 3 is USE_TOGGLE, and with the bail in place that stop sticks --
+    // the truck never reaches pu5c and the whole cutscene stalls there.
+    // Without it, arrive()'s continue() re-arms the train and the sequence
+    // plays through, which is the behaviour the map was authored against.
+    //
+    // The underlying problem is that the toggle should have been an explicit
+    // OFF/ON pair from the multi_manager's `delay#usetype` suffix; until that
+    // is threaded all the way through, honouring a TOGGLE here stops the train
+    // permanently.  Fix the usetype plumbing before revisiting this guard.
     if (self.train_target == world)
     {
         self.velocity    = '0 0 0';
@@ -374,8 +409,25 @@ void() func_tracktrain_use =
                        self.targetname, self.train_state, sub_use_type,
                        self.train_target ? self.train_target.targetname : ""));
 
+    // HL's CBaseToggle::ShouldToggle — an explicit ON to a moving train, or an
+    // explicit OFF to a stopped one, is a NO-OP, not a toggle.  Without this
+    // the entity was a blind toggle and Sven's multi_manager use types
+    // inverted it: th_ep1_00's roadratmngr says "off at t=0, on at t=8" and
+    // got "start at 0, stop at 8".
+    if (sub_use_type == USE_ON  && self.train_state != 0) return;
+    if (sub_use_type == USE_OFF && self.train_state == 0) return;
+
     if (self.train_state == 0)
     {
+        // A resume-vs-advance discriminator was tried here (if we are
+        // mid-segment rather than parked on train_target, resume toward it
+        // instead of advancing past it).  It only has any effect when the
+        // move_tick stop guard is also present, and that guard stalls
+        // th_ep1_00's intro at pu5b — see the long note in
+        // func_tracktrain_move_tick.  Reinstate the two together, after the
+        // multi_manager delay#usetype suffix actually reaches this entity,
+        // or not at all.
+
         // Start — advance to NEXT track (current is our spawn anchor).
         entity next_pt = FuncTrackTrain_NextTrack(self.train_target);
         if (next_pt == world)
@@ -398,6 +450,10 @@ void() func_tracktrain_use =
     self.velocity              = '0 0 0';
     self.mover_planned_velocity = '0 0 0';
     self.train_state           = 0;
+    // Tell CSQC we stopped.  Without this the client's newest snapshot
+    // still carries the old velocity and the replica keeps projecting off
+    // it; PVSF_NOREMOVE means no PVS-re-entry resend will correct it.
+    self.SendFlags             = 1;
     if (cvar("sv_debug_func_train"))
         dprint(sprintf("[tracktrain %s] use stop at origin=%v target=\"%s\"\n",
                        self.targetname, self.origin,
@@ -414,6 +470,9 @@ void() func_tracktrain_blocked =
 {
     if (self.dmg <= 0 || !other) return;
     if (other.takedamage == DAMAGE_NO) return;
+    // Raw .health path, same as func_train_blocked — repeats the
+    // cutscene_immune check that W_CanDamageTarget would otherwise apply.
+    if (other.cutscene_immune) return;
     other.health -= self.dmg;
 };
 
@@ -440,6 +499,14 @@ void() func_tracktrain_find_first =
     setorigin(self, pt.origin);
     self.train_target = pt;
     self.train_state  = 0;
+    // MANDATORY.  The only snapshot the client has is the one queued by
+    // SV_InitReplicatedSolidBrush at the end of the spawn frame — i.e. at the
+    // EDITOR position, before this teleport.  pvsflags = PVSF_NOREMOVE means
+    // there is no PVS-re-entry resend either, and the wire is otherwise only
+    // re-dirtied from the move tick.  So a train that spawns and doesn't
+    // immediately move stays visible at its pre-snap position forever, which
+    // is why th_ep1_00's intro truck never appeared.
+    self.SendFlags = 1;
 
     // Face the second track (= first.target) on spawn.
     entity second = FuncTrackTrain_NextTrack(pt);
@@ -485,13 +552,21 @@ void() func_tracktrain_find_first =
                 dprint(sprintf("[tracktrain %s] autostart deferred — waiting for first player\n",
                                self.targetname));
             self.think     = func_tracktrain_find_first;
-            self.nextthink = time + 0.25;
+            self.nextthink = self.ltime + 0.25;   // .ltime — see the spawn comment
             return;
         }
 
         if (cvar("sv_debug_func_train"))
             dprint(sprintf("[tracktrain %s] startspeed autostart speed=%g\n",
                            self.targetname, self.startspeed));
+        // MUST set the use type.  sub_use_type is a GLOBAL, and whatever ran
+        // last leaves its value behind — at spawn time that is normally 0,
+        // which is USE_OFF, and func_tracktrain_use's own ShouldToggle guard
+        // (`USE_OFF && train_state == 0 -> return`) then rejects the autostart
+        // outright.  Measured on th_ep1_00: "use state=0 useType=0" followed by
+        // no tick, no arrive, nothing.  Every startspeed>0 tracktrain in the
+        // corpus has therefore been silently failing to autostart.
+        sub_use_type = USE_ON;
         func_tracktrain_use();
     }
 };
@@ -521,9 +596,25 @@ TT_PASSABLE       Train doesn't block players.
 void() func_tracktrain =
 {
     if (self.speed == 0)      self.speed      = 100;
-    if (self.startspeed == 0) self.startspeed = self.speed;
+    // NO `startspeed` default.  It used to fall back to `speed`, which made
+    // the autostart test below ALWAYS true and contradicted its own comment
+    // ("mappers who want a strictly stop-at-spawn train just leave startspeed
+    // at 0").  Half-Life initialises m_startSpeed from the key alone, default
+    // 0, and Find() then does pev->speed = m_startSpeed -> Next() -> Stop().
+    // With the default in place th_ep1_00's trains rolled off their path
+    // before the cutscene had even begun.
     if (self.wheels == 0)     self.wheels     = 100;
     if (self.dmg == 0)        self.dmg        = 2;
+    // func_tracktrain's `volume` is 0-10 in the FGD ("Volume (10 = loudest)",
+    // default 10), NOT the 0.0-1.0 that func_train's PlatSounds base uses.
+    // sound() wants 0-1, so anything above 1 is a 0-10 authored value and gets
+    // scaled.  All 7 tracktrains across the target maps store exactly 10,
+    // which was being passed to sound() raw.
+    //
+    // The >1 test rather than an unconditional /10 is deliberate: it keeps
+    // working if a mapper writes a 0-1 value by hand, and it is the same shape
+    // sv_rotating.qc already uses.
+    if (self.volume > 1)      self.volume     = bound(0, self.volume / 10, 1);
     if (self.volume == 0)     self.volume     = 0.85;
 
     if (cvar("sv_debug_func_train"))
@@ -540,6 +631,20 @@ void() func_tracktrain =
     // long-form comment for why).
     SV_InitReplicatedSolidBrush();
     self.brush_type = BRUSH_TYPE_TRAIN;
+    // NO PVSF_IGNOREPVS HERE.  It was tried, to keep the snapshot stream
+    // gap-free while a cutscene camera watches the train from thousands of
+    // units away (PVSF_NOREMOVE only suppresses the removal event; it does
+    // NOT keep updates flowing outside the PVS).  It works, but it also
+    // networks the train unconditionally, and the CSQC replica then draws
+    // wherever it is -- th_ep1_00's truck and its TT_PASSABLE headlight
+    // brush became visible THROUGH the level geometry from the spawn room.
+    //
+    // The gap is now handled on the client instead: cl_brushsync.qc caps
+    // extrapolation at 0.1 s, so a PVS drop-out costs at most ~13 units of
+    // drift at 240 qu/s and the replica holds near the last authoritative
+    // sample rather than coasting off the road.  The cutscene case is
+    // separately covered by .view2 on the camera (sv_trigger_camera.qc),
+    // which unions the camera's PVS into the frozen player's.
     if (self.spawnflags & TT_PASSABLE)
         self.solid = SOLID_NOT;
 
@@ -555,5 +660,8 @@ void() func_tracktrain =
     self.blocked = func_tracktrain_blocked;
 
     self.think     = func_tracktrain_find_first;
-    self.nextthink = time + 0.1;
+    // .ltime, not time.  This is MOVETYPE_PUSH: the engine starts the map with
+    // physicstime 1.0 / sv.time 1.1 and a pusher's .ltime stays frozen until
+    // its first think, so `time + 0.1` here actually fires ~1.2s late.
+    self.nextthink = self.ltime + 0.1;
 };

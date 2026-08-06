@@ -1179,6 +1179,12 @@ void(float spread_base, float spread_move, float spread_fullspeed,
     // trace globals if any prop sits closer than the current hit.
     CSQC_PhysProp_OverrideTrace(src, end);
     CSQC_DroppedWeapon_OverrideTrace(src, end);
+    // Monsters are engine entities, invisible to a CSQC traceline - so without
+    // this the shooter's bullet passes THROUGH the monster and the local impact
+    // lands on the wall behind it, as concrete.  Same manual ray-vs-AABB
+    // technique as the two overrides above, over getentity().  See
+    // client/cl_monstertrace.qc.
+    CSQC_Monster_OverrideTrace(src, end);
 
     if (trace_fraction < 1.0)
     {

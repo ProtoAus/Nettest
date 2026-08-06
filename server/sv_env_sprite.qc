@@ -51,6 +51,14 @@ const float SF_SPRITE_PLAY_ONCE = 2;
                           // sv_cycler.qc; duplicate decls of matching
                           // type share storage in QC
 
+// Animation state.  `.framerate` is a MAPPER key, not an engine field —
+// nothing in the engine reads it (it is declared by the mod, in
+// sv_cycler_sprite.qc:34 and sv_env_beam.qc:94).  So a sprite only animates
+// if QC steps .frame itself, exactly as cycler_sprite_think does.
+.float es_framerate;     // resolved at spawn
+.float es_frameend;      // PLAY_ONCE: frame to stop on.  0 = loop forever.
+.float es_nframes;       // frame count, resolved at spawn
+
 void() env_sprite_hide =
 {
     self.effects |= EF_NODRAW;
@@ -59,10 +67,55 @@ void() env_sprite_hide =
     self.nextthink = 0;
 };
 
+void() env_sprite_anim_think;    // defined below
+
 void() env_sprite_show =
 {
     self.effects = self.effects - (self.effects & EF_NODRAW);
     self.es_visible = 1;
+
+    // Loop the frames for as long as we are visible.  The PLAY_ONCE caller
+    // overwrites this think immediately after, with a bounded es_frameend.
+    // A single-frame sprite has nothing to animate, and starting a think for
+    // it would just walk .frame off the end of the sprite.
+    if (self.es_framerate > 0)
+    if (self.es_nframes > 1)
+    {
+        self.es_frameend = 0;
+        self.think       = env_sprite_anim_think;
+        self.nextthink   = time + (1.0 / self.es_framerate);
+    }
+};
+
+// Step one frame.
+//
+// FTE does NOT wrap sprite frame indices.  R_DrawSprite rejects an out-of-range
+// frame and prints "no such frame N (sprites/foo.spr)" EVERY FRAME, so a looping
+// sprite that just keeps incrementing floods the console within seconds
+// (measured: sprites/xssmke1.spr reaching frame 119 on th_ep1_00).  Wrap here.
+void() env_sprite_anim_think =
+{
+    self.frame = self.frame + 1;
+
+    // logicops is off mod-wide, so these stay separate statements.
+    if (self.es_frameend > 0)
+    {
+        // One-shot: stop on the last frame.
+        if (self.frame >= self.es_frameend)
+        {
+            env_sprite_hide();
+            return;
+        }
+    }
+    else
+    {
+        // Looping: wrap back to 0.
+        if (self.es_nframes > 1)
+        if (self.frame >= self.es_nframes)
+            self.frame = 0;
+    }
+
+    self.nextthink = time + (1.0 / self.es_framerate);
 };
 
 void() env_sprite_use =
@@ -78,10 +131,38 @@ void() env_sprite_use =
             return;
         }
         env_sprite_show();
-        float play_dur = self.wait;
-        if (play_dur <= 0) play_dur = 1.0;
-        self.think     = env_sprite_hide;
-        self.nextthink = time + play_dur;
+        self.frame = 0;
+
+        // Play the sprite THROUGH ITS FRAMES, which is the whole point of a
+        // one-shot: th_ep1_00's `hitcarsprite` / `hitcarsprite2` are
+        // sprites/xfireball3.spr at framerate 15, and showing frame 0 for a
+        // flat second renders the first puff of a fireball and no explosion.
+        // Duration comes from the frame count so the sprite hides exactly when
+        // it has played out; `wait` stays an explicit mapper override.
+        if (self.wait > 0)
+        {
+            self.es_frameend = 0;
+            self.think       = env_sprite_hide;
+            self.nextthink   = time + self.wait;
+            return;
+        }
+
+        // sprites/xfireball3.spr is 64x64 with 20 frames, so at the mapper's
+        // framerate 15 the explosion runs 1.33 s.  Guard the frame count: a
+        // 0/1 answer (bad modelindex, or a genuinely single-frame sprite)
+        // would otherwise hide us after one tick.
+        if (self.es_framerate > 0)
+        if (self.es_nframes > 1)
+        {
+            self.es_frameend = self.es_nframes;
+            self.think       = env_sprite_anim_think;
+            self.nextthink   = time + (1.0 / self.es_framerate);
+            return;
+        }
+
+        self.es_frameend = 0;
+        self.think       = env_sprite_hide;
+        self.nextthink   = time + 1.0;
         return;
     }
 
@@ -136,8 +217,19 @@ void() env_sprite =
     self.solid    = SOLID_NOT;
     setsize(self, '0 0 0', '0 0 0');
 
-    if (self.framerate > 0)
-        self.framerate = self.framerate;        // engine reads this for auto-cycling
+    // Resolve the animation rate once.  This used to read
+    //     if (self.framerate > 0) self.framerate = self.framerate;
+    // with the comment "engine reads this for auto-cycling" — it does not.
+    // `.framerate` is a mod-declared field, invisible to the engine, so that
+    // line was a no-op and every env_sprite in the game sat on one frame.
+    self.es_framerate = self.framerate;
+    if (self.es_framerate < 0)
+        self.es_framerate = 0;
+
+    // Frame count, resolved once.  Needed to wrap a looping sprite and to bound
+    // a PLAY_ONCE burst; the engine will not wrap .frame for us.
+    self.es_nframes = modelframecount(self.modelindex);
+
     if (self.frame == 0 && self.sequence > 0)
         self.frame = self.sequence;
 

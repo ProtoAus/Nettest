@@ -820,8 +820,28 @@ float() CSQC_PlayerGibPredraw =
 
 // dir = unit vector along the killing shot (attacker → victim).
 // Gibs fan out around dir with random spread; each gets a trail.
+// The gib SET, hoisted out of the body below so monsters can reuse the whole
+// spawner - the bouncing, the blood spray, the drip timing and the settle logic
+// are all identical, and only the model and how many submodels it carries
+// differ.  Duplicating 100 lines to change two strings would have meant every
+// future fix to the physics landing in one copy and not the other.
+string csqc_gib_model;      // "" -> the player's fleshgibs
+float  csqc_gib_variants;   // submodels available to the geomset pick
+
 void(vector pos, vector dir, float count, float damage_scale) CSQC_SpawnPlayerGibs =
 {
+    // Consumed immediately so a caller that forgets to set them gets the player
+    // default rather than whatever the last monster used.
+    string gib_model    = csqc_gib_model;
+    float  gib_variants = csqc_gib_variants;
+    csqc_gib_model = "";
+    csqc_gib_variants = 0;
+    if (gib_model == "")
+    {
+        gib_model    = "models/gibs/human/fleshgibs.mdl";
+        gib_variants = 5;
+    }
+
     // Initial big blood spray at the impact point — front-loads the gore.
     float splat_id = PlayerGib_GetBloodSplat();
     if (splat_id > 0)
@@ -849,7 +869,7 @@ void(vector pos, vector dir, float count, float damage_scale) CSQC_SpawnPlayerGi
         entity gib = spawn();
         gib.classname = "csqc_debris";
 
-        setmodel(gib, "models/gibs/human/fleshgibs.mdl");
+        setmodel(gib, gib_model);
         vector spawn_pos;
         float launch_height = random() * PLAYERGIB_SPAWN_Z_SPREAD;
         spawn_pos_x = pos_x + (random() - 0.5) * 10;
@@ -858,9 +878,16 @@ void(vector pos, vector dir, float count, float damage_scale) CSQC_SpawnPlayerGi
         setorigin(gib, spawn_pos);
         setsize(gib, '-2 -2 -2', '2 2 2');
 
-        // Pick a random submodel variant for visual variety.
-        // fleshgibs.mdl variants are 1-indexed; clamp to a safe upper bound.
-        float variant = 1 + floor(random() * 5);
+        // Pick a random submodel variant for visual variety.  Variants are
+        // 1-indexed in the geomset syntax.  hgibs.mdl carries 11 (skull, meat,
+        // guts, lung, legbone, bone gib and four flesh chunks) and agibs.mdl 4,
+        // so the count has to come from the caller rather than be hardcoded.
+        //
+        // This works TODAY even though server-side bodygroups do not: setcustomskin
+        // is live for CSQC (pr_csqc.c:7152) and only PF_Fixme on the server, and a
+        // gib is a CSQC-spawned entity.  Without it every human gib would render
+        // as submodel 0 - eleven identical skulls.
+        float variant = 1 + floor(random() * gib_variants);
         setcustomskin(gib, "", strcat("geomset 0 ", ftos(variant), "\n"));
 
         // ~12.5% darker render tint — the stock fleshgibs.mdl reads a
@@ -923,6 +950,8 @@ void() CSQC_PrecacheBreakables =
 {
     precache_model("models/gibs/glassgibs.mdl");
     precache_model("models/gibs/human/fleshgibs.mdl");
+    precache_model("models/gibs/human/hgibs.mdl");   // HL's own human gib set
+    precache_model("models/agibs.mdl");              // ...and the alien one
     precache_sound("sounds/debris/break_fleshhl1.wav");
     precache_sound("sounds/debris/break_fleshhl2.wav");
     // Particle effect IDs are looked up lazily on first use — see

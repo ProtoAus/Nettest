@@ -77,7 +77,11 @@ const float WMF_WEP_CFMSG90         = 67;
 const float WMF_WEP_CFSG552         = 68;
 const float WMF_WEP_CFSL8           = 69;
 const float WMF_WEP_GRAVITYGUN      = 70;
-const float WMF_WEP_LAST            = 70;
+const float WMF_WEP_SATCHEL         = 71;
+const float WMF_WEP_TRIPMINE        = 72;
+const float WMF_WEP_SNARK           = 73;
+const float WMF_WEP_HORNETGUN       = 74;
+const float WMF_WEP_LAST            = 74;
 
 const float WMF_SLOT_NONE      = 0;
 const float WMF_SLOT_PRIMARY   = 1;
@@ -322,6 +326,18 @@ float(float wep) WeaponManifest_LoadUncached =
 
     case WMF_WEP_HLGRENADE:
         WeaponManifest_Set(WMF_SLOT_UTILITY, "Grenade", "GRENADE", "Grenade", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG, 1.0, WMF_PANIM_GRENADE, "", 0, 5, 0, 1, 21); return TRUE;
+
+    // HL equipment.  The three utility items carry their whole load in
+    // def_ammo (no magazine), and the hivehand's 8 hornets are a pool that
+    // refills itself, so it too has no magazine.
+    case WMF_WEP_SATCHEL:
+        WeaponManifest_Set(WMF_SLOT_UTILITY, "Satchel", "SATCHEL", "Satchel", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG, 1.0, WMF_PANIM_GRENADE, "models/p_satchel.mdl", 0, 5, 0, 6, 42); return TRUE;
+    case WMF_WEP_TRIPMINE:
+        WeaponManifest_Set(WMF_SLOT_UTILITY, "Tripmine", "TRIPMINE", "Tripmine", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG, 1.0, WMF_PANIM_GRENADE, "models/p_tripmine.mdl", 0, 5, 0, 7, 43); return TRUE;
+    case WMF_WEP_SNARK:
+        WeaponManifest_Set(WMF_SLOT_UTILITY, "Snark", "SNARK", "Snark", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG, 1.0, WMF_PANIM_GRENADE, "models/p_squeak.mdl", 0, 15, 0, 8, 44); return TRUE;
+    case WMF_WEP_HORNETGUN:
+        WeaponManifest_Set(WMF_SLOT_PRIMARY, "Hornetgun", "HORNETGUN", "Hornet Gun", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG, 1.0, WMF_PANIM_RIFLE, "models/p_hgun.mdl", 0, 8, 0, 30, 45); return TRUE;
     case WMF_WEP_SNOWBALL:
         WeaponManifest_Set(WMF_SLOT_UTILITY, "Snowball", "SNOWBALL", "Snowball", WMF_FLAG_LOADOUT | WMF_FLAG_DEBUG, 1.0, WMF_PANIM_GRENADE, "models/weapons/wpn_snowball/p_snowball.mdl", 0, 50, 0, 2, 22); return TRUE;
     case WMF_WEP_SLINGSHOT:
@@ -398,6 +414,10 @@ float(string key) WeaponManifest_IdFromKey =
     if (key == "hlsmg" || key == "wephlsmg") return WMF_WEP_HLSMG;
     if (key == "rpg" || key == "hlrpg" || key == "wephlrpg") return WMF_WEP_HLRPG;
     if (key == "grenade" || key == "hlgrenade" || key == "wephlgrenade") return WMF_WEP_HLGRENADE;
+    if (key == "satchel" || key == "hlsatchel" || key == "wepsatchel") return WMF_WEP_SATCHEL;
+    if (key == "tripmine" || key == "hltripmine" || key == "weptripmine") return WMF_WEP_TRIPMINE;
+    if (key == "snark" || key == "squeak" || key == "wepsnark") return WMF_WEP_SNARK;
+    if (key == "hornetgun" || key == "hivehand" || key == "wephornetgun") return WMF_WEP_HORNETGUN;
     if (key == "hlglock" || key == "wephlglock") return WMF_WEP_HLGLOCK;
     if (key == "egon" || key == "hlegon" || key == "wephlegon") return WMF_WEP_HLEGON;
     if (key == "snowball" || key == "wepsnowball" || key == "wpnsnowball") return WMF_WEP_SNOWBALL;
@@ -722,6 +742,9 @@ float(float wep) WeaponManifest_LoadBuy =
     case WMF_WEP_CSFLASHBANG:    weapon_manifest_price = 200; weapon_manifest_buycat = BUYCAT_EQUIPMENT; weapon_manifest_buy_order = 2; return TRUE;
     case WMF_WEP_CSSMOKEGRENADE: weapon_manifest_price = 300; weapon_manifest_buycat = BUYCAT_EQUIPMENT; weapon_manifest_buy_order = 3; return TRUE;
     case WMF_WEP_HLGRENADE:      weapon_manifest_price = 300; weapon_manifest_buycat = BUYCAT_EQUIPMENT; weapon_manifest_buy_order = 4; return TRUE;
+    case WMF_WEP_SATCHEL:        weapon_manifest_price = 700; weapon_manifest_buycat = BUYCAT_EQUIPMENT; weapon_manifest_buy_order = 6; return TRUE;
+    case WMF_WEP_TRIPMINE:       weapon_manifest_price = 700; weapon_manifest_buycat = BUYCAT_EQUIPMENT; weapon_manifest_buy_order = 7; return TRUE;
+    case WMF_WEP_SNARK:          weapon_manifest_price = 400; weapon_manifest_buycat = BUYCAT_EQUIPMENT; weapon_manifest_buy_order = 8; return TRUE;
     case WMF_WEP_SNOWBALL:       weapon_manifest_price = 100; weapon_manifest_buycat = BUYCAT_EQUIPMENT; weapon_manifest_buy_order = 5; return TRUE;
     case WMF_WEP_SLINGSHOT:      weapon_manifest_price = 200; weapon_manifest_buycat = BUYCAT_EQUIPMENT; weapon_manifest_buy_order = 6; return TRUE;
     }

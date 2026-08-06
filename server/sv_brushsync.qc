@@ -116,46 +116,78 @@ const float SOLIDBRUSH_EF_NODEPTHTEST  = 8192;
 // rendercolor is read as a `.vector` with each component in 0..255
 // (the FGD `color255` editor type produces "R G B" strings, which
 // QC's vector-key parser splits into self.rendercolor_x/y/z).
+// Assign the HL-derived alpha onto `self`, translating "alpha 0" into
+// EF_NODRAW.
+//
+// This exists because .alpha == 0 does NOT mean invisible in FTE — it means
+// "field never set, treat as fully opaque".  Both the server and the CSQC
+// entity path special-case it: sv_ents.c:3818 (`if (!ent->xv->alpha)
+// state->trans = 255;`) and pr_csqc.c:895 (`if (!in->xv->alpha ||
+// in->xv->alpha == 1)`).  So writing renderamt-0 straight into .alpha
+// produced the exact OPPOSITE of what the mapper asked for: a brush HL draws
+// as nothing came out fully solid.
+//
+// GoldSrc uses renderamt-0 on a non-Normal rendermode as the standard idiom
+// for "present and solid but not drawn" — invisible gib spawners, invisible
+// blockers, marker entities.  hl_c01_a1's microwave stew is exactly this: the
+// func_breakable "stewgibs" carries rendermode 2 with no renderamt at all,
+// and an env_render flips its twin to rendermode 2 to hide it on cue.
+//
+// EF_NODRAW is the only "don't draw this" the brushsync wire has, and it is
+// already the idiom func_wall_toggle_hide uses, so CSQC handles it.
+void(float a) BrushSync_SetAlpha =
+{
+    if (a <= 0)
+    {
+        self.alpha   = 1;                          // stays 1: EF_NODRAW does the hiding
+        self.effects = self.effects | EF_NODRAW;
+        return;
+    }
+    self.alpha = a;
+};
+
 void() BrushSync_ApplyRenderKeys =
 {
     // HL semantics: renderamt is an explicit "FX Amount 0..255" that
-    // multiplies into the alpha channel for translucent modes.  QC
-    // can't tell "key absent" from "key set to 0", so for the modes
-    // where 0 means "invisible" (Color/Texture/Glow/Additive) we just
-    // accept that — mappers picking those modes are expected to set
-    // renderamt explicitly.  The Normal-mode fallback below preserves
-    // back-compat with brushes that rely on a bare `renderamt` to
-    // fade without ever setting rendermode.
+    // multiplies into the alpha channel for translucent modes, and 0 is
+    // INVISIBLE, not opaque.  QC can't tell "key absent" from "key set to 0",
+    // and both spellings mean the same thing to Half-Life, so both go through
+    // BrushSync_SetAlpha above.
     float ra_alpha = bound(0, self.renderamt / 255, 1);
 
     if (self.rendermode == 1)        // Color
     {
-        self.alpha    = ra_alpha;
+        BrushSync_SetAlpha(ra_alpha);
         self.colormod = self.rendercolor / 255;
     }
     else if (self.rendermode == 2)   // Texture (alpha-blend)
     {
-        // HL mapping convention: mode 2 with NO renderamt set is the
-        // common shorthand for "use the texture's own alpha mask"
-        // (the {TEXTURE prefix gives a per-pixel alpha-test cutout).
-        // Strict HL semantics would render that case fully invisible
-        // (alpha = 0/255 = 0), but most mappers write rendermode 2
-        // and expect a transparent-mask texture to "just work" — so
-        // when no explicit renderamt is set we fall back to alpha-
-        // test (mode 4) semantics: full opacity, let the texture's
-        // own alpha drive transparency.  Bspguy and other permissive
-        // viewers do the same.
+        // Mode 2 with renderamt 0 is invisible in Half-Life, full stop.
         //
-        // Mode 2 with renderamt > 0 keeps alpha-blend behaviour for
-        // the explicit "X% see-through" use case.
+        // This used to fall back to alpha-test (mode 4) semantics — full
+        // opacity, let the texture's own mask drive transparency — on the
+        // theory that mappers write rendermode 2 and expect a "{TEXTURE"
+        // cutout to just work.  On a GoldSrc BSP that theory is wrong: the
+        // map was authored and tested against real HL, where the result is
+        // an invisible brush, and mappers lean on it deliberately.  Measured
+        // on the 121-map Sven corpus: 1284 entities carry rendermode 2 with
+        // renderamt absent or 0, and they are meant to be unseen.
+        //
+        // Native (non-GoldSrc) maps keep the permissive reading, because
+        // there the mapper is working against THIS FGD, not Half-Life's.
+        // Cost of the split, measured across all 29 maps in quakers/maps:
+        // zero — the only rendermode-2 brush any of them has carries an
+        // explicit non-zero renderamt.
         if (self.renderamt > 0)
             self.alpha = ra_alpha;
+        else if (Map_IsGoldSrc())
+            BrushSync_SetAlpha(0);
         else
             self.alpha = 1;
     }
     else if (self.rendermode == 3)   // Glow
     {
-        self.alpha    = ra_alpha;
+        BrushSync_SetAlpha(ra_alpha);
         // Additive + fullbright, but DEPTH-TESTED so walls occlude it.  (HL's kRenderGlow
         // is no-depth + a per-frame visibility trace; we don't do the trace, so leaving
         // NODEPTHTEST on made the glow draw over ALL geometry — visible across the map
@@ -173,7 +205,7 @@ void() BrushSync_ApplyRenderKeys =
     }
     else if (self.rendermode == 5)   // Additive
     {
-        self.alpha   = ra_alpha;
+        BrushSync_SetAlpha(ra_alpha);
         self.effects = self.effects | SOLIDBRUSH_EF_ADDITIVE;
         if (self.rendercolor != '0 0 0')
             self.colormod = self.rendercolor / 255;
@@ -325,6 +357,15 @@ float(entity playerent, float changedflags) solid_brush_SendEntity =
     // server isn't enforcing → server reconciliation snaps the player
     // back → "laggy" rubberbanding (esp. visible inside func_water).
     WriteByte(MSG_ENTITY, (self.solid == SOLID_NOT) ? 1 : 0);
+    // Contents override.  A negative .skin turns a SOLID_BSP brush into a volume
+    // of that content instead of a wall — FTE's "movable pool of water", which
+    // is what func_water uses (-3 water / -4 slime / -5 lava).  It HAS to reach
+    // the client: the CSQC replica is made SOLID_BSP from the byte above, and a
+    // SOLID_BSP brush without the override is a wall.  Client-side prediction
+    // would then collide with water the server lets you swim through, which is
+    // the rubberbanding wire_nonsolid was added to kill in the first place.
+    // Sent as the magnitude; 0 means "no override".
+    WriteByte(MSG_ENTITY, (self.skin < 0) ? bound(0, 0 - self.skin, 255) : 0);
 
     WriteCoord(MSG_ENTITY, self.velocity_x);
     WriteCoord(MSG_ENTITY, self.velocity_y);
@@ -379,18 +420,38 @@ float(entity playerent, float changedflags) solid_brush_SendEntity =
         // reject (and vice versa, doesn't suppress a press the
         // server would have allowed).
         //
-        //   - DOOR_USE_ABLE off (bit 2) → direct +use rejected.
-        //   - door_movement_done = 1   → ONE_MOVEMENT exhausted.
-        // Spawnflag literal 2 used here because DOOR_USE_ABLE is
-        // defined in sv_doors.qc, which compiles after this file.
-        // USE_ONLY (256) gates target activation, which CSQC doesn't
-        // predict, so it's intentionally not folded in.
+        //   - door_movement_done = 1 → ONE_MOVEMENT exhausted.
+        //   - door_has_master        → the door's `master` multisource may
+        //                              reject the press, and its state is
+        //                              dynamic and not networked, so never
+        //                              predict those.  A round-trip of
+        //                              latency beats predicting an open the
+        //                              server then refuses.
+        //
+        // This used to also block on `spawnflags & 2` (the mod-invented
+        // DOOR_USE_ABLE gate).  That gate is gone from door_use, and while
+        // it existed it silently disabled prediction for EVERY GoldSrc door
+        // — including the rotating ones, which opened fine but always a
+        // full RTT late.  NO_TRIGGER (2048) gates target activation, which
+        // CSQC doesn't predict, so it's intentionally not folded in.
         float predict_block = 0;
         if (self.brush_type == BRUSH_TYPE_DOOR)
         {
-            if (!(self.spawnflags & 2))
-                predict_block = 1;
             if (self.door_movement_done)
+                predict_block = 1;
+            if (self.door_has_master)
+                predict_block = 1;
+            // GoldSrc door that refuses direct +use: never predict an open
+            // the server is going to reject.
+            if (!self.door_player_usable)
+                predict_block = 1;
+        }
+        // Buttons gained a `master` gate too (sv_buttons.qc button_fire).
+        // Same reasoning as the door case: multisource state is dynamic and
+        // not networked, so a mastered button must never be predicted.
+        else if (self.brush_type == BRUSH_TYPE_BUTTON)
+        {
+            if (self.door_has_master)
                 predict_block = 1;
         }
         WriteByte(MSG_ENTITY, predict_block);
@@ -409,7 +470,7 @@ float(entity playerent, float changedflags) solid_brush_SendEntity =
     // through to IMPACT_MAT_DEFAULT, which is the right concrete-
     // dust look for a non-breakable wall.
     float reported_style = 255;
-    if (self.classname == "func_breakable")
+    if (Brush_IsBreakableClass(self))
         reported_style = self.style;
     WriteByte(MSG_ENTITY, reported_style);
 
@@ -447,6 +508,48 @@ float(entity playerent, float changedflags) solid_brush_SendEntity =
     WriteByte(MSG_ENTITY, self.breakable_broken ? 1 : 0);
 
     return TRUE;
+};
+
+// Re-link a brush entity whose .angles changed AFTER setmodel().
+//
+// GoldSrc overloads `angles` on a mover to mean its MOVEMENT DIRECTION, not a
+// rotation of the geometry, so SetMovedir() converts it to .movedir and then zeroes
+// .angles.  The trouble is ordering: SV_InitReplicatedSolidBrush() below calls
+// setmodel(), which links the entity into the world THERE AND THEN using whatever
+// .angles currently holds - and the movedir conversion runs afterwards.
+//
+// For SOLID_BSP, World_LinkEdict expands a rotated entity's AABB by taking the world
+// min/max of all eight box corners rotated ABOUT THE ENTITY ORIGIN.  An inline brush
+// model's origin is (0,0,0) while its geometry sits wherever the mapper drew it, so
+// for hl_c01_a1's door "doors" - box x[296,328] y[236,396] z[-240,-176], angles
+// "90 0 0" - the link produced a box rotated about a point ~400 units outside it,
+// i.e. in completely the wrong part of the map.  FindTouchedLeafs derives the PVS
+// info from that same box, so the server never considered the door visible to anyone
+// and CSQC never received it.  Clearing .angles a few lines later does not help:
+// nothing re-links, so the stale box survives.
+//
+// The result is a mover that is invisible until the first time it MOVES, because
+// moving calls setorigin() and that finally re-links it with the corrected angles.
+// Doors with DOOR_START_OPEN looked fine all along - they setorigin() at spawn.
+//
+// setorigin() to the current origin is the cheap, idiomatic way to force the relink.
+void() BrushSync_RelinkAngles =
+{
+    // sv_debug_brushlink 1 prints the box before/after, which is how this bug was
+    // confirmed: a wrong box is centred near (0,0,0) instead of wrapping the brush.
+    if (cvar("sv_debug_brushlink"))
+    {
+        // %v per vector, not %.0f per component: fteqcc caps varargs at 8, and
+        // overflowing it silently prints garbage rather than erroring.
+        vector before_mn = self.absmin, before_mx = self.absmax;
+        setorigin(self, self.origin);
+        if (before_mn != self.absmin || before_mx != self.absmax)
+            dprint(sprintf("[brushlink] %s \"%s\" %s BEFORE %v .. %v  AFTER %v .. %v\n",
+                self.classname, self.targetname, self.model,
+                before_mn, before_mx, self.absmin, self.absmax));
+        return;
+    }
+    setorigin(self, self.origin);
 };
 
 void() SV_InitReplicatedSolidBrush =
@@ -491,4 +594,84 @@ void() func_wall =
 {
     SV_InitReplicatedSolidBrush();
     self.brush_type = BRUSH_TYPE_STATIC;
+};
+
+// ---------------------------------------------------------------------------
+//  func_wall_toggle — GoldSrc / Sven Co-op
+// ---------------------------------------------------------------------------
+// A func_wall that flips between VISIBLE+SOLID and INVISIBLE+NON-SOLID when
+// used.  Sven leans on it heavily for puzzle geometry, one-way barriers and
+// doors-that-are-not-doors; pizza_ya_san1 alone places 67 of them.
+//
+// BOTH halves of the state have to reach the client, and they travel by
+// different routes through solid_brush_SendEntity:
+//   visibility -> EF_NODRAW in self.effects, which the send function already
+//                 ships (WriteShort of self.effects) and CSQC hands straight
+//                 to addentity().  Same show/hide idiom as env_sprite.
+//   solidity   -> self.solid, which the send function converts into the
+//                 wire_nonsolid bit so CSQC's pmove stops colliding too.
+//                 Without that half the client keeps walking into a wall the
+//                 server has already made pass-through, and the resulting
+//                 reconciliation reads as rubberbanding.
+//
+// SendFlags = -1 rather than |= 1: across a toggle the delta can look
+// unchanged to the engine and the snapshot then never fires, leaving the
+// client on the stale state.  Same trap documented at sv_breakable.qc:549.
+const float FWT_START_INVISIBLE = 1;   // Sven/GoldSrc flag 1
+const float FWT_USE_ANGLES      = 2;   // Sven flag 2 — honour Pitch Yaw Roll
+
+void() func_wall_toggle_show =
+{
+    self.solid   = SOLID_BSP;
+    self.effects = self.effects - (self.effects & EF_NODRAW);
+    setorigin(self, self.origin);   // relink so the restored solidity takes effect
+    self.SendFlags = -1;
+};
+
+void() func_wall_toggle_hide =
+{
+    self.solid   = SOLID_NOT;
+    self.effects = self.effects | EF_NODRAW;
+    setorigin(self, self.origin);
+    self.SendFlags = -1;
+};
+
+void() func_wall_toggle_use =
+{
+    if (self.solid == SOLID_NOT)
+        func_wall_toggle_show();
+    else
+        func_wall_toggle_hide();
+};
+
+/*QUAKED func_wall_toggle (.5 .5 .5) ? START_INVISIBLE USE_ANGLES
+A func_wall that toggles between visible+solid and invisible+non-solid.
+Fire its targetname to flip it.  While invisible it is fully absent: no
+collision, nothing drawn.
+
+"targetname"    fire this to toggle
+"rendermode"    "renderamt" "rendercolor" "renderfx"  as func_wall
+1 = Starts Invisible
+2 = Use Angles (needs an origin brush; without one GoldSrc picks world origin)
+*/
+void() func_wall_toggle =
+{
+    // GoldSrc ignores the angles key on a func_wall unless flag 2 asks for it,
+    // and maps routinely leave a stray non-zero "angles" on brushes that must
+    // NOT rotate.  Clear it before setmodel so we match that behaviour instead
+    // of silently rotating brushwork the original engine left alone.
+    if (!(self.spawnflags & FWT_USE_ANGLES))
+        self.angles = '0 0 0';
+
+    SV_InitReplicatedSolidBrush();
+    if (wasfreed(self))         // init removes brushes that have no model
+        return;
+
+    self.brush_type = BRUSH_TYPE_STATIC;
+    self.use = func_wall_toggle_use;
+
+    if (self.spawnflags & FWT_START_INVISIBLE)
+        func_wall_toggle_hide();
+    else
+        func_wall_toggle_show();
 };

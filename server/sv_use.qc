@@ -24,6 +24,32 @@ float(entity use_target) SV_UseTarget =
     if (!use_target.use)
         return FALSE;
 
+    // A GoldSrc door with no SF_DOOR_USE_ONLY is not in the player's use-trace
+    // at all (CBaseDoor::ObjectCaps grants FCAP_IMPULSE_USE only with bit 256).
+    // Report NOT-HANDLED rather than letting door_use reject it, because
+    // returning TRUE here would consume the press: the through-walls trace
+    // loop and the cone fallback both stop at the first "handled" entity, so
+    // a locked door standing between the player and a real button would eat
+    // every press aimed past it.
+    if ((use_target.classname == "func_door"
+         || use_target.classname == "func_door_rotating")
+        && !use_target.door_player_usable
+        && cvar("sv_door_use_only"))
+        return FALSE;
+
+    // Monsters carry a .use so that a trigger chain naming one by targetname
+    // still passes THROUGH it - an entity with a spawn function loses the inert
+    // relay that unimplemented classes get for free, and dropping the chain
+    // there soft-locks progression on a campaign map.  That relay is for
+    // TRIGGERS, though, not for players: without this gate a player could fire
+    // a monster's target chain by walking up and pressing +use on it.
+    //
+    // monster_player_usable is the opt-in, mirroring door_player_usable
+    // directly above.  The ally work sets it, because +use on a scientist or a
+    // barney is a real interaction (follow / stop following).
+    if ((use_target.flags & FL_MONSTER) && !use_target.monster_player_usable)
+        return FALSE;
+
     // sv_debug_use: print what we hit + its target chain so a mapper
     // can diagnose dead buttons (no target, locked master, etc.).
     if (cvar("sv_debug_use"))
@@ -168,6 +194,13 @@ void() SV_PlayerTryUse =
                 return;
         }
     }
+
+    // func_traincontrols: standing in a tracktrain's control zone and pressing
+    // +use starts / stops it.  The zone brush is SOLID_NOT and invisible, so
+    // the forward trace further down can never find it — it has to be an
+    // explicit position test, exactly like the vehicle mount above.
+    if (TrainControls_TryUse(self))
+        return;
 
     // prop_car / func_car mount/dismount toggle (SEPARATE .car_driving field so it
     // never aliases func_vehicle). MUST run before the carry-grab trace below, or a
@@ -314,7 +347,18 @@ void() SV_PlayerTryUse =
         float is_weap = SV_IsPickableWeapon(e);
         if (e.use || is_weap)
         {
-            dot = normalize(e.origin - use_start) * v_forward;
+            // Rank by AABB MIDPOINT, not .origin.  A GoldSrc brush entity
+            // compiled without an ORIGIN brush keeps .origin == '0 0 0' —
+            // its world position lives entirely in the baked BSP submodel —
+            // so ranking on .origin scored every Half-Life func_door /
+            // func_button as if it sat at the map origin and the cone could
+            // never select one.  This also makes the RANKING basis agree
+            // with findradius's own SELECTION basis: PF_findradius measures
+            // to origin + (mins+maxs)*0.5, which is exactly this.
+            // Keep identical to CSQC_PredictUse's cone in cl_brushsync.qc.
+            vector to_e = ((e.absmin + e.absmax) * 0.5) - use_start;
+            if (vlen(to_e) < 0.01) { e = e.chain; continue; }   // standing inside it
+            dot = normalize(to_e) * v_forward;
             if (dot > best_dot)
             {
                 best_dot       = dot;
@@ -345,9 +389,39 @@ void() SV_CheckTouchTriggers =
     entity oldself, oldother;
 
     // --- 1. SOLID_TRIGGER overlap (door auto-open triggers) ---
+    //     ...and MONSTERS, which is not a bonus feature bolted onto a trigger
+    //     sweep but the only way a monster's .touch can ever run at all.
+    //
+    //     This mod does not use engine player physics.  Players run the custom QC
+    //     pmove in sh_pmove.qc, so the engine generates no SV_Impact pairs for
+    //     them and this function IS the touch dispatcher - and it only ever knew
+    //     about SOLID_TRIGGER and func_button.  Every monster-side player-contact
+    //     behaviour was therefore dead code: Cockroach_Touch (mon_cockroach.qc:47)
+    //     is a faithful port of CRoach::Touch and had never once been called,
+    //     which is exactly the reported "roaches don't get squished".
+    //
+    //     Reusing THIS sweep rather than adding a second findradius is deliberate:
+    //     it runs after every player move, so a second walk would double a
+    //     per-player per-frame cost for one extra test per candidate.
     e = findradius(self.origin, 128);
     while (e)
     {
+        if ((e.flags & FL_MONSTER) && e.touch && e.deadflag == DEAD_NO
+            && e.solid != SOLID_NOT)
+        {
+            if (self.absmin_x <= e.absmax_x && self.absmax_x >= e.absmin_x &&
+                self.absmin_y <= e.absmax_y && self.absmax_y >= e.absmin_y &&
+                self.absmin_z <= e.absmax_z && self.absmax_z >= e.absmin_z)
+            {
+                sv_dbg_monster_touch = sv_dbg_monster_touch + 1;
+                oldself = self; oldother = other;
+                other   = self;
+                self    = e;
+                self.touch();
+                self  = oldself;
+                other = oldother;
+            }
+        }
         if (e.solid == SOLID_TRIGGER && e.touch)
         {
             if (self.absmin_x <= e.absmax_x && self.absmax_x >= e.absmin_x &&

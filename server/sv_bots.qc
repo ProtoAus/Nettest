@@ -336,14 +336,23 @@ void(vector goalpos) Bot_Navigate =
 	if (slot < 0 || slot >= BOT_MAXSLOT)
 		return;
 
-	if (time >= self.bot_repath_time || self.bot_path_len <= 0)
+	// The `bot_path_len <= 0` clause means "path exhausted -> get another now".  It
+	// must NOT fire after a FAILED search, because a failure also leaves
+	// bot_path_len at 0: the clause was then true again on the very next frame and
+	// the bot re-ran the single most expensive operation it has - two
+	// Nav_NearestNode sweeps (each O(nav_count) with a traceline per improvement)
+	// plus a full A* that drains the open set - every frame, forever, for a goal it
+	// can never reach.  Bot_Roam holds an unreachable goal for 25s and AntiStuck
+	// feeds it too, so this was reachable in ordinary play.  bot_repath_fails gates
+	// the fast path off and backs the retry interval away.
+	float want_repath = (time >= self.bot_repath_time);
+	if (!want_repath)
+		if (self.bot_path_len <= 0)
+			if (self.bot_repath_fails <= 0)
+				want_repath = TRUE;
+
+	if (want_repath)
 	{
-		// Repath at 1.0s (was 0.6): the periodic full repath re-runs Nav_NearestNode
-		// on self.origin, and near a node midpoint the chosen START node can flip
-		// frame-to-frame, briefly pointing the path BACKWARD (a pointless ~180).
-		// A longer interval (the path still repaths immediately when EXHAUSTED below)
-		// reduces that jitter.  The patrol goal is stable, so this costs nothing.
-		self.bot_repath_time = time + 1.0;
 		if (Nav_FindPath(self.origin, goalpos))
 		{
 			float n = nav_result_len;
@@ -353,9 +362,23 @@ void(vector goalpos) Bot_Navigate =
 				bot_pathnodes[slot * BOT_PATHLEN + i] = nav_result[i];
 			self.bot_path_len = n;
 			self.bot_path_cur = 0;
+			self.bot_repath_fails = 0;
+			// Repath at 1.0s (was 0.6): the periodic full repath re-runs
+			// Nav_NearestNode on self.origin, and near a node midpoint the chosen
+			// START node can flip frame-to-frame, briefly pointing the path BACKWARD
+			// (a pointless ~180).  A longer interval (the path still repaths
+			// immediately when EXHAUSTED above) reduces that jitter.  The patrol goal
+			// is stable, so this costs nothing.
+			self.bot_repath_time = time + 1.0;
 		}
 		else
+		{
 			self.bot_path_len = 0;
+			self.bot_repath_fails = self.bot_repath_fails + 1;
+			float back = 0.5 * self.bot_repath_fails;
+			if (back > 5) back = 5;		// unreachable goals settle at one try / 5s
+			self.bot_repath_time = time + back;
+		}
 	}
 
 	if (self.bot_path_len <= 0)

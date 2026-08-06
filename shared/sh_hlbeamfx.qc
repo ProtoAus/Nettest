@@ -16,7 +16,13 @@ void(float beam_kind, entity owner, vector beam_start, vector beam_end) HLBeam_M
 {
     WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
     WriteByte(MSG_MULTICAST, CSQC_EVENT_HL_BEAM);
-    WriteByte(MSG_MULTICAST, owner ? num_for_edict(owner) : 0);
+    // SHORT, not byte.  This doubles as the local-player exclude test AND the
+    // beam's owner handle, so a truncated number does two wrong things at once:
+    // it can silently suppress the beam for an innocent client whose entnum
+    // happens to match (n & 255), and it anchors the trail on the wrong entity.
+    // monster_alien_slave alone is 726 placements and fires exactly this beam,
+    // so monster edict numbers past 255 are the normal case, not an edge one.
+    WriteShort(MSG_MULTICAST, owner ? num_for_edict(owner) : 0);
     WriteByte(MSG_MULTICAST, beam_kind);
     WriteCoord(MSG_MULTICAST, beam_start_x);
     WriteCoord(MSG_MULTICAST, beam_start_y);
@@ -86,7 +92,7 @@ void() HLBeam_Parse =
     vector beam_end;
     entity owner_ent;
 
-    exclude_entnum = readbyte();
+    exclude_entnum = readshort();	// SHORT — must match HLBeam_Multicast above
     beam_kind = readbyte();
 
     beam_start_x = readcoord();

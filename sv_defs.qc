@@ -13,7 +13,7 @@ Available options:
 -O          - write to a different qc file
 */
 #pragma noref 1
-//#pragma flag enable logicops
+#pragma flag enable lo
 // Enable fteqcc's `auto` storage class for the big sv_lagcomp.qc ring buffers
 // (memalloc-at-load) so they do not reserve ~106k compile-time globals — keeps
 // qwprogs numpr_globals under 65530 (16-bit codegen, smaller .dat).  The
@@ -570,6 +570,7 @@ const float CONTENT_SLIME = -4;
 const float CONTENT_LAVA = -5;
 const float CONTENT_SKY = -6;
 const float CONTENT_LADDER = -16;	/* If this value is assigned to a solid_bsp's .skin field, the entity will become a ladder volume. */
+const float CONTENT_MONSTERCLIP = -17;	/* Q1CONTENTS_MONSTERCLIP (engine bspfile.h:190). As .skin on a solid_bsp, the brush blocks only traces whose contents mask includes CONTENTBIT_MONSTERCLIP -- players pass through. Used by func_monsterclip. */
 const int CONTENTBIT_NONE = 0x00000000i;
 const int CONTENTBIT_SOLID = 0x00000001i;
 const int CONTENTBIT_LAVA = 0x00000008i;
@@ -1282,6 +1283,22 @@ float(float modidx, string framename) frameforname = #276; /* Part of FTE_CSQC_S
 
 float(float modidx, float framenum) frameduration = #277; /* Part of FTE_CSQC_SKELETONOBJECTS
 		Retrieves the duration (in seconds) of the specified framegroup. */
+
+// nettest: the whole HL activity system hangs off this and sv_defs.qc was the only
+// one of the three defs files missing it (cl_defs gets it via ftedefs/csqcsysdefs.qc
+// :1458).  Copied from genericdefs/ssqc_api.qc:1492, minus the NOT_QSS/NOT_DP
+// generator markers.  Registered for SSQC at engine/server/pr_cmds.c:11738 ->
+// PF_frameforaction -> Mod_FrameNumForAction -> HLMDL_FrameForAction
+// (gl/gl_hlmdl.c:826), which implements Half-Life's weighted-random activity pick
+// over the .mdl's seqs[i].action field.
+//
+// Returns -1 when no sequence carries the action, which is the ONLY reliable
+// "does this model support this activity" probe: frameduration cannot be used as a
+// range check on an HL model, because HLMDL_FrameInfoForNum (gl_hlmdl.c:1395)
+// silently clamps an out-of-range sequence to 0 and returns a plausible number.
+// Range-check with modelframecount instead.
+float(float modidx, int actionid) frameforaction = #0:frameforaction; /*
+		Returns a random frame/animation for the specified mod-defined action, or -1 if no animations have the specified action. */
 
 void(float modidx, float framenum, __inout float basetime, float targettime, void(float timestamp, int code, string data) callback) processmodelevents = #0:processmodelevents; /* Part of FTE_GFX_MODELEVENTS
 		Calls a callback for each event that has been reached. Basetime is set to targettime. */

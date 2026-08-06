@@ -288,8 +288,13 @@ float(float attack_range, float damage) W_ButterflyTraceAttack =
         // hitclaim).  Mirrors the bullet-weapon pattern.
         float defer_player = (trace_ent.classname == "player")
                              && W_ShouldDeferToClaim(self);
+        // BRACES: without them the guard covered only the sv_dmg_bits line and
+        // the damage was applied twice on players (server-auth + hitclaim).
         if (!defer_player)
+        {
+            sv_dmg_bits = DMG_CLUB;   // a corpse can be broken apart by hand
             W_ApplyDamage(self, trace_ent, damage);
+        }
         return TRUE;
     }
 

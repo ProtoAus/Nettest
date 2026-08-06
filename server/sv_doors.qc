@@ -61,6 +61,13 @@ float() Mover_PlatformCarry;
 
 void() SetMovedir;   // defined in sv_push.qc
 
+// Declared authoritatively in sv_triggers.qc, which compiles AFTER this file
+// (sv_progs.src: sv_doors.qc then sv_triggers.qc).  Identical field/prototype
+// re-declarations share the same slot in QC, so declaring them here lets the
+// door's master gate compile without reordering the whole chain.
+.string master;
+float(string master_name, entity who) IsMasterTriggered;
+
 // useType pass-through globals — the GoldSrc trigger suite (sv_triggers.qc
 // and the per-entity files compiled after it) sets these before each
 // .use() call to communicate USE_OFF / USE_ON / USE_TOGGLE semantics and
@@ -70,10 +77,13 @@ void() SetMovedir;   // defined in sv_push.qc
 // that don't know about useType yet.
 float  sub_use_type;       // declared here so sv_doors.qc compiles standalone
 entity sub_use_caller;
-const float USE_OFF    = 0;
-const float USE_ON     = 1;
-const float USE_SET    = 2;
-const float USE_TOGGLE = 3;
+// Set by SUB_DelayedFire (sv_triggers.qc) on its throwaway temp entity so
+// Trigger_UseTargets below can report the ORIGINAL caller as sub_use_caller.
+// Declared here rather than there because sv_triggers.qc compiles after us.
+.entity delayed_origcaller;
+// USE_OFF / USE_ON / USE_SET / USE_TOGGLE moved to sv_customdefs.qc so the
+// files that compile BEFORE this one (notably sv_breakable.qc) can name them
+// when firing chains through SUB_UseTargets.
 
 void(entity caller, entity triggerer) Trigger_UseTargets =
 {
@@ -99,8 +109,9 @@ void(entity caller, entity triggerer) Trigger_UseTargets =
     // regardless of whether the chain was kicked off by a player.
     // Without this, a button's synchronous fire (BUTTON_DONT_MOVE
     // routes button_wait → Trigger_UseTargets directly inside
-    // SV_PlayerTryUse where the flag is still TRUE) makes the
-    // door's USE_ABLE gate reject the activation.
+    // SV_PlayerTryUse where the flag is still TRUE) would be seen by
+    // the door as a direct player press rather than a chain fire —
+    // which is what NO_TRIGGER / USE_ONLY discriminate on.
     sv_use_is_player_direct = FALSE;
 
     // Default useType for legacy callers — they invoke this two-arg
@@ -124,7 +135,12 @@ void(entity caller, entity triggerer) Trigger_UseTargets =
             }
             oldself = self;
             self = target_entity;
-            sub_use_caller = caller;     // multisource reads this
+            // multisource reads this to identify WHICH input reported.
+            // For a delayed fire the caller is the throwaway "delayed_use"
+            // temp entity, which a strict multisource has never registered
+            // and would therefore ignore — so report the entity that
+            // actually scheduled the fire (stamped by SUB_DelayedFire).
+            sub_use_caller = caller.delayed_origcaller ? caller.delayed_origcaller : caller;
             self.use();
             self = oldself;
         }
@@ -258,6 +274,58 @@ void() Door_PlayStopSound =
     Door_StopMoveSound();
     if (!Door_IsSilentSound(self.noise1))
         sound(self, CHAN_VOICE, self.noise1, 1, ATTN_NORM);
+};
+
+// Feedback for a +use that a master rejected.  Mirrors HL's
+// CBaseDoor::DoorTouch, which plays m_ls.sLockedSound with a re-press
+// cooldown so mashing the key doesn't machine-gun the click.
+//
+// CHAN_ITEM, NOT CHAN_VOICE: CHAN_VOICE carries the move/stop loop
+// (Door_PlayMoveSound / Door_PlayStopSound), and a locked click must not cut
+// a neighbouring door's travel sound short.
+//
+// The unconditional fallback matters more than it looks.  A locked door that
+// makes NO sound is indistinguishable from a +use that missed — which is
+// exactly the silent-failure class of bug this whole change set exists to
+// remove.  Most GoldSrc doors do set locked_sound (13 of 70 on the reference
+// map), but the rest would otherwise be mute.
+const string DOOR_DEFAULT_LOCKED_SND = "buttons/button2.wav";
+.float door_locked_snd_time;
+
+void() Door_PlayLockedSound =
+{
+    if (self.door_locked_snd_time > time)
+        return;
+    self.door_locked_snd_time = time + 0.5;
+
+    if (!Door_IsSilentSound(self.noise_locked))
+        sound(self, CHAN_ITEM, self.noise_locked, 1, ATTN_NORM);
+    else
+        sound(self, CHAN_ITEM, DOOR_DEFAULT_LOCKED_SND, 1, ATTN_NORM);
+};
+
+// `master` gate shared by func_door and func_door_rotating.  Returns TRUE
+// when the door should refuse this activation (and has already given the
+// player feedback).  Off by default — see sv_door_master in sh_cvar_table.qc
+// for why enabling it on a map with unimplemented trigger chains is worse
+// than leaving doors permissive.
+float() Door_MasterBlocks =
+{
+    if (!self.master || self.master == "")
+        return FALSE;
+    if (!cvar("sv_door_master"))
+        return FALSE;
+    if (IsMasterTriggered(self.master, activator))
+        return FALSE;
+
+    if (cvar("sv_debug_doors"))
+        dprint(sprintf("[door %s] locked by master \"%s\"\n",
+                       self.targetname, self.master));
+    // Only the player gets the click — a trigger chain hitting a locked door
+    // should be silent.
+    if (sv_use_is_player_direct)
+        Door_PlayLockedSound();
+    return TRUE;
 };
 
 // ============================================================================
@@ -482,31 +550,112 @@ void(vector destination, float move_speed, void() move_done) Mover_Start =
 //  func_door  (sliding)
 // ============================================================================
 
-// Spawnflags
-//   1   — START_OPEN: spawn pre-opened.  Auto-closes after `wait`
-//          seconds unless TOGGLE/ONE_MOVEMENT pin it open.  Resets
-//          to open at every round restart.
-//   2   — USE_ABLE (default ON in maps): direct +use opens the door.
-//          Off → only target activation / damage / proximity is
-//          rejected too — the door is purely externally driven.
-//   4   — UNBLOCKABLE: when something blocks the close, the door
-//          does NOT reverse — it keeps trying to close.  Combined
-//          with `dmg`, this becomes a continuous crusher.
-//   8   — PASS_THROUGH: door is non-solid (SOLID_NOT) — visible but
-//          walk-through.  No proximity trigger spawned.
-//   16  — ONE_MOVEMENT: door can activate exactly once per round.
-//          Auto-return is suppressed.  Combined with `health`, this
-//          gives the "shoot once to open, stays open" behaviour.
-//   32  — TOGGLE: each press toggles state; no auto-close.
-//   256 — USE_ONLY: target activation is rejected.  Damage path and
-//          direct +use still work.
+// ---------------------------------------------------------------------------
+//  Door flags
+// ---------------------------------------------------------------------------
+// Everything below reads self.door_flags, NEVER self.spawnflags.  The raw bits
+// mean different things depending on whether the BSP came from our own FGD or
+// from Hammer, and Door_NormaliseFlags() is the single place that difference is
+// resolved.  Reading .spawnflags directly anywhere else re-introduces the bug.
+//
+//   1    — START_OPEN: spawn pre-opened.  Auto-closes after `wait`
+//           seconds unless TOGGLE/ONE_MOVEMENT pin it open.  Resets
+//           to open at every round restart.  (Same bit in Half-Life.)
+//   2    — RESERVED, DEAD.  Was USE_ABLE: a mod invention with no
+//           Half-Life counterpart that gated direct +use.  nettest.fgd
+//           defaulted it to ON, so every door we ever authored has it
+//           set and every GoldSrc door lacks it — meaning the flag only
+//           ever did anything on maps we did NOT author, where it
+//           silently killed +use entirely.  Never reuse this bit: old
+//           nettest BSPs still set it, so any new meaning would fire on
+//           them retroactively.  Half-Life leaves bit 2 unused on
+//           sliding doors, so leaving it inert is safe forever.
+//   4    — DONT_LINK (Half-Life SF_DOOR_NO_LINK): do not group this door
+//           with adjacent doors.  Honoured by Door_ShouldLink.
+//   8    — PASS_THROUGH: door is non-solid (SOLID_NOT) — visible but
+//           walk-through.  No proximity trigger spawned.  (HL: Passable.)
+//   16   — ONE_MOVEMENT: door can activate exactly once per round.
+//           Auto-return is suppressed.  Combined with `health`, this
+//           gives the "shoot once to open, stays open" behaviour.
+//           NOT a Half-Life flag — stripped on GoldSrc maps, where 16 is
+//           Sven's "one-way" movement hint and would otherwise weld the
+//           door open after a single press.
+//   32   — TOGGLE: each press toggles state; no auto-close.
+//           (HL SF_DOOR_NO_AUTO_RETURN.)
+//   256  — USE_ONLY (Half-Life SF_DOOR_USE_ONLY): the door has no touch
+//           field, i.e. walking into it does nothing.  +use and trigger
+//           chains both still work.  NOTE this is the GoldSrc meaning;
+//           the old mod meaning ("reject target-trigger fires") now
+//           lives on DOOR_NO_TRIGGER below.
+//   512  — Half-Life "Monsters can't".  Accepted and ignored; we have no
+//           monsters.  Listed so nobody reuses the bit.
+//   1024 — UNBLOCKABLE: when something blocks the close, the door does
+//           NOT reverse — it keeps trying to close.  Combined with `dmg`
+//           this becomes a continuous crusher.  Moved here off bit 4,
+//           which Half-Life needs for DONT_LINK; native maps that set
+//           bit 4 are aliased onto this by the normaliser so already
+//           compiled BSPs keep working.
+//   2048 — NO_TRIGGER: target-trigger activation is rejected; +use and
+//           damage only.  This is the mod's original USE_ONLY semantic,
+//           moved off 256 so 256 can carry the GoldSrc meaning.  Native
+//           maps that set 256 are aliased onto this by the normaliser.
 const float DOOR_START_OPEN     = 1;
-const float DOOR_USE_ABLE       = 2;
-const float DOOR_UNBLOCKABLE    = 4;
+const float DOOR_RESERVED_BIT2  = 2;      // dead — see above.  DO NOT REUSE.
+const float DOOR_DONT_LINK      = 4;
 const float DOOR_PASS_THROUGH   = 8;
 const float DOOR_ONE_MOVEMENT   = 16;
 const float DOOR_TOGGLE         = 32;
 const float DOOR_USE_ONLY       = 256;
+const float DOOR_NOMONSTERS     = 512;    // HL, accepted + ignored
+const float DOOR_UNBLOCKABLE    = 1024;
+const float DOOR_NO_TRIGGER     = 2048;
+
+// Normalised flag word.  Written once by Door_NormaliseFlags() at spawn,
+// read everywhere thereafter.  Shared by func_door and func_door_rotating.
+.float door_flags;
+
+// Sven Co-op's `breakable` key ("Breakable", 0/1) off the FGD's Door
+// baseclass.  The real opt-in for shoot-to-open; `health` beside it is only
+// the threshold ("Strength").  Read at spawn in func_door / func_door_rotating.
+.float breakable;
+
+// Translate mapper-authored .spawnflags into .door_flags.  MUST be the first
+// statement of func_door / func_door_rotating, before any flag is read.
+//
+// Native maps keep their existing behaviour bit-for-bit: bits 4 and 256 are
+// ALIASED onto their new homes rather than moved, so BSPs already compiled
+// against the old FGD are unaffected.  Only GoldSrc maps get the Half-Life
+// interpretation.
+void() Door_NormaliseFlags =
+{
+    self.door_flags = self.spawnflags;
+
+    if (!Map_IsGoldSrc())
+    {
+        // Authored against nettest.fgd.  Bit 4 has always meant "crusher"
+        // here and bit 256 "reject trigger fires"; alias both forward and
+        // clear bit 4 so it can't also read as DONT_LINK.
+        if (self.spawnflags & 4)
+            self.door_flags = self.door_flags | DOOR_UNBLOCKABLE;
+        if (self.spawnflags & 256)
+            self.door_flags = self.door_flags | DOOR_NO_TRIGGER;
+        self.door_flags = self.door_flags & ~4;
+    }
+    else
+    {
+        // GoldSrc / Sven func_door.  Bit 4 stays DONT_LINK, bit 256 keeps
+        // only the "no touch field" meaning (so trigger chains still reach
+        // the door), and bit 16 is stripped because Hammer's func_door has
+        // no such flag — Sven uses it as a movement hint and reading it as
+        // ONE_MOVEMENT welds the door open after one press.
+        self.door_flags = self.door_flags & ~DOOR_ONE_MOVEMENT;
+    }
+
+    if (cvar("sv_debug_doors") && self.door_flags != self.spawnflags)
+        dprint(sprintf("[door %s] flags %g -> %g (%s map)\n",
+                       self.classname, self.spawnflags, self.door_flags,
+                       Map_IsGoldSrc() ? "goldsrc" : "native"));
+};
 
 float DOOR_STATE_BOTTOM = 0;
 float DOOR_STATE_UP     = 1;
@@ -565,9 +714,9 @@ void() door_hit_top =
     // ONE_MOVEMENT is the "stays open this round" semantic — even
     // damage-driven opens latch into this state until Door_RoundReset
     // clears the door_movement_done flag.
-    if ((self.spawnflags & DOOR_TOGGLE) || self.wait < 0)
+    if ((self.door_flags & DOOR_TOGGLE) || self.wait < 0)
         return;
-    if (self.spawnflags & DOOR_ONE_MOVEMENT)
+    if (self.door_flags & DOOR_ONE_MOVEMENT)
         return;
     self.nextthink = self.ltime + self.wait;
     self.think     = door_go_down;
@@ -577,7 +726,7 @@ void() door_go_up =
 {
     if (self.door_state == DOOR_STATE_TOP)
     {
-        if (!(self.spawnflags & DOOR_TOGGLE) && self.wait >= 0)
+        if (!(self.door_flags & DOOR_TOGGLE) && self.wait >= 0)
         {
             self.nextthink = self.ltime + self.wait;
             self.think     = door_go_down;
@@ -635,7 +784,7 @@ void() door_blocked =
 
     // UNBLOCKABLE: don't reverse — engine keeps attempting the close
     // and the dmg above keeps killing whatever's stuck.
-    if (self.spawnflags & DOOR_UNBLOCKABLE)
+    if (self.door_flags & DOOR_UNBLOCKABLE)
     {
         if (cvar("sv_debug_doors"))
             dprint(sprintf("[door %s] blocked: UNBLOCKABLE, no reverse\n",
@@ -655,14 +804,18 @@ void() door_blocked =
 
 // ---- door group activation ----
 
-// Adjacency / groupname-based linking is unchanged from the prior
-// implementation — only the legacy DOOR_DONT_LINK opt-out (bit 4)
-// was dropped because that bit is now UNBLOCKABLE.  Mappers that need
-// to keep adjacent doors independent should use distinct `groupname`
-// keys instead.
+// Adjacency / groupname-based linking.  The DONT_LINK opt-out (bit 4) is
+// honoured again now that UNBLOCKABLE has moved to bit 1024 and stopped
+// squatting on it — see Door_NormaliseFlags.  This matters on GoldSrc maps:
+// linking there is driven purely by swept-AABB adjacency when no `groupname`
+// is set, and a Hammer map with dozens of neighbouring doors relies on
+// SF_DOOR_NO_LINK to keep them independent.  Without it, one press opens the
+// whole cluster.
 float(entity d1, entity d2) Door_ShouldLink =
 {
     if (d1 == d2)                                              return FALSE;
+    if (d1.door_flags & DOOR_DONT_LINK)                        return FALSE;
+    if (d2.door_flags & DOOR_DONT_LINK)                        return FALSE;
     if (d1.groupname && d1.groupname[0])
         return (d2.groupname == d1.groupname);
     if (d2.groupname && d2.groupname[0])                       return FALSE;
@@ -677,7 +830,7 @@ void(entity door) Door_ActivateSingle =
     entity oldself;
     door.attack_finished = time + 0.1;
     oldself = self;
-    if ((door.spawnflags & DOOR_TOGGLE) && (door.door_state == DOOR_STATE_UP || door.door_state == DOOR_STATE_TOP))
+    if ((door.door_flags & DOOR_TOGGLE) && (door.door_state == DOOR_STATE_UP || door.door_state == DOOR_STATE_TOP))
     {
         self = door; door_go_down(); self = oldself;
         return;
@@ -706,19 +859,39 @@ void() door_use =
     // mp_disabledoors live admin gate (also applies to door_use_force).
     if (cvar("mp_disabledoors")) return;
 
-    // USE_ABLE controls whether direct +use opens the door.  Off →
-    // a player +using the door does nothing; the door must be
-    // opened externally (target trigger, damage, proximity).  We
-    // detect "direct +use" via sv_use_is_player_direct, the same
-    // flag the use system already maintains for sv_use.qc.
-    if (sv_use_is_player_direct && !(self.spawnflags & DOOR_USE_ABLE))
-        return;
+    // `master` gate.  Deliberately BEFORE the attack_finished debounce below,
+    // so a rejected press doesn't burn the 0.1s cooldown and the player can
+    // retry the moment the master unlocks.
+    if (Door_MasterBlocks()) return;
 
-    // USE_ONLY rejects target-trigger fires.  When set, the door
-    // can only be opened by direct +use (or damage).  Mirrors the
-    // FGD label "Use Only" — the door is intentionally isolated
-    // from external trigger chains.
-    if (!sv_use_is_player_direct && (self.spawnflags & DOOR_USE_ONLY))
+    // Direct +use gate.  Half-Life's CBaseDoor::ObjectCaps grants
+    // FCAP_IMPULSE_USE ONLY when SF_DOOR_USE_ONLY (256) is set; without it a
+    // door is not in the player's use-trace at all and can only be opened by
+    // touch or by a trigger.  hl_c01_a1's scripted entry doors are spawnflags
+    // 544 (512|32) — no 256 — so a player could +use them and skip the
+    // cutscene.
+    //
+    // This deliberately does NOT reinstate the old mod-invented USE_ABLE bit
+    // (spawnflags & 2), which was wrong: no GoldSrc door sets it, so it made
+    // every GoldSrc door dead to +use.  The gate is keyed on the REAL HL bit
+    // and applies only to GoldSrc maps — see door_player_usable, computed at
+    // spawn.  Native nettest maps keep today's permissive behaviour, which
+    // matters: testing.bsp has a spawnflags-1 +use door and dualshitfire.bsp
+    // has untargeted ones.
+    if (sv_use_is_player_direct && !self.door_player_usable
+        && cvar("sv_door_use_only"))
+    {
+        Door_PlayLockedSound();
+        return;
+    }
+
+    // NO_TRIGGER rejects target-trigger fires.  When set, the door can
+    // only be opened by direct +use (or damage) — intentionally isolated
+    // from external trigger chains.  This is the mod's original bit-256
+    // semantic; on GoldSrc maps 256 means "no touch field" instead and
+    // the normaliser never sets NO_TRIGGER, so Hammer-authored button and
+    // multi_manager chains reach the door as Half-Life intends.
+    if (!sv_use_is_player_direct && (self.door_flags & DOOR_NO_TRIGGER))
         return;
 
     // ONE_MOVEMENT latch — already activated this round.
@@ -732,7 +905,7 @@ void() door_use =
     // Mark the latch BEFORE the group walk so linked doors don't
     // each re-mark their own (and so a re-press during the open
     // animation doesn't slip past).
-    if (self.spawnflags & DOOR_ONE_MOVEMENT)
+    if (self.door_flags & DOOR_ONE_MOVEMENT)
         self.door_movement_done = 1;
 
     Trigger_UseTargets(self, activator);
@@ -742,10 +915,12 @@ void() door_use =
 };
 
 // Damage-driven open path.  Called by door_killed (on_killed callback
-// when self.health drops to zero from gunfire).  Bypasses USE_ABLE /
-// USE_ONLY because damage is a separate activation channel — a door
-// flagged "no +use, no target" can still be shot open if it has
-// health.  ONE_MOVEMENT and mp_disabledoors still apply.
+// when self.health drops to zero from gunfire).  Bypasses NO_TRIGGER and
+// the `master` gate because damage is a separate activation channel — a
+// door wired shut against both players and trigger chains can still be
+// shot open if the mapper gave it health.  (6 doors on the reference Sven
+// map set health for exactly this.)  ONE_MOVEMENT and mp_disabledoors
+// still apply.
 void() door_use_force =
 {
     if (cvar("mp_disabledoors")) return;
@@ -753,7 +928,7 @@ void() door_use_force =
     if (self.attack_finished > time) return;
     self.attack_finished = time + 0.1;
 
-    if (self.spawnflags & DOOR_ONE_MOVEMENT)
+    if (self.door_flags & DOOR_ONE_MOVEMENT)
         self.door_movement_done = 1;
 
     Trigger_UseTargets(self, activator);
@@ -769,7 +944,7 @@ void() door_killed =
 {
     activator = self.dmg_inflictor;     // shooter for kill credit / target chain
 
-    if (self.spawnflags & DOOR_ONE_MOVEMENT)
+    if (self.door_flags & DOOR_ONE_MOVEMENT)
     {
         // Stop accepting damage — extra shots after the open are
         // wasted, and leaving takedamage on would let the kill
@@ -791,11 +966,11 @@ void() door_trigger_touch =
     entity oldself, oldactivator;
     if (other.classname != "player")
         return;
-    // Treat proximity-touch the same as direct +use for gate
-    // purposes — USE_ABLE off means the door is purely externally
-    // driven and doesn't fire on player approach either.
-    if (!(self.owner.spawnflags & DOOR_USE_ABLE))
-        return;
+    // No flag test here.  The trigger is only ever spawned for doors that
+    // may be touch-opened (door_spawn_trigger's caller already screens on
+    // USE_ONLY / PASS_THROUGH), and door_use applies NO_TRIGGER itself —
+    // proximity touch reaches it with sv_use_is_player_direct FALSE, so a
+    // NO_TRIGGER door still rejects it there.
     oldself = self; oldactivator = activator;
     activator = other;
     self = self.owner;
@@ -819,20 +994,23 @@ void() door_spawn_trigger =
     trigger.touch    = door_trigger_touch;
 };
 
-/*QUAKED func_door (0 .5 .8) ? START_OPEN USE_ABLE UNBLOCKABLE PASS_THROUGH ONE_MOVEMENT TOGGLE x x TOUCH x x USE_ONLY
-Moving brush door.
+/*QUAKED func_door (0 .5 .8) ? START_OPEN x DONT_LINK PASS_THROUGH ONE_MOVEMENT TOGGLE x x USE_ONLY x NOMONSTERS UNBLOCKABLE NO_TRIGGER
+Moving brush door.  Every door +use-able unless NO_TRIGGER / a master says
+otherwise; there is no "use-able" flag (see the flag notes above the
+DOOR_* constants for why bit 2 is permanently dead).
 
 START_OPEN (1):    spawns pre-opened, auto-closes after `wait`.
-USE_ABLE (2):      direct +use opens it (default — leave on for
-                    standard doors; off makes the door purely
-                    externally driven via target/damage).
-UNBLOCKABLE (4):   blocked closes do NOT reverse — combined with
-                    `dmg`, becomes a continuous crusher.
+DONT_LINK (4):     do not group with adjacent doors (HL SF_DOOR_NO_LINK).
 PASS_THROUGH (8):  brush is non-solid; players walk through it.
 ONE_MOVEMENT (16): one activation per round; with `health` lets you
                     shoot it open and have it stay open.
 TOGGLE (32):       each press flips state; no auto-close.
-USE_ONLY (256):    target-trigger activation rejected; +use / damage
+USE_ONLY (256):    no touch field — walking into the door does nothing.
+                    +use and trigger chains still work (GoldSrc meaning).
+NOMONSTERS (512):  Half-Life flag, accepted and ignored.
+UNBLOCKABLE (1024):blocked closes do NOT reverse — combined with
+                    `dmg`, becomes a continuous crusher.
+NO_TRIGGER (2048): target-trigger activation rejected; +use / damage
                     only.
 
 "angle"      opening direction
@@ -850,6 +1028,9 @@ USE_ONLY (256):    target-trigger activation rejected; +use / damage
 void() func_door =
 {
     vector swap_pos;
+
+    // MUST be first — every flag read below goes through .door_flags.
+    Door_NormaliseFlags();
 
     if (self.sounds == 1)
     {
@@ -886,6 +1067,51 @@ void() func_door =
     Door_PrecacheIfReal(self.noise2);
     Door_PrecacheIfReal(self.noise_locked);
     Door_PrecacheIfReal(self.noise_unlocked);
+    // Unconditional — Door_PlayLockedSound falls back to this whenever the
+    // mapper left locked_sound unset, so it must be precached even for doors
+    // that specify their own.
+    precache_sound(DOOR_DEFAULT_LOCKED_SND);
+
+    // Cached for sv_brushsync.qc's predict_block byte: a mastered door's
+    // lock state is dynamic and never networked, so CSQC must not predict it.
+    self.door_has_master = (self.master && self.master != "");
+
+    // Can a player's direct +use open this door?  Read by door_use, by
+    // SV_UseTarget (so a refusal doesn't swallow the press) and by the
+    // predict_block byte (so CSQC doesn't animate an open we will refuse).
+    //
+    // Half-Life grants FCAP_IMPULSE_USE only with SF_DOOR_USE_ONLY (256).  A
+    // door WITHOUT that flag is opened one of two other ways:
+    //   named    -> by a trigger chain; CBaseDoor::DoorTouch explicitly bails
+    //               with the locked sound, so the player cannot open it at all.
+    //   unnamed  -> by walking into it (DoorTouch activates).
+    //
+    // The `!targetname` term is that second case.  We answer it with +use
+    // rather than a touch trigger on purpose: touch is what HL does, but it
+    // makes doors fly open as you brush past, and this mod ships
+    // sv_door_proximity 0 for exactly that reason.  +use is a strictly gentler
+    // superset — every door HL would open on contact still opens, just on a
+    // keypress — and no map can be broken by a door being MORE openable than
+    // Half-Life made it.  Without the term, 520 doors across the Sven corpus
+    // (507 of them GoldSrc) had no activation path left at all.
+    //
+    // Named-and-untriggered doors stay refused, which is HL-correct: 332 Sven
+    // doors are named with nothing referencing them and are dead in HL too.
+    // Verified against the two maps this could regress: testing.bsp is native
+    // so the first term carries it, and all 11 of dualshitfire.bsp's doors are
+    // named AND driven (multi_manager `strike_mm` / `strike_timer_mma` slots,
+    // or a func_button) except `secret_bussy`, which its author flagged 256 by
+    // hand.
+    // Three statements rather than one ||-chain.  `logicops` is off mod-wide,
+    // and a three-term || here silently produced 0 even with every operand
+    // parenthesised and the third one measurably true — verified on
+    // th_ep1_01's cellar door, which reported targetname=="" as 1 and
+    // door_player_usable as 0 from the same frame.  Don't chain || on a value
+    // anything depends on.
+    self.door_player_usable = 0;
+    if (!Map_IsGoldSrc())                     self.door_player_usable = 1;
+    if (self.door_flags & DOOR_USE_ONLY)      self.door_player_usable = 1;
+    if (self.targetname == "")                self.door_player_usable = 1;
 
     if (!self.speed) self.speed = 100;
     if (!self.wait)  self.wait  = 3;
@@ -912,13 +1138,30 @@ void() func_door =
     // collision tests entirely (including bullets); mappers wanting a
     // pass-through-to-players-but-bullet-stop should add a separate
     // clip brush.  We still keep MOVETYPE_PUSH so the door animates.
-    if (self.spawnflags & DOOR_PASS_THROUGH)
+    if (self.door_flags & DOOR_PASS_THROUGH)
         self.solid = SOLID_NOT;
 
     // Shootable doors — `health` lets gunfire trigger an open via the
     // standard on_killed callback, the same path func_breakable uses.
     // door_killed re-arms (or latches, with ONE_MOVEMENT) appropriately.
-    if (self.health)
+    //
+    // GoldSrc maps need an EXPLICIT opt-in, because `health` does not mean
+    // "shoot open" there.  sven-coop.fgd's Door baseclass spells it out:
+    //     health(integer)    : "Strength"  : 0
+    //     breakable(choices) : "Breakable" : 0     [0: "No"  1: "Yes"]
+    // i.e. health is only the damage threshold, and `breakable 1` is what
+    // actually arms it.  Measured across the corpus: 458 GoldSrc doors carry
+    // health > 0 with breakable unset, against 28 that opt in — so treating
+    // health alone as the trigger made 458 doors shootable that are not.
+    // hl_c01_a1 is full of them (lk2, rr1, stall1, edoor_* all sit at
+    // health 1), which is why its doors were flying open to gunfire in a
+    // chapter that hands the player no weapon at all.
+    //
+    // Native maps keep health-alone, which is what this mod's own FGD
+    // documents ("health: shootable threshold") and what the QUAKED block
+    // below says.  Costs nothing to keep: no door in any of the 29 maps in
+    // quakers/maps sets health at all.
+    if (self.health && (!Map_IsGoldSrc() || self.breakable))
     {
         self.max_health  = self.health;
         self.takedamage  = DAMAGE_YES;
@@ -961,7 +1204,13 @@ void() func_door =
             self.pos2 = self.pos1 + self.movedir * (fabs(self.movedir * self.size) - self.lip);
     }
 
-    if (self.spawnflags & DOOR_START_OPEN)
+    // .angles was the movement direction and has just been zeroed; the entity was
+    // linked with the OLD value back in SV_InitReplicatedSolidBrush.  Re-link, or
+    // the door keeps a PVS box rotated about (0,0,0) and stays invisible to clients
+    // until its first move.  See BrushSync_RelinkAngles in sv_brushsync.qc.
+    BrushSync_RelinkAngles();
+
+    if (self.door_flags & DOOR_START_OPEN)
     {
         setorigin(self, self.pos2);
         swap_pos  = self.pos1;
@@ -973,8 +1222,8 @@ void() func_door =
         // door open until pressed; ONE_MOVEMENT pins it for the
         // round; wait<0 is the legacy "stay open" sentinel.
         if (self.wait >= 0
-            && !(self.spawnflags & DOOR_TOGGLE)
-            && !(self.spawnflags & DOOR_ONE_MOVEMENT))
+            && !(self.door_flags & DOOR_TOGGLE)
+            && !(self.door_flags & DOOR_ONE_MOVEMENT))
         {
             self.nextthink = self.ltime + self.wait;
             self.think     = door_go_up;        // close direction (post-swap)
@@ -995,15 +1244,21 @@ void() func_door =
     self.mover_state = MOVER_STATE_BOTTOM;
 
     // Auto-spawn the proximity touch trigger ONLY when sv_door_proximity is on (default 0 = OFF).
-    // Off → the door opens only on +use (door_use, requires USE_ABLE) / target-chain / damage — never on
-    // walk-near.  The proximity trigger re-fired door_use every frame the player stood in its box (via the
+    // Off → the door opens only on +use (door_use) / target-chain / damage — never on walk-near.
+    // The proximity trigger re-fired door_use every frame the player stood in its box (via the
     // per-frame SV_CheckTouchTriggers scan), which caused both the walk-near open AND the every-frame
-    // direction reversal.  Still gated on un-targeted (mappers wiring via target want exclusive control) +
-    // USE_ABLE + not PASS_THROUGH when re-enabled.
+    // direction reversal.  Still gated on un-targeted (mappers wiring via target want exclusive control)
+    // + not PASS_THROUGH when re-enabled.
+    //
+    // USE_ONLY is a literal transcription of Half-Life's
+    //     if (SF_DOOR_USE_ONLY) SetTouch(NULL); else SetTouch(DoorTouch);
+    // — the flag's whole meaning in GoldSrc is "this door has no touch
+    // field".  It used to be the mod-invented USE_ABLE bit here instead,
+    // which is now dead.
     if (cvar("sv_door_proximity")
         && !self.targetname
-        && (self.spawnflags & DOOR_USE_ABLE)
-        && !(self.spawnflags & DOOR_PASS_THROUGH))
+        && !(self.door_flags & DOOR_USE_ONLY)
+        && !(self.door_flags & DOOR_PASS_THROUGH))
         door_spawn_trigger();
 };
 
@@ -1037,10 +1292,10 @@ void() Door_RoundReset =
         }
 
         // Re-arm the START_OPEN auto-close timer for this round.
-        if ((d.spawnflags & DOOR_START_OPEN)
+        if ((d.door_flags & DOOR_START_OPEN)
             && d.wait >= 0
-            && !(d.spawnflags & DOOR_TOGGLE)
-            && !(d.spawnflags & DOOR_ONE_MOVEMENT))
+            && !(d.door_flags & DOOR_TOGGLE)
+            && !(d.door_flags & DOOR_ONE_MOVEMENT))
         {
             d.nextthink = d.ltime + d.wait;
             d.think     = door_go_up;
@@ -1058,8 +1313,14 @@ void() Door_RoundReset =
 //  are the spawn-search anchors for PlayerGetSpawnPointEntity.
 // ============================================================================
 
-void() info_player_blue = {};
-void() info_player_red = {};
+// No longer empty stubs.  Spawn_PointInit (sv_player.qc) seeds the GoldSrc
+// "Start Off" spawnflag and installs the .use that toggles the point on and
+// off.  Without a .use, Trigger_UseTargets skips these entirely, which is why
+// every `trigger_relay -> spawn_startN` chain in the Sven maps did nothing.
+void() Spawn_PointInit;      // sv_player.qc — compiles after this file
+
+void() info_player_blue = { Spawn_PointInit(); };
+void() info_player_red = { Spawn_PointInit(); };
 void() info_player_start_blue = { info_player_blue(); };
 void() info_player_start_red = { info_player_red(); };
 void() info_player_team1 = { info_player_blue(); };
@@ -1069,4 +1330,4 @@ void() info_player_team2 = { info_player_red(); };
 // at map load.  PlayerGetSpawnPointEntity falls back to
 // info_player_deathmatch as the RED/T-side primary CS spawn classname.
 // info_player_start already has its own QC function in sv_player.qc.
-void() info_player_deathmatch = {};
+void() info_player_deathmatch = { Spawn_PointInit(); };

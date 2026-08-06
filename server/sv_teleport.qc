@@ -105,8 +105,47 @@ Teleports players that enter this brush to the matching info_teleport_destinatio
 KEEPVEL   (4) – preserve the player's velocity after teleporting.
 KEEPANGLE (8) – keep the player's current view angle; ignore destination angles.
 */
+// Translate GoldSrc/Sven trigger_teleport spawnflags into the mod's vocabulary
+// IN PLACE — see the bit table in sh_customdefs.qc.
+//
+// In place, rather than into a parallel field, because .spawnflags is what
+// trigger_teleport_SendEntity puts on the wire and what the shared pmove reads
+// on BOTH sides.  Rewriting it here means server and client agree with no
+// protocol change at all.
+//
+// Native maps are untouched, so BSPs already compiled against nettest.fgd keep
+// their existing 4/8 meanings exactly.
+void() Teleport_NormaliseFlags =
+{
+    if (!Map_IsGoldSrc())
+        return;
+
+    float sven = self.spawnflags;
+    float out  = 0;
+
+    if (sven & 512) out = out | TELEPORT_KEEPVEL;     // Sven "Keep velocity"
+    if (sven & 256) out = out | TELEPORT_KEEPANGLE;   // Sven "Keep Angles"
+    if (sven & 2)   out = out | TELEPORT_NOCLIENTS;   // Sven "No Clients"
+
+    // Dropped, all unimplemented here: 1 Monsters, 4 Pushables, 8 Everything
+    // else, 16 Fire On Enter, 32 Fire On Exit, 64 Random Destination,
+    // 128 Relative Teleport, 1024 Rotate (Dest Angles).  Dropping 4 and 8
+    // specifically MATTERS — left set they read as our Keep Velocity and Keep
+    // Angle, which is how -sp_campaign_portal's flag-909 teleports were
+    // accidentally preserving velocity.
+    self.spawnflags = out;
+
+    if (cvar("sv_debug_use") && out != sven)
+        dprint(sprintf("[teleport %s] flags %g -> %g (goldsrc)\n",
+                       self.targetname, sven, out));
+};
+
 void() trigger_teleport =
 {
+    // MUST be first: everything below, plus the CSQC replication and the
+    // shared pmove, reads .spawnflags.
+    Teleport_NormaliseFlags();
+
     if (!self.target)
     {
         dprint("trigger_teleport: no target set, removing\n");

@@ -447,6 +447,10 @@ void() func_train_use =
             return;     // first stop still couldn't resolve
     }
 
+    // HL ShouldToggle — see the matching comment in sv_func_tracktrain.qc.
+    if (sub_use_type == USE_ON  && self.train_state != 0) return;
+    if (sub_use_type == USE_OFF && self.train_state == 0) return;
+
     if (self.train_state == 0)
     {
         // Stopped — kick the chain.  Walk one corner forward from the
@@ -488,6 +492,13 @@ void() func_train_blocked =
         return;
     if (other.takedamage == DAMAGE_NO)
         return;
+    // This path subtracts .health directly rather than going through
+    // W_ApplyDamage, so it does NOT inherit the cutscene_immune check in
+    // W_CanDamageTarget and has to repeat it.  A player watching a cutscene
+    // with the Invulnerable flag must not be ground up by a train they can't
+    // see and can't move away from.
+    if (other.cutscene_immune)
+        return;
     other.health -= self.dmg;
 };
 
@@ -509,6 +520,10 @@ void() func_train_find_first =
     setorigin(self, pc.origin);
     self.train_target = pc;
     self.train_state  = 0;     // stay stopped until triggered
+    // Replicate the snap — see the identical note in sv_func_tracktrain.qc.
+    // Without this the client keeps rendering the train at its editor
+    // position until the train first moves.
+    self.SendFlags = 1;
 };
 
 /*QUAKED func_train (0 .5 .8) ? x x x TRAIN_NOT_SOLID

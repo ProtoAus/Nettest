@@ -1905,24 +1905,35 @@ void PM_CategorizePosition()
     wpt_x = pm_origin_x;
     wpt_y = pm_origin_y;
 
+    // PM_ContentsAt, not pointcontents: the latter is worldmodel-only and cannot
+    // see a func_water brush, so on any GoldSrc map that puts its pools in brush
+    // entities — de_rats' two, and Sven maps generally — the player walked along
+    // the bottom instead of swimming.  See shared/sh_customdefs.qc.
+    // `cont <= CONTENT_WATER` is the vanilla Quake test and stays, but CONTENT_LADDER
+    // (-16) also satisfies it.  That never mattered while this read pointcontents,
+    // because a worldmodel has no ladder contents; now that brush entities answer
+    // too, a brush using FTE's recommended modern ladder form (SOLID_BSP + skin
+    // CONTENT_LADDER, sv_defs.qc:572) would read as WATER and have the player swim
+    // up it.  Nothing in the mod does that today -- func_ladder is SOLID_NOT with
+    // no skin -- so this is a guard against a future ladder, not a live bug.
     wpt_z = pm_origin_z + hull_mins_z + 1;
-    cont  = pointcontents(wpt);
-    if (cont <= CONTENT_WATER)
+    cont  = PM_ContentsAt(wpt);
+    if (cont <= CONTENT_WATER && cont != CONTENT_LADDER)
     {
         pm_watertype  = cont;
         pm_waterlevel = 1;
 
         wpt_z = pm_origin_z + hull_mins_z + hull_height * 0.5;
-        cont  = pointcontents(wpt);
-        if (cont <= CONTENT_WATER)
+        cont  = PM_ContentsAt(wpt);
+        if (cont <= CONTENT_WATER && cont != CONTENT_LADDER)
         {
             pm_waterlevel = 2;
 
             // Full-vector eye point: view_ofs is composed along gravity-"up" while
             // shifted (x/y are 0 otherwise, so this is identical when not shifted).
             wpt   = pm_origin + self.view_ofs;
-            cont  = pointcontents(wpt);
-            if (cont <= CONTENT_WATER)
+            cont  = PM_ContentsAt(wpt);
+            if (cont <= CONTENT_WATER && cont != CONTENT_LADDER)
                 pm_waterlevel = 3;
         }
     }
@@ -4587,6 +4598,12 @@ void() PM_CheckTeleportTriggers =
         // BSP refinement — only teleport if the player actually overlaps
         // the brush geometry (not just the AABB enclosing it).
         if (!PM_BoxInTriggerBrush(trig))
+            continue;
+
+        // Sven's "No Clients" (translated to TELEPORT_NOCLIENTS at spawn):
+        // the volume teleports pushables/monsters but must leave players
+        // alone.  pizza_ya_san1's only teleport is exactly this.
+        if (trig.spawnflags & TELEPORT_NOCLIENTS)
             continue;
 
         // snap to destination

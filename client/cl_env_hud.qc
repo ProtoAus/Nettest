@@ -36,27 +36,27 @@ vector env_fade_colour;
 // helpers take an implicit slot via the `current_slot` global below.
 float  current_slot;     // implicit "active" slot for the alpha / draw helpers
 
-string env_msg_text_a;
-float  env_msg_start_a;
-float  env_msg_effect_a;
-vector env_msg_pos_a;
-vector env_msg_colour_a;
-vector env_msg_colour2_a;
-float  env_msg_fadein_a;
-float  env_msg_fadeout_a;
-float  env_msg_hold_a;
-float  env_msg_fxtime_a;
+// Four slots, not two.  GoldSrc game_text carries an explicit `channel`
+// key (1..4) and HL keeps each channel independent, so two messages on
+// different channels coexist.  Measured on pizza_ya_san1: 74 game_texts
+// split across channels 1 (68) and 2 (6), and every one of them has
+// y >= 0 — so under the old position-based routing ALL 74 collapsed into
+// slot 1 and overwrote each other.
+//
+// Slot 0 stays the "centred title" slot that env_message / titles.txt
+// routes into by position, so existing behaviour is unchanged for those.
+const float ENVHUD_SLOTS = 4;
 
-string env_msg_text_b;
-float  env_msg_start_b;
-float  env_msg_effect_b;
-vector env_msg_pos_b;
-vector env_msg_colour_b;
-vector env_msg_colour2_b;
-float  env_msg_fadein_b;
-float  env_msg_fadeout_b;
-float  env_msg_hold_b;
-float  env_msg_fxtime_b;
+string env_msg_text_s[ENVHUD_SLOTS];
+float  env_msg_start_s[ENVHUD_SLOTS];
+float  env_msg_effect_s[ENVHUD_SLOTS];
+vector env_msg_pos_s[ENVHUD_SLOTS];
+vector env_msg_colour_s[ENVHUD_SLOTS];
+vector env_msg_colour2_s[ENVHUD_SLOTS];
+float  env_msg_fadein_s[ENVHUD_SLOTS];
+float  env_msg_fadeout_s[ENVHUD_SLOTS];
+float  env_msg_hold_s[ENVHUD_SLOTS];
+float  env_msg_fxtime_s[ENVHUD_SLOTS];
 
 // Scratch variables the parser / draw helpers read.  Routed to the
 // per-slot fields by EnvHud_SlotLoad / EnvHud_SlotStore below.
@@ -73,62 +73,32 @@ float  env_msg_fxtime;
 
 void(float s) EnvHud_SlotLoad =
 {
-    if (s == 1)
-    {
-        env_msg_text    = env_msg_text_b;
-        env_msg_start   = env_msg_start_b;
-        env_msg_effect  = env_msg_effect_b;
-        env_msg_pos     = env_msg_pos_b;
-        env_msg_colour  = env_msg_colour_b;
-        env_msg_colour2 = env_msg_colour2_b;
-        env_msg_fadein  = env_msg_fadein_b;
-        env_msg_fadeout = env_msg_fadeout_b;
-        env_msg_hold    = env_msg_hold_b;
-        env_msg_fxtime  = env_msg_fxtime_b;
-    }
-    else
-    {
-        env_msg_text    = env_msg_text_a;
-        env_msg_start   = env_msg_start_a;
-        env_msg_effect  = env_msg_effect_a;
-        env_msg_pos     = env_msg_pos_a;
-        env_msg_colour  = env_msg_colour_a;
-        env_msg_colour2 = env_msg_colour2_a;
-        env_msg_fadein  = env_msg_fadein_a;
-        env_msg_fadeout = env_msg_fadeout_a;
-        env_msg_hold    = env_msg_hold_a;
-        env_msg_fxtime  = env_msg_fxtime_a;
-    }
+    s = bound(0, s, ENVHUD_SLOTS - 1);
+    env_msg_text    = env_msg_text_s[s];
+    env_msg_start   = env_msg_start_s[s];
+    env_msg_effect  = env_msg_effect_s[s];
+    env_msg_pos     = env_msg_pos_s[s];
+    env_msg_colour  = env_msg_colour_s[s];
+    env_msg_colour2 = env_msg_colour2_s[s];
+    env_msg_fadein  = env_msg_fadein_s[s];
+    env_msg_fadeout = env_msg_fadeout_s[s];
+    env_msg_hold    = env_msg_hold_s[s];
+    env_msg_fxtime  = env_msg_fxtime_s[s];
 };
 
 void(float s) EnvHud_SlotStore =
 {
-    if (s == 1)
-    {
-        env_msg_text_b    = env_msg_text;
-        env_msg_start_b   = env_msg_start;
-        env_msg_effect_b  = env_msg_effect;
-        env_msg_pos_b     = env_msg_pos;
-        env_msg_colour_b  = env_msg_colour;
-        env_msg_colour2_b = env_msg_colour2;
-        env_msg_fadein_b  = env_msg_fadein;
-        env_msg_fadeout_b = env_msg_fadeout;
-        env_msg_hold_b    = env_msg_hold;
-        env_msg_fxtime_b  = env_msg_fxtime;
-    }
-    else
-    {
-        env_msg_text_a    = env_msg_text;
-        env_msg_start_a   = env_msg_start;
-        env_msg_effect_a  = env_msg_effect;
-        env_msg_pos_a     = env_msg_pos;
-        env_msg_colour_a  = env_msg_colour;
-        env_msg_colour2_a = env_msg_colour2;
-        env_msg_fadein_a  = env_msg_fadein;
-        env_msg_fadeout_a = env_msg_fadeout;
-        env_msg_hold_a    = env_msg_hold;
-        env_msg_fxtime_a  = env_msg_fxtime;
-    }
+    s = bound(0, s, ENVHUD_SLOTS - 1);
+    env_msg_text_s[s]    = env_msg_text;
+    env_msg_start_s[s]   = env_msg_start;
+    env_msg_effect_s[s]  = env_msg_effect;
+    env_msg_pos_s[s]     = env_msg_pos;
+    env_msg_colour_s[s]  = env_msg_colour;
+    env_msg_colour2_s[s] = env_msg_colour2;
+    env_msg_fadein_s[s]  = env_msg_fadein;
+    env_msg_fadeout_s[s] = env_msg_fadeout;
+    env_msg_hold_s[s]    = env_msg_hold;
+    env_msg_fxtime_s[s]  = env_msg_fxtime;
 };
 
 float  envhud_pending_count;
@@ -585,10 +555,8 @@ void(string msg) EnvHud_StartMessage =
                       env_msg_effect, env_msg_text));
 
     // Free the previous text in the destination slot, then commit.
-    if (s == 0 && env_msg_text_a != "")
-        strunzone(env_msg_text_a);
-    else if (s == 1 && env_msg_text_b != "")
-        strunzone(env_msg_text_b);
+    if (env_msg_text_s[s] != "")
+        strunzone(env_msg_text_s[s]);
 
     EnvHud_SlotStore(s);
     // Clear the scratch text pointer so EnvHud_DefaultTitle's next
@@ -673,12 +641,13 @@ void() CSQC_EnvHud_Reset =
     // Free the per-slot owned strings.  The scratch env_msg_text
     // pointer is just a copy view of one of the slot strings, so
     // strunzoning it would double-free; clear the scratch instead.
-    if (env_msg_text_a != "") strunzone(env_msg_text_a);
-    if (env_msg_text_b != "") strunzone(env_msg_text_b);
-    env_msg_text_a = "";
-    env_msg_text_b = "";
-    env_msg_start_a = 0;
-    env_msg_start_b = 0;
+    float i;
+    for (i = 0; i < ENVHUD_SLOTS; i = i + 1)
+    {
+        if (env_msg_text_s[i] != "") strunzone(env_msg_text_s[i]);
+        env_msg_text_s[i]  = "";
+        env_msg_start_s[i] = 0;
+    }
     env_msg_text = "";
     env_msg_start = 0;
     EnvHud_ClearPending();
@@ -704,6 +673,68 @@ void() CSQC_EnvFade_Parse =
         EnvHud_QueueFade(col, alpha, duration_s, hold_s, flags);
     else
         EnvHud_StartFade(col, alpha, duration_s, hold_s, flags);
+};
+
+// ---------------------------------------------------------------------------
+// CSQC_GameText_Parse — GoldSrc game_text.
+//
+// env_message resolves its styling client-side out of titles.txt; game_text
+// carries the same styling INLINE on the map entity, so the server ships the
+// resolved values and we fill the scratch fields directly rather than going
+// through EnvHud_LoadTitle.
+//
+// Routing is by `channel`, not by position — see the ENVHUD_SLOTS comment.
+// ---------------------------------------------------------------------------
+void() CSQC_GameText_Parse =
+{
+    float  chan   = readbyte();
+    float  px     = readcoord();
+    float  py     = readcoord();
+    float  fx     = readbyte();
+    vector c1     = EnvHud_Colour255(readbyte(), readbyte(), readbyte());
+    vector c2     = EnvHud_Colour255(readbyte(), readbyte(), readbyte());
+    float  fadein = readfloat();
+    float  fadeout= readfloat();
+    float  hold   = readfloat();
+    float  fxtime = readfloat();
+    string msg    = readstring();
+
+    if (msg == "")
+        return;
+
+    EnvHud_DefaultTitle();
+    env_msg_pos     = [px, py, 0];
+    env_msg_effect  = fx;
+    env_msg_colour  = c1;
+    env_msg_colour2 = c2;
+    if (fadein  > 0) env_msg_fadein  = fadein;
+    if (fadeout > 0) env_msg_fadeout = fadeout;
+    if (hold    > 0) env_msg_hold    = hold;
+    if (fxtime  > 0) env_msg_fxtime  = fxtime;
+    env_msg_text  = strzone(msg);
+    env_msg_start = cltime;
+
+    // HL channels are 1-based; channel 0 / out of range lands in the last
+    // slot rather than stomping slot 0 (the centred-title slot that
+    // env_message owns).
+    float s = chan - 1;
+    if (s < 0 || s >= ENVHUD_SLOTS)
+        s = ENVHUD_SLOTS - 1;
+
+    if (cvar("cl_envhud_force_center"))
+    {
+        env_msg_pos = '-1 -1 0';
+        s = 0;
+    }
+
+    if (EnvHud_Debug())
+        print(sprintf("[envhud] game_text chan=%g slot=%g pos=%v effect=%g hold=%.2f text='%s'\n",
+                      chan, s, env_msg_pos, env_msg_effect, env_msg_hold, msg));
+
+    if (env_msg_text_s[s] != "")
+        strunzone(env_msg_text_s[s]);
+    EnvHud_SlotStore(s);
+    env_msg_text = "";
 };
 
 void() CSQC_EnvMessage_Parse =
@@ -867,8 +898,9 @@ void() CSQC_EnvHud_DrawMessages =
 {
     // Render both message slots — the centered title (slot 0) and
     // the positioned credit (slot 1) display independently.
-    EnvHud_DrawOneSlot(0);
-    EnvHud_DrawOneSlot(1);
+    float si;
+    for (si = 0; si < ENVHUD_SLOTS; si = si + 1)
+        EnvHud_DrawOneSlot(si);
 };
 
 void() CSQC_EnvHud_DrawFade =

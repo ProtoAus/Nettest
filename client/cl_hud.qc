@@ -2,6 +2,11 @@
 //  client/cl_hud.qc  -  Heads-up display
 // ============================================================
 
+// Defined in client/cl_trigger_camera.qc, which compiles AFTER this file
+// (cl_progs.src: 136 vs 150), so the cutscene HUD-suppression checks below need
+// the prototype up here.
+float(float bit) Cutscene_HidesHud;
+
 // --- Pain flash ---
 float csqc_pain_flash_time;
 float csqc_pain_flash_alpha;
@@ -637,6 +642,14 @@ string() HUD_GetAmmoString =
         return HUD_CacheAmmoString(WEP_HLRPG, 1, predicted_player.mag_hlrpg, predicted_player.ammo_hlrpg);
     else if (predicted_player.weapon == WEP_HLGRENADE)
         return HUD_CacheAmmoString(WEP_HLGRENADE, 2, predicted_player.ammo_hlgrenade, 0);
+    else if (predicted_player.weapon == WEP_SATCHEL)
+        return HUD_CacheAmmoString(WEP_SATCHEL, 2, predicted_player.ammo_satchel, 0);
+    else if (predicted_player.weapon == WEP_TRIPMINE)
+        return HUD_CacheAmmoString(WEP_TRIPMINE, 2, predicted_player.ammo_tripmine, 0);
+    else if (predicted_player.weapon == WEP_SNARK)
+        return HUD_CacheAmmoString(WEP_SNARK, 2, predicted_player.ammo_snark, 0);
+    else if (predicted_player.weapon == WEP_HORNETGUN)
+        return HUD_CacheAmmoString(WEP_HORNETGUN, 2, predicted_player.ammo_hornet, 0);
     else if (predicted_player.weapon == WEP_SNOWBALL)
         return HUD_CacheAmmoString(WEP_SNOWBALL, 2, predicted_player.ammo_snowball, 0);
     else if (predicted_player.weapon == WEP_CSHEGRENADE)
@@ -1444,7 +1457,10 @@ void() CSQC_DrawWeaponHUD =
     prev_font = drawfont;
     drawfont = hud_font;
 
-    // Health — bottom left
+    // Health — bottom left.  A trigger_camera with "hud_health" set hides the
+    // health/armor pair for the duration of its cutscene (Sven's hud_* keys).
+    if (!Cutscene_HidesHud(CUTSCENE_SF_NOHEALTH))
+    {
     hp_str = HUD_GetHealthString();
     drawstring([20, g_height - 52], hp_str, [36, 36], '1 1 1', 0.9, 0);
 
@@ -1463,6 +1479,7 @@ void() CSQC_DrawWeaponHUD =
                        '0.5 0.7 1', 0.9, 0);
         }
     }
+    }   // end hud_health gate
 
     // Money — left side, just above health, in a smaller GoogleMed size
     // (hud_font_mono).
@@ -1493,6 +1510,14 @@ void() CSQC_DrawWeaponHUD =
     HUD_DrawWeaponSlots();
 
     // Round timer and center messages drawn above (before prediction check)
+
+    // Sven's "hud_weapons" — a trigger_camera can hide the weapon belt and
+    // ammo bar for its cutscene.
+    if (Cutscene_HidesHud(CUTSCENE_SF_NOWEAPONS))
+    {
+        drawfont = prev_font;
+        return;
+    }
 
     if (predicted_player.weapon == WEP_NONE)
     {

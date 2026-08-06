@@ -9,17 +9,22 @@
 //  around that point automatically once we set self.angles or
 //  self.avelocity.
 //
-//  Spawnflags reuse the DOOR_* values where the semantic matches:
-//    1   START_OPEN    spawn pre-rotated to the open pose
-//    2   REVERSE       negate the rotation direction
-//    8   PASSABLE      brush is non-solid, no touch trigger
-//    16  ONE_WAY       always rotate in the configured direction
+//  Spawnflags match Half-Life's func_door_rotating:
+//    1    START_OPEN   spawn pre-rotated to the open pose
+//    2    REVERSE      negate the rotation direction
+//    4    DONT_LINK    HL SF_DOOR_NO_LINK; inert here (rotating doors
+//                       are never grouped)
+//    8    PASSABLE     brush is non-solid, no touch trigger
+//    16   ONE_WAY      always rotate in the configured direction
 //                       (don't auto-flip to open away from player)
-//    32  TOGGLE        no auto-close, each press flips state
-//    64  X_AXIS        rotate around X (pitch)
-//    128 Y_AXIS        rotate around Y (roll)
+//    32   TOGGLE       no auto-close, each press flips state
+//    64   X_AXIS       rotate around X (pitch)
+//    128  Y_AXIS       rotate around Y (roll)
 //                       — default with neither flag is Z (yaw)
-//    256 USE_ONLY      target/+use only, no auto proximity trigger
+//    256  USE_ONLY     no touch field; +use and trigger chains both work
+//    512  NOMONSTERS   HL flag, accepted and ignored
+//    1024 UNBLOCKABLE  grinder — no reverse on block (was bit 4)
+//    2048 NO_TRIGGER   reject target-trigger fires (was bit 256)
 //
 //  Keys handled: distance (rotation amount in degrees), speed,
 //  wait, dmg, target, targetname, sounds, message.
@@ -37,6 +42,7 @@ string(float idx) Door_LookupUnlockedSound;                          // sv_doors
 void(string snd) Door_PrecacheIfReal;                                // sv_doors.qc
 void() Door_PlayMoveSound;                                           // sv_doors.qc
 void() Door_PlayStopSound;                                           // sv_doors.qc
+float() Door_MasterBlocks;                                           // sv_doors.qc
 
 // Forward decls — sh_pmove.qc compiles AFTER this file in sv_progs.src,
 // so the rotating-brush list helpers it defines need to be predeclared
@@ -56,15 +62,53 @@ void(entity c) RotatingBrush_RemoveFromList;
 // the same DOOR_STATE_* enum.  The constants live in sv_doors.qc; no
 // re-declaration needed because constants are global.
 
+// Flags.  As with the sliding func_door, everything below reads
+// self.door_flags (declared in sv_doors.qc), never self.spawnflags —
+// RotDoor_NormaliseFlags resolves the GoldSrc/native disagreement first.
+// Bits 1/2/8/16/32/64/128 already matched Half-Life; only 4 and 256 did not.
 const float DOORROT_START_OPEN  = 1;
-const float DOORROT_REVERSE     = 2;
-const float DOORROT_UNBLOCKABLE = 4;     // grinder mode — no reverse on block, damage per tick
+const float DOORROT_REVERSE     = 2;      // HL SF_DOOR_ROTATE_BACKWARDS
+const float DOORROT_DONT_LINK   = 4;      // HL SF_DOOR_NO_LINK — we never group rotating doors, so inert
 const float DOORROT_PASSABLE    = 8;
 const float DOORROT_ONE_WAY     = 16;
 const float DOORROT_TOGGLE      = 32;
 const float DOORROT_X_AXIS      = 64;
 const float DOORROT_Y_AXIS      = 128;
-const float DOORROT_USE_ONLY    = 256;
+const float DOORROT_USE_ONLY    = 256;    // GoldSrc: no touch field.  Triggers still work.
+const float DOORROT_NOMONSTERS  = 512;    // HL, accepted + ignored
+const float DOORROT_UNBLOCKABLE = 1024;   // grinder mode — no reverse on block, damage per tick
+const float DOORROT_NO_TRIGGER  = 2048;   // reject target-trigger fires (the mod's original bit-256 meaning)
+
+// Mirror of Door_NormaliseFlags (sv_doors.qc) for the rotating door.  Kept
+// separate rather than shared because the two classes disagree about bits
+// 2/64/128: on a rotating door bit 2 is REVERSE and 64/128 select the
+// rotation axis, and all three already match Half-Life.  Only bits 4 and
+// 256 needed moving.
+void() RotDoor_NormaliseFlags =
+{
+    self.door_flags = self.spawnflags;
+
+    if (!Map_IsGoldSrc())
+    {
+        // Authored against nettest.fgd, where 4 meant "grinder" and 256
+        // meant "reject trigger fires".  Alias forward so already-compiled
+        // BSPs behave identically, then clear 4 so it can't also read as
+        // DONT_LINK.
+        if (self.spawnflags & 4)
+            self.door_flags = self.door_flags | DOORROT_UNBLOCKABLE;
+        if (self.spawnflags & 256)
+            self.door_flags = self.door_flags | DOORROT_NO_TRIGGER;
+        self.door_flags = self.door_flags & ~4;
+    }
+    // GoldSrc: nothing to strip.  4 stays DONT_LINK (inert here), and 256
+    // keeps only its "no touch field" meaning so Hammer's button and
+    // multi_manager chains still reach the door.
+
+    if (cvar("sv_debug_doors") && self.door_flags != self.spawnflags)
+        dprint(sprintf("[door %s] flags %g -> %g (%s map)\n",
+                       self.classname, self.spawnflags, self.door_flags,
+                       Map_IsGoldSrc() ? "goldsrc" : "native"));
+};
 
 void() rotdoor_go_up;
 void() rotdoor_go_down;
@@ -477,7 +521,7 @@ float() RotDoor_CarryPlayers =
     float was_blocked = Brush_RotateCarry();
     if (!was_blocked) return 0;
 
-    if (self.spawnflags & DOORROT_UNBLOCKABLE)
+    if (self.door_flags & DOORROT_UNBLOCKABLE)
     {
         // Grinder mode — no reverse.  Per-tick damage is already
         // applied inside Brush_RotateCarry's Phase 1 and Phase 3
@@ -636,7 +680,7 @@ void() rotdoor_hit_top =
     self.SendFlags   = 1;
     RotatingBrush_RemoveFromList(self);
     Door_PlayStopSound();
-    if ((self.spawnflags & DOORROT_TOGGLE) || self.wait < 0)
+    if ((self.door_flags & DOORROT_TOGGLE) || self.wait < 0)
         return;
     self.nextthink = self.ltime + self.wait;
     self.think     = rotdoor_go_down;
@@ -646,7 +690,7 @@ void() rotdoor_go_up =
 {
     if (self.door_state == DOOR_STATE_TOP)
     {
-        if (!(self.spawnflags & DOORROT_TOGGLE) && self.wait >= 0)
+        if (!(self.door_flags & DOORROT_TOGGLE) && self.wait >= 0)
         {
             self.nextthink = self.ltime + self.wait;
             self.think     = rotdoor_go_down;
@@ -666,7 +710,7 @@ void() rotdoor_go_up =
     // (user-reported bug on TOGGLE doors blocked while closing).
     if (self.door_state == DOOR_STATE_BOTTOM)
     {
-        float sign_eff = (self.spawnflags & DOORROT_REVERSE) ? -1 : 1;
+        float sign_eff = (self.door_flags & DOORROT_REVERSE) ? -1 : 1;
 
         // Open away from player — flip the rotation sign when the
         // activator stands on the FRONT side, so the leaf swings
@@ -675,7 +719,7 @@ void() rotdoor_go_up =
         // leaf forward, again away from the player.  ONE_WAY skips
         // the auto-flip entirely.  The facing test uses the door's
         // local forward at the closed pose.
-        if (!(self.spawnflags & DOORROT_ONE_WAY)
+        if (!(self.door_flags & DOORROT_ONE_WAY)
             && activator && activator != world)
         {
             vector saved = self.angles;
@@ -765,12 +809,27 @@ void() rotdoor_use =
 {
     if (cvar("mp_disabledoors")) return;
 
-    // USE_ONLY rejects target-trigger fires (auto proximity isn't
-    // spawned for these brushes either) — exactly the behaviour
-    // func_door's USE_ONLY flag implements.
+    // `master` gate — see Door_MasterBlocks in sv_doors.qc.  Before the
+    // attack_finished debounce so a rejected press doesn't burn the cooldown.
+    if (Door_MasterBlocks()) return;
+
+    // NO_TRIGGER rejects target-trigger fires — exactly the behaviour
+    // func_door's NO_TRIGGER flag implements.  On a GoldSrc map the
+    // normaliser never sets it, so Hammer's trigger chains reach the door
+    // as Half-Life intends; bit 256 there only suppresses the touch field
+    // (rotdoor_touch, below).
     if (!sv_use_is_player_direct
-        && (self.spawnflags & DOORROT_USE_ONLY))
+        && (self.door_flags & DOORROT_NO_TRIGGER))
         return;
+
+    // Direct +use gate — see the long note in door_use (sv_doors.qc).
+    // GoldSrc doors are only player-usable with SF_DOOR_USE_ONLY (256).
+    if (sv_use_is_player_direct && !self.door_player_usable
+        && cvar("sv_door_use_only"))
+    {
+        Door_PlayLockedSound();
+        return;
+    }
 
     if (self.attack_finished > time) return;
     self.attack_finished = time + 0.1;
@@ -789,7 +848,7 @@ void() rotdoor_use =
         // Idle at TOP — non-TOGGLE doors are committed to their
         // auto-return cycle and ignore re-trigger.  TOGGLE doors
         // close on the second press.
-        if (self.spawnflags & DOORROT_TOGGLE)
+        if (self.door_flags & DOORROT_TOGGLE)
             rotdoor_go_down();
         return;
     }
@@ -800,7 +859,7 @@ void() rotdoor_touch =
 {
     entity oldself, oldactivator;
     if (other.classname != "player") return;
-    if (self.spawnflags & DOORROT_USE_ONLY) return;
+    if (self.door_flags & DOORROT_USE_ONLY) return;
 
     // Push-only activation: brushing past the proximity bbox
     // shouldn't open the door, only an actual push into it.
@@ -820,6 +879,47 @@ void() rotdoor_touch =
     self = self.owner;
     rotdoor_use();
     self = oldself; activator = oldactivator;
+};
+
+// Damage-driven open path — the .on_killed callback, fired when the door's
+// `health` reaches zero from gunfire.  Mirrors door_killed / door_use_force in
+// sv_doors.qc, with one deliberate difference: this one still honours `master`.
+//
+// Half-Life's CBaseDoor::Killed calls DoorActivate(), and DoorActivate's very
+// first act is UTIL_IsMasterTriggered — so in HL you cannot shoot a mastered
+// door open before its master is satisfied.  th_ep1_01's cellar is built on
+// exactly that: the door is health 60 with master "padlockmstr2", and the
+// padlock hanging on it is a separate func_breakable targeting that
+// multisource.  Let damage bypass the master and the padlock is decoration.
+//
+// The +use gate and NO_TRIGGER are bypassed, because damage is its own
+// activation channel — that part matches door_use_force.
+void() rotdoor_killed =
+{
+    activator = self.dmg_inflictor;   // shooter, for kill credit / target chain
+
+    // Re-arm before any early-out.  Leaving health at 0 would make every
+    // subsequent bullet re-enter this function on the same corpse.
+    self.health = self.max_health;
+
+    if (cvar("mp_disabledoors")) return;
+    if (Door_MasterBlocks())    return;
+
+    if (self.attack_finished > time) return;
+    self.attack_finished = time + 0.1;
+
+    // Mid-rotation: ignore, same as rotdoor_use.
+    if (self.door_state == DOOR_STATE_UP
+     || self.door_state == DOOR_STATE_DOWN)
+        return;
+
+    if (self.door_state == DOOR_STATE_TOP)
+    {
+        if (self.door_flags & DOORROT_TOGGLE)
+            rotdoor_go_down();
+        return;
+    }
+    rotdoor_go_up();
 };
 
 void() rotdoor_spawn_trigger =
@@ -861,6 +961,9 @@ its centre into self.origin); the door swings around that point.
 */
 void() func_door_rotating =
 {
+    // MUST be first — every flag read below goes through .door_flags.
+    RotDoor_NormaliseFlags();
+
     if (self.sounds == 1)
     {
         if (!self.noise1) self.noise1 = "doors/drclos4.wav";
@@ -893,6 +996,43 @@ void() func_door_rotating =
     Door_PrecacheIfReal(self.noise2);
     Door_PrecacheIfReal(self.noise_locked);
     Door_PrecacheIfReal(self.noise_unlocked);
+    precache_sound(DOOR_DEFAULT_LOCKED_SND);   // Door_PlayLockedSound fallback
+
+    // See the matching line in func_door — suppresses CSQC +use prediction
+    // for doors whose master may reject the press.
+    self.door_has_master = (self.master && self.master != "");
+
+    // See the long note on the matching line in func_door: GoldSrc doors accept
+    // a player's direct +use with SF_DOOR_USE_ONLY (256), or — standing in for
+    // Half-Life's DoorTouch — when the door has no targetname and so has no
+    // trigger chain that could ever open it.
+    // Written as three statements, not one ||-chain: `logicops` is off
+    // mod-wide, so || evaluates every operand and the chain is easy to get
+    // subtly wrong.  Explicit is also cheaper to read against the HL rules.
+    self.door_player_usable = 0;
+    if (!Map_IsGoldSrc())                          self.door_player_usable = 1;
+    if (self.door_flags & DOORROT_USE_ONLY)        self.door_player_usable = 1;
+    if (self.targetname == "")                     self.door_player_usable = 1;
+
+    // Shootable doors — see the long note on the matching block in func_door.
+    // On a GoldSrc map `health` is Sven's "Strength" and `breakable 1` is the
+    // real opt-in; on a native map health alone still arms it.
+    //
+    // th_ep1_01's padlocked cellar door is the cautionary case.  It reads
+    // health 60 + master "padlockmstr2" and no breakable key, so it is NOT
+    // shoot-open: breaking the padlock satisfies the multisource and then the
+    // player opens the door normally (it has no targetname, so
+    // door_player_usable is set and +use reaches it).  Arming it on health
+    // alone let the player skip the padlock by shooting the door.
+    //
+    // rotdoor_killed mirrors door_killed: re-arm health so the door can be shot
+    // again on its next close cycle, or latch takedamage off for ONE_MOVEMENT.
+    if (self.health && (!Map_IsGoldSrc() || self.breakable))
+    {
+        self.max_health = self.health;
+        self.takedamage = DAMAGE_YES;
+        self.on_killed  = rotdoor_killed;
+    }
 
     if (!self.speed)    self.speed    = 100;
     if (!self.wait)     self.wait     = 3;
@@ -908,7 +1048,7 @@ void() func_door_rotating =
     // proximity trigger; +use against a non-solid brush won't
     // resolve, so PASSABLE doors are intentionally external-target-
     // only (combine with a button or trigger to actuate).
-    if (self.spawnflags & DOORROT_PASSABLE)
+    if (self.door_flags & DOORROT_PASSABLE)
         self.solid = SOLID_NOT;
 
     // Axis selection — match HL's CBaseToggle::AxisDir bit-to-movedir
@@ -919,12 +1059,12 @@ void() func_door_rotating =
     //   bit 64  ("X axis" FGD) → movedir (0,0,1) → angles_z = roll
     //   bit 128 ("Y axis" FGD) → movedir (1,0,0) → angles_x = pitch
     //   default                → movedir (0,1,0) → angles_y = yaw
-    if (self.spawnflags & DOORROT_X_AXIS)
+    if (self.door_flags & DOORROT_X_AXIS)
     {
         self.movedir            = '0 0 1';
         self.rotdoor_axis_index = 2;     // roll, around world X — matches Mover_RotateStart
     }
-    else if (self.spawnflags & DOORROT_Y_AXIS)
+    else if (self.door_flags & DOORROT_Y_AXIS)
     {
         self.movedir            = '1 0 0';
         self.rotdoor_axis_index = 0;     // pitch, around world Y
@@ -937,9 +1077,9 @@ void() func_door_rotating =
 
     self.pos1 = self.angles;
     self.pos2 = self.pos1 + self.movedir
-              * (self.distance * ((self.spawnflags & DOORROT_REVERSE) ? -1 : 1));
+              * (self.distance * ((self.door_flags & DOORROT_REVERSE) ? -1 : 1));
 
-    if (self.spawnflags & DOORROT_START_OPEN)
+    if (self.door_flags & DOORROT_START_OPEN)
     {
         self.angles = self.pos2;
         // Mirror func_door's "swap so BOTTOM means at-pos1" pattern:
@@ -968,6 +1108,6 @@ void() func_door_rotating =
     // Proximity trigger OFF by default (sv_door_proximity 0) — rotating doors open only on +use /
     // target-chain / damage, never on walk-near.  Mirrors the func_door gate in sv_doors.qc.
     if (cvar("sv_door_proximity")
-        && !self.targetname && !(self.spawnflags & DOORROT_PASSABLE))
+        && !self.targetname && !(self.door_flags & DOORROT_PASSABLE))
         rotdoor_spawn_trigger();
 };

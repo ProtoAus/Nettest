@@ -72,6 +72,14 @@ void() W_RPGEquip;
 void() W_RPGDrop;
 void() W_HLGrenadeEquip;
 void() W_HLGrenadeDrop;
+void() W_SatchelEquip;
+void() W_SatchelDrop;
+void() W_TripmineEquip;
+void() W_TripmineDrop;
+void() W_SnarkEquip;
+void() W_SnarkDrop;
+void() W_HGunEquip;
+void() W_HGunDrop;
 void() W_SnowballEquip;
 void() W_SnowballDrop;
 void() W_CSHEGrenadeEquip;
@@ -204,6 +212,10 @@ void() weapon_settle_think;   // defined later in this file
 void() W_UtilityRefreshSlotBinding; // defined later in this file
 float(float) W_UtilityWeaponSelectable; // defined in sh_wpn_snowball.qc
 float(float) W_UtilityWeaponPickup;
+// Releases any banked ammo for the weapon just picked up.  Defined in
+// server/sv_goldsrc_ammo.qc, which compiles much later (it needs every weapon's
+// MAX_AMMO_* constant), so it is reached through a forward declaration.
+void(entity p, float wep) Ammo_DrainForWeapon;
 float(entity, float) W_UtilityEntityHasWeapon;
 float(float) W_UtilityPlayerHasWeapon;
 float(float) W_UtilityNextCarried;
@@ -457,10 +469,30 @@ void(void() spawn_func) W_RegisterMapWeapon =
     // eligible weapons get the mesh-aware tracebox + 1 u clearance so
     // SOLID_PHYSICS_TRIMESH activates without penetration; everything
     // else uses droptofloor() (engine TOSS settles any residual).
+    // W_PhysDropAllowed is NOT a pure predicate: it probes physics_supported()
+    // and LATCHES sv_ode_loaded to "1" or "-1" (see :1896).  It must therefore be
+    // evaluated in its own statement, never as the tail of an && chain.
+    //
+    // Why this matters: the term immediately before it reads the very cvar this
+    // call writes.  fteqcc's `lo` (logic-ops / short-circuit) flag is currently
+    // OFF, so every term runs unconditionally and this call doubles as the REPAIR
+    // path - it is what flips a stale "-1" back to "1" on a later map, once the
+    // physics plugin has finished loading.  Turn short-circuiting on with the call
+    // still inline and that repair disappears: sv_ode_loaded > 0 is false while the
+    // value is -1, the call is skipped, and nothing else in the tree can move it.
+    // sv_main.qc:992 only retries the attach on == 0, so -1 becomes an unrecoverable
+    // dead latch - every phys prop, dropped weapon, barrel and ragdoll inert until
+    // the server process restarts.  Reached on any machine where the first
+    // physics_supported(TRUE) fails: plug_load not yet complete, fteplug_box3d
+    // missing, or the sv_physics_engine escape hatch at sv_main.qc:1630 failing.
+    //
+    // Hoisting keeps today's behaviour exactly (the call already early-outs on
+    // sv_phys_drops <= 0 and on ineligible weapons, so it stays cheap).
+    float phys_drop_allowed = W_PhysDropAllowed(self.weapon);
     float will_phys_drop = (cvar("sv_phys_drops") > 0
         && Weapon_PhysDropEligible(self.weapon)
         && cvar("sv_ode_loaded") > 0
-        && W_PhysDropAllowed(self.weapon));
+        && phys_drop_allowed);
 
     if (will_phys_drop)
     {
@@ -817,7 +849,18 @@ void(vector src, vector end) W_WeaponTraceLine =
     // independent rewind on top of ours.
     float saved_dim_hit = self.dimension_hit;
     self.dimension_hit = saved_dim_hit | PHYSDROP_DIM;
+
+    // Melee's half of the corpse opt-in.  See W_CorpseMaskBegin
+    // (sh_weapon_standard.qc) for why this is needed and why it is a pair —
+    // hitscan goes through W_ServerTraceLineWithPhysDrops, not through here.
+    // Half-Life's rule is that both reach a corpse: bullets bleed it and never
+    // gib it, club/blast/sonic chip it apart, and W_DeadTakeDamage already
+    // enforces that split by damage type.
+    int saved_mask = W_CorpseMaskBegin(self);
+
     Lagcomp_TraceLine(src, end, MOVE_NORMAL | MOVE_HITMODEL, self);
+
+    W_CorpseMaskEnd(self, saved_mask);
     self.dimension_hit = saved_dim_hit;
 };
 
@@ -839,7 +882,15 @@ float(entity hit) W_ClassifyImpactMaterial =
 {
     if (hit && hit.classname == "player")
         return IMPACT_MAT_FLESH;
-    if (hit && hit.classname == "func_breakable")
+    // Monsters are flesh too.  Without this a headcrab took a CONCRETE DUST hit,
+    // because the fallback at the bottom resolves the WORLD TEXTURE under the
+    // impact point and a monster has no surface to resolve.  .bloodcolor was set
+    // by every AI class and read by absolutely nothing until here; it stays the
+    // per-class value so a future CSQC tint can use it, while the material code
+    // is what picks the flesh effect today.
+    if (hit && (hit.flags & FL_MONSTER))
+        return (hit.health <= 0) ? IMPACT_MAT_FLESH_LETHAL : IMPACT_MAT_FLESH;
+    if (hit && Brush_IsBreakableClass(hit))
     {
         float s = hit.style;
         if (s == BREAKABLE_FLESH)                                         return IMPACT_MAT_FLESH;
@@ -867,18 +918,27 @@ float(entity hit) W_ClassifyImpactMaterial =
 };
 
 // Send bullet impact effect to all players EXCEPT the shooter.
-// The shooter sees their own predicted impact instantly.
-void(vector pos) W_ImpactEffect =
+// ---------------------------------------------------------------------------
+// One writer for every impact-effect entry point below.
+//
+// The three functions that follow differed only in where the normal and the
+// material came from and whether the hit was an entry; the wire layout itself
+// was copy-pasted three times.  That is precisely how the shooter field came to
+// be a byte in three places at once, and why fixing it in one of them would have
+// left two live.
+//
+// `shooter` is an explicit parameter rather than `self` because monsters fire
+// through this path too, and the tracer has to anchor on whoever actually shot.
+void(vector pos, vector normal, float mat, entity target, entity shooter, float is_entry) W_ImpactEffectSend =
 {
-    if (pointcontents(pos + trace_plane_normal * -2) == CONTENT_SKY)
-        return;
-
-    float mat = W_ClassifyImpactMaterial(trace_ent);
-
     entity p = player_chain_head;
     while (p)
     {
-        if (p != self && SV_PlayerHasNetchan(p) && checkpvs(pos, p))   // nettest: PVS-cull + skip bots (no netchan) - only players who can see the impact need the ric/decal/tracer (was sent to ALL players)
+        // PVS-cull + skip bots (no netchan): only players who can see the impact
+        // need the ric/decal/tracer.  Skipping the shooter avoids echoing their
+        // own predicted impact back at them; for a monster nobody is skipped,
+        // which is correct - no client predicted that shot.
+        if (p != shooter && SV_PlayerHasNetchan(p) && checkpvs(pos, p))
         {
             msg_entity = p;
             WriteByte(MSG_ONE, SVC_CGAMEPACKET);
@@ -888,24 +948,40 @@ void(vector pos) W_ImpactEffect =
             WriteCoord(MSG_ONE, pos_z);
             // Normal is a unit vector (components in [-1,+1]); quantise to
             // a signed byte biased by 127 to save 9 B/event over WriteCoord.
-            WriteByte(MSG_ONE, bound(0, rint(127 + trace_plane_normal_x * 127), 255));
-            WriteByte(MSG_ONE, bound(0, rint(127 + trace_plane_normal_y * 127), 255));
-            WriteByte(MSG_ONE, bound(0, rint(127 + trace_plane_normal_z * 127), 255));
+            WriteByte(MSG_ONE, bound(0, rint(127 + normal_x * 127), 255));
+            WriteByte(MSG_ONE, bound(0, rint(127 + normal_y * 127), 255));
+            WriteByte(MSG_ONE, bound(0, rint(127 + normal_z * 127), 255));
             WriteByte(MSG_ONE, mat);
-            // Target entnum so remote clients can attach bullet-hole
-            // decals to the correct func_breakable / BSP entity and
-            // remove them on CSQC_EVENT_BRUSH_DESTROY. 0 = world /
-            // non-BSP hit (client treats as stationary world decal).
-            WriteShort(MSG_ONE, num_for_edict(trace_ent));
-            // Shooter entnum — used by remote clients to anchor the
-            // bullet tracer's start at the shooter's eye position.
-            // Players never exceed maxclients so a byte is enough.
-            WriteByte(MSG_ONE, num_for_edict(self));
-            WriteByte(MSG_ONE, 1);   // is_entry=1: the primary/entry impact draws the tracer
-            WriteByte(MSG_ONE, self.wep_action_id);   // shooter's per-shot action id (byte) -> remote per-shot decal cap
+            // Target entnum so remote clients can attach bullet-hole decals to
+            // the correct func_breakable / BSP entity and remove them on
+            // CSQC_EVENT_BRUSH_DESTROY.  0 = world / non-BSP hit.
+            WriteShort(MSG_ONE, num_for_edict(target));
+            // Shooter entnum, used by remote clients to anchor the tracer's start.
+            //
+            // SHORT, not byte.  The old comment here read "players never exceed
+            // maxclients so a byte is enough" - true for players, and false the
+            // moment a monster pulls a trigger.  th_ep1_01 alone builds 209
+            // monsters on top of the world's own entities, so monster edict
+            // numbers pass 255 routinely, and a truncated number does not fail
+            // safely: it resolves to whatever entity occupies slot (n & 255) and
+            // the tracer flies in from there.
+            WriteShort(MSG_ONE, num_for_edict(shooter));
+            WriteByte(MSG_ONE, is_entry);
+            WriteByte(MSG_ONE, shooter.wep_action_id);   // per-shot action id -> remote per-shot decal cap
         }
         p = p.player_chain_next;
     }
+};
+
+// The shooter sees their own predicted impact instantly.
+void(vector pos) W_ImpactEffect =
+{
+    if (pointcontents(pos + trace_plane_normal * -2) == CONTENT_SKY)
+        return;
+
+    // is_entry=1: the primary/entry impact draws the tracer.
+    W_ImpactEffectSend(pos, trace_plane_normal, W_ClassifyImpactMaterial(trace_ent),
+                       trace_ent, self, 1);
 };
 
 // Impact effect sent to all OTHER players, with the material classified
@@ -919,31 +995,10 @@ void(vector pos, vector normal) W_ImpactEffectAll =
     if (pointcontents(pos + normal * -2) == CONTENT_SKY)
         return;
 
-    float mat = W_ClassifyImpactMaterial(trace_ent);
-
-    entity p = player_chain_head;
-    while (p)
-    {
-        if (p != self && SV_PlayerHasNetchan(p) && checkpvs(pos, p))   // nettest: PVS-cull + skip bots (no netchan) - only players who can see the impact need the ric/decal/tracer (was sent to ALL players)
-        {
-            msg_entity = p;
-            WriteByte(MSG_ONE, SVC_CGAMEPACKET);
-            WriteByte(MSG_ONE, CSQC_EVENT_IMPACT);
-            WriteCoord(MSG_ONE, pos_x);
-            WriteCoord(MSG_ONE, pos_y);
-            WriteCoord(MSG_ONE, pos_z);
-            WriteByte(MSG_ONE, bound(0, rint(127 + normal_x * 127), 255));
-            WriteByte(MSG_ONE, bound(0, rint(127 + normal_y * 127), 255));
-            WriteByte(MSG_ONE, bound(0, rint(127 + normal_z * 127), 255));
-            WriteByte(MSG_ONE, mat);
-            WriteShort(MSG_ONE, num_for_edict(trace_ent));   // target entnum for decal attach
-            WriteByte(MSG_ONE, num_for_edict(self));         // shooter entnum for tracer start
-            WriteByte(MSG_ONE, 0);   // is_entry=0: penetration EXIT — decal only, NO tracer (the
-                                     // entry already drew it; an exit tracer = the doubled line)
-            WriteByte(MSG_ONE, self.wep_action_id);   // shooter's per-shot action id (byte) -> remote per-shot decal cap
-        }
-        p = p.player_chain_next;
-    }
+    // is_entry=0: penetration EXIT — decal only, NO tracer (the entry already
+    // drew it; an exit tracer is the doubled line).
+    W_ImpactEffectSend(pos, normal, W_ClassifyImpactMaterial(trace_ent),
+                       trace_ent, self, 0);
 };
 
 // Same as W_ImpactEffectAll but with an explicit material code, bypassing
@@ -954,31 +1009,23 @@ void(vector pos, vector normal, float mat) W_ImpactEffectAllMat =
     if (pointcontents(pos + normal * -2) == CONTENT_SKY)
         return;
 
-    // Skip the shooter — their CSQC_PredictFireWeapon path already ran
-    // CSQC_BulletImpact which plays the ric sound at the impact point.
-    // Without this skip the attacker hears a ping-delayed echo.
-    entity p = player_chain_head;
-    while (p)
-    {
-        if (p != self && SV_PlayerHasNetchan(p) && checkpvs(pos, p))   // nettest: PVS-cull + skip bots (no netchan) - only players who can see the impact need the ric/decal/tracer (was sent to ALL players)
-        {
-            msg_entity = p;
-            WriteByte(MSG_ONE, SVC_CGAMEPACKET);
-            WriteByte(MSG_ONE, CSQC_EVENT_IMPACT);
-            WriteCoord(MSG_ONE, pos_x);
-            WriteCoord(MSG_ONE, pos_y);
-            WriteCoord(MSG_ONE, pos_z);
-            WriteByte(MSG_ONE, bound(0, rint(127 + normal_x * 127), 255));
-            WriteByte(MSG_ONE, bound(0, rint(127 + normal_y * 127), 255));
-            WriteByte(MSG_ONE, bound(0, rint(127 + normal_z * 127), 255));
-            WriteByte(MSG_ONE, mat);
-            WriteShort(MSG_ONE, num_for_edict(trace_ent));   // target entnum for decal attach
-            WriteByte(MSG_ONE, num_for_edict(self));         // shooter entnum for tracer start
-            WriteByte(MSG_ONE, 1);   // is_entry=1: explicit-material primary hit (player/flesh) — tracer
-            WriteByte(MSG_ONE, self.wep_action_id);   // shooter's per-shot action id (byte) -> remote per-shot decal cap
-        }
-        p = p.player_chain_next;
-    }
+    // is_entry=1: explicit-material primary hit (player/flesh) — draws a tracer.
+    // The shooter is skipped inside the writer: their CSQC_PredictFireWeapon path
+    // already ran CSQC_BulletImpact and plays the ric at the impact point, so
+    // without the skip the attacker hears a ping-delayed echo.
+    W_ImpactEffectSend(pos, normal, mat, trace_ent, self, 1);
+};
+
+// As above, but for a shot fired by something that is not `self` — the monster
+// combat layer, which runs its traces with `self` already switched but wants the
+// option of naming the shooter explicitly (a squad leader's tracer anchoring on
+// the member that actually fired, for instance).
+void(vector pos, vector normal, float mat, entity shooter) W_ImpactEffectFrom =
+{
+    if (pointcontents(pos + normal * -2) == CONTENT_SKY)
+        return;
+
+    W_ImpactEffectSend(pos, normal, mat, trace_ent, shooter, 1);
 };
 
 // Send a positioned sound via multicast. Respects dimension_send,
@@ -1106,6 +1153,18 @@ float(entity target) W_CanDamageTarget =
         return FALSE;
     if (target.health <= 0)
         return FALSE;
+    // trigger_camera "Player Invulnerable" (spawnflag 256).  Checked BEFORE
+    // the unconditional player accept below, which is the whole reason this
+    // is the right chokepoint: .takedamage is meaningless on players in this
+    // mod (they sit at DAMAGE_NO and are accepted anyway), so a takedamage
+    // gate would do nothing.  Every hitscan / pellet / melee / projectile /
+    // trigger_hurt path funnels through here.
+    //
+    // NOT covered — the movers that subtract .health directly instead of
+    // calling W_ApplyDamage: func_train_blocked, func_tracktrain, and
+    // func_vehicle.  Those carry their own cutscene_immune test.
+    if (target.cutscene_immune)
+        return FALSE;
     if (target.classname == "player")
         return TRUE;
     if (target.takedamage != DAMAGE_YES)
@@ -1116,7 +1175,7 @@ float(entity target) W_CanDamageTarget =
         // sv_in_radius_explosion is set TRUE while W_RadiusExplode
         // is iterating its breakable list, so accept here.
         if (sv_in_radius_explosion
-            && target.classname == "func_breakable"
+            && Brush_IsBreakableClass(target)
             && (target.spawnflags & BREAKABLE_ONLY_EXPLOSION))
             return TRUE;
         return FALSE;
@@ -1459,13 +1518,83 @@ void(entity victim, float damage, float fall_twist) SV_SendDamageViewKick =
 // Defined in sv_func_vehicle.qc (compiles later) — a shot nudges a vehicle free.
 void(entity veh, entity attacker) Vehicle_ShotNudge;
 
+// ---------------------------------------------------------------------------
+// corpses
+// ---------------------------------------------------------------------------
+// Defined in sv_ai_gibs.qc (compiles after the AI layer, because picking a gib
+// set needs the monster's CLASS_* classification).
+void(entity body, entity attacker) Monster_Gib;
+float(entity m, float dmgbits, float lastdmg) Gib_ShouldGibOnDeath;
+
+float ai_dbg_corpse_hit;	// shots that landed on a body
+float ai_dbg_corpse_chip;	// gib-type hits that took a bite out of one
+float ai_dbg_corpse_gib;	// bodies torn apart
+
+// combat.cpp:974-1017, CBaseMonster::DeadTakeDamage.
+//
+// The return value matters and is easy to get wrong: HL returns 1 for a bullet
+// that does nothing at all, because by the time this runs TraceAttack has
+// ALREADY spawned the blood.  "This hit did no damage" and "this hit did not
+// land" are different answers, and only the second one should suppress an
+// impact effect.  So this returns the damage either way.
+float(entity attacker, entity target, float damage, float bits) W_DeadTakeDamage =
+{
+    ai_dbg_corpse_hit = ai_dbg_corpse_hit + 1;
+
+    // Bullets bleed a corpse and nothing more — DMG_BULLET is deliberately
+    // absent from DMG_GIB_CORPSE.  Everything heavier chips away at the pool
+    // BecomeDead left behind, and the hit that lands over what remains tears
+    // the body apart.
+    if (bits & DMG_GIB_CORPSE)
+    {
+        if (target.health <= damage)
+        {
+            target.health = -50;	// drives the gib launch speed, combat.cpp:235
+            ai_dbg_corpse_gib = ai_dbg_corpse_gib + 1;
+            Monster_Gib(target, attacker);
+            return damage;
+        }
+        // The 0.1 is HL's, and it is what makes a corpse take several crowbar
+        // swings rather than bursting on the first one.
+        target.health = target.health - damage * 0.1;
+        ai_dbg_corpse_chip = ai_dbg_corpse_chip + 1;
+    }
+
+    return damage;
+};
+
 float(entity attacker, entity target, float damage) W_ApplyDamage =
 {
     entity saved;
     entity old_activator;
 
+    // Read-and-clear, before ANY early return, so a damage type set by one
+    // caller can never leak into the next hit.  0 means bullet.
+    float dmgbits = sv_dmg_bits;
+    sv_dmg_bits = 0;
+    if (!dmgbits)
+        dmgbits = DMG_BULLET;
+    if (sv_in_radius_explosion)
+        dmgbits = dmgbits | DMG_BLAST;
+
+    // A corpse is a legal target and takes its own damage rules.  This has to
+    // come BEFORE W_CanDamageTarget, which rejects anything dead outright — and
+    // it cannot test health, because BecomeDead deliberately leaves a corpse
+    // with POSITIVE health (its gib pool).  deadflag is the only honest test.
+    if (target.deadflag == DEAD_DEAD && (target.flags & FL_MONSTER)
+        && target.takedamage == DAMAGE_YES)
+        return W_DeadTakeDamage(attacker, target, damage, dmgbits);
+
     if (!W_CanDamageTarget(target))
         return 0;
+
+    // Per-monster tally of damage that actually reached a PLAYER.  This is the
+    // one number that answers the whole class of "monster X doesn't hit me"
+    // report — shots fired, animations played and schedules selected can all look
+    // healthy while the damage goes nowhere, which is exactly what the houndeye's
+    // blast and the male assassin's burst were both doing.
+    if ((attacker.flags & FL_MONSTER) && target.classname == "player")
+        attacker.ai_dbg_dmgdealt = attacker.ai_dbg_dmgdealt + damage;
 
     // func_vehicle: a hit doesn't damage it — it shoves the car along the shot
     // into clear space, so players can shoot a stuck vehicle free.
@@ -1643,7 +1772,14 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
         // nettest Patch 36: tag the attacker's slot so their own client can skip this flinch —
         // they already predicted it locally (CSQC_SendHitclaim).  Timing-independent dedup (a
         // client-side time window loses at high ping, e.g. sv_minping 500).  Witnesses apply it.
-        WriteByte(MSG_MULTICAST, num_for_edict(attacker));
+        //
+        // SHORT, not byte.  The VICTIM above is always a living player, but the
+        // ATTACKER is not: a zombie or headcrab damaging a player reaches here
+        // today, and monster edict numbers pass 255 routinely.  Truncated, the
+        // number can land on a real player's slot - and this field's only job is
+        // "skip the flinch on that client", so the failure is an innocent player
+        // silently losing their flinch reaction whenever a monster hits someone.
+        WriteShort(MSG_MULTICAST, num_for_edict(attacker));
         multicast(target.origin, MULTICAST_PVS);
 
         // Camo body paint: getting shot scrubs a slice of coverage off
@@ -1757,7 +1893,19 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
 
     // Non-player entity killed: fire its .use function so buttons/triggers activate.
     // Set activator = attacker so the target chain knows who pulled the trigger.
-    if (target.health <= 0 && target.use)
+    //
+    // `!target.on_killed` matters: this branch RETURNS, so anything carrying
+    // both a .use and an .on_killed never reached the on_killed dispatch 20
+    // lines below.  Every shootable door is in that set — func_door has had
+    // .use = door_use and .on_killed = door_killed since it was written, so
+    // shooting one ran door_use and skipped door_killed's health re-arm
+    // entirely, leaving health at 0 so every following bullet re-fired the
+    // open.  func_breakable is the same shape and lands on
+    // func_breakable_break either way, so it is unaffected.
+    //
+    // The precedence is the right way round on its own terms too: .on_killed
+    // is the specific death handler, .use is the generic activation one.
+    if (target.health <= 0 && target.use && !target.on_killed)
     {
         saved         = self;
         old_activator = activator;
@@ -1779,10 +1927,33 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
 
     if (target.health <= 0 && target.on_killed)
     {
+        // How far past zero this blow drove them, captured BEFORE the death
+        // dispatch.  It has to be: on_killed reaches AI_Died, which replaces
+        // health with the corpse's own positive gib pool (max_health/2), so
+        // reading it afterwards would always say "not overkilled".
+        float overkill = target.health;
+        float was_monster = (target.flags & FL_MONSTER);
+
         saved = self;
         self  = target;
         self.on_killed();
         self  = saved;
+
+        // combat.cpp:596-601 — the killing blow decides whether there is a body
+        // at all.  Restore the overkill figure for the test, because Monster_Gib
+        // scales the launch speed off it.
+        if (was_monster && target.deadflag == DEAD_DEAD)
+        {
+            float saved_health = target.health;
+            target.health = overkill;
+            if (Gib_ShouldGibOnDeath(target, dmgbits, damage))
+            {
+                ai_dbg_corpse_gib = ai_dbg_corpse_gib + 1;
+                Monster_Gib(target, attacker);
+                return damage;
+            }
+            target.health = saved_health;
+        }
     }
 
     return damage;
@@ -2357,6 +2528,110 @@ float(entity playerent, float changedflags) projectile_SendEntity =
     return TRUE;
 };
 
+// ---------------------------------------------------------------------------
+// sv_proj_test  —  spawn a MONSTER-owned projectile in front of player 1
+// ---------------------------------------------------------------------------
+// "the grunts grenade was invisible" is a report about a projectile whose owner
+// is not a client, and in single player that is the ONLY way this send path is
+// ever exercised: projectile_SendEntity hides the object from its owner, so a
+// player's own grenade/rocket/bolt is always the CSQC-predicted fake and the
+// replicated one is never seen by the only person watching.
+//
+// Reproducing it through a real grunt means winning a firefight at over 256
+// units with the 4-second grenade cooldown up - possible, but not a test.  This
+// spawns the identical entity (W_HLGrenadeSpawn, owner = world, so the hide
+// branch cannot fire) on demand, so the client half can be read off a log.
+//
+// Set to PROJ_TYPE_* PLUS ONE (so 1 is the HL grenade, type 0) - the off value
+// has to be 0, and a negative sentinel on a command line gets eaten as a switch.
+// Self-clears after one spawn.
+//
+// Both of these live in files that compile AFTER this one (the grenade in
+// shared/weapons/, SUB_Remove in the subs), so they come in by prototype.
+entity(entity thrower, vector org, vector vel, float fuse_end) W_HLGrenadeSpawn;
+void() SUB_Remove;
+
+float projtest_next;	// next throw; see the note in W_ProjTest
+float projtest_gripe;	// rate limit on the "nobody to throw it in front of" line
+
+void() W_ProjTest =
+{
+    float ty = cvar("sv_proj_test");
+    if (ty < 1)
+        return;
+    ty = ty - 1;
+
+    // A LIVE player if there is one, otherwise any player at all.  The fallback is
+    // what makes this usable from the headless harness: that client connects and
+    // its entity joins the chain, but it never presses fire, so it stays dead and
+    // non-solid forever and the strict test waited 79 seconds and threw nothing.
+    // A spectator's origin is its camera, which is exactly where a visibility test
+    // wants the object anyway.
+    entity p = player_chain_head;
+    while (p && (p.health <= 0 || p.solid == SOLID_NOT))
+        p = p.player_chain_next;
+    if (!p)
+        p = player_chain_head;
+    if (!p)
+    {
+        // SAY SO, once a second.  A silent early-out here is indistinguishable
+        // from "spawned and the client never drew it", which is precisely the
+        // question this test exists to answer - a headless run produced an empty
+        // log and the obvious reading was that the grenade had gone out and
+        // vanished, when in fact nothing had ever been thrown.
+        if (time >= projtest_gripe)
+        {
+            projtest_gripe = time + 1;
+            dprint(sprintf("[projtest] waiting: no live player (chain head %s)\n",
+                           (player_chain_head) ? player_chain_head.classname : "<none>"));
+        }
+        return;
+    }
+
+    // NOT self-clearing any more, and the reason is the harness: the headless
+    // client takes the better part of a minute to mount every VPK, download the
+    // packed csprogs and start CSQC, while the server has a live player long
+    // before that.  A one-shot therefore always fired into a world with nobody
+    // able to see it, and its 30-second fuse had expired by the time the client
+    // was ready.  Re-throwing on a timer means the test cannot lose that race.
+    // `sv_proj_test 0` stops it.
+    if (time < projtest_next)
+        return;
+    projtest_next = time + 6;
+
+    makevectors(p.angles);
+    vector org = p.origin + p.view_ofs + v_forward * 64;
+
+    entity g;
+    if (ty == PROJ_TYPE_HLGRENADE)
+    {
+        // owner = world, exactly like a monster as far as SendEntity cares
+        g = W_HLGrenadeSpawn(world, org, v_forward * 200 + '0 0 100', time + 30);
+    }
+    else
+    {
+        g = spawn();
+        g.owner      = world;
+        g.classname  = "proj_test";
+        g.movetype   = MOVETYPE_TOSS;
+        g.solid      = SOLID_NOT;
+        setmodel(g, Projectile_TypeModel(ty));
+        setsize(g, '-2 -2 -2', '2 2 2');
+        setorigin(g, org);
+        g.velocity   = v_forward * 200 + '0 0 100';
+        g.avelocity  = '180 360 120';
+        g.gravity    = Projectile_TypeGravity(ty);
+        g.proj_type  = ty;
+        g.SendEntity = projectile_SendEntity;
+        g.SendFlags  = 1;
+        g.think      = SUB_Remove;
+        g.nextthink  = time + 30;
+    }
+
+    dprint(sprintf("[projtest] type=%g owner=world model=\"%s\" modelindex=%g org=%v\n",
+                   ty, g.model, g.modelindex, g.origin));
+};
+
 void() weapon_become_solid =
 {
     // Bump SendFlags on every call regardless of phase.  During the toss
@@ -2502,6 +2777,13 @@ void() weapon_touch =
     self = saved;
     W_SlotAmmo_CopyDropToPlayer(player, pickup);
 
+    // The reserve pays out HERE, and only here.  Ammo pickups for a gun the
+    // player does not carry bank their rounds by calibre (sv_goldsrc_ammo.qc);
+    // finding the gun is what releases them.  Placed after the pickupcopy above
+    // so the weapon's own starting ammo is already in place and the drain tops up
+    // from there rather than being overwritten by it.
+    Ammo_DrainForWeapon(player, pickup.weapon);
+
     // Register weapon in the correct player slot
     if (slot == SLOT_PRIMARY)
     {
@@ -2641,6 +2923,21 @@ void() W_UtilityRefreshSlotBinding =
         self.slot_utility_equip = W_HLGrenadeEquip;
         self.slot_utility_drop = W_HLGrenadeDrop;
     }
+    else if (self.slot_utility == WEP_SATCHEL)
+    {
+        self.slot_utility_equip = W_SatchelEquip;
+        self.slot_utility_drop = W_SatchelDrop;
+    }
+    else if (self.slot_utility == WEP_TRIPMINE)
+    {
+        self.slot_utility_equip = W_TripmineEquip;
+        self.slot_utility_drop = W_TripmineDrop;
+    }
+    else if (self.slot_utility == WEP_SNARK)
+    {
+        self.slot_utility_equip = W_SnarkEquip;
+        self.slot_utility_drop = W_SnarkDrop;
+    }
     else if (self.slot_utility == WEP_SNOWBALL)
     {
         self.slot_utility_equip = W_SnowballEquip;
@@ -2703,6 +3000,14 @@ void() W_TryEquipUtility =
 
     if (self.weapon == WEP_HLGRENADE)
         W_HLGrenadeEquip();
+    else if (self.weapon == WEP_SATCHEL)
+        W_SatchelEquip();
+    else if (self.weapon == WEP_TRIPMINE)
+        W_TripmineEquip();
+    else if (self.weapon == WEP_SNARK)
+        W_SnarkEquip();
+    else if (self.weapon == WEP_HORNETGUN)
+        W_HGunEquip();
     else if (self.weapon == WEP_SNOWBALL)
         W_SnowballEquip();
     else if (self.weapon == WEP_CSHEGRENADE)
@@ -2905,6 +3210,9 @@ void() W_DropCurrentWeapon =
     if (cur == self.slot_secondary && self.slot_secondary_drop) drop_func = self.slot_secondary_drop;
     if (cur == self.slot_melee     && self.slot_melee_drop)     drop_func = self.slot_melee_drop;
     if (cur == WEP_HLGRENADE && self.ammo_hlgrenade > 0)        drop_func = W_HLGrenadeDrop;
+    if (cur == WEP_SATCHEL   && self.ammo_satchel > 0)          drop_func = W_SatchelDrop;
+    if (cur == WEP_TRIPMINE  && self.ammo_tripmine > 0)         drop_func = W_TripmineDrop;
+    if (cur == WEP_SNARK     && self.ammo_snark > 0)            drop_func = W_SnarkDrop;
     if (cur == WEP_SNOWBALL  && self.ammo_snowball > 0)         drop_func = W_SnowballDrop;
     if (cur == WEP_CSHEGRENADE && self.ammo_cshegrenade > 0)    drop_func = W_CSHEGrenadeDrop;
     if (cur == WEP_CSFLASHBANG && self.ammo_csflashbang > 0)    drop_func = W_CSFlashbangDrop;
@@ -3110,7 +3418,7 @@ void() W_DropAllWeaponsOnDeath =
     float drop_mode = cvar("mp_dropweapons");
     if (drop_mode <= 0)
         return;
-    float slot_max = (drop_mode == 1) ? 2 : 9;
+    float slot_max = (drop_mode == 1) ? 2 : 12;
 
     for (slot_idx = 0; slot_idx < slot_max; slot_idx++)
     {
@@ -3127,6 +3435,9 @@ void() W_DropAllWeaponsOnDeath =
             else if (slot_wep == WEP_CSHEGRENADE && self.ammo_cshegrenade > 0) drop_func = W_CSHEGrenadeDrop;
             else if (slot_wep == WEP_CSFLASHBANG && self.ammo_csflashbang > 0) drop_func = W_CSFlashbangDrop;
             else if (slot_wep == WEP_CSSMOKEGRENADE && self.ammo_cssmokegrenade > 0) drop_func = W_CSSmokeGrenadeDrop;
+            else if (slot_wep == WEP_SATCHEL && self.ammo_satchel > 0) drop_func = W_SatchelDrop;
+            else if (slot_wep == WEP_TRIPMINE && self.ammo_tripmine > 0) drop_func = W_TripmineDrop;
+            else if (slot_wep == WEP_SNARK && self.ammo_snark > 0) drop_func = W_SnarkDrop;
         }
         else if (slot_idx == 4)
         {
@@ -3152,6 +3463,24 @@ void() W_DropAllWeaponsOnDeath =
         {
             if (self.slot_utility != WEP_CSSMOKEGRENADE && self.ammo_cssmokegrenade > 0)
             { slot_wep = WEP_CSSMOKEGRENADE; drop_func = W_CSSmokeGrenadeDrop; }
+        }
+        // The HL equipment carried in the OTHER utility pockets, same shape as
+        // slots 4-8 above: one slot each so a death drops every pouch, not
+        // just whichever one happened to be selected.
+        else if (slot_idx == 9)
+        {
+            if (self.slot_utility != WEP_SATCHEL && self.ammo_satchel > 0)
+            { slot_wep = WEP_SATCHEL; drop_func = W_SatchelDrop; }
+        }
+        else if (slot_idx == 10)
+        {
+            if (self.slot_utility != WEP_TRIPMINE && self.ammo_tripmine > 0)
+            { slot_wep = WEP_TRIPMINE; drop_func = W_TripmineDrop; }
+        }
+        else if (slot_idx == 11)
+        {
+            if (self.slot_utility != WEP_SNARK && self.ammo_snark > 0)
+            { slot_wep = WEP_SNARK; drop_func = W_SnarkDrop; }
         }
 
         if (!slot_wep || !drop_func)
@@ -3429,6 +3758,10 @@ void() W_WeaponFrame =
                                  || self.weapon == WEP_KATANA
                                  || self.weapon == WEP_BUTTERFLY
                                  || self.weapon == WEP_HLGRENADE
+                                 || self.weapon == WEP_SATCHEL
+                                 || self.weapon == WEP_TRIPMINE
+                                 || self.weapon == WEP_SNARK
+                                 || self.weapon == WEP_HORNETGUN
                                  || self.weapon == WEP_CSHEGRENADE
                                  || self.weapon == WEP_CSFLASHBANG
                                  || self.weapon == WEP_CSSMOKEGRENADE

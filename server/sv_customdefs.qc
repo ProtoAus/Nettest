@@ -204,6 +204,40 @@ float navdbg_proxies_exist;
 .float  delay;      // light / trigger delayed-use timer
 .string wad;        // worldspawn texture wad path(s)
 
+// ---- map format latch ----
+// TRUE when the loaded worldmodel is a GoldSrc (Half-Life / Sven Co-op)
+// BSP30 rather than one of our own ericw-tools maps.  Entity code that has
+// to interpret mapper-authored spawnflags needs this, because our FGD and
+// Hammer's disagree about what several bits mean (see Door_NormaliseFlags
+// in sv_doors.qc).
+//
+// The engine publishes the worldmodel's source game as serverinfo star key
+// "*bspversion" in SV_SpawnServer (engine/server/sv_init.c, `fromgame ==
+// fg_halflife` -> "30") BEFORE it runs PR_SpawnInitialEntities, so this is
+// readable from inside every spawn function.
+//
+// NOT usable as a detector: worldspawn's "wad" key.  ericw-tools' qbsp
+// passes it straight through into Quake BSPs too (WriteEntitiesToString
+// strips only _tb_*), so our own TrenchBroom maps carry it as well.
+//
+// Cached because infokey() allocates a tempstring per call and door /
+// button / trigger spawn functions would each pay for it.  0 = not yet
+// probed, 1 = GoldSrc, -1 = native.  Reset per map in worldspawn()
+// (sv_main.qc) — FTE does not reload progs between maps.
+float sv_map_goldsrc_cache;
+
+float() Map_IsGoldSrc =
+{
+    if (!sv_map_goldsrc_cache)
+    {
+        if (stof(infokey(world, "*bspversion")) == 30)
+            sv_map_goldsrc_cache = 1;
+        else
+            sv_map_goldsrc_cache = -1;
+    }
+    return (sv_map_goldsrc_cache > 0);
+};
+
 // ---- mover / door / button fields ----
 .vector pos1;           // closed/bottom position
 .vector pos2;           // open/top position
@@ -218,9 +252,57 @@ float navdbg_proxies_exist;
 .float  button_state;   // BUTTON_STATE_*
 .float  door_state;     // DOOR_STATE_*
 .float  door_mark;      // flood-fill serial for door group activation
+// Set at door spawn when the mapper gave the door a `master` key.  Read by
+// sv_brushsync.qc (which compiles before sv_doors.qc) to suppress CSQC +use
+// prediction: a multisource's locked/unlocked state is dynamic and isn't
+// networked, so the client cannot know whether the press will be accepted.
+.float  door_has_master;
+// TRUE when a player's direct +use may open this door.  Half-Life grants that
+// only with SF_DOOR_USE_ONLY (256); native maps stay permissive.  Computed at
+// spawn, read by door_use / rotdoor_use, SV_UseTarget and the predict_block
+// byte — declared here because SV_UseTarget and brushsync both compile before
+// the door files.
+.float  door_player_usable;
+
+// Same shape, same reason: monsters carry a .use purely so trigger chains pass
+// through them, and SV_UseTarget (which compiles before sv_monsters.qc) has to
+// be able to tell that apart from a monster a player may genuinely interact
+// with.  Off for every monster today; the ally work turns it on for the classes
+// where +use means "follow me".
+.float  monster_player_usable;
 
 entity activator;       // entity that triggered the current use/touch
 float sv_use_is_player_direct;  // TRUE only during SV_PlayerTryUse
+
+// Player-vs-monster .touch dispatches, counted so "the roach is not squished"
+// can be told apart from "the roach was never touched".  Before the monster
+// branch was added to SV_CheckTouchTriggers this was structurally always 0:
+// the mod's custom pmove means the engine emits no touch pairs for players.
+float sv_dbg_monster_touch;
+
+// scripted_sentence speaker binding, counted at spawn in sv_goldsrc_compat.qc
+// and reported by the AI status line in sv_ai_talk.qc.  Here rather than beside
+// either of them because sv_ai_talk.qc compiles at 202 and the spawn function at
+// 209, and QC globals cannot be forward-declared.
+float sv_dbg_sent_total;
+float sv_dbg_sent_named;
+
+// Set by the GoldSrc `game_end` entity (sv_goldsrc_compat.qc) to request an
+// immediate map end.  Consumed by the round-phase machine in sv_main.qc, which
+// owns round_phase / map_restart_time and compiles much later — routing the
+// request through a flag avoids a forward declaration of that whole state.
+float sv_game_end_requested;
+
+// Packed trigger_camera binding + presentation bits for the owning client.
+// See STAT_CUTSCENE / CUTSCENE_* in shared/sh_customdefs.qc.  Declared here so
+// the clientstat() registration in sv_main.qc resolves it regardless of where
+// sv_trigger_camera.qc lands in the compile order.
+.float sv_cutscene_stat;
+
+// trigger_camera "Player Invulnerable" (spawnflag 256).  Declared this early
+// because the damage chokepoint that reads it, W_CanDamageTarget in
+// sv_weapons.qc, compiles long before sv_trigger_camera.qc which sets it.
+.float cutscene_immune;
 
 // Damage callbacks (set on any entity that can take damage)
 .void() on_damaged;     // called when health reduced but still > 0
@@ -507,6 +589,27 @@ float(entity p) SV_PlayerHasNetchan =
 .float  bot_enemy_time;    // last time the enemy was visible
 .vector bot_enemy_lastpos; // last-known enemy position
 .float  bot_repath_time;   // next allowed A* re-path
+.float  bot_repath_fails;  // consecutive failed searches -> backoff (see Bot_Navigate)
+
+// Monster path storage.  Monsters cannot use bot_pathnodes[] — that is indexed by
+// edict slot and only players have reserved ones — so they allocate from the nav
+// path pool instead.  ai_pathslot is slot+1 so that 0 means "holds nothing", which
+// makes a released or never-allocated entity indistinguishable and release
+// idempotent.  ai_path_serial pins the path to the graph build it was computed
+// against: node indices do not survive a rebuild.
+.float  ai_pathslot;
+.float  ai_path_len;
+.float  ai_path_cur;
+.float  ai_path_serial;
+// Set by SV_OnEntityNoSpawnFunction on any classname we have no spawn function
+// for.  Those entities survive as inert relays so trigger chains routed THROUGH
+// them still reach the far side — but nothing ever fires them on its own, so
+// anything that waits for one to report in waits forever.  multisource reads this.
+.float  gs_unimplemented;
+
+.float  nav_req_slot;      // queued path request, slot+1 (0 = none). Dedup key:
+                           // a re-request overwrites its own entry instead of
+                           // appending, so N monsters can never queue more than N.
 .vector bot_aim;           // smoothed aim angles
 .vector bot_aimoff;        // slow human-like aim error offset (deg)
 .float  bot_aimoff_time;   // when to re-roll bot_aimoff
@@ -622,3 +725,73 @@ void(entity removing) player_chain_remove =
 	removing.player_chain_next = world;
 	removing.player_chain_prev = world;
 };
+
+// ---------------------------------------------------------------------------
+// GoldSrc useType constants.
+//
+// These live here rather than in sv_doors.qc (where the trigger suite that
+// consumes them starts) because sv_breakable.qc compiles well before that and
+// needs to name USE_TOGGLE when it fires its chain through SUB_UseTargets.
+//
+// NOTE these are NOT the same numbering as a mapper's `triggerstate` key --
+// Sven transposes 2 and 3.  Always convert with
+// GoldSrc_TriggerStateToUseType() (sv_triggers.qc); never assign a raw
+// triggerstate value into one of these.
+// ---------------------------------------------------------------------------
+const float USE_OFF    = 0;
+const float USE_ON     = 1;
+const float USE_SET    = 2;
+const float USE_TOGGLE = 3;
+
+// ---------------------------------------------------------------------------
+// GoldSrc game_text keys.
+//
+// Declared here (compile position 15) because the ED_ParseUnknownEpair hook
+// that harvests some of them lives in sv_multi_manager.qc at position 99.
+//
+// `effect`, `x` and `y` are NOT in this list on purpose — see the harvest
+// block in sv_multi_manager.qc.  `effect` cannot be a field name at all (it
+// collides with the effect() builtin), and x/y are too generic to claim.
+// Those three arrive as gt_effect / gt_x / gt_y below.
+//
+// Also not here, because they already bind to existing fields:
+//   color     -> engine .vector color (sv_defs.qc)
+//   holdtime  -> sv_env_hud.qc
+//   fadein / fadeout -> sv_ambient_generic.qc
+// ---------------------------------------------------------------------------
+// scripted_sequence / scripted_sentence's speaker key, here for the same reason
+// the game_text keys are: ED_ParseUnknownEpair (sv_multi_manager.qc, position
+// 112) writes it, and sv_scripted.qc - where the rest of the m_isz* keys live -
+// compiles at 208.  Lowercase so the case-folding fallback binds Hammer's
+// "m_iszEntity" too; scripted_sentence's bare "entity" spelling is harvested by
+// hand in that same hook, since `entity` cannot be a QC field name.
+.string m_iszentity;    // monster to claim/speak: a targetname, or a classname
+
+.float  gt_effect;      // 0 fade in/out, 1 credits, 2 typewriter
+.float  gt_x;           // 0..1 screen fraction, -1 = centre
+.float  gt_y;
+.float  channel;        // 1..4; HL keeps each channel independent
+.vector color2;         // secondary colour (effects 1 and 2)
+.float  fxtime;         // per-character time for the typewriter effect
+// Re-declared from sv_env_hud.qc (position 112) so files that compile earlier
+// can read it.  Identical re-decls share storage in QC.
+.float  holdtime;
+
+// ---------------------------------------------------------------------------
+// game_player_equip item list.
+//
+// The mapper writes raw keyvalues whose KEY is a classname to give and whose
+// VALUE is a quantity ("weapon_crowbar" "1").  Those can never be QC fields —
+// a `.string weapon_crowbar` would collide with the weapon_crowbar() spawn
+// function — so ED_ParseUnknownEpair harvests them onto a chain of child
+// entities hanging off the game_player_equip.
+// ---------------------------------------------------------------------------
+.entity gpe_first_item;   // on the game_player_equip: head of the item chain
+.entity gpe_next_item;    // on each gpe_item: next in chain
+// netname holds the classname to give, count holds the quantity.
+
+// Shared by func_vehicle (track width, for ground-follow roll sampling) and
+// env_laser (Sven's beam-width key is `width`, not env_beam's `BoltWidth`).
+// Declared here because sv_env_laser.qc compiles at 118 and sv_func_vehicle.qc
+// at 132 — the laser needs it first.
+.float  width;

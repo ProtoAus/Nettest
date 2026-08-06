@@ -35,6 +35,13 @@ const float TRIGGER_HURT_NO_CLIENTS  = 8;
 const float TRIGGER_HURT_CLIENT_ONLY = 32;
 
 // Per-victim cooldown stamp — game-time of the next hit eligible.
+// Sven's damage-type bitfield (0 GENERIC, 1 CRUSH, 2 BULLET, ... 4194304
+// SLOWFREEZE).  DECLARED ONLY: W_ApplyDamage has no damage-type channel, so
+// nothing can act on it yet.  36 trigger_hurts across the target maps set it;
+// declaring the field just stops the key being silently dropped, and makes it
+// visible in an entity dump for whoever wires up damage types later.
+.float damagetype;
+
 .float thurt_next_hit;
 
 // Per-trigger active flag (cleared while START_OFF, toggled by .use)
@@ -87,7 +94,10 @@ void() trigger_hurt_touch =
 
     if (!self.thurt_target_once_done)
     {
-        Trigger_UseTargets(self, other);
+        // Targetx keys (killtarget / delay) are dropped by the two-arg
+        // walker.  No map in the current corpus sets either on a
+        // trigger_hurt, but HL fires this chain through SUB_UseTargets.
+        SUB_UseTargets(self, other, USE_TOGGLE);
         if (self.spawnflags & TRIGGER_HURT_TARGET_ONCE)
             self.thurt_target_once_done = 1;
     }

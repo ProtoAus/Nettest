@@ -127,6 +127,15 @@ const float WEP_CFSL8            = 69;   // CF SL8 (semi-auto marksman rifle, pr
 // of all phys props in a radius, release blasts them outward.
 const float WEP_GRAVITYGUN       = 70;   // Gravity Gun (primary, physics manipulator)
 
+// The four Half-Life equipment weapons, ported from the SDK (satchel.cpp,
+// tripmine.cpp, squeakgrenade.cpp, hornetgun.cpp).  All four use GoldSrc
+// sequence-indexed viewmodels straight off the valve mount - no converted
+// IDPO copies exist or are needed.
+const float WEP_SATCHEL          = 71;   // Satchel charge (utility, throw + radio detonate)
+const float WEP_TRIPMINE         = 72;   // Tripmine (utility, wall-mounted laser mine)
+const float WEP_SNARK            = 73;   // Snark (utility, live hunting grenade)
+const float WEP_HORNETGUN        = 74;   // Hornet gun / hivehand (primary, self-regenerating ammo)
+
 // --- Slot IDs ---
 const float SLOT_NONE      = 0;
 const float SLOT_PRIMARY   = 1;
@@ -274,7 +283,7 @@ const float CSQC_EVENT_CLEANMODELS       = 33;       // server-console "cleanmod
 const float CSQC_EVENT_CLEANDECALS       = 34;       // server-console "cleandecals" trigger — wipes bullet holes, scorch decals, muzzle smoke, and CS smoke-grenade puffs client-side.
 const float CSQC_EVENT_SPRAY             = 35;       // player spray decal spawn (impulse 19). Payload: spray_id short, owner entnum byte, pos 3×coord, normal 3×coord, name string. Multicast PVS.
 const float CSQC_EVENT_SPRAY_REMOVE      = 36;       // FIFO eviction of a player's oldest spray when sv_spraymax is hit. Payload: spray_id short. Multicast ALL so any client that allocated the slot can free it.
-const float CSQC_EVENT_PLAYER_FLINCH     = 37;       // visual flinch reaction when a player takes damage.  Payload: 1 byte victim slot, 1 byte hitgroup (HITGROUP_HEAD/GENERIC).  Server multicasts on every non-fatal player hit; the attacker also predicts locally via CSQC_SendHitclaim so they see flinch instantly without waiting for the server round-trip.
+const float CSQC_EVENT_PLAYER_FLINCH     = 37;       // visual flinch reaction when a player takes damage.  Payload: 1 byte victim slot, 1 byte hitgroup (HITGROUP_HEAD/GENERIC), 1 SHORT attacker entnum (short because the attacker can be a monster, whose edict number passes 255).  Server multicasts on every non-fatal player hit; the attacker also predicts locally via CSQC_SendHitclaim so they see flinch instantly without waiting for the server round-trip.
 const float CSQC_EVENT_ENV_FADE          = 38;       // env_fade HUD overlay. Payload: rgb bytes, alpha byte, duration float, hold float, flags byte.
 const float CSQC_EVENT_ENV_MESSAGE       = 39;       // env_message title text. Payload: message/title key string; client resolves titles.txt.
 const float CSQC_EVENT_DAMAGE_VIEWKICK   = 40;       // private victim camera punch. Payload: signed short pitch*100, signed short roll*100.
@@ -287,7 +296,14 @@ const float CSQC_EVENT_NAV_GRAPH         = 46;       // debug: bot nav-graph nod
 const float CSQC_EVENT_BOT_DEBUG         = 47;       // debug: per-bot AI state. Payload: byte n, then per bot: byte entnum + 3×coord origin + byte state + byte enemy entnum + byte weapon + byte mag. Gated on sv_debug_nav; multicast ALL; cl_navdebug draws labels + enemy lines.
 const float CSQC_EVENT_KILLCAM_TRACK     = 48;       // server-side killcam: the KILLER's recorded camera track, reliably unicast to the victim on death so the rewind shows the killer's out-of-PVS approach. Payload: killer slot byte + frame_count byte, then per frame (oldest→newest): short delta_ms (kill_time - frame_time) + 3×coord origin + 2×WriteAngle (pitch, yaw) + weaponstate byte + weapon_id byte.
 const float CSQC_EVENT_PLAYER_PAINT      = 49;       // player body paint (sv_paint.qc -> cl_paint.qc). Sub-byte: 0 = camo set (slot byte + amt byte + wall-texture string), 1 = paintball splat (slot byte + r g b bytes + seed short), 2 = clear all (slot byte, respawn wash). MULTICAST_ALL (persistent visual state must reach out-of-PVS clients too).
+const float CSQC_EVENT_VOTE_START        = 51;       // trigger_vote opened. Payload: string question + string yes-label + string no-label + byte duration_secs + byte pass_percent. MULTICAST_ALL reliable — a client that misses this shows no prompt and can never answer.
+const float CSQC_EVENT_VOTE_UPDATE       = 52;       // running tally while a vote is live. Payload: byte yes + byte no + byte eligible. Sent on every answer, not per-frame.
+const float CSQC_EVENT_VOTE_END          = 53;       // vote resolved. Payload: byte outcome (0 = failed, 1 = passed, 2 = nobody voted). Closes the prompt.
+const float CSQC_EVENT_GAME_TEXT         = 54;       // GoldSrc game_text. Unlike CSQC_EVENT_ENV_MESSAGE (which ships a titles.txt KEY and resolves styling client-side), game_text carries its styling inline on the map entity, so the resolved values travel on the wire. Payload: byte channel (1..4) + 2×coord x/y (-1 = auto-centre) + byte effect + 3 bytes colour + 3 bytes colour2 + 4×float fadein/fadeout/holdtime/fxtime + string message.
 const float CSQC_EVENT_PROP_DECLOAK      = 50;       // Prop Hunt: a disguised hider died — smoke poof at the disguise hull centre as the real player model is revealed + ragdolled (server-side). Payload: pos 3×coord + hull-height byte (poof scale). MULTICAST_PVS.
+const float CSQC_EVENT_MONSTER_MODELS    = 55;       // the set of modelindexes that belong to AI monsters, so the SHOOTER's own predicted bullet trace can stop on a monster instead of passing through it (see CSQC_Monster_OverrideTrace). Payload: byte n, then n×short modelindex. MULTICAST_ALL reliable, sent once the map's monsters are built and again if a later spawn introduces a new model.
+const float CSQC_EVENT_MONSTER_GIBS      = 56;       // a monster body torn apart.  Payload: 3×coord origin, 3×coord direction, byte count, short damage-scale, byte gibset (0 = human hgibs.mdl, 1 = alien agibs.mdl).  The gib set is chosen server-side from the monster's CLASS_* (combat.cpp:256-285) because CSQC has no idea what classification a replicated monster carries.
+const float CSQC_EVENT_SHOCKWAVE         = 57;       // GoldSrc TE_BEAMCYLINDER / TE_IMPLOSION, which this engine has neither of — an expanding (or imploding) horizontal ring of sprites/shockwave.spr.  Payload: 3×coord centre, short radius, byte life (1/20 s), byte width, 3 bytes colour, byte kind (0 expand / 1 implode).  MULTICAST_PHS, matching HL's MSG_PAS.  See shared/sh_shockwave.qc.
 
 // --- Kill-feed causes (byte payload of CSQC_EVENT_KILLFEED) ---
 const float KILL_CAUSE_WEAPON       = 0;
@@ -484,7 +500,26 @@ const float BRUSH_TYPE_DOOR   = 1;
 const float BRUSH_TYPE_BUTTON = 2;
 const float BRUSH_TYPE_CONVEYOR = 4;   // ships movedir + speed in brushsync wire
 const float BRUSH_TYPE_TRAIN    = 5;   // func_train / func_tracktrain — CSQC predicts platform carry + geometry push via PM_CheckMovingPushers train branch
+const float BRUSH_TYPE_CAMTARGET = 7;  // trigger_cameratarget — clickable during a trigger_camera
+                                       // cutscene with the Mouse Cursor flag.  CSQC needs it as a real
+                                       // brush entity so the cursor ray can traceline against it.
+                                       // (6 is the last of the original run; 3 is a retired id, left
+                                       // unused deliberately rather than recycled.)
 const float BRUSH_TYPE_VEHICLE  = 6;   // func_vehicle — player-driven free-steer brush; rides the TRAIN carry branch, ships avelocity_z (yaw rate) so live steering extrapolates via the avelocity path (not snap-differentiation)
+
+// TRUE for every brush class that runs the func_breakable damage / break
+// pipeline.  func_pushable (sv_func_pushable.qc) reuses that pipeline whole —
+// GoldSrc literally derives CPushable from CBreakable — but keeps its own
+// classname so it can be told apart for physics and round-reset.  Every gate
+// that used to compare against the "func_breakable" string literal asks this
+// instead, otherwise a breakable crate would be immune to explosions, immune to
+// a one-hit crowbar, and report no material for impact FX.
+// Defined here (sh_weapons.qc, early in BOTH progs) so it is in scope for the
+// weapon files, sv_weapons.qc and sv_brushsync.qc alike.
+float(entity e) Brush_IsBreakableClass =
+{
+    return (e.classname == "func_breakable" || e.classname == "func_pushable");
+};
 
 // --- Door/button state (shared between server and client) ---
 const float MOVER_STATE_BOTTOM = 0;
@@ -517,6 +552,12 @@ const float PLAYER_ATTACKANIM_MELEE = 2;
 // utility slot before the individual utility weapon files are compiled.
 .float ammo_hlgrenade;
 .float ammo_snowball;
+// Same reason: sv_weapons.qc drives the utility slot at line 27 of
+// sv_progs.src, long before shared/weapons/sh_wpn_hl*.qc at 57-60.
+.float ammo_satchel;
+.float ammo_tripmine;
+.float ammo_snark;
+.float ammo_hornet;
 .float ammo_cshegrenade;
 .float ammo_csflashbang;
 .float ammo_cssmokegrenade;

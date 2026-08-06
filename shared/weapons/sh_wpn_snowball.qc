@@ -145,6 +145,9 @@ float(float wep) W_UtilityWeaponSelectable =
         || wep == WEP_CSHEGRENADE
         || wep == WEP_CSFLASHBANG
         || wep == WEP_CSSMOKEGRENADE
+        || wep == WEP_SATCHEL
+        || wep == WEP_TRIPMINE
+        || wep == WEP_SNARK
         || wep == WEP_CFC4);
 };
 
@@ -156,6 +159,9 @@ float(float wep) W_UtilityWeaponPickup =
         || wep == WEP_CSHEGRENADE
         || wep == WEP_CSFLASHBANG
         || wep == WEP_CSSMOKEGRENADE
+        || wep == WEP_SATCHEL
+        || wep == WEP_TRIPMINE
+        || wep == WEP_SNARK
         || wep == WEP_CFC4);
 };
 
@@ -173,6 +179,12 @@ float(entity player, float wep) W_UtilityEntityHasWeapon =
         return player.ammo_csflashbang > 0;
     if (wep == WEP_CSSMOKEGRENADE)
         return player.ammo_cssmokegrenade > 0;
+    if (wep == WEP_SATCHEL)
+        return player.ammo_satchel > 0;
+    if (wep == WEP_TRIPMINE)
+        return player.ammo_tripmine > 0;
+    if (wep == WEP_SNARK)
+        return player.ammo_snark > 0;
     if (wep == WEP_CFC4)
         return player.ammo_cfc4 > 0;
     if (wep == WEP_SLINGSHOT)
@@ -191,71 +203,58 @@ float(float wep) W_UtilityPlayerHasWeapon =
 // different action from throw-grenade.  C4 still uses the slot_utility
 // plumbing internally for equip/drop/pickup, but the impulse-4 cycle
 // skips over it.
+// The canonical utility ring.  This used to be five hand-written branches of
+// five lines each, all doing the identical thing: start one past from_wep,
+// walk forward, wrap, and accept from_wep itself last.  Three more utilities
+// would have made it eight branches of eight - so it is a table walk now.
+// The order and the semantics are unchanged for the original five; the HL
+// equipment is appended after them, which is where a player expects it.
+const float UTILRING_COUNT = 8;
+float(float idx) W_UtilityRingAt =
+{
+    if (idx == 0) return WEP_HLGRENADE;
+    if (idx == 1) return WEP_SNOWBALL;
+    if (idx == 2) return WEP_CSHEGRENADE;
+    if (idx == 3) return WEP_CSFLASHBANG;
+    if (idx == 4) return WEP_CSSMOKEGRENADE;
+    if (idx == 5) return WEP_SATCHEL;
+    if (idx == 6) return WEP_TRIPMINE;
+    return WEP_SNARK;
+};
+
 float(float from_wep) W_UtilityNextCarried =
 {
-    if (from_wep == WEP_HLGRENADE)
+    float start = -1;
+    float i;
+    float w;
+
+    for (i = 0; i < UTILRING_COUNT; i = i + 1)
+        if (W_UtilityRingAt(i) == from_wep) { start = i; break; }
+
+    if (start >= 0)
     {
-        if (self.ammo_snowball > 0) return WEP_SNOWBALL;
-        if (self.ammo_cshegrenade > 0) return WEP_CSHEGRENADE;
-        if (self.ammo_csflashbang > 0) return WEP_CSFLASHBANG;
-        if (self.ammo_cssmokegrenade > 0) return WEP_CSSMOKEGRENADE;
-        if (self.ammo_hlgrenade > 0) return WEP_HLGRENADE;
+        // Inclusive of from_wep on the final step: holding only grenades and
+        // throwing one still leaves you holding grenades.
+        for (i = 1; i <= UTILRING_COUNT; i = i + 1)
+        {
+            w = W_UtilityRingAt((start + i) % UTILRING_COUNT);
+            if (W_UtilityPlayerHasWeapon(w)) return w;
+        }
         return WEP_NONE;
     }
 
-    if (from_wep == WEP_SNOWBALL)
-    {
-        if (self.ammo_cshegrenade > 0) return WEP_CSHEGRENADE;
-        if (self.ammo_csflashbang > 0) return WEP_CSFLASHBANG;
-        if (self.ammo_cssmokegrenade > 0) return WEP_CSSMOKEGRENADE;
-        if (self.ammo_hlgrenade > 0) return WEP_HLGRENADE;
-        if (self.ammo_snowball > 0) return WEP_SNOWBALL;
-        return WEP_NONE;
-    }
-
-    if (from_wep == WEP_CSHEGRENADE)
-    {
-        if (self.ammo_csflashbang > 0) return WEP_CSFLASHBANG;
-        if (self.ammo_cssmokegrenade > 0) return WEP_CSSMOKEGRENADE;
-        if (self.ammo_hlgrenade > 0) return WEP_HLGRENADE;
-        if (self.ammo_snowball > 0) return WEP_SNOWBALL;
-        if (self.ammo_cshegrenade > 0) return WEP_CSHEGRENADE;
-        return WEP_NONE;
-    }
-
-    if (from_wep == WEP_CSFLASHBANG)
-    {
-        if (self.ammo_cssmokegrenade > 0) return WEP_CSSMOKEGRENADE;
-        if (self.ammo_hlgrenade > 0) return WEP_HLGRENADE;
-        if (self.ammo_snowball > 0) return WEP_SNOWBALL;
-        if (self.ammo_cshegrenade > 0) return WEP_CSHEGRENADE;
-        if (self.ammo_csflashbang > 0) return WEP_CSFLASHBANG;
-        return WEP_NONE;
-    }
-
-    if (from_wep == WEP_CSSMOKEGRENADE)
-    {
-        if (self.ammo_hlgrenade > 0) return WEP_HLGRENADE;
-        if (self.ammo_snowball > 0) return WEP_SNOWBALL;
-        if (self.ammo_cshegrenade > 0) return WEP_CSHEGRENADE;
-        if (self.ammo_csflashbang > 0) return WEP_CSFLASHBANG;
-        if (self.ammo_cssmokegrenade > 0) return WEP_CSSMOKEGRENADE;
-        return WEP_NONE;
-    }
-
-    // CFC4 was here previously — now lives on impulse 8.  If the cycle
-    // is queried with from_wep == WEP_CFC4, fall through to "any" below.
-
+    // CFC4 lands here — it lives on impulse 8, not in this cycle — as does
+    // any non-utility, and both want "whatever is carried".
     if (W_UtilityWeaponSelectable(self.slot_utility)
         && W_UtilityPlayerHasWeapon(self.slot_utility)
         && self.slot_utility != WEP_CFC4)
         return self.slot_utility;
 
-    if (self.ammo_hlgrenade > 0) return WEP_HLGRENADE;
-    if (self.ammo_snowball > 0) return WEP_SNOWBALL;
-    if (self.ammo_cshegrenade > 0) return WEP_CSHEGRENADE;
-    if (self.ammo_csflashbang > 0) return WEP_CSFLASHBANG;
-    if (self.ammo_cssmokegrenade > 0) return WEP_CSSMOKEGRENADE;
+    for (i = 0; i < UTILRING_COUNT; i = i + 1)
+    {
+        w = W_UtilityRingAt(i);
+        if (W_UtilityPlayerHasWeapon(w)) return w;
+    }
     return WEP_NONE;
 };
 
@@ -264,35 +263,28 @@ float(float spent_wep) W_UtilityNextAfterSpent =
     return W_UtilityNextCarried(spent_wep);
 };
 
-// Walk the canonical utility order [HL → SNOWBALL → CSHE → CSFLASH →
-// CSSMOKE] in `dir` direction (+1 next, −1 prev) starting from
-// `current`, returning the next carried utility in that direction or
-// WEP_NONE when there isn't one.  Non-wrapping by design: once the
-// caller exhausts utilities in the requested direction, the cycle
-// falls through to the next slot (primary on +1, melee on -1) instead
+// Walk the canonical utility order (W_UtilityRingAt: HL → SNOWBALL → CSHE →
+// CSFLASH → CSSMOKE → SATCHEL → TRIPMINE → SNARK) in `dir` direction (+1
+// next, −1 prev) starting from `current`, returning the next carried utility
+// in that direction or WEP_NONE when there isn't one.  Non-wrapping by
+// design: once the caller exhausts utilities in the requested direction, the
+// cycle falls through to the next slot (primary on +1, melee on -1) instead
 // of looping forever among the carried grenades.
 float(float current, float dir) W_UtilityCycleCarried =
 {
-    float order[5] = {
-        WEP_HLGRENADE,
-        WEP_SNOWBALL,
-        WEP_CSHEGRENADE,
-        WEP_CSFLASHBANG,
-        WEP_CSSMOKEGRENADE
-    };
-    float i, start = -1;
-    for (i = 0; i < 5; i++)
-        if (order[i] == current) { start = i; break; }
+    float i, n, start = -1;
+    for (i = 0; i < UTILRING_COUNT; i++)
+        if (W_UtilityRingAt(i) == current) { start = i; break; }
     if (start < 0)
         return WEP_NONE;        // current isn't a utility — caller falls through
 
-    for (i = 1; i < 5; i++)
+    for (i = 1; i < UTILRING_COUNT; i++)
     {
-        float n = start + i * dir;
-        if (n < 0 || n >= 5)
+        n = start + i * dir;
+        if (n < 0 || n >= UTILRING_COUNT)
             return WEP_NONE;    // walked off the end — exit the section
-        if (W_UtilityPlayerHasWeapon(order[n]))
-            return order[n];
+        if (W_UtilityPlayerHasWeapon(W_UtilityRingAt(n)))
+            return W_UtilityRingAt(n);
     }
     return WEP_NONE;
 };

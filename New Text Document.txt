@@ -1,0 +1,85 @@
+H1 report — Intel N100 / UHD Gen12
+Benchmark location
+Map: fy_killzone, all 66 prop_physics present.
+Origin: setpos 20 320 211 — the §3 reference viewpoint, re-issued before every sample per §2.7.
+Angle: ⚠️ uncontrolled — could not be set. cl_setangles is absent from the shipped quakers_csprogs.pk3 (mid-branch build: has carryrot/sh_matsounds, lacks cl_setangles/r_props_shadowdist), and §2.3 establishes setpos angles are discarded. Angle is whatever the spawn left.
+Spawned in via cmd jointeam red 0 — not sampled from team select, whose camera drifts in position and silently corrupts samples (see Methodology).
+
+Platform
+
+OS:            Windows 11 Education 26200, windowed 1024x768, focused throughout
+GL_VENDOR:     Intel
+GL_RENDERER:   Intel(R) UHD Graphics
+GL_VERSION:    4.6.0 - Build 31.0.101.4502
+Engine:        LOCAL BUILD, gcc 16.1.0, make m-rel FTE_TARGET=win64
+               engine-patches @ c9305a2 (Patch 123)
+               NOT the shipped exe -- it has no r_speeds_dump at all
+Build target:  Windows-native (wgl, no FTE_SDL) -> sys_framepacing exists
+CONFIG A — r_renderscale 2, r_shadows 2 (shipped defaults)
+
+run 1: Total refresh 18066.74 us   | Draw Calls 364  Draw Indicies 4532940
+run 2: Total refresh 19257.49 us   | Draw Calls 363  Draw Indicies 4532835
+run 3: Total refresh 18184.27 us   | Draw Calls 364  Draw Indicies 4532919
+mean:  18502.83 us  -> 54.04 fps      spread 6.6%
+CONFIG B — r_renderscale 1, r_shadows 2
+
+run 1: Total refresh 10817.52 us   | Draw Calls 362  Draw Indicies 4532715
+run 2: Total refresh 10733.81 us   | Draw Calls 363  Draw Indicies 4532820
+run 3: Total refresh 11475.48 us   | Draw Calls 363  Draw Indicies 4532834
+mean:  11008.94 us  -> 90.83 fps      spread 6.9%
+Both spreads sit below the 7–18% drift floor §2.5 documents, and the effect is ~10× the noise band.
+
+1. H1 verdict: hard GPU-bound. Desktop conclusions invert.
+Renderscale delta: 7493.89 µs (18502.83 → 11008.94).
+
+75× the ~100 µs CPU-bound threshold in §4.
+510× the reference desktop's 14.7 µs.
+§4's prediction that "on a 24-EU UHD this prediction is expected to fail" is confirmed.
+
+And this run identifies the mechanism directly rather than by inference. Comparing the A2/B2 tables, the delta does not land in CPU work — it lands in the fence:
+
+bucket	A (rs2)	B (rs1)	delta	share of total delta
+Frame pacing	10013.96	2508.72	7505.24	88%
+QC UpdateView	7849.69	6994.40	855.29	10%
+Shadow generation	4503.01	4066.29	436.72	5%
+Opaque Batches	1269.98	1135.01	134.97	2%
+Postproc/resolve	115.75	9.82	105.93	1%
+Present	603.18	562.46	40.72	<1%
+Frame pacing at sys_framepacing_drain 2 is the CPU blocking on the N−1 GPU fence. Quadrupling the pixels quadrupled that wait (2.5 ms → 10.0 ms) while CPU-side buckets barely moved. This is GPU backpressure measured, not deduced — and it sidesteps §2.4's limitation, since the pacing bucket captures the stall that child buckets structurally cannot.
+
+Corroborating: Postproc/resolve scales 11.8× (9.82 → 115.75 µs) — the resolve blit r_renderscale exists to feed, the one stage that scales on both source and destination.
+
+Consequence: r_renderscale 2 must not be the shipped default on hardware like this. Dropping to 1 buys +68% frames (54 → 91 fps) for 4× fewer pixels.
+
+2. Buckets whose share differs from §5
+⚠️ Read these as shape only, not as absolute comparisons — see caveat 1 below.
+
+bucket	§5 desktop	this machine (A)	note
+Frame pacing	not in table	52.0%	dominant here; §5's decomposition was at drain 0
+QC UpdateView	419.96 µs (17%)	7849.69 µs (40.8%)	18.7× — but nests the scene render here
+Shadow generation	290.16 µs (12%)	4503.01 µs (23.4%)	15.5×, and share doubles
+Opaque Batches	724.99 µs (29%)	1269.98 µs (6.6%)	1.8× absolute, share collapses
+World walking	433.07 µs (18%)	262.39 µs (1.4%)	lower in absolute terms
+Shadowmap Sides	3	7	different cascade/slot config
+The headline shape change: on the desktop, Opaque Batches + World walking were 47% of the frame. Here they're 8%, and the frame is dominated by the GPU fence and shadow generation. Shadow generation is the bucket that grows disproportionately — the low-end-specific target §4/H3 asks for.
+
+Headline scale: 18502.83 µs vs the desktop's 2178.95 µs — 8.5× slower at identical settings.
+
+3. What I could not measure, and why
+Per §7 — flagged, not estimated:
+
+View angle is not the §3 reference. cl_setangles doesn't exist in the installed csprogs. Draw Calls 363 confirms I'm in the map (§3 expects ≈340; the menu backdrop is 46), but Draw Indicies is 4.53 M against §3's ≈2.0 M — 2.3× heavier, consistent with a different view direction. So the A/B delta is valid; absolute bucket values are not comparable to §5.
+Engine is a local build, not your shipped exe — unavoidable, the shipped fteqw64.exe has no r_speeds_dump. It's also ~6700 commits newer.
+Prediction (44.41 µs) is invalid for normal play — setpos forced noclip (§2.8).
+sys_framepacing_drain left at its shipped default of 2. §5's decomposition was taken at drain 0, so do not compare bucket-for-bucket. H2 is not answered here — the drain sweep is now possible (the cvar exists in this build, absent from the shipped one) but I haven't run it.
+H4 (1% lows) not measured. Still needs a show_fps 2 capture across a round crossing.
+Lightmap updates 0.00 is genuine at r_dynamic 0, not missing data.
+Testing methodology
+Three traps cost real runs before the numbers above were trustworthy — the first two are not in BENCHMARK.md and should be added:
+
+defer must be UNQUOTED. Cmd_In_f does cmd = Cmd_Args() (common/cmd.c:274), which preserves the quote characters, so §1's template defer 30 "cl_idlefps 0" pushes one quoted token into the cbuf and dies as Unknown command "cl_idlefps 0". It fails per-command while the run still completes and quits cleanly — it looks like a successful benchmark that produced no numbers. Always grep qconsole.log for Unknown command before believing a result. ruleset_allow_in 1 must also be set un-deferred at the top, since the defer calls register at exec time.
+You must spawn in. +map alone leaves you on the team-select screen, whose camera drifts in position. timerefresh sweeps yaw so it normalises angle but not origin — three of my runs were corrupted this way, inflating frame times 16–41% (worst: 32.75 → 23.29 ms) and blowing run-to-run spread to 36–52%. Fixing the origin brought spread to 0.5–9.5%. The failure mimics §2.5 thermal drift, so it's easy to explain away.
+§2.6's 100-frame window is long here. At ~50 fps that's ~2 s, so I left 9 s between changing a cvar and dumping (~450 frames) rather than the 2 s the doc suggests.
+Every sample verified in-log: cvar values echoed before each dump, noclip on confirmed, zero Unknown command. Interleaved A/B/A/B/A/B in one session, no restarts (§2.5). mp_roundtime is in minutes (* 60, sv_main.qc:310) so server.cfg's 50 = 3000 s and cannot fire mid-run; bot_minplayers defaults to 0, so no bots.
+
+Two things the other LLM will want to know: H2 is now runnable on this machine for the first time (the drain cvar exists in this build), and the follow-up I'd prioritise over anything else is r_shadows_res 8192 → 2048. Separate timerefresh work put ~76% of the shadow cost in resolution-independent cascade generation, and Shadow generation is also the disproportionate grower here — two independent methods pointing at the same knob.

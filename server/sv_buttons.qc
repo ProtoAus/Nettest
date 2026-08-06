@@ -28,6 +28,11 @@ void(string snd) Door_PrecacheIfReal;                                // sv_doors
 .string noise_locked;
 .string noise_unlocked;
 
+// Sven func_button "Use Type" (sven-coop.fgd:2174).  Values map 1:1 onto the
+// USE_* enum in sv_doors.qc; FGD default is 3 (Toggle).  Undeclared until now,
+// which meant the engine dropped the key on all 117 buttons that set it.
+.float use_type;
+
 // ============================================================================
 //  func_button
 // ============================================================================
@@ -55,6 +60,22 @@ const float BUTTON_DONT_MOVE       = 1;
 const float BUTTON_TOGGLE          = 32;
 const float BUTTON_SPARKS          = 64;
 const float BUTTON_TOUCH_ACTIVATES = 256;
+
+// Sven/GoldSrc func_button uses the SAME four bits with the same meanings
+// (sven-coop.fgd:2166-2172), so unlike func_door there is nothing to
+// normalise here.  What DOES differ is the double-fire below.
+
+// TRUE on native maps, FALSE on GoldSrc ones.  Decided once at spawn.
+//
+// This mod re-fires the target chain in button_return so a plain button
+// produces a momentary PULSE on light entities (press = on, auto-return =
+// off).  Half-Life's CBaseButton::ButtonReturn does NOT do that — it fires
+// only in ButtonWait.  On a GoldSrc map the extra fire is actively harmful:
+// a multisource input toggles ON at button_wait and straight back OFF `wait`
+// seconds later, so a multi-button AND-gate can never latch.  Measured on
+// -sp_campaign_portal: 77 buttons feed a multisource, 75 of them with
+// wait 0.5, and 18 carry neither DONT_MOVE nor TOGGLE — exactly this case.
+.float button_refire_on_return;
 
 void() button_fire;
 void() button_return;
@@ -86,7 +107,12 @@ void() button_return =
     // new state.  Other target classes — doors, breakables,
     // other buttons — handle their own state via `.use` and are
     // either idempotent on repeat or actively want the toggle.
-    Trigger_UseTargets(self, self.enemy);
+    // GoldSrc maps skip this entirely — see button_refire_on_return.
+    if (self.button_refire_on_return)
+    {
+        sub_use_type = self.use_type ? self.use_type : USE_TOGGLE;
+        Trigger_UseTargets(self, self.enemy);
+    }
     // DONT_MOVE: collapse the return into the done callback so we
     // don't spin the mover with a zero-distance move.
     if (self.spawnflags & BUTTON_DONT_MOVE)
@@ -111,7 +137,15 @@ void() button_wait =
     self.mover_state  = MOVER_STATE_TOP;
     self.frame        = 1;
     self.SendFlags    = 1;
-    Trigger_UseTargets(self, self.enemy);
+    // use_type: Sven's key maps 1:1 onto our USE_* enum (0 Off / 1 On /
+    // 2 Set / 3 Toggle, sven-coop.fgd:2174) — no transposition, unlike
+    // `triggerstate`.  FGD default is 3, which is USE_TOGGLE anyway.
+    //
+    // SUB_UseTargets rather than the bare walker: func_button inherits
+    // Targetx, so `killtarget` and `delay` are real keys the two-arg form
+    // silently drops.  Measured: 16 of pizza_ya_san1's 30 buttons carry a
+    // killtarget that never fired, plus 3 delays across pizza and portal.
+    SUB_UseTargets(self, self.enemy, self.use_type ? self.use_type : USE_TOGGLE);
 
     if (self.wait < 0)
         return;
@@ -139,6 +173,21 @@ void() button_fire =
     // Bhop forces this on via the StartFrame gamemode block in
     // sv_main.qc; admins can also flip it in any other mode.
     if (cvar("mp_disabledoors")) return;
+
+    // `master` gate.  func_button carries a master key in Sven's FGD
+    // (sven-coop.fgd:2147) and 80 buttons across the target maps use it,
+    // but this entity never checked it — every multisource-locked button
+    // fired regardless.  Placed BEFORE the TOGGLE-reverse and re-press
+    // gates so a rejected press changes no state at all.
+    //
+    // IsMasterTriggered returns TRUE for an unknown master name, so a
+    // mapper typo can't brick a button.
+    if (!IsMasterTriggered(self.master, self.enemy))
+    {
+        if (self.noise_locked)
+            sound(self, CHAN_VOICE, self.noise_locked, 1, ATTN_NORM);
+        return;
+    }
 
     // TOGGLE-reverse: a press against an already-pressed button
     // reverses it instead of being ignored.  We re-fire the click
@@ -313,6 +362,16 @@ void() func_button =
     self.button_state = BUTTON_STATE_BOTTOM;
     self.mover_state  = MOVER_STATE_BOTTOM;
 
+    // See button_refire_on_return: HL fires only in ButtonWait; our extra
+    // pulse in button_return is a native-map behaviour we keep bit-for-bit.
+    self.button_refire_on_return = !Map_IsGoldSrc();
+
+    // Tell CSQC this button can refuse a press, so client prediction
+    // doesn't animate a locked button and then snap it back.  Same field
+    // and same wire byte the doors already use (sv_brushsync.qc) — no
+    // protocol change, only the value differs.
+    self.door_has_master = (self.master != "" && self.master != __NULL__);
+
     // .use is always wired — the actual mp_disabledoors check lives
     // in button_fire so the cvar can toggle live without a map
     // restart.  .touch is gated on the TOUCH_ACTIVATES spawnflag so
@@ -354,6 +413,12 @@ void() func_button =
         else
             self.pos2 = self.pos1 + self.movedir * (fabs(self.movedir * self.size) - self.lip);
     }
+
+    // Same ordering trap as func_door: SV_InitReplicatedSolidBrush linked this brush
+    // with .angles still holding the mapper's press DIRECTION, and SetMovedir has
+    // only just zeroed it.  Without a re-link the button carries a PVS box rotated
+    // about (0,0,0) and never reaches CSQC until it first moves.
+    BrushSync_RelinkAngles();
 
     // SPARKS: spawn a child sparker entity that lives alongside the
     // button.  Owner-linked so button_spark_think can clean itself up

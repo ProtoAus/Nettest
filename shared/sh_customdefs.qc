@@ -86,6 +86,11 @@ const float CSQC_ENT_NAV_DEBUG      = 40; // bot/nav debug overlay proxy (per-cl
 const float CSQC_ENT_CAR            = 41; // driveable prop_car/func_car mirror (reserved; Stage 2 wheel/cam wire).
                                           // High id: clear of the 2-18 ids AND PM_CSQC_PROXY_VERSION's
                                           // upward growth, so the next proxy bump can't collide.
+const float CSQC_ENT_TRIGGER_CAMERA = 42; // Sven Co-op trigger_camera cutscene pose.  Sent with
+                                          // pvsflags = PVSF_IGNOREPVS because a cutscene camera is
+                                          // routinely nowhere near the player it is filming for.
+                                          // Distinct from CSQC_ENT_CAMERA (13), which is this mod's
+                                          // own team-select preview camera with unrelated spawnflags.
 // nav-debug proxy SendFlags sections (sv_bots.qc NavDbg_SendEntity <-> cl_navdebug.qc NavDebug_EntUpdate)
 const float NAVDBG_SF_GRAPH = 1;  // static nav graph chunk (node positions + links)
 const float NAVDBG_SF_BOTS  = 2;  // per-bot live state (origin/state/enemy/weapon/mag)
@@ -568,6 +573,13 @@ void(vector trace_src, vector trace_end) CSQC_PhysProp_OverrideBackTrace;
 // Defined in client/cl_weapons.qc.
 void(vector trace_src, vector trace_end) CSQC_DroppedWeapon_OverrideTrace;
 
+// Monsters are ENGINE entities, so they are not in the CSQC world at all and a
+// CSQC traceline goes straight through them - which is why the shooter's own
+// bullets used to land on the wall behind an NPC, as concrete, with a hole.
+// Same override technique as the two above, reading the engine entity list
+// through getentity().  Defined in client/cl_monstertrace.qc.
+void(vector trace_src, vector trace_end) CSQC_Monster_OverrideTrace;
+
 // CSQC-side dropped-weapon prediction. Server networks dropped weapons
 // via CSQC_ENT_DROPPED_WEAPON so the client can predict pickups for
 // high-ping players (instant viewmodel swap on touch). State lives on
@@ -761,6 +773,30 @@ const float CSQC_ENT_CAMERA         = 13;  // team-select preview cameras (Team_
 const float CSQC_ENT_TELEPORT_TRIGGER = 3;
 const float TELEPORT_KEEPVEL          = 4;  // spawnflag: keep velocity through teleporter
 const float TELEPORT_KEEPANGLE        = 8;  // spawnflag: keep current view angle (ignore dest angles)
+const float TELEPORT_NOCLIENTS        = 16; // spawnflag: do not teleport players at all
+//
+// These three are the MOD's vocabulary and are what everything downstream —
+// including the CSQC prediction path — reads.  GoldSrc maps use a completely
+// different bit layout and are translated into this one at spawn by
+// Teleport_NormaliseFlags (sv_teleport.qc):
+//
+//     bit   nettest.fgd (ours)   sven-coop.fgd (Trigger base + own)
+//       1   -                    Monsters
+//       2   -                    No Clients          -> our 16
+//       4   Keep Velocity        Pushables
+//       8   Keep Angle           Everything else
+//      16   (No Clients)         Fire On Enter
+//      32   -                    Fire On Exit
+//      64   -                    Random Destination
+//     128   -                    Relative Teleport   (NOT IMPLEMENTED)
+//     256   -                    Keep Angles         -> our 8
+//     512   -                    Keep velocity       -> our 4
+//    1024   -                    Rotate (Dest Angles) (NOT IMPLEMENTED)
+//
+// Measured: -sp_campaign_portal's 8 teleports carry 896 / 909 / 1920, so they
+// genuinely use 256 and 512 — and 909 additionally trips our raw 4 and 8 by
+// accident.  pizza_ya_san1's single teleport is 6 (Pushables | No Clients),
+// which under Sven must NOT move a player; before this it did.
 
 // Per-teleport-trigger entity fields (cached destination, set at spawn time)
 .vector tele_dest_origin;  // world-space destination position
@@ -936,6 +972,24 @@ const float STAT_LEVEL            = 62;
 const float STAT_XP_NEXT          = 63;
 const float STAT_PROG_SESSIONXP   = 64;   // XP earned this session (match-end summary)
 
+// Sven Co-op trigger_camera binding.  0 = this player is not in a cutscene.
+// Otherwise the low bits carry the bound camera's entnum (so CSQC can find the
+// CSQC_ENT_TRIGGER_CAMERA entity holding the pose) and the high bits carry the
+// per-player presentation flags below.  One stat rather than two because the
+// binding and its presentation always change together, and a split would let
+// them arrive on different frames and flicker.
+const float STAT_CUTSCENE         = 65;
+// 16 bits of entnum, not 12: pizza_ya_san1 alone spawns 897 map entities and a
+// busy server adds players, projectiles and temp entities on top, so a 4095
+// ceiling is closer than it looks — and an aliased entnum would bind the view
+// to the wrong entity rather than fail visibly.
+const float CUTSCENE_ENT_MASK     = 0x0FFFF;  // bound camera entnum (0 = none)
+const float CUTSCENE_SF_FREEZE    = 0x10000;  // player is frozen for the duration
+const float CUTSCENE_SF_CURSOR    = 0x20000;  // mouse cursor + trigger_cameratarget picking
+const float CUTSCENE_SF_NOHEALTH  = 0x40000;  // hud_health -1   — hide health/battery
+const float CUTSCENE_SF_NOFLASH   = 0x80000;  // hud_flashlight -1
+const float CUTSCENE_SF_NOWEAPONS = 0x100000; // hud_weapons -1  — hide belt + ammo
+
 // Shared marker: 1 on a server-side AI bot (spawnclient).  Declared shared so
 // W_ShouldDeferToClaim (sh_weapon_standard.qc) can apply a bot's hitscan damage
 // server-side instead of deferring to a client hitclaim that never comes.
@@ -1090,6 +1144,21 @@ vector(entity e) PH_MeshMaxs =
 //
 // Reads sv_gamemode on SSQC and STAT_GAMEMODE on CSQC; same value either
 // way (sv_main.qc pushes the gamemode to the clientstat each tick).
+// TRUE when the running map is a GoldSrc/Half-Life BSP (version 30).
+//
+// Shared twin of the server-only Map_IsGoldSrc() in sv_customdefs.qc.  The
+// engine advertises the worldmodel's BSP version in serverinfo, and serverinfo
+// is replicated, so both VMs can answer the same question — the server reads it
+// with infokey(world, ...) and the client with serverkey(...).
+float() Map_IsGoldSrcShared =
+{
+#ifdef CSQC
+    return stof(serverkey("*bspversion")) == 30;
+#else
+    return stof(infokey(world, "*bspversion")) == 30;
+#endif
+};
+
 float() Gamemode_HasUnifiedTeams =
 {
 #ifdef CSQC
@@ -1097,7 +1166,20 @@ float() Gamemode_HasUnifiedTeams =
 #else
     float gm = cvar("sv_gamemode");
 #endif
-    return gm == GAMEMODE_FFA || gm == GAMEMODE_BHOP;
+    if (gm == GAMEMODE_FFA || gm == GAMEMODE_BHOP)
+        return TRUE;
+
+    // GoldSrc / Sven Co-op maps are single-team co-op: they ship ONE spawn
+    // pool (info_player_deathmatch) and no team spawns at all, and their whole
+    // progression assumes everybody is on the same side.  Routing them through
+    // the unified path collapses the Phase-0 team pick, merges the scoreboard
+    // column and bypasses friendly fire — which is what "don't worry about
+    // teams, there is only one spawn" needs.  Resolved from serverinfo rather
+    // than a new gamemode value so it costs no network stat and no menu work.
+    if (Map_IsGoldSrcShared())
+        return TRUE;
+
+    return FALSE;
 };
 
 // Round phase constants
@@ -1379,6 +1461,45 @@ void() precache_everything =
 	precache_model("models/weapons/wpn_hlrpg/v_rpg.mdl");
     precache_sound("sounds/weapons/wpn_hlrpg/fire.wav");
     precache_sound("sounds/weapons/wpn_hlrpg/fly.wav");
+
+	// HL equipment — satchel / tripmine / snark / hivehand.
+	// These are the valve mount's own GoldSrc models rather than converted
+	// IDPO copies, which is why the paths have no wpn_* directory.  Every one
+	// of them is precached unconditionally: a map that places weapon_satchel
+	// but no weapon_tripmine still has to be able to receive a dropped mine
+	// from another player, and a late precache is a client desync.
+	precache_model("models/v_satchel.mdl");
+	precache_model("models/v_satchel_radio.mdl");
+	precache_model("models/w_satchel.mdl");
+	precache_model("models/p_satchel.mdl");
+	precache_model("models/v_tripmine.mdl");
+	precache_model("models/p_tripmine.mdl");
+	precache_model("models/v_squeak.mdl");
+	precache_model("models/w_squeak.mdl");
+	precache_model("models/p_squeak.mdl");
+	precache_model("models/v_hgun.mdl");
+	precache_model("models/w_hgun.mdl");
+	precache_model("models/p_hgun.mdl");
+	precache_model("models/hornet.mdl");
+	precache_model("sprites/laserbeam.spr");    // the tripmine's laser
+	precache_sound("weapons/g_bounce1.wav");
+	precache_sound("weapons/g_bounce2.wav");
+	precache_sound("weapons/g_bounce3.wav");
+	precache_sound("weapons/mine_deploy.wav");
+	precache_sound("weapons/mine_activate.wav");
+	precache_sound("weapons/mine_charge.wav");
+	precache_sound("squeek/sqk_blast1.wav");
+	precache_sound("squeek/sqk_die1.wav");
+	precache_sound("squeek/sqk_deploy1.wav");
+	precache_sound("squeek/sqk_hunt1.wav");
+	precache_sound("squeek/sqk_hunt2.wav");
+	precache_sound("squeek/sqk_hunt3.wav");
+	precache_sound("agrunt/ag_fire1.wav");
+	precache_sound("agrunt/ag_fire2.wav");
+	precache_sound("agrunt/ag_fire3.wav");
+	precache_sound("hornet/ag_hornethit1.wav");
+	precache_sound("hornet/ag_hornethit2.wav");
+	precache_sound("hornet/ag_hornethit3.wav");
 
 	// HL Grenade
     precache_model("models/weapons/wpn_hlgrenade/w_grenade.mdl");
@@ -2051,3 +2172,44 @@ void() precache_everything =
 
 
 float sv_cached_pose_keepalive_interval;  // re-added after CSUSP-removal pass
+
+// ============================================================================
+//  PM_ContentsAt — point contents that can SEE BRUSH-ENTITY WATER
+// ============================================================================
+//
+//  pointcontents() consults the WORLDMODEL ONLY.  GoldSrc maps routinely put
+//  their pools in func_water brush entities rather than in baked world water
+//  (both of de_rats' pools are func_water, and Sven maps do the same), and
+//  those are completely invisible to it.  That single blind spot is why a
+//  player could stand on the bottom of de_rats' sink without ever swimming,
+//  and why a func_pushable dropped into that sink sank instead of floating.
+//
+//  pointcontentsmask(pos, 0) does the same query but ALSO walks linked brush
+//  entities and honours FTE's negative-.skin contents override — which is
+//  exactly what func_water sets (skin -3 water / -4 slime / -5 lava).  The
+//  result is a CONTENTBIT_* mask, so it is folded back into the Q1 CONTENT_*
+//  the movement code speaks, in the SAME priority order the engine's own
+//  PF_pointcontents uses (solid > sky > lava > slime > water > ladder).  That
+//  makes this a strict superset of pointcontents(): every answer it used to
+//  give is unchanged, and brush volumes now answer too.
+//
+//  Requires the brush to be SOLID_BSP — World_ContentsOfLinks skips SOLID_NOT
+//  outright (engine world.c), and an unlinked entity is not reachable at all.
+//  See server/sv_water.qc for why that costs func_water nothing: a trace's
+//  contents mask never includes water, so a skin<0 brush still cannot block
+//  anyone.
+__uint(vector pos, optional float worldonly) pointcontentsmask = #0:pointcontentsmask;
+
+float(vector pos) PM_ContentsAt =
+{
+	int m = pointcontentsmask(pos, 0);
+	if (m & CONTENTBIT_SOLID)  return CONTENT_SOLID;
+	if (m & CONTENTBIT_SKY)    return CONTENT_SKY;
+	if (m & CONTENTBIT_LAVA)   return CONTENT_LAVA;
+	if (m & CONTENTBIT_SLIME)  return CONTENT_SLIME;
+	if (m & CONTENTBIT_WATER)  return CONTENT_WATER;
+	// FTELADDER is the engine's own spelling of the bit CONTENT_LADDER maps to
+	// (FTECONTENTS_LADDER 0x4000, bspfile.h:526).
+	if (m & CONTENTBIT_FTELADDER) return CONTENT_LADDER;
+	return CONTENT_EMPTY;
+};

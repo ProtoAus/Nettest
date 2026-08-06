@@ -14,6 +14,7 @@
 // Externs from earlier compile units.
 void(entity caller, entity who, float useType) SUB_UseTargets;        // sv_triggers.qc
 float(string master_name, entity who) IsMasterTriggered;              // sv_triggers.qc
+float(float ts) GoldSrc_TriggerStateToUseType;                        // sv_triggers.qc
 
 // Spawnflags for game_team_master.  HL bit layout.
 const float SF_GTM_REMOVEONFIRE = 1;
@@ -42,7 +43,7 @@ void() game_team_master_use =
     if (!IsMasterTriggered(self.master, activator))
         return;
 
-    float us = self.triggerstate ? self.triggerstate : USE_TOGGLE;
+    float us = GoldSrc_TriggerStateToUseType(self.triggerstate);
     SUB_UseTargets(self, activator, us);
 
     if (self.spawnflags & SF_GTM_REMOVEONFIRE)
@@ -69,27 +70,59 @@ void() game_team_master =
 //  game_counter
 // ============================================================================
 
+// Sven spawnflags (sven-coop.fgd:2660-2670).  All three were previously
+// ignored: the counter always reset and never removed itself.  Measured on the
+// target maps: 12 counters in -sp_campaign_portal set RESET, and 16 in
+// pizza_ya_san1 set REMOVE — those 16 should delete themselves after firing
+// but instead fired forever.
+const float SF_GCOUNTER_REMOVE   = 1;    // "Remove On fire"
+const float SF_GCOUNTER_RESET    = 2;    // "Reset On fire"
+const float SF_GCOUNTER_OVERLIMIT = 4;   // "Fire if over limit"
+
 void() game_counter_use =
 {
     if (!IsMasterTriggered(self.master, activator))
         return;
     self.frags = self.frags + 1;
-    if (self.frags >= self.health)
+
+    // Bit 4 "Fire if over limit" only matters once the counter has been
+    // pushed past the threshold without resetting — i.e. when RESET is off.
+    float hit = (self.spawnflags & SF_GCOUNTER_OVERLIMIT)
+                ? (self.frags >= self.health)
+                : (self.frags == self.health);
+    if (!hit)
+        return;
+
+    SUB_UseTargets(self, activator, USE_TOGGLE);
+
+    if (self.spawnflags & SF_GCOUNTER_REMOVE)
     {
-        SUB_UseTargets(self, activator, USE_TOGGLE);
-        self.frags = 0;          // resets — supersedes trigger_counter
+        remove(self);
+        return;
     }
+    if (self.spawnflags & SF_GCOUNTER_RESET)
+        self.frags = 0;
 };
 
-/*QUAKED game_counter (.5 .5 .5) (-8 -8 -8) (8 8 8)
+/*QUAKED game_counter (.5 .5 .5) (-8 -8 -8) (8 8 8) REMOVE_ON_FIRE RESET_ON_FIRE FIRE_IF_OVER
 Increments an internal counter on each .use; fires its target when
-the counter reaches "health", then resets to "frags" (or 0).
+the counter reaches "health".
+
+REMOVE_ON_FIRE (1):  delete the counter after it fires.
+RESET_ON_FIRE (2):   zero the counter after it fires (otherwise it keeps
+                     climbing and, without FIRE_IF_OVER, never fires again).
+FIRE_IF_OVER (4):    fire on >= threshold rather than exactly == threshold.
 
 "targetname"  name
 "target"      chain to fire on threshold
 "frags"       initial value (default 0)
 "health"      activation threshold (default 1)
 "master"      upstream gate
+
+NOTE the default threshold stays 1, NOT the FGD's 10.  The FGD number is an
+editor default that Hammer writes into the file; four counters in
+-sp_campaign_portal ship no `health` key at all, and giving those a threshold
+of 10 would stall the map.
 */
 void() game_counter =
 {

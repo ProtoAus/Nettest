@@ -127,23 +127,23 @@ void() phys_barrel_precache =
 	// spawnflood pick one at random via PhysBarrel_RandomModel().  MUST be precached before setmodel.
 	// (The old models/props/barrel.iqm precache is gone: that file does not exist and was never
 	//  setmodel'd — it only produced an "Unable to load" on every map load.)
-	precache_model("models/props/containers/mega/metal_barrel_mp_1.iqm");
-	precache_model("models/props/containers/mega/metal_barrel_mp_2.iqm");
-	precache_model("models/props/containers/mega/metal_barrel_mp_3.iqm");
+	precache_model("models/props/containers/metal_barrel_mp_1.iqm");
+	precache_model("models/props/containers/metal_barrel_mp_2.iqm");
+	precache_model("models/props/containers/metal_barrel_mp_3.iqm");
 	// Cans — same deal as the barrels (random pick, each ships a .acd).  Replaces the old
 	// models/props/can.mdl, which did not exist: spawncan was setmodel'ing a missing file and
 	// spawning an invisible null-model prop.  See PhysCan_RandomModel.
-	precache_model("models/props/containers/mega/tin_can_mp_1_rusty.iqm");
-	precache_model("models/props/containers/mega/tin_can_mp_1_rusty_1.iqm");
-	precache_model("models/props/containers/bunkers/canned_food_3.iqm");
-	precache_model("models/props/containers/bunkers/canned_food_4.iqm");
-	precache_model("models/props/containers/bunkers/canned_food_5.iqm");
+	precache_model("models/props/containers/tin_can_mp_1_rusty.iqm");
+	precache_model("models/props/containers/tin_can_mp_1_rusty_1.iqm");
+	precache_model("models/props/containers/canned_food_3.iqm");
+	precache_model("models/props/containers/canned_food_4.iqm");
+	precache_model("models/props/containers/canned_food_5.iqm");
 	// Carriable filecabinet — IQM only.  The legacy models/props/filecabinet.mdl fallback is gone
 	// (the file does not exist), which is also a collision UPGRADE: HL-studio .mdl can't build an
 	// ODE collision mesh (the engine has no mod_halflife case) so it fell back to a BOX, whereas
 	// the IQM (mod_alias) supports both an ODE collision mesh and NativeTrace player collision —
 	// the player collides with the actual ROTATED mesh.
-	precache_model("models/props/filecabinet/filecabinet.iqm");
+	precache_model("models/props/furniture/filecabinet.iqm");
 	// Prop contact sounds (impact soft/hard, scrape loop, grab clunk, bullet ping) are
 	// precached by MatSnd_PrecacheAll() (sh_matsounds.qc) from scripts/materialsounds.txt
 	// — see precache_everything() in sh_customdefs.qc.  The 18-call hand-list that used to
@@ -268,10 +268,10 @@ string() PhysBarrel_RandomModel =
 {
 	float pick = floor(random() * 3);
 	if (pick <= 0)
-		return "models/props/containers/mega/metal_barrel_mp_1.iqm";
+		return "models/props/containers/metal_barrel_mp_1.iqm";
 	if (pick == 1)
-		return "models/props/containers/mega/metal_barrel_mp_2.iqm";
-	return "models/props/containers/mega/metal_barrel_mp_3.iqm";
+		return "models/props/containers/metal_barrel_mp_2.iqm";
+	return "models/props/containers/metal_barrel_mp_3.iqm";
 };
 
 // Same idea for the can (spawncan / phys_can).  This replaces the old hardcoded
@@ -283,14 +283,14 @@ string() PhysCan_RandomModel =
 {
 	float pick = floor(random() * 5);
 	if (pick <= 0)
-		return "models/props/containers/mega/tin_can_mp_1_rusty.iqm";
+		return "models/props/containers/tin_can_mp_1_rusty.iqm";
 	if (pick == 1)
-		return "models/props/containers/mega/tin_can_mp_1_rusty_1.iqm";
+		return "models/props/containers/tin_can_mp_1_rusty_1.iqm";
 	if (pick == 2)
-		return "models/props/containers/bunkers/canned_food_3.iqm";
+		return "models/props/containers/canned_food_3.iqm";
 	if (pick == 3)
-		return "models/props/containers/bunkers/canned_food_4.iqm";
-	return "models/props/containers/bunkers/canned_food_5.iqm";
+		return "models/props/containers/canned_food_4.iqm";
+	return "models/props/containers/canned_food_5.iqm";
 };
 
 float(entity playerent, float changedflags) phys_files_Send;   // defined below; used by the barrel spawner
@@ -1595,7 +1595,7 @@ float(entity playerent, float changedflags) phys_files_Send =
 	WriteByte(MSG_ENTITY, bound(0, rint(self.colormod_z * 255), 255));
 
 	// Skin index (livery swap) — the client mirror renders self.skin, which selects a `<model>_<N>.skin`
-	// file (surface→shader remap).  For the outrun car: 0 = clean, 1 = dirty (models/props/misc/outrun/car_1.skin).
+	// file (surface→shader remap).  For the outrun car: 0 = clean, 1 = dirty (models/props/vehicles/car_1.skin).
 	// MUST be read in the SAME wire position in CSQC_PhysProp_Update (cl_physprop.qc).
 	WriteByte(MSG_ENTITY, bound(0, rint(self.skin), 255));
 
@@ -1806,7 +1806,7 @@ void(entity owner) phys_files_spawn_infront =
 	// exist, so the else-branch could only ever produce an "Unable to load"; the whichpack() guard
 	// made it unreachable in practice anyway).  See phys_barrel_precache for why IQM-only is also
 	// the better collision path.
-	setmodel(b, "models/props/filecabinet/filecabinet.iqm");
+	setmodel(b, "models/props/furniture/filecabinet.iqm");
 
 	// SOLID_PHYSICS_BOX always (tight model hbox).  The velocity-servo carry needs
 	// a box body, and the engine OBB patch (world.c World_OBBTrace) makes a rotated

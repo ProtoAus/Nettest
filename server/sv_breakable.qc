@@ -34,6 +34,74 @@ const float BREAKABLE_ONLY_EXPLOSION    = 4;
 const float BREAKABLE_ALWAYS_SHOOTABLE  = 8;
 const float BREAKABLE_INSTANT_CROWBAR   = 256;
 
+// ---------------------------------------------------------------------------
+// Break_NormaliseFlags — translate GoldSrc/Sven spawnflags into the mod's
+// vocabulary, IN PLACE, before anything reads them.
+//
+// Our FGD and Hammer's disagree on this entity:
+//
+//     bit   nettest.fgd (ours)      sven-coop.fgd:2129-2136
+//      1    Only Trigger            Only Trigger          (same)
+//      2    Touch                   Touch                 (same)
+//      4    Only Explosion          Pressure              DIFFERENT
+//      8    Always Shootable        Repairable            DIFFERENT
+//     32    -                       Show HUD Info
+//     64    -                       Immune To Clients
+//    256    Instant Crowbar         Instant Break         (same)
+//    512    -                       Explosives Only
+//
+// So a Sven "Pressure" plate (4) read as ours becomes bullet-proof, and a
+// Sven "Explosives Only" crate (512) is not recognised at all and stays
+// shootable — both backwards.  Measured on pizza_ya_san1: 9 brushes set
+// bit 4 and 7 set bit 512.
+//
+// Rewriting .spawnflags in place (rather than adding a parallel .break_flags
+// word like Door_NormaliseFlags does) is deliberate: these flags are read
+// from SHARED code that also runs client-side — sh_weapon_standard.qc's
+// radius-damage override and the two melee instant-break paths — so a new
+// field would have to be replicated over the brushsync wire to be visible
+// there.  Keeping the mod's vocabulary means every existing consumer, server
+// and client, keeps working untouched.  func_pushable already establishes
+// this exact pattern (sv_func_pushable.qc:551).
+//
+// Native maps are not touched at all, so the 29 BSPs already compiled
+// against nettest.fgd behave bit-for-bit as before.
+// ---------------------------------------------------------------------------
+.float break_skip_normalise;   // set by func_pushable — different flag space
+
+void() Break_NormaliseFlags =
+{
+    if (!Map_IsGoldSrc() || self.break_skip_normalise)
+        return;
+
+    float sven = self.spawnflags;
+
+    // Bits 1 / 2 / 256 mean the same thing in both FGDs — carry them over.
+    float out = sven & (BREAKABLE_TRIGGER_ONLY | BREAKABLE_TOUCH
+                        | BREAKABLE_INSTANT_CROWBAR);
+
+    // Sven 512 "Explosives Only" is what our bit 4 actually means.
+    if (sven & 512)
+        out = out | BREAKABLE_ONLY_EXPLOSION;
+
+    // HL's CBreakable::Spawn derives takedamage from SF_BREAK_TRIGGER_ONLY
+    // ALONE — a targetname does NOT make a brush bulletproof.  That rule is
+    // a Quake-ism we apply below unless ALWAYS_SHOOTABLE is set, and Sven
+    // maps name breakables precisely so they can fire a target WHEN SHOT,
+    // so set it for everything that isn't trigger-only.
+    if (!(sven & BREAKABLE_TRIGGER_ONLY))
+        out = out | BREAKABLE_ALWAYS_SHOOTABLE;
+
+    // Deliberately dropped, all unimplemented: 4 Pressure, 8 Repairable,
+    // 32 Show HUD Info, 64 Immune To Clients.  Dropping matters — leaving
+    // 4 or 8 set would collide with our own meanings for those bits.
+    self.spawnflags = out;
+
+    if (cvar("sv_debug_breakables") && out != sven)
+        dprint(sprintf("[breakable %s] flags %g -> %g (goldsrc)\n",
+                       self.targetname, sven, out));
+};
+
 // --- Material styles (set via "style" key in map editor) ---
 //
 // Numbering chosen by the user — note that this does NOT match the
@@ -99,6 +167,9 @@ const float DEBRIS_FRAME_FLAT  = 2;
 
 // --- Forward declarations ---
 void(entity caller, entity triggerer) Trigger_UseTargets;
+// Defined in sv_triggers.qc, which compiles after this file.  Needed for
+// the killtarget/delay-aware chain fire in func_breakable_break.
+void(entity caller, entity who, float useType) SUB_UseTargets;
 // Defined in sv_weapons.qc, which compiles after this file.
 void(entity drop_ent) W_PhysDropWake;
 // Inter-call within this file — the .touch handler defined above
@@ -111,6 +182,10 @@ void() BrushSync_ApplyRenderKeys;
 // Same file — detects fully-AAATRIGGER-textured brushes at spawn.
 .float is_aaatrigger;
 float() Brush_IsAATrigger;
+// server/sv_func_pushable.qc (compiled later).  func_pushable runs this whole
+// file's break pipeline but resets differently — it has to be put back at its
+// SPAWN ORIGIN as well as restored, which no func_breakable ever needs.
+void() FuncPushable_ResetAll;
 
 // ============================================================
 //  Helpers
@@ -453,7 +528,11 @@ void() func_breakable_break =
 
     oldactivator = activator;
     activator = break_activator;
-    Trigger_UseTargets(self, break_activator);
+    // SUB_UseTargets, not the two-arg walker: func_breakable inherits
+    // Targetx in Sven's FGD, so `killtarget` and `delay` are real keys on
+    // it and the bare walker silently drops both.  Measured: 21 of
+    // pizza_ya_san1's 131 breakables carry a killtarget that never fired.
+    SUB_UseTargets(self, break_activator, USE_TOGGLE);
     activator = oldactivator;
 
     // Wake any sleeping phys-drop weapons resting on / inside the
@@ -555,6 +634,10 @@ void() BreakableResetAll =
         }
         e = nextent(e);
     }
+
+    // func_pushable rides this file's break pipeline but owns its own reset —
+    // it also has to be shoved back to where the round started.
+    FuncPushable_ResetAll();
 };
 
 // ============================================================
@@ -587,6 +670,9 @@ Keys:
 */
 void() func_breakable =
 {
+    // MUST be first — everything below reads .spawnflags.
+    Break_NormaliseFlags();
+
     setmodel(self, self.model);
     self.breakable_model = self.model;   // save for round reset
     self.solid = SOLID_BSP;

@@ -192,7 +192,12 @@ void() W_HLGrenadeExplode =
     float snd_idx = (snd < 0.333) ? 0 : (snd < 0.666 ? 1 : 2);
     WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
     WriteByte(MSG_MULTICAST, CSQC_EVENT_GRENADE_EXPLODE);
-    WriteByte(MSG_MULTICAST, self.owner ? num_for_edict(self.owner) : 0);
+    // SHORT, not byte.  Monsters throw this grenade now, and a monster edict
+    // number routinely exceeds 255 - a truncated owner aliases onto whatever
+    // player happens to sit at (n & 255), and that player then silently loses
+    // the explosion FX because the exclude test matches them instead of the
+    // thrower.  Same widening, same reason, as the impact-effect shooter field.
+    WriteShort(MSG_MULTICAST, self.owner ? num_for_edict(self.owner) : 0);
     WriteCoord(MSG_MULTICAST, self.origin_x);
     WriteCoord(MSG_MULTICAST, self.origin_y);
     WriteCoord(MSG_MULTICAST, self.origin_z + 8);
@@ -243,13 +248,53 @@ void() W_HLGrenadeBounce =
         float snd_idx = (snd < 0.333) ? 0 : (snd < 0.666 ? 1 : 2);
         WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
         WriteByte(MSG_MULTICAST, CSQC_EVENT_GRENADE_BOUNCE);
-        WriteByte(MSG_MULTICAST, self.owner ? num_for_edict(self.owner) : 0);
+        WriteShort(MSG_MULTICAST, self.owner ? num_for_edict(self.owner) : 0);	// see W_HLGrenadeExplode
         WriteCoord(MSG_MULTICAST, self.origin_x);
         WriteCoord(MSG_MULTICAST, self.origin_y);
         WriteCoord(MSG_MULTICAST, self.origin_z);
         WriteByte(MSG_MULTICAST, snd_idx);
         multicast(self.origin, MULTICAST_PVS);
     }
+};
+
+// Construction of the thrown grenade entity, factored out of W_HLGrenadeFrame so
+// a MONSTER can throw the identical object rather than a lookalike.
+//
+// This matters more than a tidy-up: the grunt's grenade has to bounce off the
+// same surfaces, replicate through the same projectile_SendEntity path and blow
+// up with the same radius as the player's, or it is a different weapon wearing
+// the same model.  Everything that used to be inline is here verbatim - the only
+// thing the caller now supplies is where it starts, how fast, and when it goes.
+entity(entity thrower, vector org, vector vel, float fuse_end) W_HLGrenadeSpawn =
+{
+    entity gren = spawn();
+    gren.owner     = thrower;
+    gren.classname = "proj_hlgrenade";
+    gren.movetype  = MOVETYPE_TOSS;
+    gren.solid     = SOLID_BBOX;
+    setmodel(gren, HLGREN_GRENADE_MODEL);
+    setsize(gren, '-2 -2 -2', '2 2 2');
+    setorigin(gren, org);
+    gren.velocity  = vel;
+    gren.avelocity = '180 360 120';
+    gren.gravity   = 0.5;
+    gren.touch     = W_HLGrenadeBounce;
+
+    // CSQC replication via projectile_SendEntity (sv_weapons.qc): the thrower is
+    // hidden by SendEntity returning FALSE, everyone else gets origin+velocity
+    // +avelocity at sv_toss_tickrate for smooth flight.  A monster thrower is
+    // not a client, so that hide-the-owner branch simply never fires and every
+    // player sees the grenade - which is what we want.
+    gren.proj_type  = PROJ_TYPE_HLGRENADE;
+    gren.SendEntity = projectile_SendEntity;
+    gren.SendFlags  = 1;
+
+    gren.proj_fuse_end = fuse_end;
+    if (gren.proj_fuse_end <= time + 0.01)
+        gren.proj_fuse_end = time + 0.01;
+    gren.think     = W_HLGrenadeProjectileTick;
+    gren.nextthink = time + Toss_NextThinkInterval();
+    return gren;
 };
 
 void() W_HLGrenadeFire =
@@ -304,47 +349,29 @@ void() W_HLGrenadeFrame =
         // Spawn grenade entity after the throw delay
         if (self.hlgren_throw_vel > 0 && time >= self.hlgren_spawn_time)
         {
-            entity gren;
             self.hlgren_throw_vel = 0;  // only spawn once
 
             makevectors(self.v_angle);
-            gren = spawn();
-            gren.owner = self;
-            gren.classname = "proj_hlgrenade";
-            gren.movetype = MOVETYPE_TOSS;
-            gren.solid = SOLID_BBOX;
-            setmodel(gren, HLGREN_GRENADE_MODEL);
-            setsize(gren, '-2 -2 -2', '2 2 2');
-            setorigin(gren, self.origin + self.view_ofs + v_forward * 16);
-            gren.velocity = self.velocity
-                          + v_forward * HLGREN_THROW_FORWARD
-                          + v_up      * HLGREN_THROW_UPWARD;
-            gren.avelocity = '180 360 120';
-            gren.gravity = 0.5;
-            gren.touch = W_HLGrenadeBounce;
-            // CSQC replication via projectile_SendEntity (sv_weapons.qc):
-            // shooter is hidden by SendEntity returning FALSE, others get
-            // origin+velocity+avelocity at sv_toss_tickrate for smooth
-            // flight via cl_tosssmooth.qc extrap+smooth.
-            gren.proj_type   = PROJ_TYPE_HLGRENADE;
-            gren.SendEntity  = projectile_SendEntity;
-            gren.SendFlags   = 1;
             // Absolute fuse anchor (pin-pull moment + HLGREN_FUSE_TIME).
             // The periodic-tick wrapper detonates when time >= proj_fuse_end,
             // so cooking the grenade eats into airborne fuse exactly the
             // same way the previous one-shot nextthink did.
-            gren.proj_fuse_end = self.altfire_finished + HLGREN_FUSE_TIME;
+            //
             // "Favor the thrower": subtract owner ping so the explosion
             // arrives at the shooter's screen at the same wall-clock
             // moment their CSQC_FakeHLGrenadeExplode prediction detonates.
             // Other PVS clients see the explosion ~ping ms earlier than
             // they would naturally — small artifact, big win for the
             // high-ping thrower's sense of agency.
-            gren.proj_fuse_end -= stof(infokey(self, "ping")) * 0.001;
-            if (gren.proj_fuse_end <= time + 0.01)
-                gren.proj_fuse_end = time + 0.01;
-            gren.think     = W_HLGrenadeProjectileTick;
-            gren.nextthink = time + Toss_NextThinkInterval();
+            float pfuse = self.altfire_finished + HLGREN_FUSE_TIME
+                        - stof(infokey(self, "ping")) * 0.001;
+
+            W_HLGrenadeSpawn(self,
+                             self.origin + self.view_ofs + v_forward * 16,
+                             self.velocity
+                               + v_forward * HLGREN_THROW_FORWARD
+                               + v_up      * HLGREN_THROW_UPWARD,
+                             pfuse);
         }
 
         // Throw animation frame advance

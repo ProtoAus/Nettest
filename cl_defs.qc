@@ -13,7 +13,7 @@ Available options:
 -O          - write to a different qc file
 */
 #pragma noref 1
-//#pragma flag enable logicops
+#pragma flag enable lo
 // Enable fteqcc's `auto` storage class (off by default — a non-default
 // keyword).  Lets cl_rain.qc / cl_bulletholes.qc declare their big
 // trisoup/pool arrays `auto` so they're memalloc'd at load instead of

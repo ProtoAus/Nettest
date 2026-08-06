@@ -105,6 +105,63 @@ float(string tex) CSQC_InfoDecal_FindBucket =
     return lru_idx;
 };
 
+// ---- resolve a decal NAME to the texture the shader stage should sample -----
+// Two decal namespaces arrive here and they resolve in completely different
+// places:
+//
+//   "{Source/srclock01"  the mod's own decal library.  The name always carries a
+//                        CATEGORY folder and the art lives in a pack as
+//                        gfx/decals/<category>/<name>.dds.
+//   "{TARGET"            a GoldSrc WAD lump.  HL / CS 1.6 / Sven maps write
+//                        infodecal "texture" keys naming a lump inside
+//                        decals.wad — which is loaded for every BSP30 map
+//                        because Mod_ParseInfoFromEntityLump seeds the wad list
+//                        with it (engine client/wad.c) — and there is no image
+//                        file anywhere to match.
+//
+// Pushing a wad name through the gfx/decals/ template built a path that resolves
+// to nothing, so the stage got NO texture and the quad drew as a flat untextured
+// square: dark under r_decal_renderer 2 (the _lm shader supplies white vertex
+// colour and lets the lightmap do the work) and pale under 0/1 (surface-light
+// tint).  That is the "de_rats {TARGET is a dark square" report.
+//
+// Handing the name to the engine's WAD3 path instead puts the lookup on
+// W_ConvertWAD3Texture, which implements the GoldSrc decal convention — palette
+// entry 255 is the decal's COLOUR and the pixel index is an inverted alpha ramp
+// — so {TARGET arrives as the (145 23 11) bomb-site red with correct per-pixel
+// alpha instead of a solid block.
+//
+// The "waddecal/" prefix is what REQUESTS that convention.  It used to be
+// implicit: the engine applied the decal reading to every '{' wad texture whose
+// palette entry 255 was not exactly blue.  That was wrong for BSP faces — a '{'
+// texture on a world surface is MASKED in GoldSrc (index 255 transparent, palette
+// RGB kept), and the implicit rule silently destroyed any world texture keyed on
+// a near-blue or green background.  pizza_ya_san1's "{stripeh" road paint decoded
+// to alpha<=58 and was then discarded wholesale by the '{' alpha-test shader, so
+// the zebra crossings vanished and showed sky.  The engine now defaults to masked
+// and only reads a decal when asked, which is what this prefix does.  (Matches
+// xash3d-fwgs, which gates the same branch on IL_LOAD_DECAL.)
+//
+// The library/lump discriminator is the category slash: every decal in the mod's
+// packs has one, no GoldSrc wad lump has one (lump names are capped at 15 chars
+// and are flat).  So this cannot start mis-routing the existing library decals.
+float(string texname) CSQC_InfoDecal_IsWadLump =
+{
+    if (substring(texname, 0, 1) != "{")
+        return FALSE;
+    return strstrofs(substring(texname, 1, strlen(texname) - 1), "/") < 0;
+};
+
+string(string texname) CSQC_InfoDecal_MapTarget =
+{
+    if (substring(texname, 0, 1) != "{")
+        return texname;                             // already a plain image path
+    string stem = substring(texname, 1, strlen(texname) - 1);
+    if (strstrofs(stem, "/") >= 0)
+        return sprintf("gfx/decals/%s", stem);      // mod library decal
+    return strcat("waddecal/", texname);            // GoldSrc lump -> WAD3 decal reading
+};
+
 // ---- runtime { -decal shader (replicates the is_wad branch of -------------
 //      CSQC_SpawnSprayDecal; shaderforname idempotent).  rendermode selects the
 //      blendFunc and is folded into the shader KEY (so modes don't collide on one
@@ -121,7 +178,11 @@ string(string texname, float rmode) CSQC_InfoDecal_BuildShader =
     //resolves gfx/decals/Source/srclock01. The pk3s therefore mirror that structure; do not
     //flatten them (learned the hard way on 2026-07-28: flattening silently kills every decal
     //whose name carries a category, which is nearly all of them).
-    string maptarget = is_wad ? sprintf("gfx/decals/%s", stem) : texname;
+    //
+    //A BARE wad lump name ("{TARGET") resolves to itself instead -- see
+    //CSQC_InfoDecal_MapTarget above.  `base` keeps the waddecal_ prefix either way, so the
+    //shader KEY never collides with the world-surface shader of the same texture name.
+    string maptarget = CSQC_InfoDecal_MapTarget(texname);
 
     // GoldSrc rendermode -> blend.  4 = Solid (alpha-test, opaque); 3/5 = Glow/
     // Additive; else Normal/Color/Texture (alpha blend).  Suffix keeps modes apart.
@@ -453,14 +514,33 @@ void(float isnew) CSQC_InfoDecal_Update =
         float s = escale * cvar("cl_infodecal_scale");
         if (s <= 0) s = 1;
 
+        // Build the shader BEFORE measuring: a GoldSrc wad decal has no image file to
+        // measure, so it gets sized through the shader we just registered for it.
+        string shaderkey = CSQC_InfoDecal_BuildShader(texname, rmode);
+
         // Aspect-correct half-extents from the decal image (extensionless -- see :117).
         float half_w = SPRAY_QUAD_HALF * s;
         float half_h = SPRAY_QUAD_HALF * s;
         if (substring(texname, 0, 1) == "{")
         {
-            string stem = substring(texname, 1, strlen(texname) - 1);
-            string pic  = sprintf("gfx/decals/%s", stem);
-            precache_pic(pic);
+            // Library decals measure the image file directly.  A bare wad lump is measured
+            // via `shaderkey` instead of its own name, because precache_pic("{target")
+            // would register a 2D pic under the SAME global shader name a world surface
+            // using that texture holds — the decal would then be able to restyle map
+            // geometry.  waddecal_<stem> is private to this file.
+            //
+            // Worth the detour: 95 of the 225 lumps in decals.wad are non-square (128x32
+            // arrows, 48x96 signs), so falling back to a square quad visibly distorts
+            // them.  A probe that returns nothing simply keeps the square, as before.
+            string pic = CSQC_InfoDecal_MapTarget(texname);
+            // Tested on the SOURCE name, not by comparing against the mapped
+            // one: MapTarget now rewrites wad lumps too (to "waddecal/{LUMP"),
+            // so the old `pic == texname` identity check would take the
+            // image-file branch and precache_pic a name no file can satisfy.
+            if (CSQC_InfoDecal_IsWadLump(texname))
+                pic = shaderkey;        // GoldSrc wad lump — measure our own shader
+            else
+                precache_pic(pic);      // image file — precache before measuring
             vector sz = drawgetimagesize(pic);
             if (sz_x > 0 && sz_y > 0)
             {
@@ -470,8 +550,6 @@ void(float isnew) CSQC_InfoDecal_Update =
                     half_w = SPRAY_QUAD_HALF * s * (sz_x / sz_y);   // portrait
             }
         }
-
-        string shaderkey = CSQC_InfoDecal_BuildShader(texname, rmode);
 
         // renderamt -> opacity.  0/unset = opaque (don't make keyless infodecals
         // invisible); solid mode (4) is alpha-tested so renderamt doesn't apply.

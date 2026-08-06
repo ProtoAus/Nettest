@@ -28,6 +28,23 @@
 //   16  TELEPORT        — snap to this track instantly.
 //
 
+// Sven path_track keys that were being dropped because no field existed.
+//
+// `speed` is labelled "(Legacy)" in Sven's FGD and `newspeed` supersedes it —
+// but READ THE VALUES BEFORE USING newspeed: across th_ep1_00 and
+// -sp_campaign_portal it is -1 on 100% of path_tracks (61/61 and 87/87), which
+// is the FGD's "no change" sentinel.  A naive `if (t.newspeed) spd =
+// t.newspeed;` would drive every train on both maps at -1 units/sec.  Only the
+// legacy `speed` key is ever really set, and func_tracktrain already reads it.
+// Any future consumer must guard on `> 0`.
+.float newspeed;
+.float maxspeed;
+// Branch path for a track-change entity.  DECLARED ONLY: selecting it needs a
+// func_trackchange to flip the branch, and none of the target maps contains
+// one, so the train correctly follows `target` regardless.  6 path_tracks in
+// -sp_campaign_portal set this.
+.string altpath;
+
 void() path_track =
 {
     self.movetype = MOVETYPE_NONE;

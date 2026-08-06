@@ -72,6 +72,42 @@ float(string name) ChangeLevel_NameIsSafe =
 };
 
 // Single fire path — both touch and use route through here.
+// Issue a changelevel that STAYS IN THE SAME GAME.
+//
+// This is the fix for "the textures go to hell after a level transition", and the
+// cause is not the renderer - it is which copy of a WAD the next map resolves.
+//
+// The create-server menu loads a map as `map "@<spec>/<name>"`, where <spec> names
+// the mounted game.  SV_Map_f stashes that as sv_mappreferhint, SV_SpawnServer
+// biases the worldmodel AND the texture WAD lookups to it, and publishes it as the
+// "*mappref" serverinfo key so connecting clients agree.  A bare `changelevel foo`
+// deliberately CLEARS that hint (sv_ccmds.c:751 says so, and naming changelevel as
+// one of the paths that must not inherit a stale one) - so the next map's wads are
+// resolved by plain mount priority instead.
+//
+// That matters because the names collide and the CONTENT DOES NOT.  Measured on
+// this install: halflife.wad exists in Half-Life/valve, Half-Life/bshift and Sven
+// Co-op/svencoop, all three exactly 37,914,096 bytes, and valve's MD5 differs from
+// the other two.  Same name, same size, different texture data - so a map that
+// loaded its wad from one game and then gets the other after a transition renders
+// every brush face with the wrong pixels.  Half-Life's own chapter transitions
+// (hl_c01_a1 -> a2) and the Opposing Force maps are exactly the maps that hit it.
+//
+// So: re-attach the spec the current map was loaded with.  The '@' form is
+// explicitly exempted from the package-manager's "blocked from gamecode" guard
+// (sv_ccmds.c:817 tests `*mangled != '@'`), so QC is allowed to use it.  Empty
+// hint - a map started with a plain name - falls through to the old behaviour and
+// changes nothing.
+void(string nextmap) ChangeLevel_Issue =
+{
+    string spec = infokey(world, "*mappref");
+
+    if (spec != "" && spec)
+        localcmd(sprintf("changelevel \"@%s/%s\"\n", spec, nextmap));
+    else
+        localcmd(sprintf("changelevel %s\n", nextmap));
+};
+
 void() trigger_changelevel_fire =
 {
     if (self.changelevel_fired) return;
@@ -101,7 +137,7 @@ void() trigger_changelevel_fire =
     // of trigger_changelevel firing its target chain on level exit.
     if (self.target != "")
         SUB_UseTargets(self, other, USE_TOGGLE);
-    localcmd(sprintf("changelevel %s\n", self.map));
+    ChangeLevel_Issue(self.map);
 };
 
 void() trigger_changelevel_touch =

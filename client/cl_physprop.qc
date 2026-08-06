@@ -48,17 +48,17 @@ void() CSQC_PhysProp_ResolveIndexes =
     // MUST match PhysBarrel_RandomModel / PhysCan_RandomModel + phys_barrel_precache
     // (sv_physprop.qc) — a model missing from the precache list resolves 0 and is simply
     // never matched, which is safe (the type just falls back to the generic hit path).
-    pp_idx_barrel_1 = (float)getmodelindex("models/props/containers/mega/metal_barrel_mp_1.iqm");
-    pp_idx_barrel_2 = (float)getmodelindex("models/props/containers/mega/metal_barrel_mp_2.iqm");
-    pp_idx_barrel_3 = (float)getmodelindex("models/props/containers/mega/metal_barrel_mp_3.iqm");
-    pp_idx_can_1    = (float)getmodelindex("models/props/containers/mega/tin_can_mp_1_rusty.iqm");
-    pp_idx_can_2    = (float)getmodelindex("models/props/containers/mega/tin_can_mp_1_rusty_1.iqm");
-    pp_idx_can_3    = (float)getmodelindex("models/props/containers/bunkers/canned_food_3.iqm");
-    pp_idx_can_4    = (float)getmodelindex("models/props/containers/bunkers/canned_food_4.iqm");
-    pp_idx_can_5    = (float)getmodelindex("models/props/containers/bunkers/canned_food_5.iqm");
+    pp_idx_barrel_1 = (float)getmodelindex("models/props/containers/metal_barrel_mp_1.iqm");
+    pp_idx_barrel_2 = (float)getmodelindex("models/props/containers/metal_barrel_mp_2.iqm");
+    pp_idx_barrel_3 = (float)getmodelindex("models/props/containers/metal_barrel_mp_3.iqm");
+    pp_idx_can_1    = (float)getmodelindex("models/props/containers/tin_can_mp_1_rusty.iqm");
+    pp_idx_can_2    = (float)getmodelindex("models/props/containers/tin_can_mp_1_rusty_1.iqm");
+    pp_idx_can_3    = (float)getmodelindex("models/props/containers/canned_food_3.iqm");
+    pp_idx_can_4    = (float)getmodelindex("models/props/containers/canned_food_4.iqm");
+    pp_idx_can_5    = (float)getmodelindex("models/props/containers/canned_food_5.iqm");
     // Filecabinet is a single IQM (the legacy .mdl fallback is gone — it never existed on disk).
     // Its bullet hit-test is a rotated oriented-box (see CSQC_PhysProp_RayBox), accurate when it tips.
-    pp_idx_phys_files  = (float)getmodelindex("models/props/filecabinet/filecabinet.iqm");
+    pp_idx_phys_files  = (float)getmodelindex("models/props/furniture/filecabinet.iqm");
     pp_idx_resolved = 1;
 };
 

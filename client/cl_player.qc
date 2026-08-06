@@ -17,6 +17,10 @@ server reconciliation once authoritative state arrives.
 ==============================================================================
 */
 
+// Defined in client/cl_trigger_camera.qc, which compiles after this file —
+// CSQC_Ent_Update below dispatches CSQC_ENT_TRIGGER_CAMERA to it.
+void() CSQC_TriggerCamera_Update;
+
 // ---------------------------------------------------------------------------
 //  Server-confirmed baseline (populated from the owner-only proxy snapshot)
 // ---------------------------------------------------------------------------
@@ -5577,6 +5581,13 @@ noref void(float isnew) CSQC_Ent_Update =
 	if (ent_type == CSQC_ENT_CAMERA)
 	{
 		CSQC_Camera_Update();
+		return;
+	}
+
+	// Defined in cl_trigger_camera.qc, which compiles after this file.
+	if (ent_type == CSQC_ENT_TRIGGER_CAMERA)
+	{
+		CSQC_TriggerCamera_Update();
 		return;
 	}
 

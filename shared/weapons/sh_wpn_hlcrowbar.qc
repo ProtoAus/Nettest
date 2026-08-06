@@ -140,15 +140,22 @@ void() W_CrowbarSwing =
         {
             // BREAKABLE_INSTANT_CROWBAR — see sh_wpn_csknife.qc.
             float deal = CROWBAR_DAMAGE;
-            if (trace_ent.classname == "func_breakable"
+            if (Brush_IsBreakableClass(trace_ent)
                 && (trace_ent.spawnflags & BREAKABLE_INSTANT_CROWBAR))
                 deal = 9999;
             // Defer player damage to attacker's client hitclaim so
             // damage isn't applied twice (server-auth + hitclaim).
             float defer_player = (trace_ent.classname == "player")
                                  && W_ShouldDeferToClaim(self);
+            // BRACES MATTER HERE.  Without them the guard covered only the
+            // sv_dmg_bits line and W_ApplyDamage ran unconditionally, so a
+            // crowbar hit on a player was applied TWICE - once server-auth
+            // here and once again from the attacker's client hitclaim.
             if (!defer_player)
+            {
+                sv_dmg_bits = DMG_CLUB;   // a corpse can be broken apart by hand
                 W_ApplyDamage(self, trace_ent, deal);
+            }
         }
         else
         {

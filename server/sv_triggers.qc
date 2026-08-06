@@ -72,6 +72,8 @@ void(string name) SUB_KillTargets =
 .string delayed_killtarget;
 .float  delayed_use_type;
 .entity delayed_activator;
+// .entity delayed_origcaller is declared in sv_doors.qc (which compiles
+// first and needs it inside Trigger_UseTargets).  Set below.
 
 void() SUB_DelayedFire_Think =
 {
@@ -95,6 +97,7 @@ void(entity caller, entity who, float useType, float delay) SUB_DelayedFire =
     e.delayed_killtarget  = caller.killtarget;
     e.delayed_use_type    = useType;
     e.delayed_activator   = who;
+    e.delayed_origcaller  = caller;
     e.think               = SUB_DelayedFire_Think;
     e.nextthink           = time + delay;
 };
@@ -125,6 +128,35 @@ void(entity caller, entity who, float useType) SUB_UseTargets =
 };
 
 // ---------------------------------------------------------------------------
+// GoldSrc_TriggerStateToUseType — map a mapper-authored `triggerstate` key
+// onto our USE_* constants.  These are two DIFFERENT enums and 2/3 are
+// transposed between them:
+//
+//     triggerstate (Sven FGD)      USE_* (sv_doors.qc)
+//       0 Off                        USE_OFF    = 0
+//       1 On                         USE_ON     = 1
+//       3 Set   <-- note             USE_SET    = 2
+//       2 Toggle <-- note            USE_TOGGLE = 3
+//       4 Kill                       (no equivalent)
+//
+// Sven's FGD comments the 2/3 transposition as deliberate backwards
+// compatibility.  The old code did `triggerstate ? triggerstate : USE_TOGGLE`,
+// which passed 1 through correctly by luck and got 2 and 3 backwards.
+//
+// The `0` case stays USE_TOGGLE on purpose: QC cannot distinguish "key absent"
+// from "key present and 0" on a .float, and the FGD default is 2 (Toggle), so
+// treating a zero as Toggle matches the far more common unset case.  Nothing
+// in the Sven map corpus authors an explicit `triggerstate 0`.
+// ---------------------------------------------------------------------------
+float(float ts) GoldSrc_TriggerStateToUseType =
+{
+    if (ts == 1) return USE_ON;
+    if (ts == 3) return USE_SET;
+    if (ts == 4) return USE_OFF;   // Sven "Kill" — closest we can express
+    return USE_TOGGLE;             // 2 (Toggle) and 0/unset
+};
+
+// ---------------------------------------------------------------------------
 // IsMasterTriggered — gate check.  Empty master name passes.  Multi-
 // source returns its accumulated AND-gate state.  game_team_master
 // checks activator's team.  Unknown classname → permissive (TRUE) so
@@ -134,7 +166,26 @@ float(string master_name, entity who) IsMasterTriggered =
 {
     if (master_name == "" || master_name == __NULL__)
         return TRUE;
-    entity m = find(world, targetname, master_name);
+
+    // targetname is NOT unique, and real maps exploit that.  In
+    // -sp_campaign_portal.bsp a multisource AND a func_door_rotating are
+    // both named "WeDoNotGoThere", and a third door masters off that name.
+    // find() returns matches in ascending edict order, so a bare find()
+    // picks whichever the compiler happened to emit first — and the
+    // permissive fallback at the bottom of this function means landing on
+    // the wrong one silently reports UNLOCKED, disabling the gate.  Scan
+    // the whole chain and prefer a real gate class; only fall back to the
+    // first hit when none of the matches is one.
+    entity m     = find(world, targetname, master_name);
+    entity first = m;
+    while (m)
+    {
+        if (m.classname == "multisource" || m.classname == "game_team_master")
+            break;
+        m = find(m, targetname, master_name);
+    }
+    if (!m)
+        m = first;
     if (!m)
         return TRUE;       // mapper typo policy
 

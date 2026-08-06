@@ -2,11 +2,33 @@
 // mounted game/package each map came from (used to bucket the map list by game).
 string(searchhandle handle, float num) search_getpackagename = #0:search_getpackagename;
 
+// create_server_maps is the VIEW: the filtered list the dropdown draws, and the ONLY buffer
+// create_server_selected_map ever indexes.  That naming matters -- six sites below are
+// hardcoded to this global (:400 selected_map_name, the metrics + draw in create_server_menu,
+// and the Start Server gate) and every one of them must mean VIEW.  Point one of them at the
+// master while another draws the view and the menu will faithfully launch the WRONG map.
 strbuf create_server_maps;
 float create_server_maps_loaded;
 float create_server_selected_map;
 float create_server_map_dropdown_open;
 vector create_server_map_scroll;
+
+// --- Map search / filter state ---
+// create_server_maps_all is the MASTER: every map on the active tab, deduped and sorted.
+// Rebuilding it is a full cfg/maps_index.txt read plus the O(n^2) menu_buf_contains dedupe
+// (~584k compares on the CS:S tab), so it happens on a tab change / Refresh only.  Rebuilding
+// the view is one linear strstrofs pass over the master -- that is the whole cost of a
+// keystroke.
+strbuf create_server_maps_all;
+float  create_server_maps_all_loaded;
+string create_server_search_text;
+float  create_server_search_cursor;
+string create_server_search_applied;	// needle the current view was built for (change gate)
+#define CREATE_SERVER_SEARCH_MAXTERMS 4
+string create_server_search_terms[CREATE_SERVER_SEARCH_MAXTERMS];
+float  create_server_search_term_count;
+string create_server_selected_name;	// last map actively CLICKED; survives view rebuilds
+float  create_server_selected_name_zoned;
 string create_server_name_text;
 float create_server_name_cursor;
 string create_server_maxplayers_text;
@@ -57,12 +79,15 @@ float create_server_voip_echo;
 float create_server_seeded;
 float create_server_tab;    // 0 = server, 1 = game, 2 = movement
 float create_server_tickrate_index;
-float create_server_game_filter;	// map-list filter: 0=All 1=Nettest 2=CS 3=HL 4=CoD1 5=CoD2 6=Source
-string create_server_game_labels[7] = { "Net", "CS", "HL", "CoD1", "CoD2", "HL2", "CSS" };
+float create_server_game_filter;	// map-list filter: 0=All 1=Nettest 2=CS 3=HL 4=CoD1 5=CoD2 6=Source 7=CSS 8=Sven 9=OpFor 10=BShift
+string create_server_game_labels[10] = { "Net", "CS", "HL", "CoD1", "CoD2", "HL2", "CSS", "Sven", "OpFor", "BShift" };
 // Which game categories actually have maps in the offline index (cfg/maps_index.txt),
-// keyed by game id (1..7).  Built once by create_server_scan_avail(); the filter row only
+// keyed by game id (1..8).  Built once by create_server_scan_avail(); the filter row only
 // draws tabs for games that are present, so e.g. the CoD tabs vanish without CoD content.
-float  create_server_game_has_maps[8];
+// SIZE 9, not 8: this one is indexed BY gid (has_maps[gid]), unlike the label array above
+// which is indexed [gid-1].  An out-of-bounds access here is a hard QCFAULT, not a silent
+// write -- flag_boundchecks is on by default and a variable index takes the checked path.
+float  create_server_game_has_maps[11];
 float  create_server_avail_scanned;
 
 float tickrates[] = { 64, 66, 72, 85, 100, 128, 200, 300 };
@@ -382,6 +407,11 @@ void() create_server_seed_fields =
 	create_server_odequick       = cvar("physics_ode_worldquickstep") > 0;
 	create_server_odeautodisable = cvar("physics_ode_autodisable") > 0;
 
+	// No cvar to seed from, but every text field on this screen must be non-null before its
+	// first text_input_control call.
+	create_server_search_text = "";
+	create_server_search_cursor = 0;
+
 	create_server_seeded = TRUE;
 };
 
@@ -647,15 +677,40 @@ float(string id, vector pos, vector size, strbuf options, __inout float selected
 // cfg/maps_index.txt by the engine's `fs_indexmaps`).  This is the reliable signal — the spec is
 // the real game dir, so CS:S ("...Counter-Strike Source/cstrike") and CS1.6 ("...Half-Life/cstrike")
 // are distinguished even though both end in "cstrike" and share map names (de_dust2).
-// Returns the game id used by create_server_game_filter (1..7).
+// Returns the game id used by create_server_game_filter (1..10).
 float(string spec) create_server_map_game =
 {
 	string p = strtolower(spec);
+	// Sven Co-op FIRST.  "svencoop" is the most specific token in this chain and appears in no
+	// other game's spec, so it shadows nothing below -- while going first makes it immune to an
+	// install path that happens to contain another game's token (Sven shipped for years as a
+	// Half-Life MOD at ".../Half-Life/svencoop", which would otherwise match "valve"'s sibling
+	// tests).  One test covers svencoop, svencoop_downloads (same spec, see fs.c:8935-8951),
+	// svencoop_addon and svencoop_event_*.
+	//
+	// Without this the spec matched nothing and fell into the `return 6` default, and the
+	// symptom was NOT "maps hidden": cfg/default.cfg ships `set fs_have_hl2 1`, so
+	// create_server_game_plugin_ok(6) passes -- Sven maps would have listed under the HL2 tab
+	// and mounted steam:Half-Life 2/hl2 on launch.  Visible and wrong, which is worse.
+	if (strstrofs(p, "svencoop") >= 0)       return 8;	// Sven Co-op (GoldSrc BSP30)
 	if (strstrofs(p, "call of duty 2") >= 0) return 5;	// CoD2
 	if (strstrofs(p, "call of duty") >= 0)   return 4;	// CoD1
 	if (strstrofs(p, "counter-strike source") >= 0) return 7;	// CS:Source (own category, checked before cstrike)
 	if (strstrofs(p, "half-life 2") >= 0)    return 6;	// HL2 (Source)
+	// Condition Zero is a GoldSrc cstrike variant but its gamedir is "czero", so it matched
+	// nothing here and fell into the `return 6` default alongside the Sven bug above -- its 22
+	// maps listed under the HL2 tab and mounted steam:Half-Life 2/hl2 on launch.
+	if (strstrofs(p, "czero") >= 0)         return 2;	// Condition Zero
 	if (strstrofs(p, "cstrike") >= 0)        return 2;	// CS 1.6 (GoldSrc cstrike gamedir)
+	// Opposing Force and Blue Shift.  THIRD time this exact bug has been found here, so it
+	// is worth naming the shape: an expansion's gamedir is "gearbox" / "bshift" and its spec
+	// therefore contains NEITHER "valve" NOR "half-life 2" - it matched nothing above and fell
+	// into the `return 6` default, filing all 68 OpFor maps under the HL2 tab and mounting
+	// steam:Half-Life 2/hl2 to load them.  Exactly what happened to Sven Co-op and to
+	// Condition Zero, both documented above.  Any NEW GoldSrc gamedir added to fs_addons.txt
+	// needs a line here or it inherits the same silent misfiling.
+	if (strstrofs(p, "gearbox") >= 0)        return 9;	// Opposing Force
+	if (strstrofs(p, "bshift") >= 0)         return 10;	// Blue Shift
 	if (strstrofs(p, "valve") >= 0)          return 3;	// Half-Life
 	// This mod's own maps.  BOTH spellings are matched on purpose: the engine writes the tag for
 	// non-addon (i.e. our own) maps as a HARDCODED literal — common/fs.c FS_IndexAddonMaps does
@@ -691,7 +746,11 @@ float(float gid) create_server_game_plugin_ok =
 		return cvar("fs_have_cod") ? TRUE : FALSE;
 	if (gid == 6 || gid == 7)		// HL2 / CS:Source
 		return cvar("fs_have_hl2") ? TRUE : FALSE;
-	return TRUE;				// our own maps, GoldSrc HL / CS 1.6 — base engine handles these
+	// Our own maps, GoldSrc HL / CS 1.6, Sven Co-op (8), Opposing Force (9) and Blue Shift
+	// (10) — base engine handles all of these.  They ship BSP30, a native format
+	// (bspfile.h BSPVERSIONHL, dispatched gl_model.c:6269), so there is no plugin and no
+	// fs_have_* cvar to gate them on.  Adding one would hide maps that work.
+	return TRUE;
 };
 
 // Read the engine-built OFFLINE map index (cfg/maps_index.txt — one "<sourcespec>\t<mapname>"
@@ -718,11 +777,13 @@ void(float filter) create_server_read_index =
 			string spec = substring(line, 0, tab);
 			string mapname = substring(line, tab + 1, n - tab - 1);
 			float gid = create_server_map_game(spec);
+			// Fills the MASTER — the search filter is applied later, when the view is
+			// built from it, so this expensive pass stays off the typing path.
 			if (mapname != "" &&
 			    create_server_game_plugin_ok(gid) &&
 			    (filter == 0 || gid == filter) &&
-			    !menu_buf_contains(create_server_maps, mapname))
-				bufstr_add(create_server_maps, mapname, FALSE);
+			    !menu_buf_contains(create_server_maps_all, mapname))
+				bufstr_add(create_server_maps_all, mapname, FALSE);
 		}
 		line = fgets(fh);
 	}
@@ -736,7 +797,7 @@ void(float filter) create_server_read_index =
 void() create_server_scan_avail =
 {
 	float gid;
-	for (gid = 0; gid <= 7; gid += 1)
+	for (gid = 0; gid <= 10; gid += 1)	// 0..10 inclusive == every slot of the [11] array
 		create_server_game_has_maps[gid] = 0;
 	create_server_game_has_maps[1] = 1;	// Net = the running mod, always available
 
@@ -830,6 +891,26 @@ string(string spec) create_server_deps_for_spec =
 		return strcat(base, " \"steam:Half-Life 2/hl2\"");
 	if (gid == 4 || gid == 5)   // CoD1/CoD2 -> base + that CoD dir (its content lives in .iwd/.pk3)
 		return strcat(base, " \"", spec, "\"");
+	// Opposing Force / Blue Shift -> base + their own dir.  `base` already carries
+	// steam:Half-Life/valve, which is what both expansions actually need: they ship only
+	// their own new content and inherit the rest of Half-Life, so mounting the expansion
+	// WITHOUT valve gives a map with no world textures.  Quoted like every other spec here
+	// because the path contains a space (see the Sven note below for what unquoted does).
+	if (gid == 9 || gid == 10)
+		return strcat(base, " \"", spec, "\"");
+	// Sven Co-op -> base + svencoop ALWAYS (its wads/models/sounds/sprites back every Sven map,
+	// including the ones that live in svencoop_downloads and the seasonal event dirs), plus the
+	// map's own dir when that is something else.  Every spec is quoted: FS_UseAddons_f iterates
+	// Cmd_Argv(i) (fs.c:8974), so an unquoted "steam:Sven Co-op/svencoop" splits into
+	// "steam:Sven" (warns) + "Co-op/svencoop", and the second one SILENTLY mounts
+	// <gamepath>/Co-op/svencoop because VFSOS_OpenPath does not validate the dir.
+	if (gid == 8)
+	{
+		string sven = strcat(base, " \"steam:Sven Co-op/svencoop\"");
+		if (spec != "steam:Sven Co-op/svencoop")
+			sven = strcat(sven, " \"", spec, "\"");
+		return sven;
+	}
 	return base;                // nettest / CS 1.6 / HL -> just the always-mounted base
 };
 
@@ -848,48 +929,141 @@ void(string mapname, float filter) create_server_mount_for_map =
 	localcmd(strcat("fs_useaddons ", deps, "\n"));
 };
 
-void() create_server_load_maps =
+// Set the sticky pick.  strzone'd for the same reason the search terms are: this outlives the
+// frame that set it, and it is compared against bufstr_get results (themselves tempstrings) on
+// every later view rebuild.  Zone the new value BEFORE freeing the old one so passing in a
+// string derived from the current value can never read freed memory.
+void(string name) create_server_set_selected_name =
 {
-	float map_count = 0;
-	string previous_map = "";
+	string old = create_server_selected_name;
+	float had  = create_server_selected_name_zoned;
 
-	if (create_server_maps_loaded)
-	{
-		map_count = buf_getsize(create_server_maps);
-		if (map_count > 0)
-		{
-			create_server_selected_map = bound(0, create_server_selected_map, map_count - 1);
-			previous_map = bufstr_get(create_server_maps, create_server_selected_map);
-		}
+	create_server_selected_name = strzone(name);
+	create_server_selected_name_zoned = TRUE;
 
-		buf_del(create_server_maps);
-	}
+	if (had)
+		strunzone(old);
+};
 
-	create_server_maps = buf_create();
-	create_server_maps_loaded = TRUE;
-	create_server_selected_map = 0;
-	create_server_map_dropdown_open = FALSE;
-	create_server_map_scroll = '0 0 0';
+// MASTER rebuild — the expensive half.  Must NOT sit on the typing path.
+void() create_server_build_master =
+{
+	if (create_server_maps_all_loaded)
+		buf_del(create_server_maps_all);
+
+	create_server_maps_all = buf_create();
+	create_server_maps_all_loaded = TRUE;
 
 	// Read the offline index (both .bsp and .d3dbsp were indexed by the engine), bucketed by
 	// source game via create_server_game_filter (0 = All).
 	create_server_read_index(create_server_game_filter);
 
-	map_count = buf_getsize(create_server_maps);
-	if (map_count > 1)
-		buf_sort(create_server_maps, 0, FALSE);
+	// Sort ONCE here; the view walks the master in order and inherits it for free.
+	if (buf_getsize(create_server_maps_all) > 1)
+		buf_sort(create_server_maps_all, 0, FALSE);
+};
 
-	if (previous_map != "")
+void() create_server_free_search_terms =
+{
+	for (float i = 0; i < create_server_search_term_count; i += 1)
+		strunzone(create_server_search_terms[i]);
+	create_server_search_term_count = 0;
+};
+
+// Split the needle into up to CREATE_SERVER_SEARCH_MAXTERMS lowercase terms that must ALL
+// match, so "de dust" finds de_dust2.  strtolower + tokenizebyseparator run ONCE per rebuild,
+// not once per map.
+//
+// The terms MUST be strzone'd: argv() and strtolower() return TEMPSTRINGS that get recycled
+// (the same trap sh_propmaterials.qc:141 and sh_matsounds.qc:375 call out), and the caller then
+// reads them back once per map while bufstr_get allocates a fresh tempstring on every one of
+// those ~1000 iterations.  Unzoned, the terms would be clobbered part-way through the scan and
+// the filter would silently start matching the wrong thing.
+void() create_server_split_search =
+{
+	create_server_free_search_terms();
+	if (create_server_search_text == "")
+		return;
+
+	float n = tokenizebyseparator(strtolower(create_server_search_text), " ");
+	for (float i = 0; i < n; i += 1)
 	{
-		for (float index = 0; index < map_count; index += 1)
-		{
-			if (bufstr_get(create_server_maps, index) != previous_map)
-				continue;
-
-			create_server_selected_map = index;
-			break;
-		}
+		if (create_server_search_term_count >= CREATE_SERVER_SEARCH_MAXTERMS)
+			break;			// extra words are ignored, not made unsatisfiable
+		string term = argv(i);
+		if (term == "")			// runs of spaces produce empty tokens
+			continue;
+		create_server_search_terms[create_server_search_term_count] = strzone(term);
+		create_server_search_term_count += 1;
 	}
+};
+
+// Plain case-insensitive substring per term, AND-ed.  Index map names are already lowercased by
+// fs_indexmaps (fs.c:8828), so only the needle needs folding.  Deliberately NOT anchored:
+// "surf_" is meant to find surf_ski_2, and that it also finds xsurf_a beats teaching a "^surf"
+// syntax the search box has no room to advertise.
+float(string mapname) create_server_search_match =
+{
+	for (float i = 0; i < create_server_search_term_count; i += 1)
+		if (strstrofs(mapname, create_server_search_terms[i]) < 0)
+			return FALSE;
+	return TRUE;
+};
+
+// VIEW rebuild — one linear pass.  No file I/O, no dedupe (the master is already unique) and no
+// sort (the master is already sorted).  This is the ENTIRE cost of a keystroke.
+void() create_server_rebuild_view =
+{
+	if (!create_server_maps_all_loaded)
+		return;
+
+	if (create_server_maps_loaded)
+		buf_del(create_server_maps);
+
+	create_server_maps = buf_create();
+	create_server_maps_loaded = TRUE;
+	create_server_map_dropdown_open = FALSE;
+	create_server_map_scroll = '0 0 0';
+
+	create_server_split_search();
+
+	float total = buf_getsize(create_server_maps_all);
+	for (float index = 0; index < total; index += 1)
+	{
+		string mapname = bufstr_get(create_server_maps_all, index);
+		if (create_server_search_term_count > 0 && !create_server_search_match(mapname))
+			continue;
+		bufstr_add(create_server_maps, mapname, FALSE);
+	}
+
+	create_server_search_applied = create_server_search_text;
+
+	// Restore the pick BY NAME.  MANDATORY: menu_dropdown bounds selected_index against the new
+	// count, so leaving a raw index would silently slide the selection onto an unrelated row as
+	// the list shrinks.  When the pick is filtered out we clamp to 0 rather than keep a hidden
+	// selection -- "Start Server" must always launch a map you can SEE.  create_server_selected_name
+	// is NOT cleared here, so it is sticky for RESTORE: clear the query and the pick comes back.
+	create_server_selected_map = 0;
+	float count = buf_getsize(create_server_maps);
+	for (float index = 0; index < count; index += 1)
+	{
+		if (bufstr_get(create_server_maps, index) != create_server_selected_name)
+			continue;
+
+		create_server_selected_map = index;
+		break;
+	}
+};
+
+// Public entry point — same name, same signature and same call sites as before the split.
+void() create_server_load_maps =
+{
+	create_server_build_master();
+	create_server_rebuild_view();
+
+	// Seed the sticky pick the first time we ever have a list.
+	if (create_server_selected_name == "" && buf_getsize(create_server_maps) > 0)
+		create_server_set_selected_name(bufstr_get(create_server_maps, 0));
 };
 
 void() create_server_launch =
@@ -1077,30 +1251,59 @@ void() create_server_launch =
 		localcmd(sprintf("map %s\n", mapname));
 };
 
-// Game-filter tab row for the map list — click a game to show only its maps.
+// The tab row divides left_width (206) by the number of visible games with a 2px gap, so every
+// extra game makes every label narrower.  At 7 tabs that is 27.7px and "CoD1"/"CoD2" already
+// overflow slightly; an 8th (Sven) drops it to 24px and clips them properly.  Wrapping to rows
+// of 4 gives 50px per button, which fixes the new label and the pre-existing overflow together.
+const float CSF_TABS_PER_ROW = 4;
+const float CSF_TAB_H        = 18;
+const float CSF_TAB_VGAP     = 2;
+
+// How many games have maps this session.  Shared by the height query and the draw so the two
+// can never disagree about the row count.  Meaningful only after create_server_scan_avail().
+float() create_server_game_filter_count =
+{
+	float gid, n = 0;
+	for (gid = 1; gid <= 10; gid += 1)
+		if (create_server_game_has_maps[gid])
+			n += 1;
+	return n < 1 ? 1 : n;
+};
+
+// Height the tab row will consume this frame.  Split out from the draw because the caller has
+// to size the map list BEFORE the row is drawn.
+float() create_server_game_filter_height =
+{
+	float rows = ceil(create_server_game_filter_count() / CSF_TABS_PER_ROW);
+	return rows * CSF_TAB_H + (rows - 1) * CSF_TAB_VGAP;
+};
+
+// Game-filter tab row for the map list — click a game to show only its maps.  Wraps to further
+// rows of CSF_TABS_PER_ROW once there are more games than that; absent games (e.g. no CoD
+// content) are skipped entirely and leave no gap.
 void(vector at, float w) create_server_draw_game_filter =
 {
 	float gid;
-	// Count only the games that actually have maps — the tab row sizes/positions
-	// itself to just those, so absent games (e.g. no CoD content) leave no gap.
-	float n = 0;
-	for (gid = 1; gid <= 7; gid += 1)
-		if (create_server_game_has_maps[gid])
-			n += 1;
-	if (n < 1) n = 1;
+	float n = create_server_game_filter_count();
 
+	float rows   = ceil(n / CSF_TABS_PER_ROW);
+	// Balance the rows rather than filling the first one: 7 tabs -> 4+3, not 4+2+1.
+	float percol = ceil(n / rows);
 	float g = 2;
-	float bw = (w - g * (n - 1)) / n;
+	float bw = (w - g * (percol - 1)) / percol;
 	vector on_col = MENU_BUTTON_RETURN,  on_brd = MENU_BUTTON_RETURN_BORDER;
 	vector off_col = MENU_BG_DARK,       off_brd = MENU_BORDER;
 
 	float slot = 0;
-	for (gid = 1; gid <= 7; gid += 1)
+	for (gid = 1; gid <= 10; gid += 1)
 	{
 		if (!create_server_game_has_maps[gid])
 			continue;
+		float row = floor(slot / percol);
+		float col = slot - row * percol;	// QC has no integer modulo operator
 		float sel = (create_server_game_filter == gid);
-		if (my_button_colored(strcat("gamefilter_", ftos(gid)), [at_x + slot * (bw + g), at_y], [bw, 18],
+		if (my_button_colored(strcat("gamefilter_", ftos(gid)),
+			[at_x + col * (bw + g), at_y + row * (CSF_TAB_H + CSF_TAB_VGAP)], [bw, CSF_TAB_H],
 			create_server_game_labels[gid - 1], sel ? on_col : off_col, sel ? on_brd : off_brd))
 		{
 			if (create_server_game_filter != gid)
@@ -1111,6 +1314,67 @@ void(vector at, float w) create_server_draw_game_filter =
 		}
 		slot += 1;
 	}
+};
+
+// Map search / filter row — a text box plus a clear button, sitting between the game tabs and
+// the list so it reads as "pick the game, then narrow by name".  Filters the CURRENT tab only;
+// the query PERSISTS across tab switches, so typing "surf_" once and clicking through
+// Net/CS/HL/CSS is the cross-game search.
+// Returns whether the box had keyboard focus ON ENTRY — see the ESC handling at the end of
+// create_server_menu.
+float(vector at, float w, float h) create_server_draw_map_search =
+{
+	float clear_w = 18;
+	float gap = 4;
+	float box_w = w - clear_w - gap;
+
+	// Sample focus BEFORE the control runs: sui_handle_text_input clears
+	// _last_clicked_action_count when it sees ESC, so afterwards the box already reads as
+	// unfocused and the ESC handler could not tell "cleared the search" from "was never in it".
+	// _last_clicked_actions persists across frames (it is reset only by a new click), so
+	// querying before this frame's action element is registered is correct.
+	float was_focused = sui_is_last_clicked("create_map_search");
+
+	sui_push_frame(at, [w, h]);
+	sui_set_align([SUI_ALIGN_START, SUI_ALIGN_START]);
+
+	// A hovered scroll view drains the whole per-frame input buffer, which would starve a text
+	// input drawn AFTER it.  We draw before the map list so we are fine today; the rewind costs
+	// one global write and makes this row safe to reorder.  The other direction is already
+	// handled: sui_scroll_view_begin calls sui_reread_input() itself before its own drain, so
+	// the wheel still scrolls the map list while this box holds the keyboard.  Same reasoning
+	// as client/cl_debugpanel.qc.
+	sui_reread_input();
+	text_input_control("create_map_search", [0, 0], [box_w, h], 32,
+		create_server_search_text, create_server_search_cursor);
+
+	// text_input_control has no placeholder support and leaves the align state at START/CENTER,
+	// so reset it before drawing over the box.  [2, 3] mirrors the control's own internals: a
+	// 2px inset, and an 8px line centred in (h - 4) -> floor(((18 - 4) - 8) * 0.5) = 3.
+	sui_set_align([SUI_ALIGN_START, SUI_ALIGN_START]);
+	if (create_server_search_text == "")
+		sui_text([2, 3], MENU_TEXT_SMALL, "Search maps...", MENU_TEXT_2, 0.55, 0);
+
+	// The clear slot is ALWAYS reserved so the box never changes width, but the button only
+	// draws when there is something to clear — no dead control.
+	if (create_server_search_text != "")
+	{
+		if (my_button("create_map_search_clear", [box_w + gap, 0], [clear_w, h], "x"))
+		{
+			create_server_search_text = "";
+			create_server_search_cursor = 0;
+		}
+	}
+
+	sui_pop_frame();
+	sui_set_align([SUI_ALIGN_START, SUI_ALIGN_START]);
+
+	// One rebuild per EDIT, not per frame — false on the overwhelming majority of frames.  No
+	// timer debounce: the rebuild is a single linear pass over the master.
+	if (create_server_search_text != create_server_search_applied)
+		create_server_rebuild_view();
+
+	return was_focused;
 };
 
 void() create_server_menu =
@@ -1125,7 +1389,11 @@ void() create_server_menu =
 	float right_width = size_x - right_x - pad;
 	float property_x = right_x + 10;
 	float property_width = max(180, size_x - property_x - pad);
-	float map_panel_height = size_y - 64 - footer_height - 22;	// -22 for the game-filter tab row
+	float search_row_h   = 18;	// matches the game-filter tabs above it
+	float search_row_gap = 6;
+	float map_panel_height = 0;	// derived below, once the tab row count is known
+	float filter_h = 0;
+	float search_focused = FALSE;
 	float xpos = 0;
 	float ypos = 0;
 	float has_maps = FALSE;
@@ -1136,6 +1404,17 @@ void() create_server_menu =
 	create_server_seed_fields();
 	if (!create_server_avail_scanned)
 		create_server_scan_avail();
+
+	// Left column budget, top to bottom: 36 header + 16 title, (filter_h + 4) game tabs,
+	// (search_row_h + search_row_gap) search row, the list, then Refresh Maps + the count line
+	// + the footer.  The old "- 22" was the single-row tab allowance and becomes the two terms
+	// below; filter_h is 18 for one row of tabs and 38 once they wrap, so this has to come
+	// AFTER create_server_scan_avail() has populated create_server_game_has_maps.
+	// The "+ 20" is reclaimed from the "Selected:" line removed below -- menu_dropdown already
+	// renders the selected name as the list's header button, so it was duplicated.
+	filter_h = create_server_game_filter_height();
+	map_panel_height = size_y - 64 - footer_height
+	                 - (filter_h + 4) - (search_row_h + search_row_gap) + 20;
 	// Default to the Net tab — never "All" (0).  Also fall back to Net if the
 	// remembered tab is a game you no longer have maps for, so you can't get stuck
 	// on a tab that isn't drawn anymore; reload the list when the tab changes.
@@ -1168,15 +1447,37 @@ void() create_server_menu =
 	sui_text([xpos, ypos], MENU_TEXT_SMALL, "Map Selection", MENU_TEXT_1, 1, 0);
 	ypos += 16;
 	create_server_draw_game_filter([xpos, ypos], left_width);
-	ypos += 22;
-	menu_dropdown("create_map", [xpos, ypos], [left_width, map_panel_height], create_server_maps, create_server_selected_map, create_server_map_dropdown_open, create_server_map_scroll, TRUE);
+	ypos += filter_h + 4;
+	search_focused = create_server_draw_map_search([xpos, ypos], left_width, search_row_h);
+	// The search row may have just rebuilt the view — re-derive the metrics exactly the way the
+	// Refresh Maps button below does, so the list is sized for the NEW count on THIS frame and
+	// has_maps is right for the Start Server gate further down.
+	map_count = buf_getsize(create_server_maps);
+	has_maps = map_count > 0;
+	dropdown_height = has_maps ? min(map_panel_height - 24, max(24, map_count * 20 + 4)) : 0;
+	selected_map = create_server_selected_map_name();
+	ypos += search_row_h + search_row_gap;
+	// Clicking a row is the ONLY thing that sets the sticky pick, so a selection that gets
+	// filtered out can be restored by clearing the query.
+	if (menu_dropdown("create_map", [xpos, ypos], [left_width, map_panel_height], create_server_maps, create_server_selected_map, create_server_map_dropdown_open, create_server_map_scroll, TRUE))
+		create_server_set_selected_name(create_server_selected_map_name());
 	ypos += 24 + dropdown_height + 8;
 
-	if (selected_map != "")
-		sui_text([xpos, ypos], MENU_TEXT_SMALL, strcat("Selected: ", selected_map), MENU_TEXT_1, 0.95, 0);
-	else
-		sui_text([xpos, ypos], MENU_TEXT_SMALL, "No BSP files found in maps/.", MENU_TEXT_2, 0.9, 0);
-	ypos += 20;
+	// No "Selected: <map>" line here any more — menu_dropdown(keep_open = TRUE) already draws
+	// the selected name as the list's header button, so it was a duplicate, and its 20px row is
+	// what pays for the search row above.  The failure messages stay, now search-aware, and
+	// ONLY they reserve the row: when a map is selected the row collapses, which is what puts
+	// Refresh Maps, the count line and the footer back at exactly their pre-change y.  Leaving
+	// the row reserved unconditionally would double-spend those 20px (the list grew by them via
+	// map_panel_height) and push the count line down into the footer.
+	if (selected_map == "")
+	{
+		if (create_server_search_text != "")
+			sui_text([xpos, ypos], MENU_TEXT_SMALL, strcat("No map matches \"", create_server_search_text, "\""), MENU_TEXT_2, 0.9, 0);
+		else
+			sui_text([xpos, ypos], MENU_TEXT_SMALL, "No BSP files found in maps/.", MENU_TEXT_2, 0.9, 0);
+		ypos += 20;
+	}
 
 	if (my_button("create_refresh", [xpos, ypos], [left_width, 20], "Refresh Maps"))
 	{
@@ -1188,8 +1489,13 @@ void() create_server_menu =
 	}
 	ypos += 26;
 
-	if (has_maps)
+	// "N of M" doubles as the affordance that a filter is active at all.
+	if (has_maps && create_server_search_text != "")
+		sui_text([xpos, ypos], MENU_TEXT_SMALL, sprintf("%.0f of %.0f maps", map_count, buf_getsize(create_server_maps_all)), MENU_TEXT_2, 0.85, 0);
+	else if (has_maps)
 		sui_text([xpos, ypos], MENU_TEXT_SMALL, sprintf("%.0f maps available", map_count), MENU_TEXT_2, 0.85, 0);
+	else if (create_server_search_text != "")
+		sui_text([xpos, ypos], MENU_TEXT_SMALL, sprintf("No match in %.0f maps.", buf_getsize(create_server_maps_all)), MENU_TEXT_2, 0.85, 0);
 	else
 		sui_text([xpos, ypos], MENU_TEXT_SMALL, "Drop BSPs into maps/ to fill this list.", MENU_TEXT_2, 0.85, 0);
 
@@ -1566,9 +1872,24 @@ void() create_server_menu =
 
 	if (sui_listen_back())
 	{
-		create_server_map_dropdown_open = FALSE;
-		create_server_gamemode_open = FALSE;
-		current_menu = MENU_MAIN;
+		// ESC with the map search focused clears the query first — one ESC to drop the filter,
+		// a second to leave.  ESC does reach this line even while a field has focus:
+		// sui_listen_scan walks the RAW input buffer independently of the consume cursor, and
+		// sui_handle_text_input's char-27 case only defocuses.  That is PRE-EXISTING for all
+		// ~20 text fields on this screen and is deliberately left alone; only the search box
+		// gets the extra step, because it is the one whose state is invisible once you look
+		// away from it.  (search_focused was sampled inside the widget, before the control ran.)
+		if (search_focused && create_server_search_text != "")
+		{
+			create_server_search_text = "";
+			create_server_search_cursor = 0;
+		}
+		else
+		{
+			create_server_map_dropdown_open = FALSE;
+			create_server_gamemode_open = FALSE;
+			current_menu = MENU_MAIN;
+		}
 	}
 
 	sui_pop_frame();

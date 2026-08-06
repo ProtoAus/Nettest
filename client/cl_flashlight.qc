@@ -120,6 +120,12 @@ void() CSQC_Flashlight_Render =
 {
     if (!csqc_flashlight_on)
         return;
+    // Sven's "hud_flashlight" on a trigger_camera.  Also covers the general
+    // case: the beam is cast from VF_ORIGIN, which during a cutscene is the
+    // camera, so leaving it on would light whatever the cutscene is filming
+    // from an angle the player isn't standing at.
+    if (Cutscene_HidesHud(CUTSCENE_SF_NOFLASH) || Cutscene_Active())
+        return;
     if (!predicted_player || !csqc_prediction_valid)
         return;
     if (getstati(STAT_PLAYERTEAM) <= TEAM_NONE)

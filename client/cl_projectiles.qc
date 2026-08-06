@@ -16,6 +16,7 @@
 // ============================================================
 
 .float csqc_projectile_type;
+.float proj_dbg_next;       // throttle for the developer lifecycle trace below
 
 // Predraw: extrap+smooth via cl_tosssmooth.qc, then locally spin the
 // model via avelocity (server doesn't send angle updates beyond the
@@ -93,6 +94,19 @@ void(float isnew) CSQC_Projectile_Update =
         string mdl = Projectile_TypeModel(ptype);
         if (mdl != "")
             setmodel(self, mdl);
+
+        // "the grunts grenade was invisible" — the SERVER side of that report is
+        // proven correct (measured: modelindex 388, live velocity, SendFlags
+        // bumped every tick), so if a monster-thrown grenade still does not draw,
+        // the cause is one of exactly three things and this line names which:
+        //   modelindex 0  -> the model is not in the CLIENT's precache list, so
+        //                    setmodel silently did nothing;
+        //   mdl ""        -> the type byte did not resolve to a path;
+        //   both fine     -> it is drawing, and the fault is elsewhere (scale,
+        //                    origin, or it is being removed immediately).
+        if (cvar("developer"))
+            print(sprintf("[proj] new type=%g model=\"%s\" modelindex=%g org=%v\n",
+                          ptype, mdl, self.modelindex, new_origin));
         setsize(self, '-2 -2 -2', '2 2 2');
         // Initialise angles from the current velocity direction so the
         // model points where it's flying on first appearance, before any
@@ -117,6 +131,17 @@ void(float isnew) CSQC_Projectile_Update =
     self.avelocity = new_avelocity;
     self.csqc_projectile_type = ptype;
     self.frame = 0;
+
+    // Birth alone does not answer "was it invisible": an entity that arrives
+    // correctly and is then removed, or whose origin walks off to nowhere, looks
+    // exactly like one that never drew.  Throttled to 2 Hz so a 30 s test grenade
+    // produces a readable trace rather than 600 lines.
+    if (cvar("developer") && cltime >= self.proj_dbg_next)
+    {
+        self.proj_dbg_next = cltime + 0.5;
+        print(sprintf("[proj] live type=%g modelindex=%g drawmask=%g org=%v vel=%v\n",
+                      ptype, self.modelindex, self.drawmask, new_origin, new_velocity));
+    }
 
     // Route the new authoritative sample through the smoothing helper.
     // Gravity factor matches the server's .gravity for this projectile

@@ -47,6 +47,7 @@ const float MM_MAX_SLOTS = 64;
 .entity mm_next_slot;      // chain link on each slot node
 .string mm_slot_target;    // <targetname> with any '#suffix' stripped
 .float  mm_slot_delay;     // mapper-supplied delay in seconds
+.float  mm_slot_usetype;   // USE_* from the VALUE's '#suffix' (see MM_ValueUseType)
 .float  mm_count;          // number of populated slots
 .float  mm_index;          // current slot during firing pass
 .entity mm_activator;      // captured at use-time, replayed to chain
@@ -78,11 +79,52 @@ string(string key) MM_StripSuffix =
     return key;
 };
 
+// Sven's per-slot use type, encoded as a '#suffix' on the VALUE:
+//
+//     "pickup" "0#0"      fire at t=0 with USE_OFF
+//     "pickup#1" "8#1"    fire at t=8 with USE_ON
+//
+// Two DIFFERENT '#' conventions are in play and they must not be confused:
+// the KEY suffix is Hammer's duplicate-key disambiguator (MM_StripSuffix
+// above), while the VALUE suffix is this use type.
+//
+//     #0 = Off    #1 = On    #2 = Kill (remove the target entirely)
+//     no suffix  = Toggle (the default)
+//
+// This is ALSO a different enum from the `triggerstate` key, where 2 means
+// Toggle — do NOT route this through GoldSrc_TriggerStateToUseType.
+//
+// Measured across the 121-map Sven corpus: 4903 suffixed values, of which
+// #2 (Kill) is the single most common at 2428.  Dropping the suffix made
+// every slot a Toggle, which inverts any stop-then-start pair — th_ep1_00's
+// `roadratmngr` says "stop the train at 0, start it at 8" and got the
+// opposite, which is why the intro truck never appeared.
+const float MM_USE_KILL = -1;      // sentinel; not a real USE_* value
+
+float(string value) MM_ValueUseType =
+{
+    float i = 0;
+    float n = strlen(value);
+    while (i < n)
+    {
+        if (str2chr(value, i) == '#')
+        {
+            float t = stof(substring(value, i + 1, n - i - 1));
+            if (t == 0) return USE_OFF;
+            if (t == 1) return USE_ON;
+            if (t == 2) return MM_USE_KILL;
+            return USE_TOGGLE;
+        }
+        i = i + 1;
+    }
+    return USE_TOGGLE;
+};
+
 // Allocate a new slot node and append it to the multi_manager's chain.
 // Slots are stored in entry order — the calling code (the engine
 // keyvalue hook) feeds them in BSP-entdata order, which matches the
 // HL "key entry order" semantic the wiki documents.
-void(entity mm, string target_name, float delay) MM_AddSlot =
+void(entity mm, string target_name, float delay, float usetype) MM_AddSlot =
 {
     if (mm.mm_count >= MM_MAX_SLOTS)
     {
@@ -92,14 +134,15 @@ void(entity mm, string target_name, float delay) MM_AddSlot =
     }
 
     if (cvar("sv_debug_use"))
-        print(sprintf("[mm-parse] '%s' slot %g: target=\"%s\" delay=%g\n",
-                      mm.targetname, mm.mm_count, target_name, delay));
+        print(sprintf("[mm-parse] '%s' slot %g: target=\"%s\" delay=%g usetype=%g\n",
+                      mm.targetname, mm.mm_count, target_name, delay, usetype));
 
     entity node = spawn();
     node.classname        = "mm_slot";
     node.owner            = mm;
     node.mm_slot_target   = target_name;
     node.mm_slot_delay    = delay;
+    node.mm_slot_usetype  = usetype;
     node.mm_next_slot     = world;
 
     // Append to tail to preserve entry order.
@@ -155,13 +198,19 @@ void(entity mm) MM_SortSlots =
             entity b = a.mm_next_slot;
             if (a.mm_slot_delay > b.mm_slot_delay)
             {
-                // Swap the (target, delay) PAIRS rather than re-link
-                // the nodes — simpler and avoids prev-pointer juggling.
-                string t = a.mm_slot_target; float d = a.mm_slot_delay;
-                a.mm_slot_target = b.mm_slot_target;
-                a.mm_slot_delay  = b.mm_slot_delay;
-                b.mm_slot_target = t;
-                b.mm_slot_delay  = d;
+                // Swap the (target, delay, usetype) TUPLES rather than
+                // re-link the nodes — simpler and avoids prev-pointer
+                // juggling.  usetype MUST be swapped with the pair or the
+                // sort scrambles use types across slots.
+                string t = a.mm_slot_target;
+                float  d = a.mm_slot_delay;
+                float  u = a.mm_slot_usetype;
+                a.mm_slot_target  = b.mm_slot_target;
+                a.mm_slot_delay   = b.mm_slot_delay;
+                a.mm_slot_usetype = b.mm_slot_usetype;
+                b.mm_slot_target  = t;
+                b.mm_slot_delay   = d;
+                b.mm_slot_usetype = u;
                 swapped = 1;
             }
             a = a.mm_next_slot;
@@ -181,10 +230,20 @@ void(entity mm, entity slot) MM_FireSlot =
         // attempt the fire — useful diagnostic for "trigger has key 6
         // but no entity named 6" cases.
         entity probe = find(world, targetname, slot.mm_slot_target);
-        print(sprintf("[mm-fire] '%s' slot t=%g: target=\"%s\" delay=%g %s\n",
+        print(sprintf("[mm-fire] '%s' slot t=%g: target=\"%s\" delay=%g usetype=%g %s\n",
                       mm.targetname, time - mm.attack_finished,
-                      slot.mm_slot_target, slot.mm_slot_delay,
+                      slot.mm_slot_target, slot.mm_slot_delay, slot.mm_slot_usetype,
                       probe ? "(exists)" : "(NO ENTITY WITH THAT TARGETNAME)"));
+    }
+
+    // Sven "#2" = Kill: remove the target outright rather than firing it.
+    // Half-Life expresses this as UTIL_Remove, which SUB_KillTargets already
+    // implements (find-by-name + remove).  It is deliberately NOT a fifth
+    // USE_* value, so nothing downstream has to learn about it.
+    if (slot.mm_slot_usetype == MM_USE_KILL)
+    {
+        SUB_KillTargets(slot.mm_slot_target);
+        return;
     }
 
     string saved_target     = mm.target;
@@ -196,7 +255,7 @@ void(entity mm, entity slot) MM_FireSlot =
     mm.delay      = 0;          // delay for the SLOT is via our scheduler;
                                 // suppress SUB_UseTargets's own delay path
 
-    SUB_UseTargets(mm, mm.mm_activator, USE_TOGGLE);
+    SUB_UseTargets(mm, mm.mm_activator, slot.mm_slot_usetype);
 
     mm.target     = saved_target;
     mm.killtarget = saved_killtarget;
@@ -268,9 +327,10 @@ entity(entity src, entity src_activator) MM_SpawnClone =
         entity n = spawn();
         n.classname      = "mm_slot";
         n.owner          = c;
-        n.mm_slot_target = src_n.mm_slot_target;
-        n.mm_slot_delay  = src_n.mm_slot_delay;
-        n.mm_next_slot   = world;
+        n.mm_slot_target  = src_n.mm_slot_target;
+        n.mm_slot_delay   = src_n.mm_slot_delay;
+        n.mm_slot_usetype = src_n.mm_slot_usetype;   // or MULTITHREADED clones lose it
+        n.mm_next_slot    = world;
         if (!prev)
             c.mm_first_slot = n;
         else
@@ -334,6 +394,38 @@ void() multi_manager_use =
 //
 // The "#suffix" stripping lets a single multi_manager fire the same
 // target multiple times via foo#0 / foo#1 / foo#a etc.
+// Field lookup by name, so an unknown key can be retried in a different case
+// before we give up on it.  Both are FTE extension builtins with no fixed
+// number, hence the #0:name form (44 other builtins in sv_defs.qc use it).
+float(string fieldname) findentityfield = #0:findentityfield;
+float(float fieldnum, entity ent, string s) putentityfieldstring = #0:putentityfieldstring;
+
+// Entity keys are matched with strcmp (engine/qclib/pr_edict.c ED_FindField),
+// so key CASE is significant — and GoldSrc map compilers disagree about it.
+// -sp_campaign_portal.bsp writes "m_iObeyTriggerMode"; pizza_ya_san1.bsp writes
+// "m_imaxlivechildren", all lower.  Declaring every Sven key twice, once per
+// casing, would be miserable and would still miss whatever a third compiler
+// does, so instead: when a key misses, fold it to lower case and try once more.
+//
+// Our own field declarations are all lower-case, which makes the folded form
+// the one that can actually hit.  Returns TRUE if the value was stored.
+float(string key, string value) GoldSrc_TryCaseFoldedField =
+{
+    string lower = strtolower(key);
+    if (lower == key)
+        return FALSE;                   // already lower — the miss was real
+
+    float fld = findentityfield(lower);
+    if (fld <= 0)
+        return FALSE;
+
+    putentityfieldstring(fld, self, value);
+    if (cvar("sv_debug_use"))
+        print(sprintf("[keyfold] %s -> %s = \"%s\" on %s\n",
+                      key, lower, value, self.classname));
+    return TRUE;
+};
+
 void(string key, string value) ED_ParseUnknownEpair =
 {
     // Engine-handled / spawn-system keys — never slot pairs.  Skip
@@ -356,10 +448,168 @@ void(string key, string value) ED_ParseUnknownEpair =
     if (key == "rendermode")     return;
     if (key == "renderfx")       return;
     // Hammer / ZHLT editor metadata — not gameplay keys.
-    if (substring(key, 0, 5) == "zhlt_")  return;
-    if (substring(key, 0, 5) == "_minl")  return;
-    if (substring(key, 0, 6) == "_light") return;
-    if (key == "_tb_id" || key == "_tb_type" || key == "_tb_name") return;
+    //
+    // NOTE the underscore-stripped spellings.  The engine removes a leading
+    // '_' BEFORE invoking this hook (engine/server/pr_cmds.c SV_BadField:
+    // `if (*keyname == '_') keyname++;`), so ericw / TrenchBroom metadata
+    // arrives here as "minlight", "tb_id", "light_*" — never with the
+    // underscore.  The previous "_minl" / "_light" / "_tb_id" tests could
+    // therefore never match, which is why our OWN maps were also spawning
+    // mm_slot edicts for their editor metadata.
+    if (substring(key, 0, 5) == "zhlt_")    return;   // no leading '_' — arrives intact
+    if (substring(key, 0, 3) == "tb_")      return;   // _tb_id / _tb_type / _tb_name / _tb_textures
+    if (substring(key, 0, 8) == "minlight") return;   // _minlight, _minlight_color
+    // Deliberately NOT a bare "light" prefix test: that would eat a
+    // legitimate multi_manager slot targeting an entity named e.g.
+    // "lightswitch".  The specific ericw keys are enough.
+    if (key == "light" || key == "lightignore" || key == "lightmap_scale") return;
+
+    // GoldSrc / Sven Co-op per-entity config keys.  These are never
+    // multi_manager slots, and a Sven map carries a LOT of them: each
+    // func_door alone has m_iObeyTriggerMode plus four
+    // fireon*_triggerstate, and -sp_campaign_portal.bsp has 1941 entities.
+    // Without these tests every one becomes a real mm_slot edict, and both
+    // SV_CheckTouchTriggers' per-player-per-frame findradius pair and
+    // Door_OpenGroup's per-door classname scan walk the whole edict table.
+    // The "m_" and "$" prefixes are structural (Half-Life member-variable
+    // and Sven custom-keyvalue naming), so they cannot collide with a real
+    // targetname in practice.
+    // Before discarding anything, see whether it is just a mixed-case spelling of
+    // a field we DO declare.
+    //
+    // nettest: this used to sit BELOW the m_/$/fireon prefix returns, which made it
+    // unreachable for exactly the keys it was written for.  The old comment claimed
+    // it "must run ahead of the slot capture, or a m_iObeyTriggerMode would become a
+    // bogus slot instead of binding to .m_iobeytriggermode" - but the m_ return two
+    // lines above it got there first, so no m_* key ever reached it, and
+    // .m_iobeytriggermode is not declared anywhere in the tree.
+    //
+    // This matters well beyond that one key.  ED_FindField is a plain strcmp
+    // (qclib/pr_edict.c:293), so a field only binds when the map's spelling matches
+    // the declaration exactly, and the corpus is split: Hammer-family compilers emit
+    // CamelCase (m_iszEntity, TriggerCondition) while others emit lowercase. The mod
+    // declares BOTH spellings in different files - lowercase in sv_trigger_camera.qc,
+    // CamelCase in sv_trigger_changetarget.qc / sv_trigger_copyvalue.qc /
+    // sv_goldsrc_compat.qc:69 - so each key worked for exactly one compiler and was
+    // silently dropped for the other. Hoisting the case-fold above the prefix returns
+    // is what lets a single lowercase declaration serve both spellings, and it is a
+    // prerequisite for scripted_sequence's m_isz* keys binding at all.
+    //
+    // The mm_slot flood protection the prefix returns provide is fully preserved:
+    // an m_*/$/fireon key that does NOT case-fold onto a declared field still falls
+    // through to the returns below and is discarded exactly as before.
+    if (GoldSrc_TryCaseFoldedField(key, value))
+        return;
+
+    if (substring(key, 0, 2) == "m_")     return;   // m_iObeyTriggerMode, m_iOpenFlags, m_fIgnoreTargetname
+    if (substring(key, 0, 1) == "$")      return;   // Sven custom keyvalues: $s_door, $i_*, $v_*
+    if (substring(key, 0, 6) == "fireon") return;   // fireonclosed/opened/closing/opening[_triggerstate]
+    if (key == "soundlist" || key == "explosion" || key == "weapon") return;
+    if (key == "globalstate" || key == "mapversion" || key == "scversion2") return;
+
+    // game_text styling keys that CANNOT be plain fields.
+    //
+    //   "effect" collides with the effect() builtin in sv_defs.qc — QC has a
+    //           single namespace for fields and functions, so declaring
+    //           `.float effect` is a hard compile error.
+    //   "x"/"y" are legal field names but perilous next to vector _x/_y
+    //           expansion, and far too generic to claim globally.
+    //
+    // Harvest them here instead.  self is bound to the entity being parsed,
+    // so a direct assignment works.  This MUST sit above the classname
+    // fast-reject below, which would otherwise discard them: Hammer emits
+    // classname first, and game_text is not a multi_manager.
+    // Scoped to game_text so a multi_manager slot literally named "x" or
+    // "effect" can't be swallowed.  classname is "" when the compiler emits
+    // it last, which is why the empty case is allowed through too.
+    if (self.classname == "" || self.classname == __NULL__
+        || self.classname == "game_text")
+    {
+        if (key == "effect") { self.gt_effect = stof(value); return; }
+        if (key == "x")      { self.gt_x      = stof(value); return; }
+        if (key == "y")      { self.gt_y      = stof(value); return; }
+    }
+
+    // scripted_sentence's SPEAKER, for exactly the same reason and with exactly
+    // the same shape.  Half-Life stores it in CScriptedSentence::m_iszEntity -
+    // the same member scripted_sequence uses - but the two classes disagree
+    // about the BSP spelling: scripted_sequence writes "m_iszEntity" and
+    // scripted_sentence writes a bare "entity", which cannot be a QC field name
+    // because `entity` is a type keyword.  So it lands here and is copied onto
+    // the field its sibling already owns.
+    //
+    // Measured over the whole map corpus: 758 scripted_sentences across 124
+    // maps, and ALL 758 carry this key.  Without it the speaker had to be
+    // guessed from a nearest-monster radius search, which finds nothing at all
+    // for 98 of them (the line then plays from an invisible point entity, so no
+    // jaw moves anywhere) and picks the WRONG monster for another 196.  That is
+    // 39% of the game's scripted dialogue coming out of the wrong mouth.
+    //
+    // Same classname scoping and same "" allowance as game_text above: the key
+    // is generic enough that a multi_manager slot could legitimately be named
+    // "entity", and Hammer's key order is not guaranteed.
+    if (key == "entity")
+    {
+        if (self.classname == "" || self.classname == __NULL__
+            || self.classname == "scripted_sentence")
+        {
+            // strzone because `value` is a PR_TempString from the engine's
+            // rotating buffer (pr_cmds.c:502) and will be overwritten by the
+            // next key parsed.  Never freed: it lives as long as the map does,
+            // and 758 of them across the whole corpus is not a leak worth
+            // bookkeeping for.
+            self.m_iszentity = strzone(value);
+            return;
+        }
+    }
+
+    // game_player_equip's item list.  The KEY is the classname to give and the
+    // VALUE is the quantity, so there is no fixed key set to declare — see the
+    // gpe_first_item comment in sv_customdefs.qc.  Capture onto a child chain.
+    //
+    // Note some of these names (ammo_357, ammo_shells, ...) are real fields
+    // already, so the engine binds them and they never arrive here.  That is a
+    // known and documented gap, not something this hook can fix.
+    // The classname test allows "" as well as the real name: these maps emit
+    // classname LAST (verified on th_ep1_00, whose game_player_equip lists
+    // item_suit before classname), so requiring the real name would never
+    // match a single key.
+    //
+    // item_name_* / item_group_* are EXCLUDED — they are Sven's InventoryRules
+    // base-class keys, not items to hand out, and they appear on unrelated
+    // entities (th_ep1_00 has two on a func_conveyor).
+    if ((self.classname == "" || self.classname == __NULL__
+         || self.classname == "game_player_equip")
+        && (substring(key, 0, 7) == "weapon_"
+            || substring(key, 0, 5) == "ammo_"
+            || (substring(key, 0, 5) == "item_"
+                && substring(key, 0, 10) != "item_name_"
+                && substring(key, 0, 11) != "item_group_")))
+    {
+        entity gi = spawn();
+        gi.classname     = "gpe_item";
+        gi.owner         = self;
+        gi.netname       = strzone(key);
+        gi.count         = stof(value);
+        gi.gpe_next_item = self.gpe_first_item;
+        self.gpe_first_item = gi;
+        if (cvar("sv_debug_use"))
+            print(sprintf("[game_player_equip] captured \"%s\" x%g\n", key, gi.count));
+        return;
+    }
+
+    // Fast reject: if classname has ALREADY been parsed for this entity and
+    // it isn't a multi_manager, there is nothing to capture.  This is an
+    // OPTIMISATION, not a guarantee — ED_ParseEdict (engine/qclib/pr_edict.c)
+    // walks keys in strict file order with no classname pre-pass, so this
+    // fires only when the compiler emitted classname first (Hammer/VHLT and
+    // TrenchBroom/ericw both do) and simply doesn't trigger in the
+    // "classname last" case described above.  Correctness for that case is
+    // unchanged: we still capture the slot and the spawn function still
+    // ignores it unless the entity really is a multi_manager.
+    if (self.classname != "" && self.classname != __NULL__
+        && self.classname != "multi_manager")
+        return;
 
     // Always print the capture so a user with sv_debug_use 1 enabled
     // at map-load can verify the engine hook is firing for each key.
@@ -370,9 +620,12 @@ void(string key, string value) ED_ParseUnknownEpair =
                       num_for_edict(self), self.classname, key, value));
 
     // Capture as a slot.  Strip HL '#suffix' first.
+    // Key suffix = Hammer's duplicate-key disambiguator.
+    // Value suffix = Sven's per-slot use type.  Two different conventions.
     string tname = MM_StripSuffix(key);
-    float  dly   = stof(value);
-    MM_AddSlot(self, tname, dly);
+    float  dly   = stof(value);            // stof stops at '#', so "8#1" -> 8
+    float  ut    = MM_ValueUseType(value);
+    MM_AddSlot(self, tname, dly, ut);
 };
 
 /*QUAKED multi_manager (.5 .5 .5) (-8 -8 -8) (8 8 8) MULTITHREADED
@@ -401,7 +654,7 @@ void() multi_manager =
         if (cvar("sv_debug_use"))
             print(sprintf("[mm-recover] '%s' field-collision slot target=\"train\" delay=%g\n",
                           self.targetname, stof(self.train)));
-        MM_AddSlot(self, "train", stof(self.train));
+        MM_AddSlot(self, "train", stof(self.train), MM_ValueUseType(self.train));
         self.train = "";
     }
 

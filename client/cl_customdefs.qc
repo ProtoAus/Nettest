@@ -273,3 +273,9 @@ float csqc_codscope_fire_blocks_ads;
 float csqc_codscope_sway_pitch;
 float csqc_codscope_sway_yaw;
 float() CSQC_CodScope_HidesViewmodel;
+
+// Forward decls for the trigger_camera cutscene (cl_trigger_camera.qc), which
+// compiles near the end of cl_progs.src — after cl_weapons.qc (viewmodel
+// suppression), cl_hud.qc (the hud_* keys) and cl_flashlight.qc.
+float() Cutscene_Active;
+float(float bit) Cutscene_HidesHud;

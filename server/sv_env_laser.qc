@@ -90,11 +90,11 @@ void() EnvLaser_AimAndDamage =
     self.ebeam_end_pos   = trace_endpos;
 
     // Apply damage to whatever the trace hit (player / npc / breakable).
-    if (self.damage > 0 && trace_ent && trace_ent != world
-        && trace_ent.takedamage != DAMAGE_NO)
-    {
-        trace_ent.health -= self.damage * 0.1;     // per-tick at 10Hz
-    }
+    // No takedamage gate and no direct .health subtraction - see the same fix in
+    // sv_env_beam.qc.  Players sit at DAMAGE_NO in this mod, so the old test made
+    // an env_laser lethal to crates and harmless to people.
+    if (self.damage > 0 && trace_ent && trace_ent != world)
+        W_ApplyDamage(self, trace_ent, self.damage * 0.1);     // per-tick at 10Hz
 
     // DECAL_END handling: spawnflag bit is translated to an
     // EBEAM_NET_DECAL_END netflag in the env_beam wire format
@@ -178,6 +178,13 @@ void() env_laser =
     // Defaults — match env_beam's seeds.
     if (self.renderamt == 0)         self.renderamt = 200;
     if (self.rendercolor == '0 0 0') self.rendercolor = '255 50 50';
+    // env_laser's FGD key is `width`, NOT `BoltWidth` — BoltWidth belongs to
+    // env_beam (sven-coop.fgd:1846).  `.width` already exists as func_vehicle's
+    // track width (declared in sv_customdefs.qc so both files can see it), so
+    // the key was binding to a live field and then being ignored, leaving every
+    // laser at the default.  Measured: all 14 lasers in -sp_campaign_portal set
+    // it (7 at 40, 7 at 8).
+    if (self.width > 0)              self.BoltWidth = self.width;
     if (self.BoltWidth == 0)         self.BoltWidth = 16;
 
     // Precache beam sprite + optional end sprite.

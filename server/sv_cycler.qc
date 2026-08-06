@@ -42,7 +42,12 @@
 
 void() BrushSync_ApplyRenderKeys;        // sv_brushsync.qc
 
-.float body;        // bodygroup combo — parsed, stored for later
+// Bodygroup combo.  As of Patch 131 this is a REAL entvar: the engine registers
+// `body` in progdefs.h, ships it in entity_state_t under PEXT2_BODYGROUP, and
+// gl_hlmdl.c divides it back out per bodypart.  It used to be parsed and stored
+// and read by nothing at all.  Declared here rather than in sv_ai_defs.qc only
+// because this file has owned the map-key spelling since the cycler landed.
+.float body;
 .float sequence;    // MDL animation index (map key — declared shared
                      // with sv_env_sprite.qc; QC accepts duplicate
                      // .float decls of matching type harmlessly)

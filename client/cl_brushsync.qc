@@ -218,6 +218,69 @@ float() CSQC_SolidBrush_Predraw =
         if (t_elapsed < 0) t_elapsed = 0;
         float t_lookahead = cvar("cl_brushsync_lookahead");
         if (t_lookahead < 0) t_lookahead = 0;
+
+        // Cap the extrapolation at roughly ONE observed update interval, not at
+        // the full cl_brushsync_lookahead (1 second by default).
+        //
+        // Extrapolation here is a straight line along the last known velocity,
+        // and a tracktrain's velocity turns at every path_track.  Given a whole
+        // second of budget, th_ep1_00's intro truck — 240 u/s — would carry 240
+        // units past a corner before the next snapshot yanked it back onto the
+        // rails: "the car drives off track weirdly, but next cut it's back on
+        // track".  The same thing happens whenever updates simply stop arriving
+        // (the brush leaves the PVS mid-shot), and there the replica then just
+        // sits at that wrong offset until they resume.
+        //
+        // One update interval is the honest budget: it covers the gap we
+        // actually expect and no more.  1.5x absorbs ordinary jitter in the
+        // snapshot rate.  The cvar stays the hard ceiling, and the first
+        // snapshot (no prev yet) still gets the full allowance because there is
+        // nothing to measure from.
+        if (self.csqc_snap_time_prev > 0)
+        {
+            float t_period = (self.csqc_snap_time - self.csqc_snap_time_prev) * 1.5;
+            if (t_period > 0 && t_lookahead > t_period)
+                t_lookahead = t_period;
+        }
+
+        // HARD CEILING, independent of the observed snapshot gap.
+        //
+        // The adaptive clamp above only ever TIGHTENS t_lookahead below
+        // cl_brushsync_lookahead (default 1.0), so it is a mitigation and not
+        // an amplifier -- but it still lets the budget grow back toward a full
+        // second once the stream has been slow for two consecutive gaps (PVS
+        // drop-out across a cutscene camera cut, packet loss, rate limit).
+        // That is the wrong shape for a PATH-FOLLOWING brush: a func_train /
+        // func_tracktrain re-aims its velocity at every path_corner /
+        // path_track, so this straight-line projection leaves the road at
+        // every corner by v * t * 2*sin(turn/2) and no budget is ever honest.
+        //
+        // Measured on th_ep1_00's intro truck "pickup" (50 path_tracks,
+        // 18595 qu, 240 qu/s, 500 qu/s across pua -> puazzzzzt), sharpest
+        // corner 32.4 deg at new2, factor 2*sin(16.2 deg) = 0.557:
+        //       24 ms ->   3.2 qu   (healthy cadence; invisible)
+        //      100 ms ->  13.4 qu   (this ceiling; 25 qu at 500 qu/s)
+        //      300 ms ->  40 qu
+        //     1000 ms -> 134 qu at 240 qu/s, 253 qu at 500 qu/s
+        //                = one to two truck-lengths off the road
+        //
+        // 100 ms still covers a 10-packets-per-second stream, so nothing that
+        // is smooth today becomes steppy; past that the replica holds near the
+        // last authoritative sample instead of coasting away.
+        //
+        // Deliberately NOT switched to snapshot-to-snapshot INTERPOLATION.
+        // csqc_snap_time is stamped with cltime at packet-parse time, so an
+        // interpolation denominator would carry the full network jitter and the
+        // rendered SPEED would wobble -- worse on a 77-second cinematic
+        // tracking shot than a few qu of corner error.  And BRUSH_TYPE_TRAIN is
+        // not tracktrain-only: func_plat, func_trackautochange and
+        // func_pushable all share it, have no corners at all, and are ridden or
+        // shoved by the player (63 pushables in bm_sts alone) -- a snapshot
+        // interval of added latency there is a regression, not a fix.  It is
+        // also not render-only: cl_defs.qc sets physics_mode = 2, so the
+        // client's own collision link integrates from this origin.
+        if (t_lookahead > 0.1) t_lookahead = 0.1;
+
         if (t_elapsed > t_lookahead) t_elapsed = t_lookahead;
 
         if (self.velocity != '0 0 0')
@@ -481,6 +544,15 @@ void() CSQC_SolidBrush_Update =
     // though the server didn't.  Stored on the entity so the solid
     // assignment further down can OR it in.
     self.wire_nonsolid = readbyte();
+    // Contents override (server sends the magnitude of a negative .skin; 0 = none).
+    // Applying it is what keeps a func_water SOLID_BSP on the client WITHOUT it
+    // being a wall — the engine reads .skin < 0 on a brush entity as "this volume
+    // is water/slime/lava", and a trace's contents mask never includes those, so
+    // nothing collides with it.  Prediction needs the brush present and marked,
+    // not absent: PM_ContentsAt has to find the same water the server does or the
+    // client won't predict swimming and every stroke reconciles.
+    float wire_contents = readbyte();
+    self.skin = (wire_contents > 0) ? (0 - wire_contents) : 0;
     if (self.rendermode == 3 || self.rendermode == 5)
     {
         // Glow / Additive: the engine renders these additively (black drops out,
@@ -646,6 +718,37 @@ void() CSQC_SolidBrush_Update =
     // still blocks the player exactly as the server's pmove sees it,
     // matching HL behaviour for clip / trigger placeholder brushes.
     float aaa_hide = (self.is_aaatrigger && !cvar("cl_aaatrigger"));
+
+    // GoldSrc "FX Amount 0" means INVISIBLE for every non-Normal rendermode
+    // (HL SDK const.h: kRenderTransAdd is src*a+dest, so a=0 contributes
+    // nothing).  We cannot express that through .alpha or .colormod, because
+    // FTE's CSQC->renderer copy treats an exact zero in either as "the field
+    // was never set" and substitutes the opaque default:
+    //     pr_csqc.c  if (!in->xv->alpha || in->xv->alpha == 1)
+    //                    out->shaderRGBAf[3] = 1.0f;            // 0 -> OPAQUE
+    //     pr_csqc.c  if (!colormod[0] && !colormod[1] && !colormod[2])
+    //                    VectorSet(out->shaderRGBAf, 1,1,1);    // 0 -> WHITE
+    // and r_surf.c forces BEF_FORCEADDITIVE for an RF_ADDITIVE brush model
+    // regardless of alpha (RF_TRANSLUCENT is only an `else if`).  So both
+    // dimming levers above collapse at exactly the value that should hide the
+    // brush, and rendermode 5 + no renderamt rendered as an opaque FULL-WHITE
+    // additive slab — the most visible result possible.  pizza_ya_san1 uses
+    // that idiom for invisible-but-solid barriers (func_wall "*11",
+    // func_wall_toggle "wlt_komugiarea"), which showed up as solid walls.
+    float fx_hide = (alpha_value <= 0
+                     && (self.rendermode == 1      // Color
+                      || self.rendermode == 2      // Texture
+                      || self.rendermode == 3      // Glow
+                      || self.rendermode == 5));   // Additive
+
+    // EF_NODRAW is likewise inert on a CSQC-drawn entity: the engine honours
+    // it only for legacy NETWORK entities (cl_ents.c), and
+    // CopyCSQCEdictToEntity reads just FULLBRIGHT / ADDITIVE / NOSHADOW /
+    // NODEPTHTEST out of .effects — there is no NODRAW case.  So
+    // func_wall_toggle_hide()'s EF_NODRAW made the brush non-solid but left it
+    // fully drawn.  Honour it here, where drawmask actually works.
+    float nodraw_hide = (effect_flags & EF_NODRAW);
+
     self.movetype    = MOVETYPE_NOCLIP;
     // SOLID_NOT when EITHER the brush is hidden (broken / predicted-
     // broken) OR the server explicitly marked it non-solid (func_water,
@@ -655,7 +758,15 @@ void() CSQC_SolidBrush_Update =
     // through, producing rubberbanding when reconciliation snapped the
     // player back into the empty space the server says they should be.
     self.solid       = (hide || self.wire_nonsolid) ? SOLID_NOT : SOLID_BSP;
-    self.drawmask    = (hide || aaa_hide) ? 0 : MASK_ENGINE;
+    // drawmask 0 is the mod's established hide-but-stay-solid idiom (see
+    // aaa_hide above); solidity is assigned separately on the line above, so a
+    // hidden brush still blocks — which is the whole point of the GoldSrc
+    // invisible-clip idiom.  Caveat, shared with the pre-existing aaa_hide
+    // path: addentities gates CSQC_SolidBrush_Predraw on the same drawmask, so
+    // a hidden MOVING brush loses the client-side origin-overshoot clamp and
+    // rides on server snapshots alone.  Invisible movers are rare and the
+    // snapshots still correct them, so this is the right trade.
+    self.drawmask    = (hide || aaa_hide || fx_hide || nodraw_hide) ? 0 : MASK_ENGINE;
     self.angles      = ang;
     self.alpha       = alpha_value;
     self.effects     = effect_flags;
@@ -774,6 +885,26 @@ void(entity ent, vector destination) CSQC_MoverPredict =
     }
 
     ent.velocity = delta * (ent.speed / distance);
+
+    // ARM THE ARRIVAL CLAMP.  The replica is MOVETYPE_NOCLIP, so the engine
+    // integrates origin += velocity * frametime every render frame and the
+    // ONLY thing that ever stops it is the overshoot clamp inside
+    // CSQC_SolidBrush_Predraw.  That predraw is otherwise installed only by
+    // the snapshot handler, gated on the SERVER-reported velocity — and a
+    // resting brush's last snapshot had velocity 0, so a locally-predicted
+    // move had no predraw and no clamp at all.
+    //
+    // Symptom when this is missing: press a button the server then refuses
+    // (locked master, mp_disabledoors, or simply an aim mismatch) and the
+    // client brush slides away across the map forever, because a refusal
+    // sets no SendFlags and PVSF_NOREMOVE means no corrective snapshot ever
+    // arrives.  This is exactly the pizza_ya_san1 `ml_startobj` report.
+    //
+    // Its rotating twin CSQC_RotateMoverPredict has always done this.
+    ent.csqc_snap_origin = ent.origin;
+    ent.csqc_snap_time   = cltime;
+    ent.predraw          = CSQC_SolidBrush_Predraw;
+    MovingBrush_AddToList(ent);
 };
 
 void(entity ent, vector dest_angles) CSQC_RotateMoverPredict =
@@ -857,14 +988,23 @@ void() CSQC_PredictUse =
     use_start = self.origin + self.view_ofs;
     use_end   = use_start + v_forward * CSQC_USE_TRACE_LENGTH;
 
-    // Match server: tracebox with expanded hull, not traceline
-    tracebox(use_start, '-8 -8 -8', '8 8 8', use_end, MOVE_NORMAL, self);
+    // Match the server EXACTLY: sv_use.qc's primary probe is a traceline, not
+    // a fat tracebox.  The old comment here claimed otherwise and was wrong,
+    // and on a small brush the difference is a live mispredict: an 8-unit-wide
+    // button is hit by a +-8 client hull at aim angles where the server's
+    // centre line misses entirely, so the client predicts a press the server
+    // never sees.
+    traceline(use_start, use_end, MOVE_NORMAL, self);
 
     hit = trace_ent;
     if (hit && hit != world
         && (hit.brush_type == BRUSH_TYPE_DOOR || hit.brush_type == BRUSH_TYPE_BUTTON))
     {
-        if (hit.brush_type == BRUSH_TYPE_DOOR && hit.door_locked)
+        // door_locked is the server's predict_block byte and it is sent for
+        // BUTTONS too (mastered buttons, and GoldSrc doors that refuse +use).
+        // Restricting this test to doors meant a mastered button predicted an
+        // open the server was always going to reject.
+        if (hit.door_locked)
             return;
         CSQC_PredictMoverActivate(hit);
         return;
@@ -878,9 +1018,20 @@ void() CSQC_PredictUse =
     {
         if (e != self
             && (e.brush_type == BRUSH_TYPE_DOOR || e.brush_type == BRUSH_TYPE_BUTTON)
-            && !(e.brush_type == BRUSH_TYPE_DOOR && e.door_locked))
+            && !e.door_locked)      // applies to buttons too — see above
         {
-            dot = normalize(e.origin - use_start) * v_forward;
+            // Rank by AABB MIDPOINT, not .origin.  A GoldSrc brush entity
+            // compiled without an ORIGIN brush keeps .origin == '0 0 0' —
+            // its world position lives entirely in the baked BSP submodel —
+            // so ranking on .origin scored every Half-Life func_door /
+            // func_button as if it sat at the map origin, and the cone could
+            // never select one.  This must stay identical to the server's
+            // SV_PlayerTryUse cone (sv_use.qc) or the two sides predict
+            // different doors.  It also matches findradius's own selection
+            // basis, which measures to origin + (mins+maxs)*0.5.
+            vector to_e = ((e.absmin + e.absmax) * 0.5) - use_start;
+            if (vlen(to_e) < 0.01) { e = e.chain; continue; }   // standing inside it
+            dot = normalize(to_e) * v_forward;
             if (dot > best_dot)
             {
                 best_dot = dot;

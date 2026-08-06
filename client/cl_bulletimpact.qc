@@ -257,6 +257,13 @@ float(entity hit) Impact_ClassifyLocal =
     // slots. Classify them as flesh too so local-hit particles land.
     if (hit.classname == "player_visual_proxy") return IMPACT_MAT_FLESH_LETHAL;
 
+    // Monsters, via the getentity ray sweep in cl_monstertrace.qc.  FLESH rather
+    // than FLESH_LETHAL: the server's own classifier reserves the lethal splash
+    // for a monster that is already dead (sv_weapons.qc:869), and the client
+    // cannot know the health, so the routine variant is the honest match.  The
+    // difference everyone else sees is the spark-splash, not the blood.
+    if (hit.classname == "csqc_monster_proxy") return IMPACT_MAT_FLESH;
+
     // Physics props — metal sparks/ric on hit, no hole (the bullet-
     // hole gate rejects by classname).  Replicated via SendEntity
     // (cl_physprop.qc) which sets classname before the trace can

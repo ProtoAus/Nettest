@@ -223,8 +223,17 @@ float(entity ent, float changedflags) EnvBeam_SendEntity =
     WriteByte(MSG_ENTITY, bound(0, self.renderamt,    255));
     WriteByte(MSG_ENTITY, bound(0, self.BoltWidth,    255));
     WriteByte(MSG_ENTITY, bound(0, self.NoiseAmplitude, 255));
-    WriteByte(MSG_ENTITY, bound(0, self.TextureScroll, 100));
+    // TextureScroll is SIGNED — negative scrolls the other way, which is how
+    // every rain beam in th_ep1_00 is authored (TextureScroll -20, i.e. falling
+    // rather than rising).  The old bound(0, ..., 100) clamped all 124 of them
+    // to exactly 0, so nothing scrolled at all.  Bias by 128 to fit a byte.
+    WriteByte(MSG_ENTITY, bound(0, rint(self.TextureScroll) + 128, 255));
     WriteByte(MSG_ENTITY, bound(0, self.framestart,   255));
+    // framerate — frames/sec for multi-frame beam sprites.  Sent because CSQC
+    // now resolves the beam's shader per FRAME via spriteframe(), so a 3-frame
+    // sprite like sprites/lgtning.spr can actually cycle.  172 env_beams across
+    // the Sven corpus author this key; it used to be parsed and dropped.
+    WriteByte(MSG_ENTITY, bound(0, rint(self.framerate), 255));
 
     // End-sprite modelindex: 0 for env_beam (no end sprite),
     // non-zero for env_laser which sets self.ebeam_end_sprite_index.
@@ -366,16 +375,20 @@ void() EnvBeam_DamageTick =
     if (self.damage > 0)
     {
         traceline(self.ebeam_start_pos, self.ebeam_end_pos, MOVE_NORMAL, self);
-        if (trace_ent && trace_ent != world && trace_ent.takedamage != DAMAGE_NO)
-        {
-            float dmg = self.damage * 0.1;     // per-tick at 10Hz
-            // Direct .health subtraction — no attacker context for
-            // env_beam so the nettest W_ApplyDamage path doesn't
-            // apply cleanly.  Entities with their own death logic
-            // (player respawn, breakable break-think) handle death
-            // via their own per-tick health checks elsewhere.
-            trace_ent.health -= dmg;
-        }
+        // NO takedamage GATE, and no direct .health subtraction either.  Both
+        // were wrong and they were wrong together:
+        //
+        //   * players in this mod sit at DAMAGE_NO permanently and are accepted
+        //     unconditionally inside W_CanDamageTarget (sv_weapons.qc:1157) - so
+        //     a takedamage test here meant an env_beam could damage a crate and
+        //     never a person, which is the one thing it exists to do.
+        //   * subtracting .health directly skips the entire damage pipeline:
+        //     no death handling, no kill feed, no damage flash, no armour.  The
+        //     old comment said there was "no attacker context", but the movers
+        //     that crush already pass the brush itself as the attacker
+        //     (sv_rotating.qc, sv_pendulum.qc), and that works.
+        if (self.damage > 0 && trace_ent && trace_ent != world)
+            W_ApplyDamage(self, trace_ent, self.damage * 0.1);   // per-tick at 10Hz
     }
 
     self.nextthink = time + 0.1;

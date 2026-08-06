@@ -145,7 +145,10 @@ void() pendulum_think =
             entity p = find(world, classname, "player");
             while (p)
             {
-                if (!p.is_dead && p.takedamage != DAMAGE_NO)
+                // No takedamage test: players are permanently DAMAGE_NO in
+                // this mod and W_CanDamageTarget accepts them regardless, so the
+                // gate only ever excluded the one thing a pendulum should hit.
+                if (!p.is_dead)
                 {
                     vector pmin = p.origin + p.mins;
                     vector pmax = p.origin + p.maxs;
@@ -188,7 +191,9 @@ void() pendulum_use =
 
 void() pendulum_blocked =
 {
-    if (self.dmg > 0 && other != world && other.takedamage != DAMAGE_NO)
+    // W_ApplyDamage owns the "can this be hurt" decision (W_CanDamageTarget);
+    // pre-filtering on takedamage here only ever excluded players.
+    if (self.dmg > 0 && other != world)
         W_ApplyDamage(self, other, self.dmg);
     // Reverse: flip phase_sign and restart timer at "extreme".
     // Effectively: bounce off whatever blocked us.

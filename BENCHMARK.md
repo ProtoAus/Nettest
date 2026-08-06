@@ -111,6 +111,30 @@ counters. It requires `r_speeds 2` or higher and is one-shot: it sets a flag con
 
 These all produce believable numbers, not errors.
 
+### 2.0 `r_model_mincoverage` used to delete the viewmodel (fixed 2026-08-02)
+
+`cfg/default.cfg` ships `r_model_mincoverage 0.01`, which is what opens the Patch 100 screen-coverage
+block in `gl_alias.c`. Before 2026-08-02 that block also ran a near-clip-plane reject using
+`e->origin` — which for an `RF_WEAPONMODEL` entity is **camera-relative**, not a world position (it
+isn't composed with `r_refdef.weaponmatrix` until `R_RotateForEntity`). The test therefore reduced to
+
+```
+viewmodel dropped  <=>  dot(player_world_pos, view_forward) > clmodel->radius
+```
+
+so the gun vanished over roughly half of all yaw directions, on every Quake-MDL (`IDPO`) viewmodel.
+GoldSrc (`IDST`) viewmodels route through `R_HalfLife_GenerateBatches` and were never affected,
+which is what made it look weapon-specific.
+
+**Why it matters for benchmarking:** any FPS figure taken at `r_model_mincoverage 0.01` on a build
+older than this fix was measured with the viewmodel intermittently not drawn, i.e. flattering by an
+unknown and view-dependent amount. Numbers in §5 and §5b predate the fix. Re-measure before
+comparing against them, and confirm the gun is actually on screen while the harness runs.
+
+The fix gates the early return on the `sizecullable` flag already computed 60 lines above
+(`gl_alias.c`), which exempts `RF_WEAPONMODEL` / `RF_EXTERNALMODEL` / `RF_FIRSTPERSON`, skeletal-object
+entities and players. The prop coverage cull the cvar exists for is untouched.
+
 ### 2.1 The CSQC cvar table overwrites anything set at exec time
 
 `sh_cvar_table.qc` is the single source of truth for mod cvars and is re-applied at CSQC init.

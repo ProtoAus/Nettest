@@ -373,15 +373,20 @@ float(float attack_range, float damage) W_KnifeTraceAttack =
         // any reasonable max_health so the kill path triggers in one
         // hit regardless of the brush's HP setting.
         float deal = damage;
-        if (trace_ent.classname == "func_breakable"
+        if (Brush_IsBreakableClass(trace_ent)
             && (trace_ent.spawnflags & BREAKABLE_INSTANT_CROWBAR))
             deal = 9999;
         // Defer player damage to the attacker's hitclaim so the swing
         // doesn't apply damage twice (server-auth + hitclaim).
         float defer_player = (trace_ent.classname == "player")
                              && W_ShouldDeferToClaim(self);
+        // BRACES: without them the guard covered only the sv_dmg_bits line and
+        // the damage was applied twice on players (server-auth + hitclaim).
         if (!defer_player)
+        {
+            sv_dmg_bits = DMG_CLUB;   // a corpse can be broken apart by hand
             W_ApplyDamage(self, trace_ent, deal);
+        }
         return TRUE;
     }
 

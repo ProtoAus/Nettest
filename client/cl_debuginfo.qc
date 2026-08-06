@@ -2021,6 +2021,33 @@ float(float x, float y) CSQC_DrawDebugDrift =
 //  cl_debug_surface — surface material under the crosshair + underfoot
 // ============================================================
 
+// --- ray vs AABB, for the "what am I actually looking at" probe below --------
+// tmin/tmax ride in globals because QC has no by-reference scalars and doing
+// this inline three times is worse than doing it once.
+float sp_slab_tmin, sp_slab_tmax;
+float(float o, float d, float lo, float hi) Surf_SlabAxis =
+{
+    if (fabs(d) < 0.0001)
+        return (o >= lo && o <= hi);   // ray parallel to this slab: in or out, no clipping
+    float t1 = (lo - o) / d;
+    float t2 = (hi - o) / d;
+    if (t1 > t2) { float t = t1; t1 = t2; t2 = t; }
+    if (t1 > sp_slab_tmin) sp_slab_tmin = t1;
+    if (t2 < sp_slab_tmax) sp_slab_tmax = t2;
+    return (sp_slab_tmax >= sp_slab_tmin);
+};
+
+// Distance along `dir` at which the ray enters e's bounding box, or -1.
+float(entity e, vector org, vector dir, float maxd) Surf_RayEntersAABB =
+{
+    sp_slab_tmin = 0;
+    sp_slab_tmax = maxd;
+    if (!Surf_SlabAxis(org_x, dir_x, e.absmin_x, e.absmax_x)) return -1;
+    if (!Surf_SlabAxis(org_y, dir_y, e.absmin_y, e.absmax_y)) return -1;
+    if (!Surf_SlabAxis(org_z, dir_z, e.absmin_z, e.absmax_z)) return -1;
+    return sp_slab_tmin;
+};
+
 float(float x, float y) CSQC_DrawDebugSurface =
 {
     y = dbg_text(x, y, "--- SURFACE ---", '0.3 1 0.6');
@@ -2043,6 +2070,44 @@ float(float x, float y) CSQC_DrawDebugSurface =
         gnd_mat = Surf_MaterialFor(gnd_tex);
     }
 
+    // WHAT the crosshair hit, not just what it is made of.  The traceline above
+    // is MOVE_NOMONSTERS, so it can only ever report a SOLID surface: a brush
+    // entity that is drawn but non-solid (func_illusionary, func_water, anything
+    // the server left SOLID_NOT) is invisible to it — the ray passes through and
+    // names the wall BEHIND it.  That is precisely the "I can see a texture I
+    // can't identify and the readout shows the wall it's flush against" case.
+    //
+    // So the ray is also walked by hand against every brush-model entity's
+    // bounding box, solidity ignored, and the nearest one reported.  The model
+    // name is the payoff: "*38" points straight at a BSP submodel, which is
+    // enough to name the offending entity from the map file.
+    string look_ent = (trace_ent == world || !trace_ent)
+                    ? "worldspawn"
+                    : sprintf("ent %g  model %s", num_for_edict(trace_ent),
+                              modelnameforindex(trace_ent.modelindex));
+
+    entity best  = world;
+    float  bestd = 999999;
+    entity scan;
+    for (scan = nextent(world); scan; scan = nextent(scan))
+    {
+        if (scan == predicted_player) continue;
+        if (!scan.modelindex)         continue;
+        if (substring(modelnameforindex(scan.modelindex), 0, 1) != "*") continue;
+        float d = Surf_RayEntersAABB(scan, vorg, v_forward, 8192);
+        if (d < 0 || d >= bestd) continue;
+        best  = scan;
+        bestd = d;
+    }
+    string any_ent = "(none)";
+    if (best != world)
+        any_ent = sprintf("ent %g  model %s  @%gqu  tex %s",
+                          num_for_edict(best), modelnameforindex(best.modelindex),
+                          rint(bestd),
+                          Surf_TexAtPoint(best, vorg + v_forward * bestd));
+
+    y = dbg_line(x, y, "Look ent",   look_ent, DBG_VALUE_COL);
+    y = dbg_line(x, y, "Any brush",  any_ent,  DBG_VALUE_COL);
     y = dbg_line(x, y, "Look tex",   (look_tex == "") ? "(none)" : look_tex, DBG_VALUE_COL);
     y = dbg_line(x, y, "Look mat",   sprintf("%s  (impact %g, sndset %s)", Surf_MatName(look_mat),
                     Surf_ImpactMat(look_mat), (Surf_SoundSet(look_mat) == "") ? "generic" : Surf_SoundSet(look_mat)), DBG_GOOD_COL);

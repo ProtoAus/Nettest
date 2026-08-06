@@ -199,7 +199,9 @@ void() rotating_touch =
 // meat-grinder.
 void() rotating_blocked =
 {
-    if (self.dmg > 0 && other != world && other.takedamage != DAMAGE_NO)
+    // No takedamage gate - see sv_pendulum.qc.  A FAN_PAIN rotator that could
+    // not hurt a player was not a meat-grinder, it was decor.
+    if (self.dmg > 0 && other != world)
         W_ApplyDamage(self, other, self.dmg);
 };
 

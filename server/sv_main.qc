@@ -976,6 +976,144 @@ void() SV_DoCleanDecals =
 	multicast('0 0 0', MULTICAST_ALL);
 };
 
+// ---------------------------------------------------------------------------
+// sv_hlequip_test  —  fire each of the four HL equipment weapons once
+// ---------------------------------------------------------------------------
+// A satchel, a tripmine, a snark and a hivehand are all "press the button and
+// something is supposed to exist in the world afterwards" weapons, and every
+// one of the four has a different reason it might not: the satchel spawns from
+// a throw, the tripmine from a traceline that must find a surface, the snark
+// from a traceline that must find EMPTY space, and the hornet from neither.
+// Reading the resulting entity counts is the difference between "it compiled"
+// and "it works", and none of it needs a human at the keyboard.
+//
+// Runs the SSQC fire function directly, which is the same entry point the
+// button takes (sv_weapons.qc's button0/button1 dispatch calls self.fire /
+// self.altfire), so this is not a test-only code path.
+float hlequip_test_stage;
+float hlequip_test_next;
+
+void() W_HLEquipTest =
+{
+    if (!cvar("sv_hlequip_test"))
+        return;
+    if (time < hlequip_test_next)
+        return;
+
+    entity p = player_chain_head;
+    while (p && (p.health <= 0 || p.solid == SOLID_NOT))
+        p = p.player_chain_next;
+    if (!p)
+        return;
+
+    hlequip_test_next = time + 2;
+    hlequip_test_stage = hlequip_test_stage + 1;
+
+    entity oldself = self;
+    self = p;
+
+    if (hlequip_test_stage == 1)
+    {
+        self.ammo_satchel = MAX_AMMO_SATCHEL;
+        self.slot_utility = WEP_SATCHEL;
+        W_SatchelEquip();
+        self.weaponstate = WS_IDLE;
+        self.attack_finished = 0;
+        W_SatchelFire();
+    }
+    else if (hlequip_test_stage == 2)
+    {
+        // The detonator is the half that cannot be reached by pressing
+        // +attack, so it gets its own stage.
+        self.weaponstate = WS_IDLE;
+        self.attack_finished = 0;
+        W_SatchelAltFire();
+    }
+    else if (hlequip_test_stage == 3)
+    {
+        self.ammo_tripmine = MAX_AMMO_TRIPMINE;
+        self.slot_utility = WEP_TRIPMINE;
+        W_TripmineEquip();
+        self.weaponstate = WS_IDLE;
+        self.attack_finished = 0;
+        // Aim slightly DOWN and forward, not straight at the floor.  Aiming at
+        // your own feet places a mine whose beam runs up through your own body,
+        // so it arms and instantly detonates - which is correct HL behaviour and
+        // exactly why nobody does it, but it tests the wrong thing.
+        // 45 degrees down puts the mine on the floor about 64 units AHEAD of
+        // the player, so its upward beam does not pass through them.  Aiming
+        // at your own feet arms a mine inside your own hull, which detonates
+        // instantly - correct, and not what this is testing.
+        self.v_angle = '45 0 0';
+        W_TripmineFire();
+    }
+    else if (hlequip_test_stage == 4)
+    {
+        self.ammo_snark = MAX_AMMO_SNARK;
+        self.slot_utility = WEP_SNARK;
+        W_SnarkEquip();
+        self.weaponstate = WS_IDLE;
+        self.attack_finished = 0;
+        self.v_angle = '0 0 0';
+        W_SnarkFire();
+    }
+    else if (hlequip_test_stage == 5)
+    {
+        self.ammo_hornet = MAX_AMMO_HORNET;
+        self.slot_primary = WEP_HORNETGUN;
+        W_HGunEquip();
+        self.weaponstate = WS_IDLE;
+        self.attack_finished = 0;
+        W_HGunFire();
+        self.weaponstate = WS_IDLE;
+        self.attack_finished = 0;
+        self.hgun_alt_finished = 0;
+        W_HGunAltFire();
+    }
+    else
+    {
+        cvar_set("sv_hlequip_test", "0");
+
+        // Assigned one per line on purpose.  QC locals live in the progs
+        // globals and are NOT zeroed on entry, and a comma-separated
+        // declaration only applies the initialiser to the first name - so the
+        // single-line version reported a leftover beam count from a previous
+        // call and sent me hunting a tripmine bug that did not exist.
+        float n_satchel; float n_mine; float n_snark; float n_hornet; float n_beam;
+        n_satchel = 0; n_mine = 0; n_snark = 0; n_hornet = 0; n_beam = 0;
+        entity e = findchain(classname, "monster_satchel");
+        while (e) { n_satchel = n_satchel + 1; e = e.chain; }
+        e = findchain(classname, "monster_tripmine");
+        while (e) { n_mine = n_mine + 1; e = e.chain; }
+        e = findchain(classname, "monster_snark");
+        while (e) { n_snark = n_snark + 1; e = e.chain; }
+        e = findchain(classname, "hornet");
+        while (e) { n_hornet = n_hornet + 1; e = e.chain; }
+        e = findchain(classname, "tripmine_beam");
+        while (e)
+        {
+            n_beam = n_beam + 1;
+            dprint(sprintf("[hlequip] leftover beam #%g org=%v owner=\"%s\" active=%g\n",
+                           n_beam, e.origin, e.owner.classname, e.ebeam_active));
+            e = e.chain;
+        }
+
+        // A satchel count of 0 here is the PASS for the satchel: stage 1 threw
+        // one and stage 2 blew it up.  Everything else should still be alive.
+        // Order matters and I got it wrong once: the label list and the
+        // argument list have to agree, or a live snark reads as a leaked beam
+        // and you go looking for a leak that was never there.
+        dprint(sprintf("[hlequip] satchels=%g (0 = thrown AND detonated) mines=%g snarks=%g hornets=%g beams=%g\n",
+                       n_satchel, n_mine, n_snark, n_hornet, n_beam));
+        dprint(sprintf("[hlequip] tripmine beam ticks=%g\n", tripmine_dbg_beamticks));
+        dprint(sprintf("[hlequip] ammo left: satchel=%g tripmine=%g snark=%g hornet=%g\n",
+                       p.ammo_satchel, p.ammo_tripmine, p.ammo_snark, p.ammo_hornet));
+    }
+
+    self = oldself;
+};
+
+
 void() StartFrame =
 {
 	entity e, saved;
@@ -1202,6 +1340,9 @@ void() StartFrame =
 	// camera when >CAMERA_CYCLE_SECONDS have elapsed.
 	Camera_EnsureTargetsResolved();
 	Camera_UpdateCyclingSpectators();
+	Vote_Frame();	// trigger_vote countdown — driven here, not from a think on
+			// the entity, so a vote survives its trigger_vote being
+			// killtargeted while the clock is still running.
 
 	// Synthesize missed input ticks for low-cl_netfps players so other
 	// clients see them move smoothly instead of freeze-then-jump.
@@ -1210,6 +1351,17 @@ void() StartFrame =
 	// nettest bots: advance the incremental nav-graph build (sv_navnodes.qc),
 	// then run the bot fill + per-bot AI (sv_bots.qc).
 	Nav_Tick();
+	// Service queued path requests BEFORE the AI that consumes them, and under a
+	// per-frame cap: a squadmaker wave all deciding to repath on the same frame
+	// would otherwise run one full A* per monster inside this single StartFrame.
+	Nav_ServiceRequests();
+	// Reset the AI layer's per-frame LOS trace budget and re-read its cvars.
+	// Monsters run on their own .nextthink during PHYSICS, which happens after
+	// StartFrame, so this is the point at which the budget is refreshed for the
+	// thinks that are about to run.
+	AI_Tick();
+	W_ProjTest();		// sv_proj_test: one monster-owned projectile, for the CSQC receive path
+	W_HLEquipTest();	// sv_hlequip_test: fire satchel/tripmine/snark/hivehand once each
 	Bot_RunFrame();
 	CarDbg_Tick();		// prop_car physics debug overlay: per-client proxies when sv_debug_car 1
 	PhysFlood_Tick();	// drain the spawnflood queue a few props/frame (no mass-spawn hitch)
@@ -1262,6 +1414,18 @@ void() StartFrame =
 			round_phase = ROUND_PHASE_ACTIVE;
 			round_end_time = time + cvar("mp_roundtime") * 60;
 		}
+	}
+	// GoldSrc `game_end` fired — the map's own objective says we're done.
+	// Handled here, ahead of the per-phase machine, so it lands from any phase
+	// and goes straight to MAP_END rather than waiting on the round clock or
+	// mp_maxrounds (the two conditions that normally gate the MAP_END
+	// transition below).  Guarded so re-firing it during the end delay can't
+	// keep pushing map_restart_time out.
+	if (sv_game_end_requested && round_phase != ROUND_PHASE_MAP_END)
+	{
+		sv_game_end_requested = 0;
+		round_phase      = ROUND_PHASE_MAP_END;
+		map_restart_time = time + cvar("mp_maprestartdelay");
 	}
 	else if (round_phase == ROUND_PHASE_ACTIVE)
 	{
@@ -1389,7 +1553,10 @@ void() StartFrame =
 			string nextmap = SV_NextMapFromCycleFile();
 			if (nextmap == "")
 				nextmap = mapname;
-			localcmd(sprintf("changelevel %s\n", nextmap));
+			// Carry the current map's game spec forward - see ChangeLevel_Issue in
+			// sv_trigger_changelevel.qc for why a bare changelevel can hand the
+			// next map a different game's copy of a same-named WAD.
+			ChangeLevel_Issue(nextmap);
 		}
 	}
 
@@ -1541,14 +1708,42 @@ void() StartFrame =
 	}
 };
 
+
 void() worldspawn =
 {
+
 	// Reset per-map state that's held in QC file-scope globals — FTE
 	// doesn't reload progs between map loads, so any global that
 	// accumulates across a map (camera linked-list head, one-shot
 	// flags, cycling RNG state) needs an explicit clear here.
+	//
+	// The GoldSrc latch MUST be cleared first: worldspawn is entity 0 and
+	// its spawn function runs before any other entity's, so clearing here
+	// guarantees the first Map_IsGoldSrc() caller re-probes serverinfo for
+	// THIS map rather than inheriting the previous map's answer.
+	sv_map_goldsrc_cache  = 0;
+
+	// sv_ode_loaded is a THREE-state latch (0 = unprobed, 1 = ODE attached,
+	// -1 = physics unavailable) and cvars survive a map change, so a "-1" stamped
+	// on a map where plug_load had not finished yet would otherwise persist for the
+	// whole server process.  The one-shot attach at :992 only retries on == 0, so
+	// nothing would ever clear it and every phys prop stays inert until restart.
+	// Re-arm it here, next to the GoldSrc latch and for the same reason: worldspawn
+	// runs before any other entity, so each map gets exactly one fresh probe.
+	cvar_set("sv_ode_loaded", "0");
+
+	monster_chain_head    = world;   // rebuilt as this map's monsters spawn
+	sv_game_end_requested = 0;
+	Cutscene_ResetState();           // sv_trigger_camera.qc
+	Vote_ResetState();               // sv_trigger_vote.qc
 	Camera_ResetState();
 	Nav_Reset();		// nettest bots: clear the nav graph before this map's info_node entities spawn
+	Monster_BuiltinProbe();	// sv_monster_probe 1: dump HL .mdl sequence data readable from SSQC
+	// NOTE: AI_Init() is deliberately NOT here.  It reads its own cvars, and the
+	// mod's cvar table is not registered until CVar_Init() ~160 lines below, so
+	// every default would read as 0 — sv_ai_enable included, which silently left
+	// every map-placed monster inert.  It is called just after CVar_Init(), which
+	// is still inside worldspawn and therefore still before any entity spawns.
 	Surf_LoadMaterials();	// scripts/surfaceprops.txt -> texture material table (sh_surfaceprops.qc)
 	PropMat_LoadMaterials();	// scripts/propmaterials.txt -> prop material+weight table (sh_propmaterials.qc)
 	MatSnd_LoadSounds();	// scripts/materialsounds.txt -> per-material contact sound sets (sh_matsounds.qc).
@@ -1650,7 +1845,11 @@ void() worldspawn =
 	clientstat(STAT_CROSSHAIR_MOVESPREAD, EV_FLOAT,   sv_crosshair_movespread);
 	clientstat(STAT_CROSSHAIR_FULLSPEED,  EV_FLOAT,   sv_crosshair_fullspeed);
 	clientstat(STAT_CROSSHAIR_GAPSCALE,   EV_FLOAT,   sv_crosshair_gapscale);
-	clientstat(STAT_CROSSHAIR_DISABLED,         EV_INTEGER,  sv_crosshair_disabled);
+	// EV_FLOAT, matching the `.float` field — see the STAT_CUTSCENE note below
+	// for why EV_INTEGER on a float field ships raw bits.  Nothing reads this
+	// stat today (sh_weapons.qc), so the old EV_INTEGER was harmless, but it
+	// would have bitten whoever wired it up next.
+	clientstat(STAT_CROSSHAIR_DISABLED,         EV_FLOAT,    sv_crosshair_disabled);
 
 	clientstat(STAT_PLAYERTEAM, EV_FLOAT, player_team);
 	clientstat(STAT_TEAMMENU_REQUEST, EV_FLOAT, team_menu_request_serial);
@@ -1683,6 +1882,16 @@ void() worldspawn =
 	clientstat(STAT_LEVEL, EV_FLOAT, sv_level);
 	clientstat(STAT_XP_NEXT, EV_FLOAT, sv_xp_next);
 	clientstat(STAT_PROG_SESSIONXP, EV_FLOAT, sv_sessionxp);
+
+	// Sven trigger_camera binding + presentation flags, packed into one stat.
+	// EV_FLOAT because sv_cutscene_stat is a `.float` (sv_customdefs.qc).  The
+	// EV_* argument declares the FIELD's storage type, not the desired wire
+	// type: SV_UpdateQCStats reads the eval_t union with `eval->_int` for
+	// EV_INTEGER, so registering a float field as EV_INTEGER ships the raw
+	// IEEE-754 bits (65958 went out as 0x4780D300) and the client decodes a
+	// nonsense entnum.  Floats hold integers exactly to 2^24 and this payload
+	// peaks at 0x1FFFFF, so nothing rounds — the bitfield is safe in a float.
+	clientstat(STAT_CUTSCENE, EV_FLOAT, sv_cutscene_stat);
 	Prog_DBInit();	// open the sqlite player store + ensure schema (once)
 
 	// All custom cvars are registered from a single shared table —
@@ -1691,6 +1900,21 @@ void() worldspawn =
 	// generated cfg/allcommands.cfg too.
 	CVar_Init();
 	CVar_RegisterMine();
+
+	// Monster AI boot: build the schedule/task table and precache + warm the AI
+	// classes' models.  Placed HERE, immediately after the cvar table exists,
+	// because AI_Init caches sv_ai_* — read any earlier and every default is 0,
+	// which switches the whole AI layer off without saying so.  Still inside
+	// worldspawn, so it comfortably precedes every entity the map spawns; that
+	// ordering is required both ways, since each monster's Monster_Build reads
+	// the cache and SVPR_GetCModel BLOCKS on first model access.
+	AI_Init();
+
+	// Half-Life's dialogue table.  Must be here, in worldspawn, because every
+	// word of every sentence needs precache_sound and that is the only place it
+	// may be called - a sentence precached later plays as "not precached" and is
+	// dropped, which is exactly how the body-drop sounds failed.
+	Sentences_Precache();
 
 	// FTE engine pre-registers a few cvars with values that disagree
 	// with the mod's intended defaults (e.g., sv_accelerate "10",

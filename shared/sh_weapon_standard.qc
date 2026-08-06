@@ -139,6 +139,12 @@ float(float now, .float mag_fld, float fire_delay, float dryfire_delay) SH_Stand
 // use the literal value 1 below so no forward decl is needed for it.
 .float pm_oldbuttons;
 
+#ifdef SSQC
+// server/sv_ai_core.qc, which compiles a long way below this file - QC
+// forward-declares functions, so the ordering costs one line.
+void(entity who) AI_HeardGunfire;
+#endif
+
 // Semi-auto wrapper around SH_StandardTryFire.
 // Blocks fire when +attack was already held last pmove tick — the
 // player must release and re-press for each shot.  Used by handguns
@@ -309,6 +315,17 @@ float(float now, .float mag_fld,
 #endif
     // Queue penalty — applied AFTER this shot's spread is calculated
     self.fire_spread_pending += FIRE_SPREAD_PENALTY_PER_SHOT;
+#ifdef SSQC
+    // Tell the monsters.  This is the single authoritative "a shot was fired"
+    // point for every standard weapon, which is why the hook lives here rather
+    // than in each of the fifty weapon files.
+    //
+    // SSQC only: on the client this function also runs during prediction and
+    // reconcile-replay, where firing it would be both meaningless (no monsters)
+    // and repeated.  AI_HeardGunfire rate-limits itself globally, so a minigun
+    // costs the same as a pistol.
+    AI_HeardGunfire(self);
+#endif
     return 1;
 };
 
@@ -439,6 +456,52 @@ float(float now, string viewmodel_path) SH_SeqDrivenTickState =
 // sv_weapons.qc — the declaration must precede the consumer.
 float sv_in_radius_explosion;
 
+// ---------------------------------------------------------------------------
+// damage TYPE  —  sv_dmg_bits
+// ---------------------------------------------------------------------------
+// Half-Life carries a bitsDamageType through every damage call, and one specific
+// mask decides whether a hit can tear a corpse apart:
+//
+//   #define DMG_GIB_CORPSE (DMG_CRUSH|DMG_FALL|DMG_BLAST|DMG_SONIC|DMG_CLUB)
+//                                                             cbase.h:638
+//
+// DMG_BULLET is deliberately NOT in it.  That is the rule behind something every
+// Half-Life player knows without being told: you can shoot a body all day and it
+// just bleeds, but one crowbar swing or one grenade turns it into pieces.
+//
+// This is a GLOBAL rather than a parameter because W_ApplyDamage has 58 call
+// sites and the overwhelming majority of them are bullets.  Making it a
+// parameter would mean touching all 58 to write "DMG_BULLET" 50-odd times, for
+// no behaviour.  Instead 0 means bullet, the handful of sources that are NOT
+// bullets set it immediately before the call, and W_ApplyDamage reads-and-clears
+// it at the top so a value can never leak into the next hit.  Same shape, and
+// the same reasoning, as sv_in_radius_explosion directly above.
+const float DMG_BULLET = 1;
+const float DMG_CLUB   = 2;		// crowbar, knife, any melee — and monster claws
+const float DMG_BLAST  = 4;		// explosions
+const float DMG_SONIC  = 8;		// houndeye shockwave
+const float DMG_CRUSH  = 16;	// doors, trains, movers
+const float DMG_FALL   = 32;
+
+const float DMG_GIB_CORPSE = 62;	// CLUB|BLAST|SONIC|CRUSH|FALL — cbase.h:638
+float sv_dmg_bits;					// 0 == DMG_BULLET
+
+// Damage this monster has landed on a PLAYER, cumulative.  Declared here rather
+// than with the other .ai_* fields because W_ApplyDamage writes it and compiles
+// long before the AI layer.  It is the one number that separates "this monster
+// never attacks" from "this monster attacks and the damage goes nowhere" — which
+// were both true at once, of different monsters, in the same playtest.
+.float ai_dbg_dmgdealt;
+
+// HL's pev->deadflag values (cbase.h).  .deadflag is a STOCK engine field
+// (sv_defs.qc:345), so unlike .ai_state it is readable from sv_weapons.qc, which
+// compiles long before the AI layer — that is what lets the damage path tell a
+// corpse from a living monster at all.
+const float DEAD_NO           = 0;
+const float DEAD_DYING        = 1;
+const float DEAD_DEAD         = 2;
+const float DEAD_RESPAWNABLE  = 3;
+
 // Forward declarations — defined in sv_weapons.qc (compiled later)
 float(entity target) W_CanDamageTarget;
 float(entity attacker, entity target, float damage) W_ApplyDamage;
@@ -467,16 +530,53 @@ void(entity target) W_SendServerHitboxes;
 void() W_PhysDropsExpandTraceBboxes;
 void() W_PhysDropsRestoreTraceBboxes;
 
+// ---------------------------------------------------------------------------
+//  Corpse trace opt-in
+// ---------------------------------------------------------------------------
+// AI_Died leaves a body at SOLID_CORPSE so it stops blocking movement and stops
+// disagreeing with client prediction (sv_ai_core.qc).  The engine's price is that
+// a SOLID_SLIDEBOX tracer — which every player is — gets a default hit mask with
+// NO corpse bit (engine world.c:2841-2856, "slidebox passes through corpses").
+// Without opting back in, every bullet and every crowbar swing would sail through
+// a body and W_DeadTakeDamage would never run.  The engine's own constant docs
+// name this exact recipe (pr_cmds.c:13560).
+//
+// Both weapon trace chokepoints call this, and there are two of them because
+// melee and hitscan took different routes long before corpses were damageable:
+// melee goes through W_WeaponTraceLine (sv_weapons.qc), hitscan through
+// W_ServerTraceLineWithPhysDrops below.  Missing either one is a silent
+// half-fix, so the pair lives here rather than being written out twice.
+//
+// A zero mask means "engine default" and therefore cannot simply be OR'd — the
+// default has to be spelled out.  Same idiom as CSQC_WeaponTraceLine
+// (sh_weapon_logic.qc:731-738).
+int(entity e) W_CorpseMaskBegin =
+{
+    int saved = e.hitcontentsmaski;
+    if (saved == 0i)
+        e.hitcontentsmaski = CONTENTBITS_POINTSOLID | CONTENTBIT_CORPSE;
+    else
+        e.hitcontentsmaski = saved | CONTENTBIT_CORPSE;
+    return saved;
+};
+
+void(entity e, int saved) W_CorpseMaskEnd =
+{
+    e.hitcontentsmaski = saved;
+};
+
 void(vector src, vector end, float moveflags, entity ignore) W_ServerTraceLineWithPhysDrops =
 {
     float saved_dim_hit = self.dimension_hit;
     self.dimension_hit = saved_dim_hit | PHYSDROP_DIM;
+    int saved_mask = W_CorpseMaskBegin(self);
     // Inflate every phys-drop's traceline AABB to a rotation-safe size
     // so the engine broadphase reaches the rotated mesh; ODE's collision
     // shape stays tight because we restore before the next physics step.
     W_PhysDropsExpandTraceBboxes();
     traceline(src, end, moveflags, ignore);
     W_PhysDropsRestoreTraceBboxes();
+    W_CorpseMaskEnd(self, saved_mask);
     self.dimension_hit = saved_dim_hit;
 };
 
@@ -538,6 +638,7 @@ void(vector center, float radius,
         if (W_CanDamageTarget(e))
         {
             float dmg = W_LinearDamageFalloff(dist, peak_damage, min_damage, radius);
+            sv_dmg_bits = DMG_BLAST;
             W_ApplyDamage(attacker, e, dmg);
         }
 
@@ -569,7 +670,7 @@ void(vector center, float radius,
         // takedamage = DAMAGE_NO (so hitscan can't touch them) but
         // explicitly want to be damageable BY explosions — accept
         // them here regardless of the flag setting.
-        if (b.classname == "func_breakable"
+        if (Brush_IsBreakableClass(b)
             && (b.takedamage == DAMAGE_YES
                 || (b.spawnflags & SF_ONLY_EXPLOSION)))
         {
@@ -585,6 +686,7 @@ void(vector center, float radius,
             {
                 float bdmg = W_LinearDamageFalloff(bdist, peak_damage,
                                                    min_damage, radius);
+                sv_dmg_bits = DMG_BLAST;
                 W_ApplyDamage(attacker, b, bdmg);
             }
         }

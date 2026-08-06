@@ -13,7 +13,7 @@ Available options:
 -O          - write to a different qc file
 */
 #pragma noref 1
-//#pragma flag enable logicops
+#pragma flag enable lo
 #pragma warning error Q101 /*too many parms*/
 #pragma warning error Q105 /*too few parms*/
 #pragma warning error Q106 /*assignment to constant/lvalue*/

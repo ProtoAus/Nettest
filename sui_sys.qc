@@ -740,6 +740,14 @@ float _scan_listen_count;
 // Listen to a certain keycode if it was pressed, this way sui know it was requested
 float(float keycode) sui_listen_scan =
 {
+	// Bounds-check before writing.  _input_buffer gets this treatment at :723 but
+	// _scan_listens never did, and it is the easier of the two to overrun: the
+	// scroll-view code calls sui_listen_down()/sui_listen_up() from INSIDE a
+	// `while (sui_get_input(...))` loop, so the count grows per input event per
+	// frame, not per frame.
+	if (_scan_listen_count >= MAX_INPUTS)
+		return FALSE;
+
 	_scan_listens[_scan_listen_count] = keycode;
 	_scan_listen_count += 1;
 	for (float i = 0; i < _input_length; i++)
@@ -752,66 +760,92 @@ float(float keycode) sui_listen_scan =
 
 float(string command) sui_listen_command =
 {
+	// `matched` rather than an early return: the return used to sit INSIDE the
+	// per-bind loop, so a command bound to two keys registered only up to the
+	// first key that happened to be pressed this frame and silently dropped the
+	// rest - which then leaked through sui_block_listened().  Register every bind,
+	// then report.
+	float matched = FALSE;
 	float num_binds = tokenize(findkeysforcommand(command));
 	for (int i = 0; i < num_binds; i++)
 	{
 		float keycode = stof(argv(i));
+		if (_scan_listen_count >= MAX_INPUTS)
+			break;
 		_scan_listens[_scan_listen_count] = keycode;
 		_scan_listen_count += 1;
 		for (int j = 0; j < _input_length; j++)
 		{
 			if (_input_buffer[j].scan == keycode)
-			return TRUE;
+				matched = TRUE;
 		}
 	}
-	return FALSE;
+	return matched;
 };
 
-float() sui_listen_up = 
+// The sui_listen_* helpers below look like pure predicate chains but are NOT:
+// every sui_listen_scan / sui_listen_command call REGISTERS its keycode into
+// _scan_listens[] as a side effect, and that array is the sole input to
+// sui_block_listened() (:844, wired in as the default block handler at :959),
+// which decides whether a key event is swallowed instead of reaching the engine.
+//
+// So each operand must be evaluated for its registration, not just until the
+// answer is known.  Written as a `return a || b || c` chain that is only correct
+// while fteqcc's `lo` (short-circuit) flag is off; the moment it goes on, the
+// operands after the first match stop registering and those keys leak through to
+// the game while a menu is open.  Evaluate every operand into a local first, then
+// combine - correct under both settings.
+float() sui_listen_up =
 {
-	return sui_listen_scan(K_UPARROW)
-		|| sui_listen_scan(K_GP_DPAD_UP)
-		|| sui_listen_scan(K_GP_LTHUMB_UP)
-		|| sui_listen_command("+forward");
+	float a = sui_listen_scan(K_UPARROW);
+	float b = sui_listen_scan(K_GP_DPAD_UP);
+	float c = sui_listen_scan(K_GP_LTHUMB_UP);
+	float d = sui_listen_command("+forward");
+	return a || b || c || d;
 }
 
-float() sui_listen_down = 
+float() sui_listen_down =
 {
-	return sui_listen_scan(K_DOWNARROW)
-		|| sui_listen_scan(K_GP_DPAD_DOWN)
-		|| sui_listen_scan(K_GP_LTHUMB_DOWN)
-		|| sui_listen_command("+back");
+	float a = sui_listen_scan(K_DOWNARROW);
+	float b = sui_listen_scan(K_GP_DPAD_DOWN);
+	float c = sui_listen_scan(K_GP_LTHUMB_DOWN);
+	float d = sui_listen_command("+back");
+	return a || b || c || d;
 }
 
-float() sui_listen_left = 
+float() sui_listen_left =
 {
-	return sui_listen_scan(K_LEFTARROW)
-		|| sui_listen_scan(K_GP_DPAD_LEFT)
-		|| sui_listen_scan(K_GP_LTHUMB_LEFT)
-		|| sui_listen_command("+moveleft");
+	float a = sui_listen_scan(K_LEFTARROW);
+	float b = sui_listen_scan(K_GP_DPAD_LEFT);
+	float c = sui_listen_scan(K_GP_LTHUMB_LEFT);
+	float d = sui_listen_command("+moveleft");
+	return a || b || c || d;
 }
 
-float() sui_listen_right = 
+float() sui_listen_right =
 {
-	return sui_listen_scan(K_RIGHTARROW)
-		|| sui_listen_scan(K_GP_DPAD_RIGHT)
-		|| sui_listen_scan(K_GP_LTHUMB_RIGHT)
-		|| sui_listen_command("+moveright");
+	float a = sui_listen_scan(K_RIGHTARROW);
+	float b = sui_listen_scan(K_GP_DPAD_RIGHT);
+	float c = sui_listen_scan(K_GP_LTHUMB_RIGHT);
+	float d = sui_listen_command("+moveright");
+	return a || b || c || d;
 }
 
 float() sui_listen_confirm =
 {
-	return sui_listen_scan(K_ENTER)
-		|| sui_listen_scan(K_GP_A)
-		|| sui_listen_command("+attack")
-		|| sui_listen_command("+jump");
+	float a = sui_listen_scan(K_ENTER);
+	float b = sui_listen_scan(K_GP_A);
+	float c = sui_listen_command("+attack");
+	float d = sui_listen_command("+jump");
+	return a || b || c || d;
 }
 
 float() sui_listen_back =
 {
-	return sui_listen_scan(K_ESCAPE)
-		|| sui_listen_scan(K_GP_B)
-		|| sui_listen_command("togglemenu");
+	float a = sui_listen_scan(K_ESCAPE);
+	float b = sui_listen_scan(K_GP_B);
+	float c = sui_listen_command("togglemenu");
+	return a || b || c;
 }
 
 void() sui_menu_nav =

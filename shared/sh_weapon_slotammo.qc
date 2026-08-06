@@ -223,6 +223,10 @@ void(entity drop, entity player, float wep) W_SlotAmmo_CopyPlayerToDrop =
         drop.weapon_drop_aux = slotammo_aux;
     }
     else if (wep == WEP_HLGRENADE)       drop.weapon_drop_ammo = player.ammo_hlgrenade;
+    else if (wep == WEP_SATCHEL)         drop.weapon_drop_ammo = player.ammo_satchel;
+    else if (wep == WEP_TRIPMINE)        drop.weapon_drop_ammo = player.ammo_tripmine;
+    else if (wep == WEP_SNARK)           drop.weapon_drop_ammo = player.ammo_snark;
+    else if (wep == WEP_HORNETGUN)       drop.weapon_drop_ammo = player.ammo_hornet;
     else if (wep == WEP_SNOWBALL)        drop.weapon_drop_ammo = player.ammo_snowball;
     else if (wep == WEP_CSHEGRENADE)     drop.weapon_drop_ammo = player.ammo_cshegrenade;
     else if (wep == WEP_CSFLASHBANG)     drop.weapon_drop_ammo = player.ammo_csflashbang;

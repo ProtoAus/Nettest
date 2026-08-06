@@ -211,6 +211,12 @@ void() momentary_door =
     else
         self.pos2 = self.pos1 + self.movedir * (fabs(self.movedir * self.size) - self.lip);
 
+    // SetMovedir has just zeroed .angles, but SV_InitReplicatedSolidBrush above
+    // already linked this brush with the old value.  Re-link so the PVS box is built
+    // from the real geometry rather than one rotated about (0,0,0).
+    // (The START_OPEN branch below happens to setorigin and would mask this.)
+    BrushSync_RelinkAngles();
+
     if (self.spawnflags & MOMDOOR_START_OPEN)
     {
         setorigin(self, self.pos2);

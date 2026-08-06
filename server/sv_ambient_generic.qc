@@ -11,7 +11,16 @@ const float AG_SMALL_RADIUS    = 2;
 const float AG_MEDIUM_RADIUS   = 4;
 const float AG_LARGE_RADIUS    = 8;
 const float AG_START_SILENT    = 16;
-const float AG_NOT_TOGGLED     = 32;
+// sven-coop.fgd calls bit 32 "Un-looped|Cyclic".  It means TWO things in
+// CAmbientGeneric and we only ever implemented one of them:
+//   * ToggleUse: a non-looping sound retriggers from the top on every Use
+//     instead of toggling off   -- we had this, as AG_NOT_TOGGLED
+//   * Precache:  `if (!START_SILENT) { if (m_fLooping) m_fActive = TRUE; }`
+//     i.e. a non-looping ambient NEVER auto-starts at spawn, even when
+//     "Start Silent" is clear   -- we did NOT have this; see the spawn gate
+//     at the bottom of this file.
+const float AG_NOT_LOOPED      = 32;
+const float AG_NOT_TOGGLED     = 32;   // same bit, retrigger-vs-toggle spelling
 
 const float AG_LFO_OFF = 0;
 const float AG_LFO_SQR = 1;
@@ -33,6 +42,31 @@ const float AG_LFO_RND = 3;
 .float lfomodvol;
 .float cspinup;
 
+// Sven playmode (sven-coop.fgd:1330-1400).  Never declared before, so the key
+// was dropped and every ambient took whatever the WAV's own loop cue points
+// said — which for a sound authored as one-shot means looping forever.
+// Measured across the three target maps: 40 ambients set playmode, of which 18
+// are one-shot (1 or 5); the other 22 are 2 (Loop) and were already correct.
+//   0 Default   1 Play Once   2 Loop   5 Linear Once   6 Linear Loop
+.float playmode;
+// Linear-mode falloff distances.  PARSED, NOT IMPLEMENTED — attenuation here
+// is the radius-flag model in AmbientGeneric_Attenuation(), which has no
+// distance-pair form.  Declared so the keys bind rather than vanish, and so
+// they show up in an entity dump when someone comes to implement it.
+.float linearmin;
+.float linearmax;
+
+const float AG_PLAYMODE_ONCE        = 1;
+const float AG_PLAYMODE_LOOP        = 2;
+const float AG_PLAYMODE_LINEAR_ONCE = 5;
+const float AG_PLAYMODE_LINEAR_LOOP = 6;
+
+float() AmbientGeneric_IsPlayOnce =
+{
+    return (self.playmode == AG_PLAYMODE_ONCE
+         || self.playmode == AG_PLAYMODE_LINEAR_ONCE);
+};
+
 // Runtime state.
 .float ag_active;
 .float ag_attenuation;
@@ -53,6 +87,11 @@ const float AG_LFO_RND = 3;
 .float ag_current_volume;
 .float ag_current_pitch;
 .float ag_lfo_start;
+.float ag_playonce_stop;   // absolute time to cut a playmode-1/5 sample, 0 = none
+// Last values actually handed to sound(), quantised — see AmbientGeneric_Push.
+.float ag_pushed_once;
+.float ag_last_pushed_vol;
+.float ag_last_pushed_pitch;
 .float ag_lfo_next_random;
 .float ag_lfo_random;
 
@@ -79,7 +118,39 @@ string(string raw) AmbientGeneric_NormaliseSample =
 {
     if (raw == "") return raw;
     if (substring(raw, 0, 1) == "!")
-        return substring(raw, 1, -1);
+        raw = substring(raw, 1, -1);
+
+    // Strip an extension this engine build cannot decode, so FTE's own
+    // format-fallback loop can find a replacement.
+    //
+    // S_LoadSoundWorker tries the EXACT path first and only falls back to
+    // .wav/.opus/.ogg when that file does not EXIST.  An .mp3 exists and loads
+    // fine — it is the DECODE that fails — so the fallback never runs and
+    // dropping an .ogg beside the .mp3 does nothing at all.  Asking for the
+    // extensionless stem makes the exact lookup miss and lets the fallback
+    // find whatever you shipped.
+    //
+    // 153 ambient_generics across the Sven corpus name an .mp3.  This is a
+    // stopgap that lets you override individual tracks; the real fix is a
+    // portable mp3 decoder registered in the engine (see sv_cdaudio_pathfmt
+    // and the notes on S_RegisterSoundInputPlugin).
+    if (cvar("sv_sound_strip_undecodable"))
+    {
+        float n = strlen(raw);
+        if (n > 4)
+        {
+            string ext = strtolower(substring(raw, n - 4, 4));
+            if (ext == ".mp3")
+                return substring(raw, 0, n - 4);
+        }
+        if (n > 5)
+        {
+            string ext5 = strtolower(substring(raw, n - 5, 5));
+            if (ext5 == ".flac")
+                return substring(raw, 0, n - 5);
+        }
+    }
+
     return raw;
 };
 
@@ -193,6 +264,25 @@ void() AmbientGeneric_Push =
     if (self.message == "")
         return;
 
+    // Only re-issue when the audible parameters ACTUALLY changed.
+    //
+    // Every sound() on the same channel restarts the sample from the top.  The
+    // modulation think runs at 20 Hz, so an ambient with any LFO or fade was
+    // re-triggering its sample 20 times a second — which for a long or
+    // streaming sample means it never audibly gets going at all.  th_ep1_00's
+    // `raindropssnd` uses preset 27 (lfotype 1), so this ran for the whole map.
+    //
+    // Quantise before comparing: volume to 1/64 and pitch to whole units, both
+    // finer than the mixer resolves, so genuine fades still update smoothly.
+    float qv = rint(self.ag_current_volume * 64);
+    float qp = rint(self.ag_current_pitch);
+    if (self.ag_pushed_once && qv == self.ag_last_pushed_vol
+                            && qp == self.ag_last_pushed_pitch)
+        return;
+    self.ag_pushed_once       = 1;
+    self.ag_last_pushed_vol   = qv;
+    self.ag_last_pushed_pitch = qp;
+
     string sample = AmbientGeneric_NormaliseSample(self.message);
     sound(self, CHAN_VOICE, sample,
           self.ag_current_volume,
@@ -225,6 +315,8 @@ void(float base_volume, float base_pitch) AmbientGeneric_ModulateAndPush =
     AmbientGeneric_Push();
 };
 
+void() AmbientGeneric_Stop;      // defined below; the play-once cut calls it
+
 void() AmbientGeneric_Think =
 {
     float tv = AmbientGeneric_TransitionFrac(self.ag_vol_dur);
@@ -233,6 +325,16 @@ void() AmbientGeneric_Think =
     float pitch = self.ag_pitch_from + (self.ag_pitch_to - self.ag_pitch_from) * tp;
 
     AmbientGeneric_ModulateAndPush(volume, pitch);
+
+    // playmode "Play Once" deadline reached — fade the sample out so a looping
+    // WAV doesn't keep repeating.  Checked before the completion branches
+    // below, which would otherwise park the think and never come back.
+    if (self.ag_playonce_stop > 0 && time >= self.ag_playonce_stop)
+    {
+        self.ag_playonce_stop = 0;
+        AmbientGeneric_Stop();
+        return;
+    }
 
     if (tv >= 1 && tp >= 1)
     {
@@ -246,7 +348,9 @@ void() AmbientGeneric_Think =
             return;
         }
 
-        if (!AmbientGeneric_HasLFO())
+        // A pending play-once deadline has to keep the think alive even when
+        // the fade has settled and there is no LFO to drive it.
+        if (!AmbientGeneric_HasLFO() && self.ag_playonce_stop <= 0)
         {
             self.nextthink = 0;
             return;
@@ -320,6 +424,10 @@ void() AmbientGeneric_Start =
     self.ag_active = 1;
     self.ag_lfo_start = time;
     self.ag_lfo_next_random = time;
+    // Clear the push-dedup latch: a restart MUST re-issue sound() even when it
+    // lands on the same volume/pitch it was last playing at, or a stopped
+    // ambient could never be started again.
+    self.ag_pushed_once = 0;
 
     if (self.cspinup > 0 && self.ag_cspin_count < 1)
         self.ag_cspin_count = 1;
@@ -334,6 +442,23 @@ void() AmbientGeneric_Start =
                               self.fadein * AG_TIME_SCALE,
                               self.spinup * AG_TIME_SCALE,
                               0);
+
+    // playmode "Play Once": arrange to silence the sample instead of letting
+    // its loop cue points run forever.
+    //
+    // HONEST LIMITATION: this is a timed cut, not true end-of-sample
+    // detection.  soundlength() is CSQC-only in this engine, so the server
+    // cannot ask how long the sample actually is; sv_ambient_playonce_maxlen
+    // is the cap.  A one-shot longer than the cap gets clipped, which is still
+    // strictly better than repeating for the rest of the map.
+    if (AmbientGeneric_IsPlayOnce())
+    {
+        float maxlen = cvar("sv_ambient_playonce_maxlen");
+        if (maxlen <= 0) maxlen = 10;
+        self.ag_playonce_stop = time + maxlen;
+    }
+    else
+        self.ag_playonce_stop = 0;
 };
 
 void() AmbientGeneric_Stop =
@@ -389,7 +514,7 @@ void() AmbientGeneric_Use =
         AmbientGeneric_Start();
 };
 
-/*QUAKED ambient_generic (.6 .8 .4) (-8 -8 -8) (8 8 8) PLAY_EVERYWHERE SMALL_RADIUS MEDIUM_RADIUS LARGE_RADIUS START_SILENT NOT_TOGGLED
+/*QUAKED ambient_generic (.6 .8 .4) (-8 -8 -8) (8 8 8) PLAY_EVERYWHERE SMALL_RADIUS MEDIUM_RADIUS LARGE_RADIUS START_SILENT NOT_LOOPED
 HL/GoldSrc point-entity ambient sound source.
 
 "message"       WAV path relative to sound/.  "!NAME" has the leading
@@ -440,7 +565,7 @@ void() ambient_generic =
     {
         string sample = AmbientGeneric_NormaliseSample(self.message);
         if (sample != self.message)
-            dprint(sprintf("ambient_generic: sentence syntax '%s' not expanded; playing raw '%s'\n",
+            dprint(sprintf("ambient_generic: rewrote sample '%s' -> '%s'\n",
                            self.message, sample));
         precache_sound(sample);
     }
@@ -450,7 +575,53 @@ void() ambient_generic =
                        self.origin));
     }
 
-    if (!(self.spawnflags & AG_START_SILENT) && self.message != "")
+    // Auto-start at spawn is for LOOPING, non-silent ambients ONLY.
+    //
+    // Reference: HL SDK dlls/sound.cpp.  Spawn() does
+    //     if (spawnflags & AMBIENT_SOUND_NOT_LOOPING) m_fLooping = FALSE;
+    // and Precache() does
+    //     if (!(spawnflags & AMBIENT_SOUND_START_SILENT))
+    //         { if (m_fLooping) m_fActive = TRUE; }
+    //     if (m_fActive) UTIL_EmitAmbientSound(...);
+    // util.h:383-384 gives START_SILENT 16 and NOT_LOOPING 32.  So bit 32
+    // suppresses the spawn-time emit ON ITS OWN, independently of bit 16.
+    //
+    // Testing only bit 16 made every triggered one-shot in the map fire at
+    // t=0.1.  On th_ep1_00 that is 14 of 27 ambients, NINE of them spawnflags
+    // 33 (Play Everywhere -> ATTN_NONE, no falloff): steamtrainsnd, thsignsnd,
+    // thundersnd1/2, thunder1snd, thunder2snd, thunder1snd2, thunder2snd2,
+    // thunder3snd2.  thsignsnd is hunger/hungerzombiecop/zo_pain2.wav, the
+    // zombie-cop groan that belongs on the THEY HUNGER title card ~60 s into
+    // the intro; radio_static_snd's WAV carries a loop cue point and so ran
+    // under the radio music for the whole intro instead of firing at the 23 s
+    // mark when the broadcast cuts out.
+    //
+    // Corpus-wide: 576 ambient_generics across 40 of the 108 Sven maps set 32
+    // without 16 (th_ep3_04 54, th_ep1_01 47, th_escape 46, hl_c12 24, ...).
+    //
+    // Two knock-on effects, both measured and both HL-faithful:
+    //   * th_ep1_00's `owlsnd` and `birdy2` are named but nothing in the map
+    //     ever fires them, so they go from "one blip at t=0.1" to silent.
+    //     HL is silent for them too.  Corpus-wide only one bit-32 ambient has
+    //     no targetname at all (infested.bsp, ambience/cricket.wav).
+    //   * Sven's later `playmode` key can contradict bit 32.  Exactly one
+    //     entity in 5653 does so (bm_sts.bsp `game_area`, playmode 6 =
+    //     Linear/Loop with bit 32 set); we resolve in bit 32's favour because
+    //     that is what the HL code above does.  Revisit if bm_sts matters.
+    //
+    // Sequential ifs rather than a && chain: logicops is off mod-wide.  The
+    // old && was in fact evaluating correctly (neither operand has a side
+    // effect) -- the bug was a missing term, not a short-circuit trap -- but
+    // three-term gates in this codebase are written this way by convention.
+    float ag_autostart = TRUE;
+    if (self.message == "")
+        ag_autostart = FALSE;
+    if (self.spawnflags & AG_START_SILENT)
+        ag_autostart = FALSE;
+    if (self.spawnflags & AG_NOT_LOOPED)
+        ag_autostart = FALSE;
+
+    if (ag_autostart)
     {
         self.think = AmbientGeneric_Start;
         self.nextthink = time + 0.1;

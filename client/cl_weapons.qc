@@ -396,6 +396,10 @@ void(float weapon_id) CSQC_SpawnFakeDrop =
         drop_aux = slotammo_aux;
     }
     else if (weapon_id == WEP_HLGRENADE)       drop_ammo = self.ammo_hlgrenade;
+    else if (weapon_id == WEP_SATCHEL)         drop_ammo = self.ammo_satchel;
+    else if (weapon_id == WEP_TRIPMINE)        drop_ammo = self.ammo_tripmine;
+    else if (weapon_id == WEP_SNARK)           drop_ammo = self.ammo_snark;
+    else if (weapon_id == WEP_HORNETGUN)       drop_ammo = self.ammo_hornet;
     else if (weapon_id == WEP_SNOWBALL)        drop_ammo = self.ammo_snowball;
     else if (weapon_id == WEP_CSHEGRENADE)     drop_ammo = self.ammo_cshegrenade;
     else if (weapon_id == WEP_CSFLASHBANG)     drop_ammo = self.ammo_csflashbang;
@@ -1085,6 +1089,10 @@ void(float wep, float mag, float ammo, float silencer) CSQC_ApplyPickupAmmo =
         W_SlotAmmo_LoadLegacy(self, wep);
     }
     else if (wep == WEP_HLGRENADE)       {                                 self.ammo_hlgrenade = ammo;       }
+    else if (wep == WEP_SATCHEL)         {                                 self.ammo_satchel = ammo;         }
+    else if (wep == WEP_TRIPMINE)        {                                 self.ammo_tripmine = ammo;        }
+    else if (wep == WEP_SNARK)           {                                 self.ammo_snark = ammo;           }
+    else if (wep == WEP_HORNETGUN)       {                                 self.ammo_hornet = ammo;          }
     else if (wep == WEP_SNOWBALL)        {                                 self.ammo_snowball = ammo;        }
     else if (wep == WEP_CSHEGRENADE)     {                                 self.ammo_cshegrenade = ammo;     }
     else if (wep == WEP_CSFLASHBANG)     {                                 self.ammo_csflashbang = ammo;     }
@@ -1625,6 +1633,10 @@ void() CSQC_AddPredictedViewmodel =
     // Prop Hunt disguise (weaponless anyway, but belt-and-braces).
     if (cvar("chase_active") || CSQC_PropHunt_LocalDisguised())
         return;
+    // trigger_camera cutscene — the view is coming from a camera elsewhere in
+    // the map, so the player's gun would hang in the middle of the shot.
+    if (Cutscene_Active())
+        return;
     // Scope visibility — hide the viewmodel while the player is
     // "looking through" any scope so the gun doesn't poke through the
     // scope overlay.  Helper covers FADING_IN / SCOPED / FADING_OUT
@@ -1923,6 +1935,10 @@ void(float weapon_id) CSQC_WeaponEquip =
     else if (weapon_id == WEP_HLSMG)        CSQC_HLSMGEquip();
     else if (weapon_id == WEP_HLRPG)        CSQC_RPGEquip();
     else if (weapon_id == WEP_HLGRENADE)    CSQC_HLGrenadeEquip();
+    else if (weapon_id == WEP_SATCHEL)      CSQC_SatchelEquip();
+    else if (weapon_id == WEP_TRIPMINE)     CSQC_TripmineEquip();
+    else if (weapon_id == WEP_SNARK)        CSQC_SnarkEquip();
+    else if (weapon_id == WEP_HORNETGUN)    CSQC_HGunEquip();
     else if (weapon_id == WEP_SNOWBALL)     CSQC_SnowballEquip();
     else if (weapon_id == WEP_CSHEGRENADE)  CSQC_CSHEGrenadeEquip();
     else if (weapon_id == WEP_CSFLASHBANG)  CSQC_CSFlashbangEquip();

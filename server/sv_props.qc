@@ -83,9 +83,17 @@ float() Props_SetupModel =
 	// the +use grab traceline never hits it. The cabinet (sv_physprop.qc:794) and
 	// barrel (:274) sidestep this by hand-tuning setsize instead of trusting the
 	// model bounds — do the same here with a sensible fallback cube.
-	if ((self.maxs_x - self.mins_x) < 1 ||
-	    (self.maxs_y - self.mins_y) < 1 ||
-	    (self.maxs_z - self.mins_z) < 1)
+	//
+	// FLAT is not the same as ZERO, and conflating the two was a bug. A single-sided
+	// quad — 28 of the facade panels (118 x 0 x 118) and the 6 office notepads
+	// (8 x 11 x 0) — has ONE degenerate axis and two perfectly good ones, and the old
+	// `||` sent it down the cube path: a 118x118 wall panel became a 32x32 box, so the
+	// player walked through most of the wall and collided with thin air in the middle
+	// of it. Pad only the axis that is actually flat.
+	local float dx = self.maxs_x - self.mins_x;
+	local float dy = self.maxs_y - self.mins_y;
+	local float dz = self.maxs_z - self.mins_z;
+	if (dx < 1 && dy < 1 && dz < 1)
 	{
 		local float ph = cvar("sv_props_default_halfsize");
 		if (ph < 1)
@@ -95,8 +103,27 @@ float() Props_SetupModel =
 		// the ground rather than half-buried.
 		setsize(self, '-1 -1 0' * ph, '1 1 2' * ph);
 		if (cvar("sv_debug_physprops"))
-			dprint(sprintf("%s: model '%s' has a degenerate bbox; using fallback cube +-%g\n",
+			dprint(sprintf("%s: model '%s' has a ZERO bbox; using fallback cube +-%g\n",
 			               self.classname, self.model, ph));
+	}
+	else if (dx < 1 || dy < 1 || dz < 1)
+	{
+		local float pad = cvar("sv_props_min_extent");
+		local vector mn = self.mins;
+		local vector mx = self.maxs;
+		local float c;
+		if (pad < 1)
+			pad = 2;                                  // ~5cm: a plausible panel thickness
+		// X/Y grow about the centre — a wall panel is modelled on its own plane.
+		if (dx < 1) { c = (mn_x + mx_x) * 0.5; mn_x = c - pad * 0.5; mx_x = c + pad * 0.5; }
+		if (dy < 1) { c = (mn_y + mx_y) * 0.5; mn_y = c - pad * 0.5; mx_y = c + pad * 0.5; }
+		// Z grows UPWARD only, keeping the same feet-on-floor convention as above: a
+		// flat notepad lies ON the desk rather than half-sunk into it.
+		if (dz < 1) { mx_z = mn_z + pad; }
+		setsize(self, mn, mx);
+		if (cvar("sv_debug_physprops"))
+			dprint(sprintf("%s: model '%s' is flat (%g %g %g); padded to %v .. %v\n",
+			               self.classname, self.model, dx, dy, dz, self.mins, self.maxs));
 	}
 
 	// rendermode / renderamt / rendercolor -> .alpha / .colormod / .effects
@@ -357,6 +384,10 @@ void() Props_SpawnPhysics =
 	// Material + weight from scripts/propmaterials.txt (per-entity "mass" key overrides the weight).
 	self.po_material  = PropMat_For(self.model);
 	local float pmass = (self.mass > 0) ? self.mass : PropMat_Mass(self.po_material, self);
+	if (cvar("sv_debug_physprops"))
+		dprint(sprintf("%s: '%s' material '%s' mass %g%s\n", self.classname, self.model,
+		               PropMat_Name(self.po_material), pmass,
+		               (self.mass > 0) ? " (map override)" : ""));
 	PhysObj_Setup(self, pmass, PropMat_Friction(self.po_material));   // MOVETYPE_PHYSICS + ODE
 	// Buoyancy: cache the displaced volume once.  Deliberately the SAME bbox volume PropMat_Mass used to
 	// derive the mass, so the equilibrium depth works out to exactly pm_density/water_density — the bbox's

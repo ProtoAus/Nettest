@@ -9,6 +9,7 @@
 // Externs from earlier compile units.
 void(entity caller, entity who, float useType) SUB_UseTargets;        // sv_triggers.qc
 float(string master_name, entity who) IsMasterTriggered;              // sv_triggers.qc
+float(float ts) GoldSrc_TriggerStateToUseType;                        // sv_triggers.qc
 
 // ============================================================================
 //  trigger_relay
@@ -25,7 +26,7 @@ void() trigger_relay_use =
 {
     if (!IsMasterTriggered(self.master, activator))
         return;
-    float us = self.triggerstate ? self.triggerstate : USE_TOGGLE;
+    float us = GoldSrc_TriggerStateToUseType(self.triggerstate);
     SUB_UseTargets(self, activator, us);
     if (self.spawnflags & SF_RELAY_FIREONCE)
         remove(self);
@@ -77,8 +78,17 @@ void() trigger_auto_think =
         return;
     }
 
-    float us = self.triggerstate ? self.triggerstate : USE_TOGGLE;
+    float us = GoldSrc_TriggerStateToUseType(self.triggerstate);
+    // `delay` on a trigger_auto is its MAP-START wait, and it has just
+    // elapsed — it is not also a chain delay.  SUB_UseTargets defers by
+    // caller.delay, so leaving it set fires the target at 2x the authored
+    // time (pizza_ya_san1's delay-10 auto fired at t=20).  Zero it across
+    // the call rather than in the spawn function, so the key stays readable
+    // for entity dumps and trigger_copyvalue.
+    float saved_delay = self.delay;
+    self.delay = 0;
     SUB_UseTargets(self, world, us);
+    self.delay = saved_delay;
     // Mirror HL: trigger_auto without FIREONCE still only fires once
     // (the think isn't re-scheduled), so the flag controls whether
     // the entity persists in the slot table or is freed.

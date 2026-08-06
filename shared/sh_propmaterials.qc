@@ -49,7 +49,7 @@ float(string name) PropMat_NameToIndex =
 
 // Normalize an entity model path to the key patterns match on: lowercase, drop a
 // leading "models/", drop the file extension.  e.g.
-//   "models/props/containers/mega/metal_barrel_mp_1.iqm" -> "mega/containers/metal_barrel_mp_1"
+//   "models/props/containers/metal_barrel_mp_1.iqm" -> "mega/containers/metal_barrel_mp_1"
 string(string model) PropMat_Normalize =
 {
     string s = strtolower(model);

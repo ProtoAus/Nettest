@@ -13,9 +13,17 @@ shared/sh_player_anims.qc
 shared/sh_weapon_logic.qc
 shared/sh_weapon_standard.qc
 server/sv_customdefs.qc
+// nettest: MOVED UP from just above server/sv_bots.qc.  QC forward-declares FUNCTIONS but not ARRAYS, so anything that touches nav_* storage directly must compile after this file.  sv_navnodes.qc itself calls only builtins (cvar, dprint, find, remove, sprintf, tracebox, traceline, vlen) and its own functions, so it can sit this early with no forward references of its own.
+server/sv_navnodes.qc
+// AI substrate: constants + fields only, no code.  Must precede every other AI
+// file AND server/sv_monsters.qc, which reaches the AI layer through
+// forward-declared FUNCTIONS only -- QC forward-declares functions but not
+// arrays, so AI arrays stay owned by the files below this line.
+server/sv_ai_defs.qc
 server/sv_progression.qc
 server/sv_money.qc
 shared/sh_hlbeamfx.qc
+shared/sh_shockwave.qc
 server/sv_breakable.qc
 server/sv_weapons.qc
 shared/weapons/sh_wpn_csdeagle.qc
@@ -47,6 +55,10 @@ shared/weapons/sh_wpn_csg3sg1.qc
 shared/weapons/sh_wpn_hlsmg.qc
 shared/weapons/sh_wpn_hlrpg.qc
 shared/weapons/sh_wpn_hlgrenade.qc
+shared/weapons/sh_wpn_hlsatchel.qc
+shared/weapons/sh_wpn_hltripmine.qc
+shared/weapons/sh_wpn_hlsnark.qc
+shared/weapons/sh_wpn_hlhornetgun.qc
 shared/weapons/sh_wpn_csgrenades.qc
 shared/weapons/sh_wpn_snowball.qc
 shared/weapons/sh_wpn_paintball.qc
@@ -90,6 +102,7 @@ server/sv_combat.qc
 server/sv_enemies.qc
 shared/sh_renderfx.qc
 server/sv_brushsync.qc
+server/sv_env_render.qc
 server/sv_doors.qc
 server/sv_triggers.qc
 server/sv_trigger_once_multi.qc
@@ -127,12 +140,15 @@ server/sv_platform_carry.qc
 server/sv_momentary.qc
 server/sv_func_train.qc
 server/sv_func_tracktrain.qc
+server/sv_func_traincontrols.qc
 server/sv_func_trackautochange.qc
 server/sv_func_vehicle.qc
+server/sv_func_pushable.qc
 server/sv_info_map_parameters.qc
 server/sv_player_weaponstrip.qc
 server/sv_cycler_sprite.qc
 server/sv_cycler.qc
+server/sv_item_generic.qc
 server/sv_env_sprite.qc
 server/sv_env_spark.qc
 server/sv_physprop.qc
@@ -142,8 +158,68 @@ shared/sh_vehicle_phys.qc
 server/sv_prop_vehicle.qc
 server/sv_push.qc
 server/sv_teleport.qc
+server/sv_monsters.qc
+// AI layer.  AFTER sv_monsters.qc, not before: these files read its per-monster
+// keys (.gag, .bloodcolor, .displayname) and QC requires a FIELD to be declared
+// before use.  The other direction needs no ordering at all - sv_monsters.qc
+// reaches the AI layer through forward-declared FUNCTIONS only, and touches none
+// of its arrays.  All of them must stay after server/sv_navnodes.qc, which owns
+// nav_pos[] and the path-slot pool.
+server/sv_ai_sched.qc
+server/sv_ai_anim.qc
+server/sv_ai_move.qc
+// Monster attack primitives.  After sv_ai_move.qc, before sv_ai_core.qc: it
+// needs the AI fields and constants, and the class files below call into it.
+// Faction matrix.  Before sv_ai_core.qc, which consults it on every enemy test.
+server/sv_ai_factions.qc
+server/sv_ai_combat.qc
+server/sv_ai_core.qc
+// Gibs.  After sv_ai_core.qc because choosing a gib set reads .ai_class, and
+// the damage path in sv_weapons.qc (compiled far earlier) reaches Monster_Gib
+// through a forward declaration.
+server/sv_ai_gibs.qc
+server/monsters/mon_headcrab.qc
+server/monsters/mon_zombie.qc
+server/monsters/mon_cockroach.qc
+server/monsters/mon_islave.qc
+server/monsters/mon_houndeye.qc
+server/monsters/mon_grunt.qc
+server/monsters/mon_aliens.qc
+server/monsters/mon_turret.qc
+server/monsters/mon_swimfly.qc
+server/monsters/mon_barnacle.qc
+server/monsters/mon_bigfoes.qc
+server/monsters/mon_bosses.qc
+// NPC test bench.  After the monster files (it names their classes) and before
+// sv_player.qc, which dispatches to it from SV_ParseClientCommand.
+server/sv_ai_debugcmds.qc
+// Posed bodies, not AI — they use Monster_Build but never enter the AI registry.
+server/monsters/mon_corpses.qc
+// Half-Life's sentences.txt. BEFORE sv_goldsrc_compat.qc, which is where
+// scripted_sentence lives and calls into it.
+server/sv_sentences.qc
+// CTalkMonster: head turn, jaw, idle chatter. AFTER sv_sentences.qc because it
+// speaks through it; sv_ai_core.qc forward-declares the two entry points it needs.
+server/sv_ai_talk.qc
+// scripted_sequence possession. AFTER the whole AI layer (it drives monsters
+// through AI_SetSequenceNamed, the path tasks and the schedule gate) and BEFORE
+// sv_goldsrc_compat.qc, which used to own the class and now only owns
+// scripted_sentence.
+server/sv_scripted.qc
+server/sv_goldsrc_compat.qc
+server/sv_goldsrc_entities.qc
+// GoldSrc / OpFor / Blue Shift pickups.  AFTER the weapon files (it aliases
+// their spawn functions) and after sv_goldsrc_compat.qc, which owns the two
+// ammo classes that already worked.
+server/sv_goldsrc_pickups.qc
+// Ammo, on a reserve model: a pickup always takes, and banks what the player
+// cannot use yet until they find the matching gun.  AFTER sv_goldsrc_pickups.qc,
+// whose GoldSrc_SpawnPickup / GoldSrc_PickupTaken it shares.
+server/sv_goldsrc_ammo.qc
 server/sv_ladder.qc
 server/sv_cameras.qc
+server/sv_trigger_camera.qc
+server/sv_trigger_vote.qc
 server/sv_spray.qc
 server/sv_paint.qc
 server/sv_infodecal.qc
@@ -154,7 +230,6 @@ server/sv_prophunt.qc
 server/sv_lagcomp.qc
 server/sv_killcam.qc
 server/sv_radio.qc
-server/sv_navnodes.qc
 server/sv_bots.qc
 server/sv_ragdoll.qc
 server/sv_main.qc

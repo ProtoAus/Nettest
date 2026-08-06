@@ -22,6 +22,128 @@ float(entity spot) Spawn_IsClear =
     return (trace_startsolid == 0);
 };
 
+// ---------------------------------------------------------------------------
+// Spawn-point eligibility — GoldSrc/Sven semantics.
+//
+// Sven spawn points are LIVE ENTITIES, not passive markers: sven-coop.fgd's
+// PlayerDmClass base gives info_player_deathmatch `base(Targetname, Target)`
+// plus these spawnflags —
+//
+//     2  Start Off              disable this spawn point when the map starts
+//     4  Repel Spawn            (not implemented — rope descent)
+//     8  Filter player targetname   compare the player's targetname to `message`
+//     16 Invert Filter          needs 8
+//     32 Trigger on spawn       fire `target` when a player spawns here rather
+//                               than when the point is toggled
+//
+// — and firing a spawn point's targetname TOGGLES it. Maps drive whole
+// checkpoint systems off this: pizza_ya_san1 has 12 `spawn_start1` (live) and
+// 12 `spawn_start2` (flag 2, dead until enabled), and th_ep1_00 turns
+// `they2_respawn` on after the intro then calls trigger_respawn to pull
+// everyone forward.
+//
+// None of it was implemented — the pickers below read only Spawn_IsClear — so
+// players landed on disabled points about half the time and post-cutscene
+// relocation never happened at all.
+// ---------------------------------------------------------------------------
+const float SPAWNPT_START_OFF   = 2;
+const float SPAWNPT_REPEL       = 4;
+const float SPAWNPT_FILTER_NAME = 8;
+const float SPAWNPT_INVERT      = 16;
+const float SPAWNPT_ON_SPAWN    = 32;
+
+.float spawn_disabled;     // runtime on/off, seeded from SPAWNPT_START_OFF
+
+// Is `spot` usable by `who` right now?
+float(entity spot, entity who) Spawn_IsEligible =
+{
+    if (spot.spawn_disabled)
+        return FALSE;
+
+    // `master` gate — same multisource / game_team_master check every other
+    // GoldSrc entity uses.
+    if (!IsMasterTriggered(spot.master, who))
+        return FALSE;
+
+    // Flags 8/16: only spawn a player whose targetname appears in `message`
+    // (semicolon-separated), or with 16, only one whose name does NOT.
+    if (spot.spawnflags & SPAWNPT_FILTER_NAME)
+    {
+        float match = FALSE;
+        if (who.targetname != "" && spot.message != "")
+        {
+            float n = tokenizebyseparator(spot.message, ";");
+            float i;
+            for (i = 0; i < n; i = i + 1)
+            {
+                if (argv(i) == who.targetname)
+                {
+                    match = TRUE;
+                    i = n;              // no short-circuit in this VM; just stop
+                }
+            }
+        }
+        if (spot.spawnflags & SPAWNPT_INVERT)
+        {
+            if (match) return FALSE;
+        }
+        else
+        {
+            if (!match) return FALSE;
+        }
+    }
+
+    return TRUE;
+};
+
+// Called once the player is actually placed here.
+void(entity spot, entity who) Spawn_NotifyUsed =
+{
+    // Sven's `netname` renames the player on spawn — that is what the
+    // targetname filter above then matches against on later spawns.
+    if (spot.netname != "" && spot.netname != __NULL__)
+        who.targetname = spot.netname;
+
+    // Flag 32 fires `target` per player spawned here rather than on toggle.
+    if ((spot.spawnflags & SPAWNPT_ON_SPAWN) && spot.target != "")
+    {
+        entity oldself = self;
+        self = spot;
+        SUB_UseTargets(spot, who, USE_TOGGLE);
+        self = oldself;
+    }
+};
+
+// Toggling a spawn point by name flips it on/off, and (without flag 32)
+// fires its target.  This is the .use every spawn classname was missing —
+// Trigger_UseTargets skips any target with a null .use, so every
+// `trigger_relay -> spawn_startN` in these maps was a silent no-op.
+void() Spawn_PointUse =
+{
+    float want;
+    if (sub_use_type == USE_ON)       want = 0;      // enable  = not disabled
+    else if (sub_use_type == USE_OFF) want = 1;
+    else                              want = !self.spawn_disabled;
+
+    if (want == self.spawn_disabled)
+        return;
+    self.spawn_disabled = want;
+
+    if (cvar("sv_debug_spawns"))
+        bprint(PRINT_HIGH, sprintf("[spawn] \"%s\" %s\n", self.targetname,
+                                   self.spawn_disabled ? "DISABLED" : "ENABLED"));
+
+    if (!(self.spawnflags & SPAWNPT_ON_SPAWN) && self.target != "")
+        SUB_UseTargets(self, activator, USE_TOGGLE);
+};
+
+// Shared spawn-classname init.  Every info_player_* stub routes through this.
+void() Spawn_PointInit =
+{
+    self.spawn_disabled = (self.spawnflags & SPAWNPT_START_OFF) ? 1 : 0;
+    self.use            = Spawn_PointUse;
+};
+
 // Returns one entity matching `spawn_classname`, preferring an unobstructed
 // spawn point (no player or other solid intersecting). Falls back to a random
 // occupied one if every spawn of this classname is blocked. Returns world if
@@ -46,6 +168,8 @@ entity(string spawn_classname) PlayerFindSpawnByClassname =
         spot = find(spot, classname, spawn_classname);
         if (!spot)
             break;
+        if (!Spawn_IsEligible(spot, self))
+            continue;       // Start Off / mastered shut / name-filtered out
 
         count_any = count_any + 1;
         if (random() < (1 / count_any))
@@ -87,6 +211,8 @@ entity(string a, string b) PlayerFindSpawnByEitherClassname =
             break;
         if (spot.classname != a && spot.classname != b)
             continue;
+        if (!Spawn_IsEligible(spot, self))
+            continue;       // see PlayerFindSpawnByClassname
 
         count_any = count_any + 1;
         if (random() < (1 / count_any))
@@ -103,6 +229,24 @@ entity(string a, string b) PlayerFindSpawnByEitherClassname =
     if (choice_free)
         return choice_free;
     return choice_any;
+};
+
+// TRUE when the running map came from Sven Co-op.  SV_SpawnServer advertises
+// the game spec it resolved the worldmodel from as the "*mappref" serverinfo
+// key (populated from the menu's `map "@<spec>/<name>"` form), and every Sven
+// spec contains "svencoop" — svencoop, its _downloads sibling, svencoop_addon
+// and the seasonal svencoop_event_* dirs all match the one substring.
+//
+// Deliberately not cached: the result would have to be invalidated on every
+// map change, and a stale TRUE would silently mis-route spawns on the next
+// map.  One infokey + strstrofs per respawn is nothing next to how rarely
+// respawns happen.
+float() Spawn_MapIsSvenCoop =
+{
+    string spec = infokey(world, "*mappref");
+    if (!spec || spec == "")
+        return FALSE;
+    return strstrofs(strtolower(spec), "svencoop") >= 0;
 };
 
 // Strict team-spawn policy: TEAM_BLUE only ever spawns at blue classnames,
@@ -176,6 +320,21 @@ entity() PlayerGetSpawnPointEntity =
         // is the more universal "any spawn" classname in CS maps.
         cs_primary = "info_player_start";
         cs_backup  = "info_player_deathmatch";
+    }
+
+    // Sven Co-op maps are co-op: they ship info_player_deathmatch and nothing
+    // else — no team spawns, no info_player_start.  Every one of the 121 indexed
+    // Sven maps follows that, -sp_campaign_portal and pizza_ya_san1 included.
+    // The CS-style chain above would still FIND those spawns, but only on its
+    // BACKUP leg for a blue player, which logs a CS-FALLBACK on every respawn
+    // and leaves the two teams disagreeing about which classname is canonical.
+    // There are no sides on a Sven map, so point both teams straight at the
+    // classname the map actually uses.  The team lookups above still run first
+    // and harmlessly find nothing.
+    if (Spawn_MapIsSvenCoop())
+    {
+        cs_primary = "info_player_deathmatch";
+        cs_backup  = "info_player_start";
     }
 
     string cs_used = "";
@@ -257,6 +416,9 @@ void() PlayerPlaceAtSpawnPoint =
     setorigin(self, spawnpoint.origin + '0 0 1');
     self.angles = spawnpoint.angles;
     self.v_angle = spawnpoint.angles;
+
+    // GoldSrc `netname` rename + spawnflag 32 "Trigger on spawn".
+    Spawn_NotifyUsed(spawnpoint, self);
 };
 
 void() PlayerApplyTeamColours =
@@ -438,6 +600,10 @@ void(vector org, float weapon_id) SV_DebugSpawnWeaponId =
 	else if (weapon_id == WEP_KNIFE)          SV_DebugSpawnWeapon(org, weapon_knife);
 	else if (weapon_id == WEP_HLCROWBAR)      SV_DebugSpawnWeapon(org, weapon_hlcrowbar);
 	else if (weapon_id == WEP_HLGRENADE)      SV_DebugSpawnWeapon(org, weapon_hlgrenade);
+	else if (weapon_id == WEP_SATCHEL)        SV_DebugSpawnWeapon(org, weapon_satchel);
+	else if (weapon_id == WEP_TRIPMINE)       SV_DebugSpawnWeapon(org, weapon_tripmine);
+	else if (weapon_id == WEP_SNARK)          SV_DebugSpawnWeapon(org, weapon_snark);
+	else if (weapon_id == WEP_HORNETGUN)      SV_DebugSpawnWeapon(org, weapon_hornetgun);
 	else if (weapon_id == WEP_SNOWBALL)       SV_DebugSpawnWeapon(org, weapon_snowball);
 	else if (weapon_id == WEP_SLINGSHOT)      SV_DebugSpawnWeapon(org, weapon_slingshot);
 	else if (weapon_id == WEP_CSHEGRENADE)    SV_DebugSpawnWeapon(org, weapon_cshegrenade);
@@ -727,6 +893,17 @@ void() TeamSelectionCheck =
 {
     if (PlayerNeedsTeamSelection())
     {
+        // A client with nobody at the keyboard sits here forever - SOLID_NOT,
+        // MOVETYPE_NONE, no model - so every test that needs a live in-world
+        // player stalls waiting for a menu press that is never coming.  That is
+        // what kept the headless client from measuring anything.  sv_autojoin
+        // takes the same path the menu button does, so what gets measured is a
+        // normally-joined player and not some half-spawned test-only state.
+        if (cvar("sv_autojoin"))
+        {
+            PlayerJoinTeam(TEAM_BLUE, 0);
+            return;
+        }
         PlayerHandlePreTeamSelectionImpulse();
         self.velocity = '0 0 0';
         return;
@@ -1171,9 +1348,16 @@ void() ClientKill =
 };
 
 //called when a client connects to the server
+void() AI_MonsterModelsResend;		// server/sv_ai_core.qc
+
 void() ClientConnect =
 {
-	// print("Client connect\n");
+	// A client joining mid-map has already missed the monster-modelindex
+	// broadcast, and there is no way for it to ask - so re-send.  Without this
+	// every late joiner shoots monsters and sees concrete dust on the wall behind
+	// them for the rest of the map, which is exactly the bug the broadcast fixes,
+	// only harder to reproduce.
+	AI_MonsterModelsResend();
 };
 
 // ============================================================
@@ -2292,6 +2476,9 @@ void() W_GiveStartingAmmo =
 			if (util_wep == WEP_NONE || util_wep == self.slot_utility)
 				continue;
 			if      (util_wep == WEP_HLGRENADE)       self.ammo_hlgrenade      = MAX_AMMO_HLGRENADE;
+			else if (util_wep == WEP_SATCHEL)         self.ammo_satchel        = MAX_AMMO_SATCHEL;
+			else if (util_wep == WEP_TRIPMINE)        self.ammo_tripmine       = MAX_AMMO_TRIPMINE;
+			else if (util_wep == WEP_SNARK)           self.ammo_snark          = MAX_AMMO_SNARK;
 			else if (util_wep == WEP_SNOWBALL)        self.ammo_snowball       = MAX_AMMO_SNOWBALL;
 			else if (util_wep == WEP_CSHEGRENADE)     self.ammo_cshegrenade    = MAX_AMMO_CSHEGRENADE;
 			else if (util_wep == WEP_CSFLASHBANG)     self.ammo_csflashbang    = MAX_AMMO_CSFLASHBANG;
@@ -2680,6 +2867,21 @@ void() W_RefreshUtilitySlot =
 		self.slot_utility_drop  = W_HLGrenadeDrop;
 		self.ammo_hlgrenade = MAX_AMMO_HLGRENADE;
 		break;
+	case WEP_SATCHEL:
+		self.slot_utility_equip = W_SatchelEquip;
+		self.slot_utility_drop  = W_SatchelDrop;
+		self.ammo_satchel = MAX_AMMO_SATCHEL;
+		break;
+	case WEP_TRIPMINE:
+		self.slot_utility_equip = W_TripmineEquip;
+		self.slot_utility_drop  = W_TripmineDrop;
+		self.ammo_tripmine = MAX_AMMO_TRIPMINE;
+		break;
+	case WEP_SNARK:
+		self.slot_utility_equip = W_SnarkEquip;
+		self.slot_utility_drop  = W_SnarkDrop;
+		self.ammo_snark = MAX_AMMO_SNARK;
+		break;
 	case WEP_SNOWBALL:
 		self.slot_utility_equip = W_SnowballEquip;
 		self.slot_utility_drop  = W_SnowballDrop;
@@ -2959,6 +3161,12 @@ void() PlayerSpawn =
 	}
 	self.survived_round = 0;  // consume the flag so it doesn't leak to future spawns
 
+	// GoldSrc game_player_equip: any instance NOT flagged USE_ONLY equips
+	// every player as they spawn (HL does this from CHalfLifeMultiplay::
+	// PlayerSpawn).  Runs after the default loadout so the map's choices win.
+	// A map with no game_player_equip pays one find() that returns world.
+	GamePlayerEquip_EquipSpawningPlayer(self);
+
 	// Defuse: if no terrorist was alive when the round's bomb assignment ran,
 	// it deferred (sv_defuse_pending_red_pickup) — the first RED to spawn here
 	// picks the bomb up.  Clears the flag so only one carrier is granted.
@@ -3140,6 +3348,7 @@ void() SetChangeParms =
 
 void() info_player_start =
 {
+    Spawn_PointInit();
 };
 
 void(float elapsedtime) SV_PausedTic =
@@ -3654,10 +3863,18 @@ string(float fieldval, string cvarnm) CarGet_Pair =
 	return strcat(" ", cvarnm, " ", ftos(v));
 };
 
+float(entity p, string cmd) AIDbg_Command;	// server/sv_ai_debugcmds.qc
+
 void(string command_string) SV_ParseClientCommand =
 {
 	tokenize(command_string);
 	string cmd = argv(0);
+
+	// NPC test bench (server/sv_ai_debugcmds.qc).  First, so a debug command can
+	// never be shadowed by a gameplay one, and cheap: it is a handful of string
+	// compares that return FALSE immediately for anything not prefixed ai_.
+	if (AIDbg_Command(self, cmd))
+		return;
 
 	if (cmd == "spectrack")
 	{

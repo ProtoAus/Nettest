@@ -160,7 +160,9 @@ float(entity p) Mover_PlatformCarry_Player =
             else
             {
                 // Blocked — crush per .dmg if the brush has it set.
-                if (self.dmg > 0 && p.takedamage != DAMAGE_NO)
+                // No takedamage gate - players are DAMAGE_NO in this mod and
+                // W_ApplyDamage decides for itself.
+                if (self.dmg > 0)
                     W_ApplyDamage(self, p, self.dmg);
                 p.platform_carry = self;
                 p.platform_carry_velocity = self.velocity;
