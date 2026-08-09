@@ -235,6 +235,41 @@ float(string first) Sentences_SplitFirst =
 	return (sent_dir != "" && sent_word0 != "");
 };
 
+// Turn a sentence WORD into the filename stem it actually refers to.
+//
+// HL's file carries prosody on the word itself: a trailing '.' is a full pause,
+// ',' a shorter one, '!' emphasis.  They are timing markers, NOT part of the
+// filename -- "attention." is played from vox/attention.wav.  Appending ".wav"
+// without stripping them produced "vox/attention..wav", which the client's
+// download guard then rejected as a path containing ".." (CL_CheckFile tests for
+// the substring anywhere, so a malformed name trips a traversal check).
+//
+// The '.' cases at least announced themselves.  The ',' cases did not: they build
+// "vox/sector,.wav", which contains no "..", so nothing warned and the word was
+// simply dropped from every sentence using it.  Measured on the shipped file:
+// 21 distinct words end in '.', 117 in ',' -- so roughly 85% of the breakage was
+// silent, and the console errors were the small visible part of it.
+//
+// Strips any trailing character that cannot appear in one of these filenames
+// rather than enumerating the punctuation, so a marker we have not seen cannot
+// reintroduce this.  Parenthesised modifiers -- "clik(p120)" -- are already gone
+// by here; Sentences_StripMods removes them at load.
+string(string w) Sentences_WordFile =
+{
+	//str2chr, not substring+compare: QC has no ordering operators for strings, so a
+	//range test has to be done on the character CODE.
+	float n = strlen(w);
+	while (n > 0)
+	{
+		float c = str2chr(w, n - 1);
+		if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+		    (c >= '0' && c <= '9') || c == '_' || c == '-')
+			break;
+		n = n - 1;
+	}
+	return (n == strlen(w)) ? w : substring(w, 0, n);
+};
+
 void() Sentences_Precache =
 {
 	Sentences_Load();
@@ -248,9 +283,15 @@ void() Sentences_Precache =
 		if (!Sentences_SplitFirst(argv(0)))
 			continue;
 		string dir = sent_dir;
-		precache_sound(strcat(dir, "/", sent_word0, ".wav"));
+		string w0 = Sentences_WordFile(sent_word0);
+		if (w0 != "")
+			precache_sound(strcat(dir, "/", w0, ".wav"));
 		for (j = 1; j < n; j = j + 1)
-			precache_sound(strcat(dir, "/", argv(j), ".wav"));
+		{
+			string wj = Sentences_WordFile(argv(j));
+			if (wj != "")	//a token that was ALL punctuation names no file
+				precache_sound(strcat(dir, "/", wj, ".wav"));
+		}
 	}
 };
 
@@ -335,8 +376,12 @@ void(entity e) Sentences_Pump =
 		return;
 	}
 
-	sound(e, e.ai_sent_chan, strcat(e.ai_sent_dir, "/", argv(0), ".wav"),
-	      e.ai_sent_vol, e.ai_sent_attn);
+	//Same stripping as the precache, or playback would ask for a name that was never
+	//precached and the word would be silent -- see Sentences_WordFile.
+	string wnow = Sentences_WordFile(argv(0));
+	if (wnow != "")
+		sound(e, e.ai_sent_chan, strcat(e.ai_sent_dir, "/", wnow, ".wav"),
+		      e.ai_sent_vol, e.ai_sent_attn);
 
 	// Rebuild the tail.  strzone because argv()'s buffers are reused by the next
 	// tokenize, and this string has to survive until the next tick.
