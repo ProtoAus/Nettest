@@ -189,10 +189,11 @@ void KillFeed_Parse()
             continue;                      // already latched (in-PVS death) — don't restart anim
         vp.vis_is_dead        = 1;
         vp.vis_server_is_dead = 1;         // SOLID_NOT gate (cl_player.qc:4819)
-        if (vp.vis_anim_bottom < CSANIM_DEATH1 || vp.vis_anim_bottom > CSANIM_DIE_FORWARD)
+        // Model-aware, not a Counter-Strike index range — see SH_IsDeathPose.
+        if (!SH_IsDeathPose(vp.modelindex, vp.vis_anim_bottom))
         {
-            vp.vis_anim_bottom      = CSANIM_DEATH1;   // generic death pose (real dir unknown offscreen)
-            vp.vis_anim_top         = CSANIM_DEATH1;
+            vp.vis_anim_bottom      = SH_GenericDeathPose(vp.modelindex);   // real dir unknown offscreen
+            vp.vis_anim_top         = vp.vis_anim_bottom;
             vp.vis_anim_bottom_time = 0;
             vp.vis_anim_top_time    = 0;
         }

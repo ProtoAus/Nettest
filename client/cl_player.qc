@@ -4349,10 +4349,21 @@ float() CSQC_PlayerVisual_Predraw =
 		// "Bip01 L Leg".  Probe both, or a Sven-shaped model (sini, the
 		// They Hunger cast) gets basebone 0 and no upper/lower body split
 		// at all.  Matches sh_player_anims.qc's server-side probe.
+		// DoD splits at "Bip01 Spine" with the legs as the BASE group, and CSQC
+		// takes the 1-based tag value unmodified (it does its own -1).  Same rule
+		// as the live path below; see shared/sh_player_anims.qc for why.
 		float kbb = cvar("sv_player_basebone");
+		float kdod = SH_UseDoDAnims(self.modelindex);
+		if (kbb <= 0 && kdod) kbb = gettagindex(self, "Bip01 Spine");
 		if (kbb <= 0) kbb = gettagindex(self, "Bip01 L Thigh");
 		if (kbb <= 0) kbb = gettagindex(self, "Bip01 L Leg");
 		self.basebone        = kbb;
+		if (kdod)
+		{
+			float ksw;
+			ksw = self.frame;      self.frame      = self.baseframe;      self.baseframe      = ksw;
+			ksw = self.frame1time; self.frame1time = self.baseframe1time; self.baseframe1time = ksw;
+		}
 		self.subblend2frac   = self.vis_pitch / 90;
 		self.vis_prev_origin = self.origin;
 		self.vis_prev_cltime = cltime;
@@ -4582,9 +4593,33 @@ float() CSQC_PlayerVisual_Predraw =
 	// on Sven/Half-Life ones.  Both sides must agree or the hitboxes lean
 	// differently from the drawn model.
 	float bb = cvar("sv_player_basebone");
+	// A DoD rig puts the legs FIRST, so its split is at "Bip01 Spine" and the
+	// base group is the legs — see the long note at the server's copy of this
+	// probe (shared/sh_player_anims.qc).  Checked before the thigh/leg probe
+	// because DoD has no "Bip01 L Thigh" and would otherwise resolve to bone 2.
+	//
+	// NO -1 HERE, unlike the server.  pr_csqc.c does `endbone -= 1` itself after
+	// reading .basebone, while pr_cmds.c assigns it straight through — so the two
+	// VMs must be handed numbers one apart to produce the same split, and the
+	// 1-based gettagindex value is exactly what CSQC wants.
+	float dod_here = SH_UseDoDAnims(self.modelindex);
+	if (bb <= 0 && dod_here) bb = gettagindex(self, "Bip01 Spine");
 	if (bb <= 0) bb = gettagindex(self, "Bip01 L Thigh");
 	if (bb <= 0) bb = gettagindex(self, "Bip01 L Leg");
 	self.basebone = bb;
+
+	// The DoD field swap, matching the server's exactly — see the note there.
+	// Both sides must agree or the traced hitboxes lean differently from the
+	// drawn model.
+	if (dod_here)
+	{
+		float sw;
+		sw = self.frame;      self.frame      = self.baseframe;      self.baseframe      = sw;
+		sw = self.frame1time; self.frame1time = self.baseframe1time; self.baseframe1time = sw;
+		sw = self.frame2;     self.frame2     = self.baseframe2;     self.baseframe2     = sw;
+		sw = self.frame2time; self.frame2time = self.baseframe2time; self.baseframe2time = sw;
+		sw = self.lerpfrac;   self.lerpfrac   = self.baselerpfrac;   self.baselerpfrac   = sw;
+	}
 
 	// Torso aim blending via subblend fracs (.frame side).
 	// subblend2frac = Y axis (pitch / up-down aiming)
@@ -5317,6 +5352,35 @@ void() CSQC_DumpPlayerBones =
 void(entity proxy) PlayerVis_ApplySkin =
 {
 	float backpack_submodel = (proxy.vis_bodygroup & 1) ? 2 : 1;
+
+	// `geomset 0 2` PICKS SUBMODEL 2 OF BODYPART 0, and the syntax is 1-BASED, so
+	// it means array index 1.  That is correct on the rebuilt CS models, and it is
+	// an INVISIBLE PLAYER on three of the five DoD ones.  Vertex counts of
+	// bodypart 0 ("body"), read out of the .mdl files:
+	//
+	//     us-inf     [270, 288, 270, 288, 270, 0]     index 1 = 288  ok
+	//     axis-inf   [267, 249, 249, 275, 293, 275]   index 1 = 249  ok
+	//     brit-inf   [247,   0,   0,   0,   0, 0]     index 1 =   0  <- EMPTY
+	//     us-para    [457,   0,   0,   0,   0, 0]     index 1 =   0  <- EMPTY
+	//     axis-para  [280,   0,   0,   0,   0, 0]     index 1 =   0  <- EMPTY
+	//
+	// DoD declares six body submodels on every model and only fills the ones that
+	// nation actually uses; the rest are authored empty.  An empty submodel is not
+	// an error and logs nothing — the player simply has no body, which is a
+	// gameplay problem rather than a cosmetic one.
+	//
+	// So DoD takes submodel 1 (index 0), the variant every one of the five fills.
+	// The backpack line is skipped too: bodypart 2 on these models is `head`, not
+	// a backpack, and pointing the backpack toggle at somebody's face would swap
+	// their head when they picked up armour.
+	if (SH_UseDoDAnims(proxy.modelindex))
+	{
+		string dsk = "geomset 0 1\n";
+		dsk = strcat(dsk, Paint_SkinLines(proxy));
+		setcustomskin(proxy, "", dsk);
+		return;
+	}
+
 	string sk = sprintf("geomset 0 2\ngeomset 2 %g\n", backpack_submodel);
 	sk = strcat(sk, Paint_SkinLines(proxy));
 	setcustomskin(proxy, "", sk);
@@ -5357,8 +5421,12 @@ void() CSQC_PlayerVisual_Update =
 		// the server's late death-anim snapshot would re-trigger the
 		// pose CSQC_TryPredictDeath already played out, causing a
 		// visible "the body restarts the death animation" jitter.
-		float new_anim_bottom  = readbyte();
-		float new_anim_top     = readbyte();
+		// readSHORT — matched write in sv_player.qc's VP_SF_ANIM block, changed
+		// in the same commit.  A DoD player model has 345 sequences and 89 of
+		// them do not fit in a byte; see the note at the writer for what the
+		// masking actually produced.
+		float new_anim_bottom  = readshort();
+		float new_anim_top     = readshort();
 		float new_pitch        = readfloat();
 		float new_flags        = readfloat();
 		float new_anim_top_gen = readbyte();
@@ -5417,12 +5485,14 @@ void() CSQC_PlayerVisual_Update =
 		// CSANIM_DEATH* / CSANIM_DIE_* range starts at CSANIM_DEATH1
 		// (sh_player_anims.qc), so anything below is treated as a
 		// non-death frame that needs the snap.
+		// Asked of the MODEL now, not against a hardcoded Counter-Strike range —
+		// a DoD model's real death indices are all outside it, so the old test
+		// rejected correct poses and re-stamped a generic one every snapshot.
 		if (!prev_is_dead && self.vis_is_dead
-		    && (self.vis_anim_bottom < CSANIM_DEATH1
-		     || self.vis_anim_bottom > CSANIM_DIE_FORWARD))
+		    && !SH_IsDeathPose(self.modelindex, self.vis_anim_bottom))
 		{
-			self.vis_anim_bottom      = CSANIM_DEATH1;
-			self.vis_anim_top         = CSANIM_DEATH1;
+			self.vis_anim_bottom      = SH_GenericDeathPose(self.modelindex);
+			self.vis_anim_top         = self.vis_anim_bottom;
 			self.vis_anim_bottom_time = 0;
 			self.vis_anim_top_time    = 0;
 		}

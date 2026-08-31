@@ -1052,12 +1052,70 @@ const float TEAM_MODEL_COUNT = 4;
 // sv_player.qc (PlayerVisual writer): 252-255 = team-independent sentinels, else (team-1)*4 + model.
 // Used client-side by the visual proxy (cl_player.qc) AND the seated car-driver render (cl_physprop.qc)
 // so both pick the SAME model the server encoded.  Lives here (shared) next to the model arrays.
+// THE TEAM-INDEPENDENT MODELS, in ONE table.
+//
+// player_model_index 0-3 are the per-team models above and are encoded as
+// (team-1)*4 + index.  Everything from 5 up is team-independent and rides a
+// SENTINEL byte counting down from 255.  Bytes 8..246 are unused — the encoder
+// has only ever emitted 0-7 and the sentinels — so adding models costs no wire
+// format change at all, only entries here.
+//
+// THESE TWO FUNCTIONS EXIST BECAUSE THE RULE HAD THREE HAND-WRITTEN COPIES:
+// server/sv_player.qc's PlayerApplyModel (index -> path), the visual-proxy
+// writer in the same file (index -> byte), and a third in server/sv_physprop.qc
+// for the seated car driver.  Adding a model meant editing all three plus the
+// decoder, and nothing linked them; the seated-driver copy is exactly the kind
+// that gets missed.  One table, four callers.
+const float PLAYERMODEL_DOD_FIRST  = 9;
+const float PLAYERMODEL_DOD_LAST   = 13;
+const float PLAYERMODEL_MAX_INDEX  = 13;
+
+// "" when the index is a per-team model (0-3) — the caller resolves those from
+// team_blue_models / team_red_models, which need the team.
+string(float idx) SH_TeamlessModelPath =
+{
+    if (idx == 5)  return "models/player/sini.mdl";
+    if (idx == 6)  return "models/player/chickenman/chickenman.iqm";
+    if (idx == 7)  return "models/player/numberk/numberK.iqm";
+    if (idx == 8)  return "models/player/kilmer/kilmer.iqm";
+    // Day of Defeat.  Mounted from the dod gamedir (fs_addons.txt), 345
+    // sequences each, and animated by NAME through shared/sh_player_dod.qc
+    // rather than by the CSANIM_* indices — see SH_ModelIsDoD.
+    if (idx == 9)  return "models/player/us-inf/us-inf.mdl";
+    if (idx == 10) return "models/player/axis-inf/axis-inf.mdl";
+    if (idx == 11) return "models/player/brit-inf/brit-inf.mdl";
+    if (idx == 12) return "models/player/us-para/us-para.mdl";
+    if (idx == 13) return "models/player/axis-para/axis-para.mdl";
+    return "";
+};
+
+// 0 when the index is a per-team model — same split as above.
+float(float idx) SH_TeamlessModelByte =
+{
+    if (idx == 5)  return 255;
+    if (idx == 6)  return 254;
+    if (idx == 7)  return 253;
+    if (idx == 8)  return 252;
+    if (idx == 9)  return 251;
+    if (idx == 10) return 250;
+    if (idx == 11) return 249;
+    if (idx == 12) return 248;
+    if (idx == 13) return 247;
+    return 0;
+};
+
 string(float tmbyte) SH_ModelPathForTeamByte =
 {
-    if (tmbyte == 255) return "models/player/sini.mdl";
-    if (tmbyte == 254) return "models/player/chickenman/chickenman.iqm";
-    if (tmbyte == 253) return "models/player/numberk/numberK.iqm";
-    if (tmbyte == 252) return "models/player/kilmer/kilmer.iqm";
+    // Sentinels first, decoded straight back through the same table the encoder
+    // used, so the two cannot drift.  The floor()/stride arithmetic below is only
+    // reachable for a real 0-7 team byte.
+    if (tmbyte >= 247)
+    {
+        // 255 -> 5, 254 -> 6, ... 247 -> 13
+        string p = SH_TeamlessModelPath(260 - tmbyte);
+        if (p != "")
+            return p;
+    }
     float vteam  = floor(tmbyte / 4);        // 0 = blue, 1 = red (matches (team-1) in the encoder)
     float vmodel = tmbyte - vteam * 4;       // 0..3 model index within the team
     if (vteam == 0) return team_blue_models[vmodel];

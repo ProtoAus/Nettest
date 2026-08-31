@@ -1041,7 +1041,16 @@ void(entity target, float body_dmg, float bone_id, float in_hitgroup) CSQC_TryPr
     // (shared/sh_player_anims.qc) — head shot → head-snap death anim,
     // gut shot → gut-clutch, anything else → generic CSANIM_DEATH1.
     float deathframe;
-    if      (hitgroup == HITGROUP_HEAD)    deathframe = CSANIM_DIE_HEAD;
+    if (SH_ModelIsDoD(target.modelindex))
+    {
+        // DoD names its deaths; the CSANIM_* constants below are Counter-Strike
+        // INDICES and land on unrelated takes here (CSANIM_DIE_HEAD would play
+        // crouch_bazooka_shoot).  Same picker the server uses in
+        // SH_PlayerAnim_Death, so the predicted pose matches the authoritative
+        // one that arrives a moment later and there is no snap.
+        deathframe = DoD_GetDeathAnim(target.modelindex, hitgroup, FALSE);
+    }
+    else if (hitgroup == HITGROUP_HEAD)    deathframe = CSANIM_DIE_HEAD;
     else if (hitgroup == HITGROUP_STOMACH) deathframe = CSANIM_DIE_GUT;
     else                                   deathframe = CSANIM_DEATH1;
 

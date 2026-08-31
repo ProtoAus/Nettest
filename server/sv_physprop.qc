@@ -2024,13 +2024,14 @@ float(entity playerent, float changedflags) phys_files_Send =
 		{
 			WriteByte(MSG_ENTITY, 1);
 			WriteByte(MSG_ENTITY, num_for_edict(drv));   // driver player slot (matches the visual proxy's vis_owner_entnum → proxy suppressed)
-			// team_model_byte — inline copy of the canonical encoder in sv_player.qc (PlayerVisual writer).
-			float dtm;
-			if      (drv.player_model_index == 5) dtm = 255;   // sini
-			else if (drv.player_model_index == 6) dtm = 254;   // chickenman
-			else if (drv.player_model_index == 7) dtm = 253;   // numberK
-			else if (drv.player_model_index == 8) dtm = 252;   // kilmer
-			else dtm = (drv.player_team - 1) * 4 + bound(0, drv.player_model_index, TEAM_MODEL_COUNT - 1);
+			// team_model_byte — NO LONGER an inline copy.  It was one, and that is
+			// exactly the copy that gets missed when a model is added: the seated
+			// driver would render as somebody else's character while the same
+			// player's on-foot proxy rendered correctly.  Shared table in
+			// sh_customdefs.qc, same call as sv_player.qc's writer and the decoder.
+			float dtm = SH_TeamlessModelByte(drv.player_model_index);
+			if (dtm == 0)
+				dtm = (drv.player_team - 1) * 4 + bound(0, drv.player_model_index, TEAM_MODEL_COUNT - 1);
 			WriteByte(MSG_ENTITY, dtm);
 			WriteByte(MSG_ENTITY, bound(0, drv.skin, 255));
 			// Resolved seat offsets (per-car key → sv_car_seat_* cvar → default), biased into signed shorts.

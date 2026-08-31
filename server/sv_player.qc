@@ -796,14 +796,8 @@ void() PlayerApplyModel =
     // team change or a respawn cannot silently revert somebody's character.
     if (self.player_model_override != "" && self.player_model_override != __NULL__)
         mdl = self.player_model_override;
-    else if (self.player_model_index == 5)
-        mdl = "models/player/sini.mdl";
-    else if (self.player_model_index == 6)
-        mdl = "models/player/chickenman/chickenman.iqm";
-    else if (self.player_model_index == 7)
-        mdl = "models/player/numberk/numberK.iqm";
-    else if (self.player_model_index == 8)
-        mdl = "models/player/kilmer/kilmer.iqm";
+    else if (SH_TeamlessModelPath(self.player_model_index) != "")
+        mdl = SH_TeamlessModelPath(self.player_model_index);   // 5-8 + the five DoD
     else
     {
         float idx = bound(0, self.player_model_index, TEAM_MODEL_COUNT - 1);
@@ -840,7 +834,12 @@ void(float new_team, float model_idx) PlayerJoinTeam =
     if (new_team != TEAM_BLUE && new_team != TEAM_RED)
         return;
 
-    model_idx = bound(0, model_idx, 8); // 0-3 = team models; 5 = sini, 6 = chickenman, 7 = numberK, 8 = kilmer
+    // 0-3 = team models; 5 = sini, 6 = chickenman, 7 = numberK, 8 = kilmer,
+    // 9-13 = the five Day of Defeat models.  PLAYERMODEL_MAX_INDEX rather than a
+    // literal, so the ceiling moves with the table in sh_customdefs.qc — this
+    // clamp is SILENT, and a stale one turns "the picker does nothing" into a
+    // bug with no log line anywhere.
+    model_idx = bound(0, model_idx, PLAYERMODEL_MAX_INDEX);
 
     // Defensive: leaving spec ALWAYS needs a full PlayerSpawn pass.
     // PlayerJoinSpectate sets is_dead=TRUE, modelindex=0, solid=NOT,
@@ -1781,8 +1780,23 @@ float(entity playerent, float changedflags) Player_Visual_SendEntity =
 
 	if (bits & VP_SF_ANIM)
 	{
-		WriteByte(MSG_ENTITY, self.frame);
-		WriteByte(MSG_ENTITY, self.baseframe);
+		// WriteSHORT, not byte, and the reader in client/cl_player.qc changed in
+		// the same commit — this is a positional stream, so a width mismatch
+		// deserialises every later section (IDENTITY, GRAPPLE, Prop Hunt) off by
+		// one byte with no error anywhere.
+		//
+		// A byte was not merely tight, it was WRONG, and silently: WriteByte
+		// MASKS rather than erroring, and the DoD player models carry 345
+		// sequences.  Measured on us-inf.mdl:
+		//     crouch_garand_reload = 266  ->  266 & 255 = 10  = dod_walk
+		//     bipod_mg42_reload    = 333  ->  333 & 255 = 77
+		// So a crouching Garand reload reached the client as the WALK CYCLE — not
+		// a missing animation or a frozen one, a different and entirely plausible
+		// wrong pose, with nothing logged on either side.  89 of the 345 are over
+		// the byte: every crouch reload, every deployed reload, the PIAT and
+		// Panzerschreck standing reloads, and all four dead poses.
+		WriteShort(MSG_ENTITY, self.frame);
+		WriteShort(MSG_ENTITY, self.baseframe);
 		WriteFloat(MSG_ENTITY, self.vps_last_v_pitch);
 		WriteFloat(MSG_ENTITY, self.flags);
 		WriteByte(MSG_ENTITY, self.vps_last_anim_top_gen);
@@ -2030,16 +2044,10 @@ void(entity player) Player_VisualProxy_Sync =
 	else
 		next_angles_y = player.v_angle_y;
 
-	float next_tmbyte;
-	if (player.player_model_index == 5)
-		next_tmbyte = 255;          // sentinel: sini (team-independent)
-	else if (player.player_model_index == 6)
-		next_tmbyte = 254;          // sentinel: chickenman (team-independent)
-	else if (player.player_model_index == 7)
-		next_tmbyte = 253;          // sentinel: numberK (team-independent)
-	else if (player.player_model_index == 8)
-		next_tmbyte = 252;          // sentinel: kilmer (team-independent)
-	else
+	// Sentinel table in shared/sh_customdefs.qc, shared with the decoder and with
+	// the seated-driver copy in sv_physprop.qc — see the note there.
+	float next_tmbyte = SH_TeamlessModelByte(player.player_model_index);
+	if (next_tmbyte == 0)
 		next_tmbyte = (player.player_team - 1) * 4
 		            + bound(0, player.player_model_index, TEAM_MODEL_COUNT - 1);
 
@@ -5405,8 +5413,13 @@ void(string command_string) SV_ParseClientCommand =
 	{
 		if (cvar("sv_playerselect") <= 0)
 			return;
+		// Whitelist: the three original picks plus the five DoD models.  Written
+		// against the shared table rather than as a literal list, because this is
+		// a BARE RETURN — a rejected index looks exactly like the picker working
+		// and the server ignoring it, with nothing printed on either side.
 		float new_idx = stof(argv(1));
-		if (new_idx != 6 && new_idx != 7 && new_idx != 8)
+		if (new_idx != 6 && new_idx != 7 && new_idx != 8
+		    && (new_idx < PLAYERMODEL_DOD_FIRST || new_idx > PLAYERMODEL_DOD_LAST))
 			return;
 		self.player_model_index = new_idx;
 		if ((self.player_team == TEAM_BLUE || self.player_team == TEAM_RED)

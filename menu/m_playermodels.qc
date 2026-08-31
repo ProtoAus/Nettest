@@ -42,17 +42,33 @@ const float PLAYERMODEL_PANEL_GAP    = 12;   // space between this panel and Spr
 
 // Parallel arrays — index N across all three describes one model.
 // player_model_index values match PlayerApplyModel in server/sv_player.qc.
-const float PLAYERMODEL_COUNT = 3;
-float  g_playermodel_indices[PLAYERMODEL_COUNT] = { 6, 7, 8 };
+// menu.dat is a THIRD VM and shares no symbols with sv_progs or cl_progs
+// (m_progs.src), so the indices here are a hand-kept mirror of the table in
+// shared/sh_customdefs.qc (SH_TeamlessModelPath / SH_TeamlessModelByte) and of
+// the whitelist in server/sv_player.qc's `cmd playermodel`.  All three must
+// agree; the server's half of the check is a bare return, so a mismatch shows up
+// as "the picker does nothing" with no log line.
+const float PLAYERMODEL_COUNT = 8;
+float  g_playermodel_indices[PLAYERMODEL_COUNT] = { 6, 7, 8, 9, 10, 11, 12, 13 };
 string g_playermodel_paths  [PLAYERMODEL_COUNT] = {
     "models/player/chickenman/chickenman.iqm",
     "models/player/numberk/numberK.iqm",
-    "models/player/kilmer/kilmer.iqm"
+    "models/player/kilmer/kilmer.iqm",
+    "models/player/us-inf/us-inf.mdl",
+    "models/player/axis-inf/axis-inf.mdl",
+    "models/player/brit-inf/brit-inf.mdl",
+    "models/player/us-para/us-para.mdl",
+    "models/player/axis-para/axis-para.mdl"
 };
 string g_playermodel_names  [PLAYERMODEL_COUNT] = {
     "Chickenman",
     "numberK",
-    "Kilmer"
+    "Kilmer",
+    "US Infantry",
+    "Wehrmacht",
+    "British",
+    "US Airborne",
+    "Fallschirmjager"
 };
 
 float  g_playermodel_selected;     // index into the arrays, 0..PLAYERMODEL_COUNT-1

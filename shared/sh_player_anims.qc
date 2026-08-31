@@ -445,6 +445,76 @@ void() SH_DoDAnimReport =
     float cs = getmodelindex("models/player/leet/leet.iqm");
     print(sprintf("[panim-dod] control: leet.iqm shape=%s (must be Counter-Strike)\n",
                   SH_ModelIsDoD(cs) ? "DoD" : (SH_ModelIsSven(cs) ? "Sven" : "Counter-Strike")));
+
+    // THE SELECTION TABLE AND THE PRECACHE LIST ARE SEPARATE STRING LITERALS,
+    // in different files, and nothing links them.  A typo in either is silent:
+    // PlayerApplyModel would setmodel() a path the engine never precached, and
+    // the player would get whatever the engine does with an unknown model rather
+    // than an error.  Walk the table and assert every entry is a model that
+    // actually loaded AND classifies DoD-shaped.
+    float mi, tbad = 0;
+    string tfirst = "";
+    for (mi = PLAYERMODEL_DOD_FIRST; mi <= PLAYERMODEL_DOD_LAST; mi = mi + 1)
+    {
+        string tp = SH_TeamlessModelPath(mi);
+        float ti = getmodelindex(tp);
+        if (ti <= 0 || !SH_ModelIsDoD(ti))
+        {
+            tbad = tbad + 1;
+            if (tfirst == "")
+                tfirst = strcat("index ", ftos(mi), " -> '", tp, "'",
+                                (ti <= 0) ? " NOT PRECACHED" : " not DoD-shaped");
+        }
+    }
+    print(sprintf("[panim-dod] selection table: %g models, BAD=%g%s\n",
+                  PLAYERMODEL_DOD_LAST - PLAYERMODEL_DOD_FIRST + 1, tbad,
+                  (tbad > 0) ? strcat("  first: ", tfirst) : ""));
+
+    // Drive every DoD weapon through the LIVE dispatchers and assert each lands
+    // on the take we named.  A Counter-Strike index is a perfectly valid number
+    // on a 345-sequence model, so this is the only check that can actually fail
+    // when the DoD arm is missing.
+    DoD_SelfTest(probe);
+};
+
+// ------------------------------------------------------------
+//  Death-pose validity, asked of the MODEL
+// ------------------------------------------------------------
+//
+// Three sites decide "is this frame already a death pose, or do I need to stamp
+// a generic one over it": the proxy's dead-transition snap (client/cl_player.qc),
+// the out-of-PVS kill notify (client/cl_killfeed.qc) and the predicted death
+// (shared/sh_weapon_logic.qc).  All three used the same hardcoded
+// CSANIM_DEATH1..CSANIM_DIE_FORWARD range, which is a fact about the
+// Counter-Strike sequence list and not about the model in front of them.
+//
+// On a DoD model every real death index (19-29, plus the four corpse poses at
+// 341-344) is outside that range, so the test answers "not a death pose" for a
+// perfectly correct one and overwrites it — on EVERY snapshot, because the
+// server keeps re-sending the right answer and the client keeps rejecting it.
+//
+// Deliberately uses SH_ModelIsDoD, not SH_UseDoDAnims: the cached variant stores
+// its verdict on `self`, and two of the three callers ask about an entity that is
+// NOT self (the killfeed walks a list; the predicted-death site takes a target
+// parameter).  A death transition happens once per life, so the uncached probe
+// costs nothing worth caching.
+float(float mdlidx, float f) SH_IsDeathPose =
+{
+    if (SH_ModelIsDoD(mdlidx))
+        return DoD_IsDeathPose(mdlidx, f);
+    return (f >= CSANIM_DEATH1 && f <= CSANIM_DIE_FORWARD);
+};
+
+// The "direction unknown" pose to stamp when the above says one is needed.
+float(float mdlidx) SH_GenericDeathPose =
+{
+    if (SH_ModelIsDoD(mdlidx))
+    {
+        float f = DoD_Frame(mdlidx, "die_simple");
+        if (f >= 0)
+            return f;
+    }
+    return CSANIM_DEATH1;
 };
 
 void() SH_HLAnimReport =
@@ -556,23 +626,52 @@ void() SH_HLAnimReport =
 // Cached per entity: this is asked several times per player per frame, and
 // frameforname walks the model's sequence names.  Recomputed only when the
 // modelindex changes, which is exactly when the answer can change.
-.float pm_anim_shape;      // 0 = not yet known, 1 = CS-shaped, 2 = Sven-shaped
+.float pm_anim_shape;      // 0 = not yet known, 1 = CS-shaped, 2 = Sven-shaped, 3 = DoD-shaped
 .float pm_anim_shape_mdl;  // the modelindex pm_anim_shape was computed for
+
+// THE ONE CLASSIFIER.  Three shapes now; the Counter-Strike index path is still
+// the default for anything that matches no positive probe, so an unknown custom
+// model behaves exactly as it did before.
+//
+// DoD is tested FIRST and the two probes share no sequence name with
+// SH_ModelIsSven's, so the "zero misroutes across 151 models" result at the top
+// of this file is unchanged — verified live by the control line in
+// SH_DoDAnimReport, which asserts leet.iqm still classifies Counter-Strike.
+float(float mdlidx) SH_AnimShape =
+{
+    if (mdlidx <= 0)
+        return 1;
+    if (self.pm_anim_shape_mdl != mdlidx || !self.pm_anim_shape)
+    {
+        self.pm_anim_shape_mdl = mdlidx;
+        if (SH_ModelIsDoD(mdlidx))
+            self.pm_anim_shape = 3;
+        else if (SH_ModelIsSven(mdlidx))
+            self.pm_anim_shape = 2;
+        else
+            self.pm_anim_shape = 1;
+    }
+    return self.pm_anim_shape;
+};
 
 float(float mdlidx) SH_UseSvenAnims =
 {
     if (mdlidx <= 0)
         return FALSE;
-    if (self.pm_anim_shape_mdl != mdlidx || !self.pm_anim_shape)
-    {
-        self.pm_anim_shape_mdl = mdlidx;
-        self.pm_anim_shape = SH_ModelIsSven(mdlidx) ? 2 : 1;
-    }
-    return (self.pm_anim_shape == 2);
+    return (SH_AnimShape(mdlidx) == 2);
+};
+
+float(float mdlidx) SH_UseDoDAnims =
+{
+    if (mdlidx <= 0)
+        return FALSE;
+    return (SH_AnimShape(mdlidx) == 3);
 };
 
 float(float mdlidx, float family, float crouching) SH_GetAimAnim =
 {
+    if (SH_UseDoDAnims(mdlidx))
+        return DoD_GetAimAnim(mdlidx, family, crouching);
     if (SH_UseSvenAnims(mdlidx))
         return Sini_GetAimAnim(mdlidx, family, crouching);
 
@@ -604,6 +703,8 @@ float(float mdlidx, float family, float crouching) SH_GetAimAnim =
 
 float(float mdlidx, float family, float crouching) SH_GetShootAnim =
 {
+    if (SH_UseDoDAnims(mdlidx))
+        return DoD_GetShootAnim(mdlidx, family, crouching);
     if (SH_UseSvenAnims(mdlidx))
         return Sini_GetShootAnim(mdlidx, family, crouching);
 
@@ -645,6 +746,8 @@ float(float mdlidx, float family, float crouching) SH_GetShootAnim =
 
 float(float mdlidx, float family, float crouching) SH_GetReloadAnim =
 {
+    if (SH_UseDoDAnims(mdlidx))
+        return DoD_GetReloadAnim(mdlidx, family, crouching);
     if (SH_UseSvenAnims(mdlidx))
         return Sini_GetReloadAnim(mdlidx, family, crouching);
 
@@ -735,9 +838,16 @@ void() SH_PlayerAnim_Death =
         // Skip the hitgroup / crouch / model-specific branches.
         deathframe = CSANIM_DEATH2;
     }
-    else if (SH_UseSvenAnims(mdlidx))
+    else if (SH_UseDoDAnims(mdlidx))
     {
-        deathframe = Sini_GetRandomDeathAnim(mdlidx);
+        // DoD NAMES its deaths (die_simple / die_headshot / die_gutshot /
+        // die_crouch_head ...), and every one of their indices — 19 to 29 — falls
+        // OUTSIDE the CSANIM_DEATH1..CSANIM_DIE_FORWARD range that the client's
+        // death-snap validity test uses.  Resolve by name here, and teach that
+        // test about the shape (client/cl_player.qc, client/cl_killfeed.qc) or it
+        // will overwrite a correct pose on every snapshot.
+        deathframe = DoD_GetDeathAnim(mdlidx, self.death_hitgroup,
+                                      (self.flags & FL_DUCKING) != 0);
     }
     else
     {
@@ -1113,7 +1223,16 @@ void() SH_PlayerAnim_Update =
     // animation still shows a complete recoil rather than a single frame of it.
 
     // Lower body: locomotion
-    if (SH_UseSvenAnims(mdlidx))
+    if (SH_UseDoDAnims(mdlidx))
+    {
+        // DoD names its locomotion set with a dod_ prefix — dod_idle1,
+        // dod_crouch_idle, dod_jog, dod_crawl — plus a bare `jump`.  Resolved by
+        // name in DoD_GetLegsAnim, which also carries the note about there being
+        // no single-frame no-IK leg pose here to stand in for
+        // CSANIM_LEGS_IDLE_STATIC.
+        self.anim_bottom = DoD_GetLegsAnim(mdlidx, speed >= 1, crouching, onground);
+    }
+    else if (SH_UseSvenAnims(mdlidx))
     {
         // Sven-shaped model (sini, the They Hunger cast): look up by name
         if (!onground)
@@ -1200,6 +1319,17 @@ void() SH_PlayerAnim_Update =
     }
     else
         self.sv_backpedaling = FALSE;
+
+    // A DoD RIG HAS NOTHING TO COUNTER-ROTATE WITH.  The counter-rotation below
+    // is how the CS path keeps the torso pointing at the aim direction while the
+    // legs face the walk direction, and Half-Life does the same job with FOUR
+    // spine bone controllers (StudioModelRenderer.cpp: controller[0..3] each take
+    // a quarter of the yaw).  All five DoD player models ship `ctl=0` — DoD's own
+    // game has no torso twist and yaws the whole body to the gait — so applying
+    // leg_twist here would swing a DoD player's torso away from their aim with
+    // nothing able to bring it back.  Zeroed rather than left to do harm.
+    if (SH_UseDoDAnims(mdlidx))
+        leg_twist = 0;
 
     // Rotate whole model toward movement (legs face walk direction)
     self.angles_y += leg_twist;
@@ -1313,11 +1443,65 @@ void() SH_PlayerAnim_Update =
         // Probing in that order costs one extra gettagindex on Sven models and
         // makes every Sven-shaped model split its body correctly, not just the
         // one that used to be index 5.
-        bb = gettagindex(self, "Bip01 L Thigh");
-        if (bb <= 0)
-            bb = gettagindex(self, "Bip01 L Leg");
+        // A DoD RIG IS THE OTHER WAY ROUND, and the probe above resolves it to
+        // exactly the wrong answer: DoD has no "Bip01 L Thigh", so it falls
+        // through to "Bip01 L Leg" = bone 2 — which would put the ROOT and the
+        // PELVIS in the aim group and everything from the knee up, torso
+        // included, in the locomotion group.  The torso would play the walk
+        // cycle.
+        //
+        // The legs are a PREFIX here (0 Bip01, 1 Pelvis, 2-7 the two legs,
+        // 8 Bip01 Spine, 9+ torso/arms/head — identical on all five models
+        // despite 34/34/34/35/32 bone counts).  So the split is at Bip01 Spine,
+        // and the base group [0, endbone) is the LEGS rather than the torso.
+        // That is not a workaround: GoldSrc's own player renderer does the same
+        // thing at the same bone — StudioModelRenderer.cpp copies the GAIT
+        // sequence into every bone until it reaches "Bip01 Spine", then stops.
+        // DoD's stand_*_aim takes are authored full-body precisely because their
+        // leg half is meant to be thrown away by that pass.
+        //
+        // gettagindex is 1-BASED (it returns bone_index + 1), and this is the
+        // SERVER: pr_cmds.c assigns `endbone = ent->xv->basebone` with no
+        // adjustment, so the raw index 8 is what we want and the tag value must
+        // have 1 subtracted.  CSQC does `endbone -= 1` itself, so its copy of
+        // this probe writes the tag value unmodified — see client/cl_player.qc.
+        // The two sides are handed DIFFERENT NUMBERS to reach the same split.
+        float dodspine = gettagindex(self, "Bip01 Spine");
+        if (dodspine > 0 && SH_UseDoDAnims(mdlidx))
+        {
+            bb = dodspine - 1;
+        }
+        else
+        {
+            bb = gettagindex(self, "Bip01 L Thigh");
+            if (bb <= 0)
+                bb = gettagindex(self, "Bip01 L Leg");
+        }
     }
     self.basebone = bb;
+
+    // AND SWAP WHICH FIELD CARRIES WHICH LAYER.  Everything above wrote
+    // .frame = legs and .baseframe = torso, which is right for a rig whose legs
+    // are a SUFFIX (bones >= basebone).  On DoD the legs are the base group, so
+    // the two have to trade places — including their timers, their lerp targets
+    // and their lerp fractions, or the legs would run on the torso's wall clock
+    // and the torso on the legs' distance clock.
+    //
+    // Done HERE, as one swap at the end, rather than by branching the frame-write
+    // block: every piece of change-detection, lerp and timing logic above then
+    // runs unchanged on the semantically correct values, and only the final
+    // labelling differs.  The client does the identical swap (cl_player.qc) and
+    // both must agree exactly, or the server's traced hitboxes lean differently
+    // from the drawn model.
+    if (SH_UseDoDAnims(mdlidx))
+    {
+        float sw;
+        sw = self.frame;          self.frame          = self.baseframe;      self.baseframe      = sw;
+        sw = self.frame1time;     self.frame1time     = self.baseframe1time; self.baseframe1time = sw;
+        sw = self.frame2;         self.frame2         = self.baseframe2;     self.baseframe2     = sw;
+        sw = self.frame2time;     self.frame2time     = self.baseframe2time; self.baseframe2time = sw;
+        sw = self.lerpfrac;       self.lerpfrac       = self.baselerpfrac;   self.baselerpfrac   = sw;
+    }
 
     // Progressive spine twist from lateral velocity
     makevectors([0, self.angles_y, 0]);
