@@ -73,20 +73,128 @@ void(entity player) W_GrappleRelease =
             "sounds/player/grappledisconnect.wav", 1, ATTN_NORM);
     }
     // Cut any in-flight loop on CHAN_BODY.
-    sound(player, CHAN_BODY, "", 0, ATTN_NORM);
+    SV_StopChannel(player, CHAN_BODY);
 };
 
 // ----------------------------------------------------------------
 //  Hook entity touch — invoked by the engine when the projectile
 //  collides.  Self is the hook entity.
 // ----------------------------------------------------------------
+// What the hook is currently stuck in, when that is a movable object rather
+// than world geometry.  world = anchored to level brushwork, the old behaviour.
+//
+// The hook used to discard `other` entirely and freeze itself at the contact
+// point, which is why the rope stayed pinned to thin air where a moving crate
+// used to be, and why the grapple could only ever pull the PLAYER.
+.entity grapple_target;
+
+// Can the hook reel this in rather than reel the player to it?
+//
+// Deliberately delegates every judgement to the physics layer already behind the
+// gravity gun (sv_physprop.qc / sh_wpn_gravitygun.qc) instead of inventing a
+// second opinion about what is grabbable.
+float(entity e) W_GrappleTargetIsPullable =
+{
+    if (e == world) return FALSE;
+    if (e.classname == "player") return FALSE;
+    if (e.movetype == MOVETYPE_PHYSICS) return TRUE;
+    if (e.classname == "corpse_ragdoll" && e.skeletonindex) return TRUE;
+    // func_pushable and friends: pushable brushwork moves, level geometry does not.
+    if (e.movetype == MOVETYPE_PUSH && e.classname == "func_pushable") return TRUE;
+    return FALSE;
+};
+
+// IS `.weapon` ON THIS ENTITY ACTUALLY A WEAPON?
+//
+// `.weapon` is a STOCK entvars field (sv_defs.qc:334), so FTE's entity-lump parser
+// writes it from any map key called "weapon" - and GoldSrc maps do exactly that.
+// Every func_pushable on pizza_ya_san1 and pizza_ya_san2 ships `"weapon" "1"`, which
+// lands as WEP_DEAGLE, and Weapon_PhysDropEligible says yes to any non-zero id.  The
+// crate then went down the weapon path below: W_PhysDropStart swapped its SendEntity
+// from solid_brush_SendEntity to dropped_weapon_SendEntity, the CSQC type byte
+// changed under it, CSQC_Ent_CleanupTypeChange tore the brush down and re-dressed it
+// as a pistol - "they turn into another model" - and W_PhysDropThink then removed it
+// once the ODE body, sitting at the world origin because a GoldSrc submodel has
+// .origin '0 0 0', tripped the stuck test.  That is "and then they vanished".
+//
+// weapon_touch is what this mod actually stamps on a gun; a replicated brush never
+// carries it.  SV_IsPickableWeapon (sv_use.qc:91) asks the same question, but it
+// also applies pickup UX gates (weapon_solid_time, PropHunt) that are wrong here.
+float(entity e) W_GrappleIsWeaponEntity =
+{
+    if (!e || e == world)      return FALSE;
+    if (e.weapon == WEP_NONE)  return FALSE;
+    return (e.touch == weapon_touch);
+};
+
+// Is this a plain pickup — ammo box, health kit, battery — rather than a
+// physics body?  These are authored as static SOLID_TRIGGER volumes with no ODE
+// body at all, so Carry_TryGrab can never take them (Carry_IsCarriable requires
+// MOVETYPE_PHYSICS).  They get tugged instead: see the touch handler.
+float(entity e) W_GrappleTargetIsPickup =
+{
+    if (e == world) return FALSE;
+    if (e.classname == "player") return FALSE;
+    if (e.solid != SOLID_TRIGGER) return FALSE;
+    // A pickup is something with a touch handler that gives you something.
+    // .weapon covers dropped weapons and map weapons; .items / .aiment-free
+    // ammo and health entities carry a touch and a model.
+    return (e.touch != __NULL__) && (e.modelindex != 0);
+};
+
 void() W_GrappleHookTouch =
 {
-    // Only attach to static brushwork.  Bouncing off players / other
-    // projectiles would let opponents grief the rope so we just ignore.
+    // Players still can't be hooked — letting opponents be reeled around would
+    // be a griefing tool, and it is not what the barnacle does in Opposing Force.
     if (other.classname == "player")
         return;
-    if (other.solid == SOLID_TRIGGER)
+
+    // WAKE FIRST, THEN JUDGE.
+    //
+    // A settled weapon drop is SOLID_TRIGGER + MOVETYPE_NONE (weapon_become_solid
+    // / the settle think in sv_weapons.qc), and W_GrappleTargetIsPullable only
+    // says yes to MOVETYPE_PHYSICS.  So the reject below used to fire on exactly
+    // the objects this feature exists for, BEFORE the W_PhysDropWake that would
+    // have made them grabbable — "grab a dropped weapon and pull it to me" could
+    // never work, quite apart from the fire gate that stopped the hook spawning
+    // at all.  Waking here puts the object into MOVETYPE_PHYSICS first, so every
+    // test after this point sees what it will actually be.
+    if (W_GrappleIsWeaponEntity(other) && other.weapon_physdrop_sleeping)
+        W_PhysDropWake(other);
+
+    // A weapon that never became a physics body at all — a map spawn or a
+    // `give`, which stay SOLID_TRIGGER + MOVETYPE_TOSS pickups because
+    // W_SyncMapWeaponPhysics only converts the phys-eligible ones — gets
+    // promoted here, so the tongue treats EVERY weapon the way it treats a crate.
+    //
+    // This is the reported behaviour gap: physics objects came to hand like a
+    // +use carry, while weapons "simply disconnect and don't get picked up or
+    // slung".  They were falling into the tug branch below, which set
+    // MOVETYPE_TOSS on an entity whose client-side copy is drawn from a
+    // SendEntity snapshot -- so the server moved something the client was never
+    // told had moved, and from the player's side nothing happened at all.
+    // Giving it a real body routes it through Carry_TryGrab, which owns the
+    // SendFlags bookkeeping already.
+    if (W_GrappleIsWeaponEntity(other) && other.model != ""
+        && other.movetype != MOVETYPE_PHYSICS
+        && W_PhysDropAllowed(other.weapon))
+    {
+        entity saved_self = self;
+        self = other;
+        other.owner     = world;
+        other.velocity  = '0 0 0';
+        other.avelocity = '0 0 0';
+        W_PhysDropStart(other, 0);
+        self = saved_self;
+    }
+
+    // SOLID_TRIGGER is not a blanket reject: dropped weapons, ammo boxes and
+    // health kits all live there.  Triggers that are neither pullable nor a
+    // pickup are still ignored, so walking a hook through a trigger_multiple or
+    // a trigger_hurt does not stop it dead.
+    if (other.solid == SOLID_TRIGGER
+        && !W_GrappleTargetIsPullable(other)
+        && !W_GrappleTargetIsPickup(other))
         return;
 
     self.movetype = MOVETYPE_NONE;
@@ -94,6 +202,130 @@ void() W_GrappleHookTouch =
     self.avelocity = '0 0 0';
     self.touch    = __NULL__;
     self.nextthink = 0;             // cancel miss-timeout
+
+    // ---- Hooked something movable?  Reel it in instead of reeling ourselves --
+    //
+    // This is a RANGED version of the gravity gun's grab, and it deliberately
+    // reuses that machinery rather than growing a second physics path:
+    // Carry_TryGrab latches the object and Carry_Tick (already driven every
+    // frame from PlayerPreThink) floats it in to the carry pose, including the
+    // smooth pull-in from wherever it was standing.
+    //
+    // A sleeping weapon drop is MOVETYPE_NONE until woken — still solid, so the
+    // hook hits it, but nothing would ever move it.  That is exactly why resting
+    // dropped weapons were ungrabbable for the gravity gun too, and the fix is
+    // the same call.
+    self.grapple_target = world;
+    if (other != world && self.owner && self.owner.classname == "player")
+    {
+        float took = FALSE;
+        // A dropped WEAPON deliberately skips the carry and goes to the tug
+        // below, even though it is a perfectly grabbable ODE body.
+        //
+        // sv_phys_drops defaults to 1, so a dropped gun is MOVETYPE_PHYSICS and
+        // Carry_TryGrab SUCCEEDED on it — which is why hooking one never reeled
+        // it in: the grapple was not failing, it was quietly doing something
+        // else.  You ended up holding the gun gravity-gun style, which lowers
+        // the viewmodel and blocks firing, and the rope was torn down by that
+        // success.  From the player's side that reads as "it just disconnects".
+        //
+        // Weapons are the one class where "collect it" is unambiguous, so they
+        // get the tug the fallback below was written for.
+        if (other.movetype == MOVETYPE_PHYSICS && !other.weapon)
+        {
+            // carry_allow_any widens Carry_IsCarriable from "cabinets only" to
+            // "any ODE body" for this grab, matching W_GravGunFire's ranged grab.
+            carry_allow_any = TRUE;
+            took = Carry_TryGrab(self.owner, other);
+            carry_allow_any = FALSE;
+        }
+        else if (other.classname == "corpse_ragdoll" && other.skeletonindex)
+            took = Ragdoll_TryGrab(self.owner, other);
+
+        // TUG FALLBACK — anything a carry could not take, but that the player
+        // plainly meant to collect, still comes to them.
+        //
+        // Reached in three ways, and the first is the reported bug: a WEAPON
+        // that reached Carry_TryGrab and was refused anyway.  Carry_TryGrab has
+        // several independent reasons to say no (the object is already held, the
+        // player is already carrying something, the ODE body is not live yet)
+        // and the old code treated every one of them as "reel the player in
+        // instead" — so the tongue hit a gun, said nothing, and yanked you at it.
+        // Ammo boxes and health kits have no physics body at all and land here
+        // too, as does a weapon on a server with sv_phys_drops off.
+        if (!took && (W_GrappleIsWeaponEntity(other)
+                      || W_GrappleTargetIsPickup(other)
+                      || W_GrappleTargetIsPullable(other)))
+        {
+            vector to_me = (self.owner.origin + self.owner.view_ofs) - other.origin;
+            float  d = vlen(to_me);
+
+            // A REPLICATED BRUSH IS NEITHER TOSSED NOR SPUN.  A func_pushable is a
+            // GoldSrc submodel with .origin '0 0 0' and its world position baked into
+            // mins/maxs, so .angles rotates it about the MAP ORIGIN rather than
+            // itself (sv_func_pushable.qc:41-46 documents this as unfixable for the
+            // class) and MOVETYPE_TOSS hands the engine a brush that its own header
+            // says must stay MOVETYPE_PUSH.  The crate has a velocity-driven tick of
+            // its own and a moving_brush_list entry the client already mirrors, so a
+            // horizontal impulse is the whole of what it needs - and it makes
+            // "grapple a crate" and "+use-pull a crate" the same interaction.
+            float is_brush = (other.solid == SOLID_BSP);
+
+            if (!is_brush)
+            {
+                // A live ODE body must NOT be switched to MOVETYPE_TOSS — the
+                // physics world keeps driving it and the movetype change is simply
+                // ignored, which is a silent no-op.  Push the body instead.
+                if (other.movetype != MOVETYPE_PHYSICS)
+                    other.movetype = MOVETYPE_TOSS;
+                else
+                    PhysProp_Wake(other);   // a settled ODE body ignores .velocity
+            }
+
+            if (d > 1)
+            {
+                if (is_brush)
+                {
+                    // Horizontal only: a crate has no lift, and its own tick owns Z
+                    // (gravity, ground probe, buoyancy).
+                    vector flat = to_me;  flat_z = 0;
+                    if (vlen(flat) > 1)
+                        other.velocity = normalize(flat) * bound(120, d * 0.9, 400);
+                    other.nextthink = other.ltime + 0.02;   // wake the crate's tick
+                }
+                else
+                {
+                    // Aim slightly above the player and scale with distance so a
+                    // far pickup still arrives rather than falling short.
+                    vector dir = normalize(to_me + '0 0 24');
+                    other.velocity  = dir * bound(300, d * 1.6, 900);
+                    other.avelocity = '0 240 0';
+                }
+            }
+            // If this pickup draws itself through a SendEntity snapshot rather
+            // than plain delta replication, the client will not notice it moved
+            // unless the snapshot is dirtied.  Cheap, and silent to anything
+            // that has no SendEntity.
+            other.SendFlags |= 1;
+            took = TRUE;
+        }
+
+        if (cvar("sv_debug_physprops"))
+            dprint(sprintf("[grapple] hit %s ent=%g movetype=%g solid=%g weapon=%g took=%g\n",
+                other.classname, num_for_edict(other), other.movetype,
+                other.solid, other.weapon, took));
+
+        if (took)
+        {
+            // The rope's job is done — the object is in hand.  Release rather
+            // than leaving a rope stretched to something now floating in front
+            // of the player's face.
+            self.grapple_target = other;
+            sound(self, CHAN_AUTO, "sounds/player/hook.wav", 1, ATTN_NORM);
+            W_GrappleRelease(self.owner);
+            return;
+        }
+    }
 
     if (self.owner && self.owner.grapple_hook == self)
     {
@@ -108,7 +340,10 @@ void() W_GrappleHookTouch =
         // `velocity_z > 180` cut-off, so the ground-snap trace
         // pins them every tick.  A one-shot jump-strength impulse
         // gets them airborne so the pull can take over.
-        if (self.owner.flags & FL_ONGROUND)
+        // ...but only when the PLAYER is the thing about to move.  With an
+        // object hooked we reel it in and stay put, so launching the player off
+        // the floor would be both wrong and disorienting.
+        if ((self.owner.flags & FL_ONGROUND) && self.grapple_target == world)
         {
             float lift = cvar("sv_grappling_attach_lift");
             if (lift <= 0) lift = 270;
@@ -154,6 +389,11 @@ void() W_GrappleEngage =
     setorigin(h, self.origin + self.view_ofs + '0 0 -16' + v_forward * 12);
     h.velocity   = self.velocity
                  + v_forward * cvar("sv_grappling_launch_speed");
+    // Physics props and dropped weapons live on PHYSDROP_DIM, ragdolls on
+    // RAGDOLL_DIM — dimensions the hook did not collide against, so it flew
+    // straight through every one of them.  The gravity gun ORs the same bits
+    // into its grab trace for the same reason (sh_wpn_gravitygun.qc).
+    h.dimension_hit = h.dimension_hit | PHYSDROP_DIM | RAGDOLL_DIM;
     h.touch      = W_GrappleHookTouch;
     h.think      = W_GrappleHookTimeout;
     float life = cvar("sv_grappling_max_life");
@@ -293,6 +533,7 @@ void() W_GrapplePullTick =
     }
 
     vector pull_dir = to_anchor * (1 / dist);
+
 
     // Add velocity along the rope, capped at sv_grappling_pull_max_speed
     // projected onto pull_dir.  Velocity perpendicular to the rope is

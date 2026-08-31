@@ -737,6 +737,20 @@ void() Bot_Think =
 	self.button2 = 0;
 	self.impulse = 0;
 
+	// sv_launcher_test owns the bot's weapon outright while it runs, so the AI
+	// below has to keep its hands off.  Three separate ways it would otherwise
+	// invalidate that harness, all of them silent:
+	//   - the dry-mag block sends WEAPON_IMPULSE_RELOAD, which is a MANUAL reload
+	//     and would mask a broken auto-reload as a pass;
+	//   - a roaming bot walks over a map weapon, which swaps the primary slot and
+	//     runs the launcher's drop function (zeroing its mag AND reserve);
+	//   - firing at something re-arms attack_finished mid-measurement.
+	// Returning here leaves the three zeroed inputs above in place, so the bot
+	// stands still with no buttons held; Bot_RunFrame still calls PlayerPreThink
+	// and SV_RunClientCommand for it, which is what keeps .wepframe ticking.
+	if (cvar("sv_launcher_test"))
+		return;
+
 	// Weapon management.  Reload when the mag is dry but reserve remains; if the
 	// weapon is FULLY dry (no reserve, can't reload) fall DOWN the slot chain to a
 	// usable weapon instead of dry-firing forever: primary → secondary(if loaded) →

@@ -31,25 +31,49 @@ float(float roomtype) CSQC_EnvSound_Slot =
     return ENV_SOUND_REVERB_BASE + roomtype;
 };
 
+// HOW WET THE ROOM IS, 0..1.  Everything below was authored at flGain 1.0, which
+// is EFX's "the reverb is as loud as the dry signal" - and that is a great deal
+// wetter than GoldSrc's DSP ever was.  On a map that leans on env_sound (the They
+// Hunger episodes put one in nearly every room) the result was an echo strong
+// enough to make gunfire and speech hard to place, which is the reported "world
+// echo sound effect for specific locations is WAY too intense".
+//
+// A scale rather than 28 retuned tables, because the RELATIVE character of the
+// rooms was right - a tunnel does trail longer than a booth - and only the
+// overall wet level was wrong.  Scaling the three gain terms together keeps each
+// room's shape and moves all of them down by the same amount.
+//
+// 0.4 by default.  1 restores the old behaviour exactly; 0 turns reverb off
+// without having to unhook the listener.
+const float ENV_SOUND_REVERB_STRENGTH_DEFAULT = 0.4;
+
+float() CSQC_EnvSound_Strength =
+{
+    if (cvar_string("snd_env_reverb_strength") == "")
+        return ENV_SOUND_REVERB_STRENGTH_DEFAULT;
+    return bound(0, cvar("snd_env_reverb_strength"), 1);
+};
+
 void(float roomtype, float density, float diffusion, float gainhf,
      float decay, float decayhf, float reflections, float reflectdelay,
      float late, float latedelay, float echotime, float echodepth,
      float modtime, float moddepth) CSQC_EnvSound_DefineReverb =
 {
     reverbinfo_t ri;
+    float wet = CSQC_EnvSound_Strength();
 
     ri.flDensity = density;
     ri.flDiffusion = diffusion;
-    ri.flGain = 1.0;
+    ri.flGain = wet;
     ri.flGainHF = gainhf;
     ri.flGainLF = 1.0;
     ri.flDecayTime = decay;
     ri.flDecayHFRatio = decayhf;
     ri.flDecayLFRatio = 1.0;
-    ri.flReflectionsGain = reflections;
+    ri.flReflectionsGain = reflections * wet;
     ri.flReflectionsDelay = reflectdelay;
     ri.flReflectionsPan = '0 0 0';
-    ri.flLateReverbGain = late;
+    ri.flLateReverbGain = late * wet;
     ri.flLateReverbDelay = latedelay;
     ri.flLateReverbPan = '0 0 0';
     ri.flEchoTime = echotime;
@@ -65,11 +89,18 @@ void(float roomtype, float density, float diffusion, float gainhf,
     setup_reverb(CSQC_EnvSound_Slot(roomtype), &ri, sizeof(ri));
 };
 
+// The strength the 28 slots were last built at.  setup_reverb bakes the numbers
+// into the slot, so changing the cvar has to rebuild them - otherwise the knob
+// appears to do nothing until the next map.
+float csqc_env_sound_built_strength;
+
 void() CSQC_EnvSound_InitReverbs =
 {
-    if (csqc_env_sound_reverbs_ready)
+    float wet = CSQC_EnvSound_Strength();
+    if (csqc_env_sound_reverbs_ready && wet == csqc_env_sound_built_strength)
         return;
     csqc_env_sound_reverbs_ready = 1;
+    csqc_env_sound_built_strength = wet;
 
     // These are intentionally GoldSrc-flavoured approximations, not a
     // claim of byte-identical EAX.  They preserve the useful mapper

@@ -55,3 +55,15 @@ __pycache__/
 # --- Build logs ---
 build.log
 sv_build.log
+
+# --- Compiler output that lands in src/ ---
+# fteqcc writes ../qwprogs.dat for a normal build, but a stray run from the wrong
+# cwd (or an old .src) leaves a copy HERE.  Neither these nor the line-number
+# sidecars are build inputs.
+qwprogs.dat
+csprogs.dat
+menu.dat
+*.lno
+
+# --- Scratch .src files for one-off compile checks ---
+_zz_*.src

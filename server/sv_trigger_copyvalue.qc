@@ -126,10 +126,97 @@ float(float op, float a, float b, float trigB) TV_Calc =
 	return a;
 };
 
+// Same op, but onto one of Sven's "$" custom keyvalues, which are not fields and
+// so cannot go through findentityfield / putentityfieldstring.  Storage is the
+// side table in sv_customkeys.qc; the type comes from the name's prefix.
+//
+// Shape mirrors TV_Apply below deliberately, so the two stay comparable.
+void(entity act, entity dst, string dstkey, vector srcVec, float srcF, string srcStr, float srcType) TV_ApplyCustom =
+{
+	float  op    = act.m_iszValueType;
+	float  fl    = act.spawnflags;
+	float  trigB = act.m_trigonometricBehaviour;
+	float  kt    = CustomKey_Type(dstkey);
+	string cur   = CustomKey_Get(dst, dstkey);
+	string news  = "";
+	vector ov    = '0 0 0';
+	vector nv    = '0 0 0';
+	float  a     = 0;
+	float  s     = 0;
+	float  i     = 0;
+
+	if (op == TVT_APPEND)
+	{
+		news = strcat(cur, srcStr);
+		for (i = 0; i < act.m_iAppendSpaces; i = i + 1)
+			news = strcat(news, " ");
+		CustomKey_Set(dst, dstkey, news);
+		return;
+	}
+
+	// A $s_ target with REPLACE is a plain string assignment, and that is the
+	// whole reason the type prefix exists.  Falling through to the numeric path
+	// would evaluate stof("extreme") == 0 and store "0" — which is precisely the
+	// difficulty selection this entity is used to carry.
+	if (kt == EV_STRING && op == TVT_REPLACE)
+	{
+		CustomKey_Set(dst, dstkey, srcStr);
+		return;
+	}
+
+	if (op == TVT_DIR2ANG || op == TVT_ANG2DIR)
+	{
+		vector sv = TV_Mask(srcVec, fl);
+		vector res;
+		if (fl & SF_TV_INVSOURCE) sv = sv * -1;
+		if (op == TVT_DIR2ANG)
+			res = vectoangles(sv);
+		else
+		{
+			makevectors(sv);
+			res = v_forward;
+		}
+		ov = stov(cur);
+		if (!(fl & SF_TV_NOX)) ov_x = res_x;
+		if (!(fl & SF_TV_NOY)) ov_y = res_y;
+		if (!(fl & SF_TV_NOZ)) ov_z = res_z;
+		CustomKey_Set(dst, dstkey, vtos(ov));
+		return;
+	}
+
+	s = srcF;
+	if (srcType == EV_VECTOR)
+		s = vlen(TV_Mask(srcVec, fl));
+	if (fl & SF_TV_INVSOURCE)
+		s = 0 - s;
+
+	if (kt == EV_VECTOR)
+	{
+		ov = stov(cur);
+		nv = ov;
+		if (!(fl & SF_TV_NOX)) { a = ov_x; if (fl & SF_TV_INVTARGET) a = 0 - a; nv_x = TV_Calc(op, a, s, trigB); }
+		if (!(fl & SF_TV_NOY)) { a = ov_y; if (fl & SF_TV_INVTARGET) a = 0 - a; nv_y = TV_Calc(op, a, s, trigB); }
+		if (!(fl & SF_TV_NOZ)) { a = ov_z; if (fl & SF_TV_INVTARGET) a = 0 - a; nv_z = TV_Calc(op, a, s, trigB); }
+		CustomKey_Set(dst, dstkey, vtos(nv));
+		return;
+	}
+
+	a = stof(cur);
+	if (fl & SF_TV_INVTARGET) a = 0 - a;
+	CustomKey_Set(dst, dstkey, TV_FtoS(TV_Calc(op, a, s, trigB), act.m_iFloatConversion));
+};
+
 // apply the trigger's configured op onto dst's field `dstkey`, using a source
 // pre-resolved into (vector / scalar / string) + its EV_ type.
 void(entity act, entity dst, string dstkey, vector srcVec, float srcF, string srcStr, float srcType) TV_Apply =
 {
+	// "$s_foo" and friends are map-invented variables with no field behind them.
+	if (CustomKey_IsCustom(dstkey))
+	{
+		TV_ApplyCustom(act, dst, dstkey, srcVec, srcF, srcStr, srcType);
+		return;
+	}
+
 	float dstFn = findentityfield(dstkey);
 	if (dstFn <= 0)
 		return;
@@ -261,13 +348,31 @@ void() trigger_copyvalue_fire =
 	entity srcent = find(world, targetname, self.netname);
 	if (!srcent)
 		return;
-	float srcFn = findentityfield(self.m_iszSrcValueName);
-	if (srcFn <= 0)
-		return;
-	float  srcType = entityfieldtype(srcFn);
-	string srcStr  = getentityfieldstring(srcFn, srcent);
-	float  srcF    = stof(srcStr);
-	vector srcVec  = stov(srcStr);
+
+	float  srcType = 0;
+	string srcStr  = "";
+	float  srcF    = 0;
+	vector srcVec  = '0 0 0';
+
+	// A "$" source is a custom keyvalue, not a field.  An absent one aborts
+	// rather than reading as 0, the same reading TCond_ReadKey takes.
+	if (CustomKey_IsCustom(self.m_iszSrcValueName))
+	{
+		if (!CustomKey_Has(srcent, self.m_iszSrcValueName))
+			return;
+		srcType = CustomKey_Type(self.m_iszSrcValueName);
+		srcStr  = CustomKey_Get(srcent, self.m_iszSrcValueName);
+	}
+	else
+	{
+		float srcFn = findentityfield(self.m_iszSrcValueName);
+		if (srcFn <= 0)
+			return;
+		srcType = entityfieldtype(srcFn);
+		srcStr  = getentityfieldstring(srcFn, srcent);
+	}
+	srcF   = stof(srcStr);
+	srcVec = stov(srcStr);
 
 	entity dst;
 	if (self.spawnflags & SF_TV_MULTIDEST)

@@ -23,17 +23,48 @@
 //  load, so a multisource emitted before its inputs would see none of
 //  them.  Same reason func_vehiclecontrols and squadmaker defer.
 //
-//  ZERO-INPUT GATES ARE PERMISSIVE, and that is deliberate HL parity, not
-//  an oversight.  HL's Register only scans `pev->target`, so a gate driven
-//  by a multi_manager (whose targets live in arbitrary keyvalues, not in
-//  .target) registers nothing.  HL's IsTriggered then walks `i < m_iTotal`
-//  with m_iTotal == 0, falls straight out with i == m_iTotal, and returns
-//  TRUE — so such a gate reads as permanently satisfied and its Use fires
-//  the target chain immediately.  pizza_ya_san1's `ms_norainu` is exactly
-//  this: two multi_managers (mm_meatshopend / mm_vegeshopend) drive it and
-//  nothing targets it by name.  Requiring both would soft-lock the map
-//  against how it was authored and tested.  Registering multi_manager
-//  slots would be "more correct" and less compatible; we match HL.
+//  MULTI_MANAGER SLOTS ARE INPUTS TOO, and the comment that used to sit
+//  here said the opposite.  It claimed "HL's Register only scans
+//  pev->target, so a gate driven by a multi_manager registers nothing",
+//  and concluded that registering multi_manager slots would be "more
+//  correct and less compatible".  That is simply not what the SDK does.
+//  CMultiSource::Register (dlls/buttons.cpp:239-272) runs TWO passes:
+//
+//      pentTarget = FIND_ENTITY_BY_STRING(NULL, "target", targetname);
+//      ... while (...) m_rgEntities[m_iTotal++] = pTarget;
+//
+//      pentTarget = FIND_ENTITY_BY_STRING(NULL, "classname", "multi_manager");
+//      while (...) if (pTarget->HasTarget(pev->targetname))
+//                      m_rgEntities[m_iTotal++] = pTarget;
+//
+//  The second pass is the whole reason a manager-driven lock works in
+//  Half-Life, and skipping it is what made 440 corpus gates permissive.
+//
+//  hl_c01_a1's airlock is the reported case.  A trigger_multiple with
+//  `master lk1lock1` opens the four `lk1` doors; `lk1lock1` is a
+//  multisource whose ONLY input is the multi_manager airlockdoorbuzzmm1,
+//  which barney fires at the end of his retina-scan chain.  With the
+//  second pass missing, lk1lock1 registered nothing, fell through to the
+//  permissive branch below, and the airlock was +use-able from map load —
+//  before the guard had checked anyone's suit or touched the scanner.
+//
+//  Measured over the corpus (svencoop + svencoop_downloads + valve +
+//  gearbox + bshift): 1363 gates, 565 with no `target` input at all, and
+//  440 of those 565 are driven by a multi_manager and are now correctly
+//  gated.  6 more gates gain extra inputs alongside their existing ones.
+//  Two of the 440 are driven by a MULTITHREADED manager, which fires
+//  through a clone — see MM_ResolveCaller, without which those two would
+//  soft-lock.
+//
+//  ZERO-INPUT GATES ARE STILL PERMISSIVE, and that part was always right:
+//  HL's IsTriggered walks `i < m_iTotal` with m_iTotal == 0, falls
+//  straight out with i == m_iTotal, and returns TRUE.  It just applies to
+//  far fewer gates now (125, not 565).
+//
+//  sv_multisource_no_mm_inputs 1 restores the old permissive behaviour.
+//  It exists because this is a 440-gate behaviour change that no amount
+//  of headless testing can play through, and one cvar is a cheaper
+//  rollback than a revert.
 //
 //  Each ms_state_node holds:
 //    .ms_input    — the entity it represents
@@ -46,6 +77,13 @@
 
 // Externs from earlier compile units.
 void(entity caller, entity who, float useType) SUB_UseTargets;        // sv_triggers.qc
+
+// ...and from a LATER one.  sv_multi_manager.qc is at sv_progs.src:172 and this
+// file is at :166, so both of these are forward declarations rather than the
+// ordinary case.  Only ms_register (a deferred think) and multisource_use call
+// them, and both run long after every compile unit is loaded.
+float(entity mm, string nm) MM_HasTarget;
+entity(entity e) MM_ResolveCaller;
 
 // ms_active is forward-declared in sv_triggers.qc so IsMasterTriggered
 // can read it before this file loads.  Re-declare for documentation.
@@ -110,8 +148,29 @@ void() ms_register =
         while (e)
         {
             // Don't register ourselves, and skip entities that can't fire
-            // (no .use means they will never report in, so counting them
-            // would lock the gate forever).
+            // (nothing will ever report in for them, so counting them would
+            // lock the gate forever).
+            //
+            // "Can fire" is .use OR .touch.  It used to be .use alone, and
+            // that was wrong in the most common case there is: a brush
+            // trigger.  trigger_multiple_init installs a .touch and a .think
+            // and no .use — it reports in from trigger_multi_touch, through
+            // SUB_UseTargets, exactly like a trigger_relay does.  Under the
+            // .use-only test every such input was skipped, the gate fell
+            // through to the no-inputs branch below, and PERMISSIVE is the
+            // worst possible default there: the gate is open from map load,
+            // which is the opposite of what a locked gate is for.
+            //
+            // hl_c01_a1 is the map that surfaced it.  `suit_ms` has one input
+            // (a trigger_once in the HEV bay) and masters the
+            // game_player_equip that grants item_suit, so the suit was handed
+            // out on the first spawn — 50 armour, and Barney's
+            // trigger_suitcheck passing before the player had been anywhere
+            // near the locker.  Two more gates on that map (`ms1`,
+            // `lk1lock1`) were stuck open the same way.  HL's
+            // CMultiSource::Register (dlls/triggers.cpp) tests nothing at all
+            // and registers every entity whose `target` matches, so this is a
+            // step back TOWARD parity, not away from it.
             //
             // gs_unimplemented belongs in exactly that category and is NOT
             // covered by the .use test: SV_OnEntityNoSpawnFunction deliberately
@@ -124,9 +183,32 @@ void() ms_register =
             // 114, func_breakable 46, func_button 34, all of which work.
             // Skipping rather than blanket-permissive keeps the gate honest for
             // the inputs that DO work instead of throwing the whole gate away.
-            if (e != self && e.use && !e.gs_unimplemented)
+            if (e != self && (e.use || e.touch) && !e.gs_unimplemented)
                 ms_find_or_create_node(self, e);
             e = find(e, target, self.targetname);
+        }
+
+        // PASS 2 — every multi_manager that names us in a slot.  HL's
+        // second Register loop, verbatim in intent: it walks by CLASSNAME
+        // because a manager's targets are not in .target and so cannot be
+        // found by the walk above.  See the file header for the corpus
+        // numbers and for what this fixes on hl_c01_a1.
+        //
+        // Clones are excluded for free: MM_SpawnClone names them
+        // "multi_manager_clone", so this find never returns one.  That is
+        // the right outcome anyway — a clone is created per-fire and
+        // removed when its schedule ends, so it could never be a stable
+        // input.  MM_ResolveCaller maps a clone's fire back onto its
+        // source, which IS the entity registered here.
+        if (!cvar("sv_multisource_no_mm_inputs"))
+        {
+            entity mm = find(world, classname, "multi_manager");
+            while (mm)
+            {
+                if (mm != self && MM_HasTarget(mm, self.targetname))
+                    ms_find_or_create_node(self, mm);
+                mm = find(mm, classname, "multi_manager");
+            }
         }
     }
 
@@ -153,6 +235,12 @@ void() multisource_use =
         caller = activator;
     if (!caller)
         return;     // can't track anonymous fires
+
+    // A MULTITHREADED multi_manager fires through a throwaway clone, which is
+    // not the entity ms_register pre-registered.  Resolve it back, or the
+    // clone would take a second node of its own and the gate could never
+    // reach all-on.  No-op for every other caller.
+    caller = MM_ResolveCaller(caller);
 
     // A gate that never registered any input behaves as HL's does: it is
     // already satisfied, and any fire pushes the chain onward.
@@ -208,16 +296,46 @@ void() multisource_use =
     }
     if (!any) all_on = 0;
 
+    // buttons.cpp:216-236 — CMultiSource::IsTriggered is TWO tests ANDed: every
+    // input on, AND the named global ON.
+    //
+    // ms_active stays PURE INPUT STATE and the global is ANDed in at each read
+    // (here and in IsMasterTriggered).  That is not tidiness: HL re-evaluates
+    // IsTriggered() on every UTIL_IsMasterTriggered call, so a gate whose inputs
+    // are already satisfied opens the instant an env_global elsewhere — or on an
+    // earlier map — flips the state ON.  Folding the global into the cached flag
+    // would freeze such a gate shut until an input happened to fire again, and
+    // for a cross-map global no input ever would.
+    float gate_ok = GlobalState_GateOpen(self.globalstate);
+
     if (all_on != self.ms_active)
     {
         self.ms_active = all_on;
         if (cvar("sv_debug_use"))
-            print(sprintf("[multisource] \"%s\" -> %s\n", self.targetname,
-                          all_on ? "OPEN" : "CLOSED"));
-        if (all_on)
-            SUB_UseTargets(self, activator, USE_TOGGLE);
-        else
+            print(sprintf("[multisource] \"%s\" -> %s%s\n", self.targetname,
+                          all_on ? "OPEN" : "CLOSED",
+                          (all_on && !gate_ok) ? " (held by globalstate)" : ""));
+        if (all_on && gate_ok)
+        {
+            // buttons.cpp:207-210 — a multisource WITH a globalstate hands its
+            // chain USE_ON rather than USE_TOGGLE.  These gates unlock things
+            // that must not re-lock on a second fire, which is exactly what a
+            // toggle would do.
+            if (self.globalstate != "" && self.globalstate != __NULL__)
+                SUB_UseTargets(self, activator, USE_ON);
+            else
+                SUB_UseTargets(self, activator, USE_TOGGLE);
+        }
+        else if (!all_on)
+        {
+            // NOT Half-Life: CMultiSource::Use fires nothing when IsTriggered
+            // is false.  This tree has always pushed a USE_OFF on the closing
+            // edge so a mastered door re-locks, and that is kept.  The
+            // globalstate-held case deliberately does NOT reach here — being
+            // held shut is not a closing edge, and firing OFF on it would drive
+            // the chain from a state change that never happened.
             SUB_UseTargets(self, activator, USE_OFF);
+        }
     }
 };
 
@@ -228,8 +346,9 @@ whose `master` key names this multisource.
 
 "targetname"  name (so other entities can target / master this)
 "target"      entity / chain to fire when AND-gate flips ON
-"globalname"  accepted, ignored (env_global is OOS)
-"globalstate" accepted, ignored
+"globalname"  accepted, ignored (HL level-transition identity, not this)
+"globalstate" extra condition — the named global must be ON as well, and the
+              outgoing chain is handed USE_ON instead of USE_TOGGLE
 */
 void() multisource =
 {

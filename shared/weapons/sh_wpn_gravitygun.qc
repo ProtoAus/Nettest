@@ -439,9 +439,41 @@ void() CSQC_PredictGravGunCommand =
     // +attack (bit 1) = grab fire.  The throw-while-carrying case is the throwprop
     // path (cl_player.qc), which suppresses the fire bit before we run here and
     // predicts its own fire2 — so this only ever fires the GRAB.
+    // THE SERVER ALREADY REFUSES TO ANIMATE AN EMPTY GRAB and this did not.
+    // W_GravGunFire returns at "nothing grabbable in front — no animation"
+    // BEFORE setting WS_FIRE, but CSQC entered WS_FIRE on the button alone — and
+    // reconcile never writes weaponstate back (client/cl_player.qc:1022), so the
+    // server's correct refusal was invisible and the grab take played on every
+    // press into thin air.  The mirror image of the medkit and the snark: there
+    // the client copied a too-permissive shared gate, here it had no gate at all.
+    //
+    // The client cannot reproduce Carry_TryGrab (mass, ODE body state, the
+    // carry_allow_any widening), but it does have the prop hulls — they are
+    // relinked for prediction every frame (PhysProp_RelinkHullsForPrediction) —
+    // so "did the ray hit ANY entity rather than the world" removes the common
+    // case, which is aiming at a wall or open air.  Deliberately permissive:
+    // hitting a prop the server then judges non-carriable still animates, and
+    // that is the safe direction to be wrong in, because the alternative is
+    // swallowing a grab the server performs.
+    float gg_can_grab = FALSE;
     if ((input_buttons & 1) && !self.pm_carrying
         && self.weaponstate == WS_IDLE
         && now >= self.attack_finished)
+    {
+        // serverkeyfloat WITH A DEFAULT, not cvar(): sv_gravgun_grab_range is
+        // declared CVAR_SIDE_SV (sh_cvar_table.qc:3733), so it is not registered
+        // in the client VM and cvar() would read 0 — a zero-length trace, always
+        // hitting nothing, silently swallowing EVERY grab animation.  That is
+        // strictly worse than the bug being fixed, and it is the failure this
+        // codebase's cvar audit exists to catch.  The default matches the table.
+        makevectors(input_angles);
+        vector gg_start = self.origin + self.view_ofs;
+        float  gg_range = serverkeyfloat("sv_gravgun_grab_range", 600);
+        traceline(gg_start, gg_start + v_forward * gg_range, MOVE_NORMAL, self);
+        gg_can_grab = (trace_ent != world);
+    }
+
+    if (gg_can_grab)
     {
         self.weaponstate      = WS_FIRE;
         self.wep_anim_start    = now;

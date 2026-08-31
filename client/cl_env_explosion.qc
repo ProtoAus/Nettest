@@ -12,7 +12,7 @@
 // Forward decls from sh_wpn_csgrenades.qc (CSQC half) — both compile
 // before this file but the QCC parser still wants the forward look-up.
 void(vector pos, float sample) CSQC_SpawnCSGrenadeSprite;
-void(vector pos)               CSQC_SpawnSmokePuff;
+void(vector pos)               CSQC_SpawnExplosionSmokePuff;
 
 // Forward decls from cl_scorch.qc.
 void(vector pos, float kind)   CSQC_SpawnScorchDecal;
@@ -47,26 +47,31 @@ void() CSQC_EnvExplosionSmokeTick =
     float i = 0;
     while (i < 5)
     {
-        CSQC_SpawnSmokePuff(self.ee_smoke_origin);
+        CSQC_SpawnExplosionSmokePuff(self.ee_smoke_origin);
         i = i + 1;
     }
 
     self.ee_remaining_bursts = self.ee_remaining_bursts - 1;
-    self.nextthink = time + 0.5;
+    self.nextthink = time + 0.18;
 };
 
-// Spawn a smoke-burst emitter at `pos`.  Does 6 bursts × 5 puffs over
-// ~3 s, matching the user-requested cadence.  Each puff uses the
-// existing CSQC_SpawnSmokePuff which already handles drift-up, grow
-// and fade-out — same look as the muzzle barrel smoke and the smoke
-// grenade.  Origin is pulled down 8 qu so the puffs hug the ground
-// instead of sinking through it.
+// Spawn a smoke-burst emitter at `pos`.  Does 3 bursts × 5 puffs over ~0.5 s.
+//
+// Was 6 bursts × 0.5 s feeding CSQC_SpawnSmokePuff — the SMOKE-GRENADE puff, which
+// delays up to 3.6 s and then lives 11-17 s.  An explosion was therefore still
+// smoking ~20 s later, which is a smoke grenade's job description and not a
+// detonation's.  Now three quick bursts of CSQC_SpawnExplosionSmokePuff
+// (sh_wpn_csgrenades.qc), whose puffs start at once and are gone in ~2 s, so the
+// whole effect clears in a little over two seconds.  The grenade is untouched.
+//
+// Origin is pulled down 8 qu so the puffs hug the ground instead of sinking
+// through it.
 void(vector pos) CSQC_EnvExplosionSpawnSmokeEmitter =
 {
     entity emit = spawn();
     emit.classname           = "env_explosion_smoke_emit";
     emit.ee_smoke_origin     = pos - '0 0 8';
-    emit.ee_remaining_bursts = 6;
+    emit.ee_remaining_bursts = 3;
     emit.think               = CSQC_EnvExplosionSmokeTick;
     emit.nextthink           = time;
 };

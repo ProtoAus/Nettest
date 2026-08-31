@@ -831,7 +831,12 @@ void(vector vang) makevectors = #1; /*
 void(entity e, vector o) setorigin = #2; /*
 		Changes e's origin to be equal to o. Also relinks collision state (as well as setting absmin+absmax), which is required after changing .solid */
 
-void(entity e, string m) setmodel = #3; /*
+// RENAMED for shared/sh_modellist.qc, which defines the QC function `setmodel`
+// that every caller in the tree binds to.  CSQC needs this as much as SSQC does:
+// the first-person viewmodel is set here and nowhere else
+// (cl_weapons.qc's setmodel(csqc_viewmodel_ent, ...)), and .weapon_viewmodel is
+// never networked, so a server-only remap would leave every gun stock.
+void(entity e, string m) setmodel_raw = #3; /*
 		Looks up m in the model precache list, and sets both e.model and e.modelindex to match. BSP models will set e.mins and e.maxs accordingly, other models depend upon the value of sv_gameplayfix_setmodelrealbox - for compatibility you should always call setsize after all pickups or non-bsp models. Also relinks collision state. */
 
 void(entity e, vector min, vector max) setsize = #4; /*
@@ -840,7 +845,12 @@ void(entity e, vector min, vector max) setsize = #4; /*
 float() random = #7; /*
 		Returns a random value between 0 and 1. Be warned, this builtin can return 1 in most engines, which can break arrays. */
 
-void(entity e, float chan, string samp, float vol, float atten, optional float speedpct, optional float flags, optional float timeofs) sound = #8; /*
+// RENAMED for shared/sh_soundlist_global.qc, which defines the QC function
+// `sound` that every caller in the tree binds to.  Sven's globalsoundlist needs
+// one chokepoint in front of every emitter; renaming the builtin here is that
+// chokepoint, at the cost of zero call-site edits.  Call _raw only from the
+// wrapper.
+void(entity e, float chan, string samp, float vol, float atten, optional float speedpct, optional float flags, optional float timeofs) sound_raw = #8; /*
 		Starts a sound centered upon the given entity.
 		chan is the entity sound channel to use, channel 0 will allow you to mix many samples at once, others will replace the old sample
 		'samp' must have been precached first
@@ -885,10 +895,14 @@ entity(entity start, .string fld, string match) find = #18; /*
 		Scan for the next entity with a given field set to the given 'match' value. start should be either world, or the previous entity that was found. Returns world on failure/if there are no more.
 		If you have many many entities then you may find that hashtables will give more performance (but requires extra upkeep). */
 
-string(string s) precache_sound = #19; /*
+// RENAMED - see the note on sound_raw above.  shared/sh_soundlist_global.qc owns
+// the name `precache_sound` now.
+string(string s) precache_sound_raw = #19; /*
 		Precaches a sound, making it known to clients and loading it from disk. This builtin (strongly) should be called during spawn functions. This builtin must be called for the sound before the sound builtin is called, or it might not even be heard. */
 
-string(string s) precache_model = #20; /*
+// RENAMED — see the note on setmodel_raw above.  shared/sh_modellist.qc owns
+// the name `precache_model` now; call _raw only from that wrapper.
+string(string s) precache_model_raw = #20; /*
 		Precaches a model, making it known to clients and loading it from disk if it has a .bsp extension. This builtin (strongly) should be called during spawn functions. This must be called for each model name before setmodel may use that model name.
 		Modelindicies precached in SSQC will always be positive. CSQC precaches will be negative if they are not also on the server. */
 
@@ -1074,7 +1088,10 @@ string(string s, ...) strzone = #118; /* Part of FRIK_FILE, FTE_STRINGS, ZQ_QC_S
 void(string s) strunzone = #119; /* Part of FRIK_FILE, FTE_STRINGS, ZQ_QC_STRINGS
 		Destroys a string that was allocated by strunzone. Further references to the string MAY crash the game. In FTE, this function became redundant and now does nothing. */
 
-void(string soundname, optional float channel, optional float volume) localsound = #177; /*
+// RENAMED - see sound_raw.  Every weapon in shared/weapons/*.qc plays its own
+// predicted shot through localsound, so leaving this one unwrapped would remap
+// the sound everyone else hears and not the one the shooter does.
+void(string soundname, optional float channel, optional float volume) localsound_raw = #177; /*
 		Plays a sound... locally... probably best not to call this from ssqc. Also disables reverb. */
 
 float(string modelname, optional float queryonly) getmodelindex = #200; /*

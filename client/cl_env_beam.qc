@@ -93,7 +93,29 @@ const float EBEAM_SUBDIV_NOISY  = 4;
 .float  eb_end_sprite_idx; // env_laser EndSprite modelindex (0 = none)
 .float  eb_active_last;    // for spark-burst trigger on rising edge
 
+// --- View-anchored start (Half-Life's `entindex | 0x1000` attachment beams) ---
+//
+// A sustained first-person beam CANNOT store its muzzle end as a world point.
+// Prediction runs at INPUT rate and stamps the point from the raw predicted
+// origin; the camera is rebuilt every RENDER frame from a further-advanced
+// origin plus CSQC_ApplyLocalSmoothOffset, plus camera bob and weight
+// (cl_main.qc:811-821).  So the stored point trails the eye by the smoothing
+// term and sits off-axis by the bob term, and the beam visibly follows the
+// player around instead of leaving the gun.  That is the reported egon lag.
+//
+// Half-Life never sends a muzzle coordinate at all: CEgon::CreateEffect uses
+// PointEntInit + SetEndAttachment(1) (egon.cpp:433-436) and the client uses
+// R_BeamEntPoint(idx | 0x1000, ...) (ev_hldm.cpp:1483), i.e. an
+// entity+attachment handle the engine re-evaluates every render frame.  Only
+// the far end is ever a world point.
+//
+// eb_view_ofs is that muzzle offset in CAMERA-LOCAL units (x=forward, y=right,
+// z=up) and is resolved against the live camera at the top of the predraw.
+.float  eb_view_anchor;    // 1 = eb_start_pos is derived from eb_view_ofs each frame
+.vector eb_view_ofs;       // camera-local muzzle offset (forward, right, up)
+
 float() CSQC_EnvBeam_Predraw;
+void() CSQC_EnvBeam_LocalExpire = { remove(self); };
 
 // Spawn a small spark burst at `pos`.  Re-uses the bullet-impact
 // metal-spark particle effect — registered + precached by the
@@ -182,6 +204,100 @@ void() CSQC_EnvBeam_Update =
     // via R_BeginPolygon.  Clear the model slot in case this CSQC entity
     // slot was previously used for something else.
     setmodel(self, "");
+};
+
+// ============================================================
+//  CLIENT-LOCAL BEAMS  —  the shooter's own half of a weapon beam
+// ============================================================
+//
+// Half-Life draws a firing player's gauss / egon beam TWICE, from two
+// different places.  The server's CBeams carry FL_SKIPLOCALHOST (egon.cpp), so
+// they never reach the player who fired; that client instead draws its own pair
+// in EV_EgonFire / EV_FireGauss (cl_dll/ev_hldm.cpp).  The point is latency: a
+// sustained beam swept across a room has to track the crosshair exactly, and a
+// networked one trails it by a round trip.
+//
+// This is the CSQC half.  It builds the SAME entity CSQC_EnvBeam_Update builds
+// from the wire and hands it to the SAME predraw, so the shooter's beam and the
+// observers' beam are the same renderer with the same numbers -- which is the
+// whole reason to do it here rather than with a particle approximation.  The
+// arguments are in the SERVER's units (rendercolor 0-255, renderamt 0-255,
+// BoltWidth and NoiseAmplitude in tenths, TextureScroll signed) so a weapon can
+// pass one set of constants to both sides and trust they match; the conversions
+// below are copied from the wire parse above and must stay in step with it.
+//
+// Pass `b` = an existing beam to refresh it in place (sustained fire), or world
+// to spawn one.  life > 0 self-removes after that long; life <= 0 means the
+// caller owns it and must call CSQC_EnvBeam_LocalKill.
+entity(entity b, vector from, vector to, float sprite_idx, vector col,
+       float bright, float width, float noise, float scroll, float life,
+       float end_sprite)
+    CSQC_EnvBeam_Local =
+{
+    if (!b || b == world)
+    {
+        b = spawn();
+        b.classname = "env_beam";
+        b.drawmask  = MASK_ENGINE;
+        b.predraw   = CSQC_EnvBeam_Predraw;
+        setmodel(b, "");
+    }
+
+    b.eb_netflags   = EBEAM_NET_ACTIVE_CL;
+    b.eb_start_pos  = from;
+    b.eb_end_pos    = to;
+    b.eb_sprite_idx = sprite_idx;
+    b.eb_color      = [bound(0, col_x, 255) / 255,
+                       bound(0, col_y, 255) / 255,
+                       bound(0, col_z, 255) / 255];
+    b.eb_brightness = bound(0, bright, 255) / 255;
+    b.eb_width      = bound(0, width, 255) * 0.1;
+    b.eb_noise      = bound(0, noise, 255) / 255;
+    b.eb_scroll     = scroll;
+    b.eb_framestart = 0;
+    b.eb_framerate  = 0;
+    b.eb_end_sprite_idx = end_sprite;
+    b.eb_active_last = EBEAM_NET_ACTIVE_CL;
+
+    // Midpoint origin, matching the networked path — the predraw fills the
+    // ribbon itself, but the origin is what the engine sorts and culls on.
+    setorigin(b, (from + to) * 0.5);
+
+    if (life > 0)
+    {
+        b.think     = CSQC_EnvBeam_LocalExpire;
+        b.nextthink = time + life;
+    }
+    else
+    {
+        // Dead-man timer: a sustained beam refreshes this every tick, so if the
+        // weapon is switched away, the player dies, or prediction simply stops
+        // calling us, the beam disappears on its own instead of hanging in the
+        // air for the rest of the map.
+        b.think     = CSQC_EnvBeam_LocalExpire;
+        b.nextthink = time + 0.3;
+    }
+    return b;
+};
+
+// Mark a local beam's START as camera-relative rather than a world point, so it
+// is re-resolved every render frame instead of every input frame.  `local_ofs` is
+// (forward, right, up) in camera space -- the same convention the muzzle-flash
+// sprite offsets use.  This is the port of HL's `entindex | 0x1000` attachment
+// beams; call it on any SUSTAINED first-person beam, and leave one-shot flashes
+// (the gauss) alone, where a stored point is correct and cheaper.
+void(entity b, vector local_ofs) CSQC_EnvBeam_LocalAnchorToView =
+{
+    if (!b || b == world)
+        return;
+    b.eb_view_anchor = 1;
+    b.eb_view_ofs    = local_ofs;
+};
+
+void(entity b) CSQC_EnvBeam_LocalKill =
+{
+    if (b && b != world)
+        remove(b);
 };
 
 // Resolve the shader to draw this beam's ribbon with.
@@ -341,6 +457,23 @@ float() CSQC_EnvBeam_Predraw =
 {
     if (!(self.eb_netflags & EBEAM_NET_ACTIVE_CL))
         return PREDRAW_NEXT;
+
+    // Re-derive a view-anchored muzzle against THIS frame's camera before any
+    // geometry is built — the whole point is that it is never a stored world
+    // point.  Done first so nothing below can observe the stale value, and the
+    // makevectors basis it needs is consumed immediately.  See eb_view_anchor.
+    if (self.eb_view_anchor)
+    {
+        vector cam_org = (vector)getproperty(VF_ORIGIN);
+        makevectors((vector)getproperty(VF_ANGLES));
+        self.eb_start_pos = cam_org
+                          + v_forward * self.eb_view_ofs_x
+                          + v_right   * self.eb_view_ofs_y
+                          + v_up      * self.eb_view_ofs_z;
+        // Keep the sort/cull origin in step with the ribbon it represents.
+        setorigin(self, (self.eb_start_pos + self.eb_end_pos) * 0.5);
+    }
+
     if (vlen(self.eb_end_pos - self.eb_start_pos) < 1)
         return PREDRAW_NEXT;
 
@@ -557,16 +690,95 @@ float() CSQC_EnvBeam_Predraw =
             view_right = v_right;
             view_up    = v_up;
 
-            float hs = 16;        // half-size in world units
+            // Scale with brightness, as HL does: EV_FireGauss sizes the impact
+            // glow by flDamage/255 (ev_hldm.cpp:1033), so a charged shot flares
+            // and a tap does not.  This was a fixed 16 regardless.
+            float hs = 16 * bound(0.5, self.eb_brightness / 255, 2.0);
             vector ep = self.eb_end_pos;
 
-            R_PolygonVertex(ep + view_right * -hs + view_up *  hs, '0 0 0', self.eb_color, self.eb_brightness);
-            R_PolygonVertex(ep + view_right *  hs + view_up *  hs, '1 0 0', self.eb_color, self.eb_brightness);
-            R_PolygonVertex(ep + view_right *  hs + view_up * -hs, '1 1 0', self.eb_color, self.eb_brightness);
-            R_PolygonVertex(ep + view_right * -hs + view_up * -hs, '0 1 0', self.eb_color, self.eb_brightness);
+            // UNTINTED, deliberately.  HL draws the impact glow with kRenderGlow
+            // at the sprite's own colour (ev_hldm.cpp:1011, :1033) — it is a hot
+            // white-yellow flare, not a coloured one.  Feeding eb_color in here
+            // stained the biggest bright area on screen with the beam's tint,
+            // which is what made the gauss read as "the wrong orange" even
+            // though the BEAM colour ('255 128 0') already matches the SDK.
+            vector glow_col = '1 1 1';
+
+            R_PolygonVertex(ep + view_right * -hs + view_up *  hs, '0 0 0', glow_col, self.eb_brightness);
+            R_PolygonVertex(ep + view_right *  hs + view_up *  hs, '1 0 0', glow_col, self.eb_brightness);
+            R_PolygonVertex(ep + view_right *  hs + view_up * -hs, '1 1 0', glow_col, self.eb_brightness);
+            R_PolygonVertex(ep + view_right * -hs + view_up * -hs, '0 1 0', glow_col, self.eb_brightness);
             R_EndPolygon();
         }
     }
 
     return PREDRAW_NEXT;
+};
+
+
+// ============================================================================
+//  RPG ROCKET FLARE  -  the sprite half of Half-Life's EF_LIGHT
+// ----------------------------------------------------------------------------
+//  const.h:110 names EF_LIGHT exactly: "rocket flare glow sprite".  rpg.cpp:201
+//  sets it in CRpgRocket::IgniteThink -- so it appears when the MOTOR LIGHTS,
+//  not at launch -- and rpg.cpp:304-307 clears it when the motor cuts out.
+//
+//  FTE does not implement the GoldSrc effects bits, so nothing drew it: the
+//  rocket flew as a bare model with only its smoke ribbon behind it, which is
+//  the "flickering sprite behind the rocket" that was missing.
+//
+//  IT LIVES HERE RATHER THAN IN cl_projectiles.qc for one mechanical reason:
+//  spriteframe() and the DRAWFLAG_* constants are declared in this file, and
+//  cl_projectiles.qc compiles BEFORE it (cl_progs.src :32 vs :34).  The dynamic
+//  light half stays there, where it needs nothing from here.  Between them they
+//  are EF_LIGHT: a glow sprite AND the light it casts.
+//
+//  The walk matches on .model so it catches BOTH copies -- the networked rocket
+//  everyone else sees and the shooter's own CSQC-local fake, which is a
+//  different entity with a different classname but necessarily the same model.
+//  Without that the person who fired would be the only one seeing no flare,
+//  which is the trap CSQC_Projectile_DrawLights documents at length.
+// ============================================================================
+void() CSQC_DrawRocketFlares =
+{
+    entity cur;
+    vector fview_right, fview_up, fp;
+    float flick, fhs;
+    string fl_shader;
+
+    fl_shader = spriteframe("sprites/glow01.spr", 0, time);
+    if (fl_shader == "" || !fl_shader)
+        fl_shader = "ebeam";
+
+    // Camera basis once for the whole walk -- every flare is screen-aligned to
+    // the same view, so re-deriving it per rocket would be pure waste.
+    makevectors(getproperty(VF_ANGLES));
+    fview_right = v_right;
+    fview_up    = v_up;
+
+    cur = nextent(world);
+    while (cur)
+    {
+        if (cur.model == "models/rpgrocket.mdl")
+        {
+            // Same flicker expression as the light in cl_projectiles.qc, keyed
+            // the same way, so the glow and the light pulse together instead of
+            // beating against each other.
+            flick = 0.82 + 0.18 * sin(cltime * 47 + num_for_edict(cur));
+            fhs   = 9 * flick;
+
+            // Behind the rocket along its own facing: the flare is exhaust, so
+            // it belongs at the tail, not at the centre of the model.
+            makevectors(cur.angles);
+            fp = cur.origin - v_forward * 12;
+
+            R_BeginPolygon(fl_shader, DRAWFLAG_ADD | DRAWFLAG_TWOSIDED);
+            R_PolygonVertex(fp + fview_right * -fhs + fview_up *  fhs, '0 0 0', '1 0.66 0.30', 1);
+            R_PolygonVertex(fp + fview_right *  fhs + fview_up *  fhs, '1 0 0', '1 0.66 0.30', 1);
+            R_PolygonVertex(fp + fview_right *  fhs + fview_up * -fhs, '1 1 0', '1 0.66 0.30', 1);
+            R_PolygonVertex(fp + fview_right * -fhs + fview_up * -fhs, '0 1 0', '1 0.66 0.30', 1);
+            R_EndPolygon();
+        }
+        cur = nextent(cur);
+    }
 };

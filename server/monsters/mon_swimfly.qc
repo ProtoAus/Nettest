@@ -48,21 +48,57 @@ const float CTRL_AE_SMALL_SHOOT   = 3;
 const float CTRL_AE_POWERUP_FULL  = 4;
 const float CTRL_AE_POWERUP_HALF  = 5;
 
+// Voice families, verified file-by-file against the mounts before they were
+// written down (scratchpad sndls.py) and against the SDK tables for WHICH members
+// Half-Life actually uses.  Both halves of that mattered here:
+//
+//   controller/con_fire1.wav and con_fire2.wav DO NOT EXIST, in valve, gearbox,
+//   svencoop or any loose directory.  They were in this file, precached (two
+//   failing slots at every map load) and played on every energy ball, which is why
+//   the controller's attack has always been silent.  The real family is
+//   con_attack1-3 (controller.cpp:119-121).
+//
+//   ichy/ichy_bite3.wav does not exist either, and the bite rolled 1..3 - so one
+//   ichthyosaur bite in three was silent.  Half-Life's pBiteSounds is two entries
+//   (ichthyosaur.cpp:167-171).
+//
+//   The ichthyosaur's pain, alert and death families all have HOLES that a %g roll
+//   would have fallen into: HL takes pain 2/3/5, alert 2/3 and die 2/4, skipping
+//   ichy_pain1, ichy_alert1, ichy_die1 and ichy_die3 - every one of which is on
+//   disk and none of which Valve uses.
+const string SND_LEECH_BITE  = "leech/leech_bite1.wav leech/leech_bite2.wav leech/leech_bite3.wav";
+const string SND_LEECH_ALERT = "leech/leech_alert1.wav leech/leech_alert2.wav";
+
+const string SND_ICKY_BITE   = "ichy/ichy_bite1.wav ichy/ichy_bite2.wav";
+const string SND_ICKY_IDLE   = "ichy/ichy_idle1.wav ichy/ichy_idle2.wav ichy/ichy_idle3.wav ichy/ichy_idle4.wav";
+const string SND_ICKY_ALERT  = "ichy/ichy_alert2.wav ichy/ichy_alert3.wav";
+const string SND_ICKY_PAIN   = "ichy/ichy_pain2.wav ichy/ichy_pain3.wav ichy/ichy_pain5.wav";
+const string SND_ICKY_DIE    = "ichy/ichy_die2.wav ichy/ichy_die4.wav";
+
+const string SND_CTRL_ATTACK = "controller/con_attack1.wav controller/con_attack2.wav controller/con_attack3.wav";
+const string SND_CTRL_IDLE   = "controller/con_idle1.wav controller/con_idle2.wav controller/con_idle3.wav controller/con_idle4.wav controller/con_idle5.wav";
+const string SND_CTRL_ALERT  = "controller/con_alert1.wav controller/con_alert2.wav controller/con_alert3.wav";
+const string SND_CTRL_PAIN   = "controller/con_pain1.wav controller/con_pain2.wav controller/con_pain3.wav";
+const string SND_CTRL_DIE    = "controller/con_die1.wav controller/con_die2.wav";
+
 void() SwimFly_Precache =
 {
 	precache_model("models/leech.mdl");
 	precache_model("models/icky.mdl");
 	precache_model("models/controller.mdl");
-	precache_sound("leech/leech_bite1.wav");
-	precache_sound("leech/leech_bite2.wav");
-	precache_sound("leech/leech_bite3.wav");
-	precache_sound("ichy/ichy_bite1.wav");
-	precache_sound("ichy/ichy_bite2.wav");
-	precache_sound("ichy/ichy_bite3.wav");
-	precache_sound("controller/con_fire1.wav");
-	precache_sound("controller/con_fire2.wav");
-	precache_sound("controller/con_die1.wav");
-	precache_sound("controller/con_pain1.wav");
+
+	AI_SndPrecache(SND_LEECH_BITE);
+	AI_SndPrecache(SND_LEECH_ALERT);
+	AI_SndPrecache(SND_ICKY_BITE);
+	AI_SndPrecache(SND_ICKY_IDLE);
+	AI_SndPrecache(SND_ICKY_ALERT);
+	AI_SndPrecache(SND_ICKY_PAIN);
+	AI_SndPrecache(SND_ICKY_DIE);
+	AI_SndPrecache(SND_CTRL_ATTACK);
+	AI_SndPrecache(SND_CTRL_IDLE);
+	AI_SndPrecache(SND_CTRL_ALERT);
+	AI_SndPrecache(SND_CTRL_PAIN);
+	AI_SndPrecache(SND_CTRL_DIE);
 };
 
 // ---------------------------------------------------------------------------
@@ -79,9 +115,12 @@ void() Leech_Event =
 	// A small hull: a leech is tiny and its bite should not reach past its body.
 	// Reach comes from ai_melee_range so the swing can never be shorter than the
 	// range that triggered it - the mismatch that cost the stukabat every hit.
+	// Picked from the family but emitted directly: the leech is the one class whose
+	// two families want different attenuations (bite ATTN_NORM, alert ATTN_NORM*0.5
+	// - leech.cpp:281 vs :289) and .ai_snd_atten is per-entity, not per-family.
 	if (AI_MeleeHull(self, self.ai_melee_range, d, 8) != world)
 		if (!self.gag)
-			sound(self, CHAN_WEAPON, sprintf("leech/leech_bite%g.wav", ceil(random() * 3)), 1, ATTN_NORM);
+			AI_Sound(self, CHAN_WEAPON, AI_SndPick(SND_LEECH_BITE), 1, ATTN_NORM);
 	self.ai_nextattack = time + 1.0;
 };
 
@@ -101,7 +140,15 @@ void(entity m) Leech_ClassInit =
 
 	m.ai_event = Leech_Event;
 
-	if (m.bloodcolor <= 0)
+	// HL gives the leech an alert voice and nothing else - no pain, no death
+	// (leech.cpp declares only pAttackSounds and pAlertSounds).  ATTN_NORM*0.5
+	// carries it 2500 units, which is deliberate: it is a warning to the player,
+	// not a noise the leech makes for itself.  PITCH_NORM, so no jitter.
+	m.ai_snd_alert = SND_LEECH_ALERT;
+	m.ai_snd_atten = ATTN_NORM * 0.5;
+	m.ai_snd_pitch = -1;
+
+	if (m.bloodcolor == 0)
 		m.bloodcolor = 195;
 };
 
@@ -117,8 +164,7 @@ void() Ichthyosaur_Event =
 	if (d <= 0)
 		d = 35;				// HL sk_ichthyosaur_shake - it hits hard
 	if (AI_MeleeHull(self, 90, d, 32) != world)
-		if (!self.gag)
-			sound(self, CHAN_WEAPON, sprintf("ichy/ichy_bite%g.wav", ceil(random() * 3)), 1, ATTN_NORM);
+		AI_SndPlay(self, CHAN_WEAPON, SND_ICKY_BITE);
 	self.ai_nextattack = time + 2.0;
 };
 
@@ -145,7 +191,16 @@ void(entity m) Ichthyosaur_ClassInit =
 
 	m.ai_event = Ichthyosaur_Event;
 
-	if (m.bloodcolor <= 0)
+	// EMIT_ICKY_SOUND (ichthyosaur.cpp:186-187) is the class's own emit macro:
+	// attenuation 0.6 and pitch 95-105 on every family.  0.6 reaches 1667 units,
+	// two thirds again as far as ATTN_NORM - it is a big animal in open water.
+	m.ai_snd_idle  = SND_ICKY_IDLE;
+	m.ai_snd_alert = SND_ICKY_ALERT;
+	m.ai_snd_pain  = SND_ICKY_PAIN;
+	m.ai_snd_die   = SND_ICKY_DIE;
+	m.ai_snd_atten = 0.6;
+
+	if (m.bloodcolor == 0)
 		m.bloodcolor = 195;
 };
 
@@ -163,14 +218,31 @@ void() Controller_Event =
 		// projectile sprite: it is an energy discharge and the beam already works.
 		if (self.ai_enemy)
 			AI_FireBeam(self, self.ai_enemy, HL_BEAM_EGON, d);
-		if (!self.gag)
-			sound(self, CHAN_WEAPON, sprintf("controller/con_fire%g.wav", ceil(random() * 2)), 1, ATTN_NORM);
+		// CHAN_VOICE, not CHAN_WEAPON: HL's AttackSound goes through the same
+		// EMIT_SOUND_ARRAY_DYN as its idle and alert lines (controller.cpp:254).
+		AI_SndPlay(self, CHAN_VOICE, SND_CTRL_ATTACK);
 		self.ai_nextattack = time + 2.0;
 		return;
 	}
-	// HEAD_OPEN and the two POWERUP codes are the charge-up beats.  HL hangs hand
-	// sprites off them; with no per-hand attachment exposed here they are
-	// deliberately no-ops rather than an invented approximation.
+	// HEAD_OPEN and the two POWERUP codes are the charge-up beats, and they were
+	// explicit no-ops: a controller winding up its attack showed nothing at all,
+	// so its one dangerous beat had no tell.
+	//
+	// HL hangs a per-HAND xspark4.spr off these (controller.cpp:851) and this
+	// port still has no per-hand attachment to hang anything on - that part of
+	// the old comment stands.  What it does have is a mouth point, and one
+	// charge glow at the head is a truthful approximation of two at the hands in
+	// a way that "nothing" is not.
+	//
+	// Yellow-orange, and that is measured: xspark4.spr's 256-entry palette runs
+	// (255,252,14) (226,197,9) (188,134,0) (151,80,0).  The controller reads as a
+	// blue creature and its energy is not blue.
+	if (ai_event_code == CTRL_AE_HEAD_OPEN
+	 || ai_event_code == CTRL_AE_POWERUP_FULL || ai_event_code == CTRL_AE_POWERUP_HALF)
+	{
+		AlienFX_Multicast(ALIENFX_CTRL_BALL, AlienFX_MouthPos(self, 10), '0 0 0');
+		return;
+	}
 };
 
 
@@ -184,6 +256,7 @@ float(entity m, float act) Controller_YawSpeed =
 void(entity m) Controller_ClassInit =
 {
 	m.ai_yawspeed   = Controller_YawSpeed;
+	m.ai_fov      = -1;		// VIEW_FIELD_FULL, controller.cpp:373
 	m.ai_class    = CLASS_ALIEN_MILITARY;
 	m.ai_movemode = AIMODE_FLY;
 
@@ -201,7 +274,16 @@ void(entity m) Controller_ClassInit =
 
 	m.ai_event = Controller_Event;
 
-	if (m.bloodcolor <= 0)
+	// Five idle lines, three alert, three pain, two death - all present in valve/,
+	// none of them reachable until now: this class had no pain hook and no death
+	// hook at all, and its two precached files were the only two names in the
+	// family that do not exist.
+	m.ai_snd_idle  = SND_CTRL_IDLE;
+	m.ai_snd_alert = SND_CTRL_ALERT;
+	m.ai_snd_pain  = SND_CTRL_PAIN;
+	m.ai_snd_die   = SND_CTRL_DIE;
+
+	if (m.bloodcolor == 0)
 		m.bloodcolor = 195;
 };
 

@@ -45,6 +45,21 @@ const float EXPL_NO_SMOKE    = 8;
 const float EXPL_NO_DECAL    = 16;
 const float EXPL_NO_SPARKS   = 32;
 
+// Split out of env_explosion's spawn function so a func_breakable carrying
+// `explodemagnitude` can precache the same assets at MAP LOAD.  Without that
+// the brush would only pull them in at the moment it breaks, which is a
+// late-precache warning at best.
+void() Explosion_Precache =
+{
+    // Sprite + decal textures are already precached by HE grenade / scorch
+    // wiring, but precache them defensively in case the map has neither
+    // grenades nor scorches.
+    precache_model("gfx/eexplo.spr");
+    precache_sound("sounds/weapons/wpn_cshegrenade/explode1.wav");
+    precache_sound("sounds/weapons/wpn_cshegrenade/explode2.wav");
+    precache_sound("sounds/weapons/wpn_cshegrenade/explode3.wav");
+};
+
 void() env_explosion_fire =
 {
     float magnitude = self.iMagnitude;
@@ -65,14 +80,51 @@ void() env_explosion_fire =
 
     // Server-side: radius damage if NO_DAMAGE not set.  Scaling is
     // tuned so the default magnitude=100 matches a HE grenade
-    // (radius 260, damage 100, falloff to 25 at the edge).  Push
-    // force / uplift mirror the HE values.
+    // (radius 260, damage 100, falloff to 25 at the edge).
     if (!(self.spawnflags & EXPL_NO_DAMAGE))
     {
         float radius = magnitude * 2.6;
         float damage = magnitude;
-        W_RadiusExplode(self.origin, radius, damage, damage * 0.25,
-                        800, 350, world);
+
+        // PULL THE BLAST CENTRE OUT OF THE SURFACE IT IS SITTING ON.
+        //
+        // A mapper drops an env_explosion ON a wall or floor, so its origin is
+        // flush with (or just inside) solid brushwork.  W_RadiusExplode traces
+        // from the blast centre to each victim, and a centre embedded in the
+        // world means the trace starts solid and every victim is reported as
+        // occluded — no damage, no push, for anybody.  Half-Life avoids this in
+        // CEnvExplosion::Spawn (dlls/explode.cpp:170-186), which fires a
+        // TraceLine straight down and, when it hits, lifts the entity to
+        // `tr.vecEndPos + (tr.vecPlaneNormal * (m_iMagnitude - 24) * 0.6)`.
+        //
+        // Same idea, kept simple and symmetric: step out along the surface
+        // normal of whatever we are touching.  8 units clears the epsilon that
+        // makes a flush trace start solid without moving the blast far enough
+        // to change who is in range.
+        vector centre = self.origin;
+        traceline(centre, centre - '0 0 24', TRUE, self);
+        if (trace_fraction < 1)
+            centre = trace_endpos + trace_plane_normal * 8;
+
+        // ATTACKER, NOT `world`.  ExplosionCreate already stores the entity
+        // that caused the blast in .owner (see below, and sv_breakable.qc's
+        // exploding func_breakable, which passes the breaking brush) — passing
+        // `world` here threw that away, so nothing could be credited, and any
+        // consumer of the attacker in the damage chain saw the world entity.
+        // Half-Life passes `pev` as both inflictor and attacker
+        // (dlls/explode.cpp:214).
+        entity blamed = self.owner;
+        if (!blamed) blamed = self;
+
+        W_RadiusExplode(centre, radius, damage, damage * 0.25,
+                        // Knockback scaled by magnitude rather than a flat
+                        // 800/350.  HL's blast impulse is proportional to the
+                        // damage actually dealt, so a magnitude-30 charge used
+                        // to shove exactly as hard as a magnitude-300 one.
+                        // The constants are the HE grenade's values at its own
+                        // magnitude of 100, so a default explosion is unchanged.
+                        800 * (magnitude / 100), 350 * (magnitude / 100),
+                        blamed);
     }
 
     // REPEATABLE off (default) — fire-and-forget; remove after the
@@ -101,12 +153,42 @@ void() env_explosion =
     self.solid    = SOLID_NOT;
     self.use      = env_explosion_use;
 
-    // Precache assets the CSQC handler will look up.  Sprite + decal
-    // textures are already precached by HE grenade / scorch wiring,
-    // but precache them defensively in case env_explosion is on a map
-    // without grenades or scorches yet.
-    precache_model("gfx/eexplo.spr");
-    precache_sound("sounds/weapons/wpn_cshegrenade/explode1.wav");
-    precache_sound("sounds/weapons/wpn_cshegrenade/explode2.wav");
-    precache_sound("sounds/weapons/wpn_cshegrenade/explode3.wav");
+    Explosion_Precache();
+};
+
+// ===========================================================================
+//  ExplosionCreate — HL's explode.cpp:258, for code that needs to detonate
+//  something without a mapper-placed env_explosion.
+// ===========================================================================
+//
+// The SDK spawns a real env_explosion at the point, feeds it an iMagnitude and
+// immediately Use()s it, which is exactly what this does — same entity, same
+// fire path, so a breakable's blast and a mapper's env_explosion cannot drift
+// apart.  Callers earlier in sv_progs.src than this file reach it by
+// forward-declaring the FUNCTION (fields cannot be forward-declared, which is
+// why .explodemagnitude lives in sv_customdefs.qc).
+//
+// The caller is responsible for having called Explosion_Precache() at map load
+// — creating the entity here would otherwise precache mid-game.
+// `expl_owner`, not `owner`: QC has ONE namespace for fields, locals and
+// parameters, so a parameter called `owner` shadows the .owner FIELD and
+// `e.owner = owner` fails to compile with "owner is not a field".
+void(vector center, float magnitude, entity expl_owner) ExplosionCreate =
+{
+    entity e = spawn();
+    e.classname  = "env_explosion";
+    e.origin     = center;
+    e.iMagnitude = magnitude;
+    e.owner      = expl_owner;
+    e.movetype   = MOVETYPE_NONE;
+    e.solid      = SOLID_NOT;
+    setorigin(e, center);
+
+    // Fire it directly rather than through .use: env_explosion_fire reads
+    // `self`, and it removes itself afterwards (REPEATABLE is not set here,
+    // matching ExplosionCreate's fire-and-forget contract).
+    entity oself = self;
+    self = e;
+    env_explosion_fire();
+    self = oself;
 };

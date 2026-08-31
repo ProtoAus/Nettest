@@ -53,8 +53,21 @@ const float KNIFE_SEQ_MIDSLASH2 = 7;
 // interrupts the current slash visual (SH_KnifeTrySlash no longer requires
 // WS_IDLE, only a passed attack_finished cooldown).
 //
-// Tune these to match the v_knife.mdl sequence lengths. Count frames in
-// the .qc source and divide by the sequence's fps if they look off.
+// FALLBACKS ONLY.  These were eyeballed rather than read, and the slash was the
+// one that showed: measured out of the model this weapon actually ships with
+// (models/weapons/wpn_csknife/v_knife.mdl, the mod's own — svencoop does not
+// enter into this one, it has no v_knife under that path),
+//
+//     draw       1.022      was 1.03    ok
+//     slash x4   1.200      was 0.84    <- CUT AT 70 %
+//     stab       1.314      was 1.22    cut at 93 %
+//     stab_miss  1.525      was 1.22    cut at 80 %
+//
+// so the swing snapped back to idle before the blade finished travelling.  The
+// COOLDOWNS below are untouched: a re-slash is still allowed at 0.35 s and
+// interrupts the visual, which is what SH_KnifeTrySlash's comment describes, and
+// neither SH_StandardTryFire nor SH_StandardTryReload gate on WS_FIRE — so a
+// longer animation window costs no rate.
 const float KNIFE_DRAW_DURATION    = 1.03;
 const float KNIFE_FIRE_DURATION    = 0.84;
 const float KNIFE_SPECIAL_DURATION = 1.22;
@@ -76,7 +89,7 @@ const float KNIFE_STAB_MISS_TIME   = 0.30;
 const float KNIFE_DRAW_SOUND_TIME  = 0.15;
 
 const string KNIFE_VIEWMODEL    = "models/weapons/wpn_csknife/v_knife.mdl";
-const string KNIFE_WORLDMODEL   = "models/weapons/wpn_csknife/w_knife.mdl";
+const string KNIFE_WORLDMODEL   = "models/w_knife.mdl";
 // Left empty on purpose. CSQC_PredictSelectWeapon plays weapon_deploy_sound
 // IMMEDIATELY on weapon switch — but W_KnifeFrame plays the same deploy
 // sound at elapsed >= KNIFE_DRAW_SOUND_TIME, which is the in-anim
@@ -91,6 +104,13 @@ const string KNIFE_DISPLAY_NAME = "KNIFE";
 // the server authoritative for hits, the CSQC one only for sound dedup.
 .float knife_snd_stage;
 
+// Which stab variant this swing is playing: 1 = the connecting `stab`, 0 = the
+// longer `stab_miss`.  LATCHED at the press on both sides.  It used to be
+// re-traced from the LIVE view angles on every render frame, so turning during a
+// stab swapped the take mid-animation; and the two takes are different lengths
+// (1.314 s against 1.525 s), so the state duration needs one stable answer.
+.float knife_stab_hit;
+
 // ============================================================
 //  SHARED — sequence-pick helpers
 // ============================================================
@@ -104,6 +124,28 @@ float() SH_KnifePickSlashSeq =
     if (r < 0.50) return KNIFE_SEQ_SLASH2;
     if (r < 0.75) return KNIFE_SEQ_MIDSLASH1;
     return KNIFE_SEQ_MIDSLASH2;
+};
+
+// Which take the stab is playing, and how long it is — both off the latch, so
+// the state and the render agree for the whole swing.
+float() SH_KnifeStabSeq =
+{
+    return self.knife_stab_hit ? KNIFE_SEQ_STAB : KNIFE_SEQ_STAB_MISS;
+};
+
+float() SH_KnifeDrawDuration =
+{
+    return SH_SeqDuration(KNIFE_VIEWMODEL, KNIFE_SEQ_DRAW, KNIFE_DRAW_DURATION);
+};
+float() SH_KnifeSlashDuration =
+{
+    // All four slash takes are the same length on this model; asking for the one
+    // this swing picked keeps that from being an assumption.
+    return SH_SeqDuration(KNIFE_VIEWMODEL, SH_KnifePickSlashSeq(), KNIFE_FIRE_DURATION);
+};
+float() SH_KnifeStabDuration =
+{
+    return SH_SeqDuration(KNIFE_VIEWMODEL, SH_KnifeStabSeq(), KNIFE_SPECIAL_DURATION);
 };
 
 // ============================================================
@@ -122,7 +164,7 @@ float(float now) SH_KnifeTickState =
 
     if (self.weaponstate == WS_DRAW)
     {
-        if (elapsed >= KNIFE_DRAW_DURATION)
+        if (elapsed >= SH_KnifeDrawDuration())
         {
             SH_WeaponEnterIdle();
             return 1;
@@ -132,7 +174,7 @@ float(float now) SH_KnifeTickState =
 
     if (self.weaponstate == WS_FIRE)
     {
-        if (elapsed >= KNIFE_FIRE_DURATION)
+        if (elapsed >= SH_KnifeSlashDuration())
         {
             SH_WeaponEnterIdle();
             return 1;
@@ -142,7 +184,7 @@ float(float now) SH_KnifeTickState =
 
     if (self.weaponstate == WS_SPECIAL)
     {
-        if (elapsed >= KNIFE_SPECIAL_DURATION)
+        if (elapsed >= SH_KnifeStabDuration())
         {
             SH_WeaponEnterIdle();
             return 1;
@@ -255,14 +297,14 @@ void() W_KnifeDrop =
     entity tgt = weapon_drop_target;
 
     // Knife has no ammo; nothing to transfer. Run the same
-    // model+hull setup the map-spawn weapon_knife() uses so the
+    // model+hull setup the map-spawn weapon_csknife() uses so the
     // dropped pickup is identical to one placed by the mapper.
     entity oldself = self;
     self = tgt;
     W_KnifeSetupWorldEntity('-16 -16 0', '16 16 48');
     self = oldself;
 
-    tgt.classname    = "weapon_knife";
+    tgt.classname    = "weapon_csknife";
     tgt.solid        = SOLID_NOT;       // weapon_become_solid flips after grace
     tgt.movetype     = MOVETYPE_TOSS;
     tgt.weapon       = WEP_KNIFE;
@@ -331,7 +373,7 @@ float() W_KnifeAltFireWouldHit =
     makevectors(self.v_angle);
     src = self.origin + self.view_ofs;
     end = src + (v_forward * KNIFE_STAB_RANGE);
-    W_WeaponTraceLine(src, end);
+    W_MeleeTrace(src, end);     // line, then HL's head-hull fallback
 
     return trace_fraction < 1.0;
 };
@@ -344,7 +386,7 @@ float(float attack_range, float damage) W_KnifeTraceAttack =
     makevectors(self.v_angle);
     src = self.origin + self.view_ofs;
     end = src + (v_forward * attack_range);
-    W_WeaponTraceLine(src, end);
+    W_MeleeTrace(src, end);     // line, then HL's head-hull fallback
 
     if (trace_fraction >= 1.0)
         return FALSE;
@@ -438,13 +480,14 @@ void() W_KnifeAltFire =
         return;
 
     // Pick stab or stab_miss sequence based on whether the trace would
-    // connect. Client mirrors the same trace in CSQC_KnifeDisplayFrame
-    // and CSQC_PredictKnifeCommand so both pick the same variant + sound.
+    // connect, and LATCH it — the client mirrors the same trace once, at the
+    // press, in CSQC_PredictKnifeCommand.  Both display paths then read the
+    // latch instead of re-tracing per frame, so turning mid-stab can no longer
+    // swap the take (and the two takes are different lengths, so the state
+    // duration needs the latch too — SH_KnifeStabDuration).
     float would_hit = W_KnifeAltFireWouldHit();
-    if (would_hit)
-        self.weaponframe = KNIFE_SEQ_STAB;
-    else
-        self.weaponframe = KNIFE_SEQ_STAB_MISS;
+    self.knife_stab_hit = would_hit;
+    self.weaponframe    = SH_KnifeStabSeq();
 
     self.wep_nextframe = time + KNIFE_FRAME_INTERVAL;
     self.knife_snd_stage = 0;
@@ -513,11 +556,19 @@ void() W_KnifeFrame =
     }
 };
 
-// World entity — spawned from map (classname "weapon_knife")
-void() weapon_knife =
+// World entity — spawned from map (classname "weapon_csknife")
+//
+// RENAMED FROM weapon_knife.  gearbox's combat knife is ALSO `weapon_knife`,
+// and a GoldSrc map placing that classname means Opposing Force's knife, not
+// Counter-Strike's — so sh_wpn_opknife.qc took the GoldSrc name and this one
+// moved aside.  Nothing regresses for CS play: this knife is handed out by
+// loadout, buy menu and debug spawn, none of which go through a classname, and
+// `weapon_knife` remains a manifest ALIAS pointing here for any string lookup
+// that still uses the old spelling.
+void() weapon_csknife =
 {
     W_KnifeSetupWorldEntity('-16 -16 0', '16 16 48');
-    self.classname   = "weapon_knife";
+    self.classname   = "weapon_csknife";
     self.solid       = SOLID_TRIGGER;
     self.movetype    = MOVETYPE_TOSS;
     self.weapon      = WEP_KNIFE;
@@ -526,7 +577,7 @@ void() weapon_knife =
     self.weap_drop_func = W_KnifeDrop;
     self.pickupcopy  = W_KnifePickupCopy;
     self.touch       = weapon_touch;
-    W_RegisterMapWeapon(weapon_knife);
+    W_RegisterMapWeapon(weapon_csknife);
 };
 
 #endif // SSQC
@@ -596,18 +647,21 @@ void() CSQC_PredictKnifeCommand =
         if (SH_KnifeTryStab(csqc_pred_time))
         {
             CSQC_MarkPendingWeaponAck();
+
+            // Mirror the server's W_KnifeAltFireWouldHit trace ONCE, at the
+            // press, and latch it — the display path reads the latch rather
+            // than re-tracing every render frame off the live view angles.
+            // Uses input_angles (predicted_player doesn't carry v_angle on CSQC).
+            vector stab_src, stab_end;
+            makevectors(input_angles);
+            stab_src = predicted_player.origin + predicted_player.view_ofs;
+            stab_end = stab_src + (v_forward * KNIFE_STAB_RANGE);
+            CSQC_WeaponTraceLine(stab_src, stab_end, MOVE_NORMAL | MOVE_HITMODEL, predicted_player);
+            self.knife_stab_hit = (trace_fraction < 1.0);
+
             if (!pm_suppress_sounds)
             {
-                // Mirror the server's W_KnifeAltFireWouldHit trace so the
-                // client picks the same hit/miss sound variant. uses
-                // input_angles (predicted_player doesn't carry v_angle on CSQC).
-                vector stab_src, stab_end;
-                makevectors(input_angles);
-                stab_src = predicted_player.origin + predicted_player.view_ofs;
-                stab_end = stab_src + (v_forward * KNIFE_STAB_RANGE);
-                CSQC_WeaponTraceLine(stab_src, stab_end, MOVE_NORMAL | MOVE_HITMODEL, predicted_player);
-
-                if (trace_fraction < 1.0)
+                if (self.knife_stab_hit)
                     localsound("sounds/weapons/wpn_csknife/stab.wav");
                 else
                     localsound("sounds/weapons/wpn_csknife/slash.wav");
@@ -670,12 +724,13 @@ void() CSQC_PredictKnifeCommand =
         }
         else if (self.weaponstate == WS_SPECIAL)
         {
-            // Stab vs stab_miss have different hit-detection moments;
-            // predicted_player.weaponframe holds the server-authoritative
-            // stab variant picked at alt-fire time.
+            // Stab vs stab_miss have different hit-detection moments.  Read off
+            // the same latch the display and the state duration use, so all
+            // three agree for the whole swing — .weaponframe is the server's
+            // copy and arrives a round trip late.
             attack_range  = KNIFE_STAB_RANGE;
             attack_damage = KNIFE_STAB_DAMAGE;
-            if (predicted_player.weaponframe == KNIFE_SEQ_STAB)
+            if (self.knife_stab_hit)
                 hit_time = KNIFE_STAB_HIT_TIME;
             else
                 hit_time = KNIFE_STAB_MISS_TIME;
@@ -704,7 +759,12 @@ void() CSQC_PredictKnifeCommand =
                     else
                         localsound("sounds/weapons/wpn_csknife/hit2.wav");
                 }
-                else
+                // A MONSTER GETS NEITHER, tested for explicitly because this
+                // weapon passes empty sounds to the helper and does its own pick,
+                // which bypasses the helper's monster branch.  Without it a swing
+                // that only clipped a zombie's bounding box played the stone
+                // hitwall sample — the exact defect that branch exists to prevent.
+                else if (trace_ent.classname != "csqc_monster_proxy")
                 {
                     localsound("sounds/weapons/wpn_csknife/hitwall.wav");
                 }
@@ -748,19 +808,12 @@ float(float elapsed) CSQC_KnifeDisplayFrame =
 
     if (predicted_player.weaponstate == WS_SPECIAL)
     {
-        // Mirror the server's would-hit trace so client picks the same
-        // stab variant. Uses input_angles (current CSQC input's view
-        // direction) since the predicted_player proxy doesn't carry
-        // v_angle on CSQC.
-        vector src, end;
-        makevectors(input_angles);
-        src = predicted_player.origin + predicted_player.view_ofs;
-        end = src + (v_forward * KNIFE_STAB_RANGE);
-        CSQC_WeaponTraceLine(src, end, MOVE_NORMAL | MOVE_HITMODEL, predicted_player);
-
-        if (trace_fraction < 1.0)
-            return KNIFE_SEQ_STAB;
-        return KNIFE_SEQ_STAB_MISS;
+        // The latch, not a fresh trace.  This used to re-run the would-hit trace
+        // from the LIVE view angles on every render frame, so turning away from
+        // (or onto) a wall part-way through a stab swapped `stab` for
+        // `stab_miss` mid-swing — two takes with different poses AND different
+        // lengths.  CSQC_PredictKnifeCommand now traces once, at the press.
+        return predicted_player.knife_stab_hit ? KNIFE_SEQ_STAB : KNIFE_SEQ_STAB_MISS;
     }
 
     // Idle fallback (wep_anim_start > 0 but state is none of the above).

@@ -10,6 +10,96 @@
 .float fly_sound;       // bounce sound counter for casings
 .float shell_delay;     // debounce timer for touch sounds
 .float shell_deadline;  // force-settle if not grounded by this time
+.float shell_serial;    // ring-slot identity, so eviction can't free a recycled edict
+.float shell_slot;      // 1-based ring index, so 0 reads as "not tracked"
+
+// ------------------------------------------------------------
+//  Population cap
+//
+//  EJECTA HAD NO CAP AND A ~30 SECOND LIFETIME (up to 10 s bouncing, then 20 s
+//  lying there), which is fine for a pistol and is not fine for a belt-fed MG:
+//  the MG42's fire delay is 0.050, so a held trigger put 20 shadow-casting,
+//  physics-ticking alias entities on screen PER SECOND and kept every one of them
+//  for half a minute.  Each is a visedict every frame and, under r_shadows 2, a
+//  shadow caster the engine pays a world traceline plus three cascade re-draws
+//  for.  That is the "the weapon drops my fps massively when firing" report.
+//
+//  A ring, not a scan: eviction is O(1) and the cap is exact.  The serial guards
+//  the case where the edict was already freed and reused by something else — the
+//  slot only frees an entity that is still the one it recorded.
+const float CSQC_EJECTA_RING = 64;      // ceiling; cl_ejecta_max clamps below it
+entity csqc_ejecta_ring  [CSQC_EJECTA_RING];
+float  csqc_ejecta_serial[CSQC_EJECTA_RING];
+float  csqc_ejecta_next;
+float  csqc_ejecta_seq;
+
+void(entity e) CSQC_EjectaTrack =
+{
+    float cap = cvar("cl_ejecta_max");
+    if (cap <= 0)                 return;              // 0 = uncapped (the old behaviour)
+    if (cap > CSQC_EJECTA_RING)   cap = CSQC_EJECTA_RING;
+
+    if (csqc_ejecta_next >= cap)
+        csqc_ejecta_next = 0;
+
+    entity old = csqc_ejecta_ring[csqc_ejecta_next];
+    if (old != world && old.shell_serial == csqc_ejecta_serial[csqc_ejecta_next])
+    {
+        // Leaving the ring by OUR hand, so drop its back-reference first —
+        // otherwise the untrack below could later clear a slot that has since
+        // been handed to a different casing.
+        old.shell_slot   = 0;
+        old.shell_serial = 0;
+        remove(old);
+    }
+
+    csqc_ejecta_seq = csqc_ejecta_seq + 1;
+    e.shell_serial  = csqc_ejecta_seq;
+    e.shell_slot    = csqc_ejecta_next + 1;
+    csqc_ejecta_ring  [csqc_ejecta_next] = e;
+    csqc_ejecta_serial[csqc_ejecta_next] = csqc_ejecta_seq;
+    csqc_ejecta_next = csqc_ejecta_next + 1;
+};
+
+// A TRACKED CASING CAN DIE WITHOUT THE RING KNOWING, and that was the whole bug:
+//
+//     csqc deprecation warning: Tried removing free entity
+//     client/cl_shells.qc:46: CSQC_EjectaTrack
+//     client/cl_shells.qc:236: CSQC_SpawnAccessory
+//     ...
+//
+// reported from the MP44 and again from the DoD autos.  It is not a weapon bug at
+// all — the two stacks differ only in which weapon happened to be firing, and the
+// fault is here, in the shared tracker every ejecting weapon goes through.
+//
+// Two paths free an ejecta entity behind the ring's back: CSQC_ShellExpire (the
+// 20 s lifetime, which EVERY casing eventually reaches) and CSQC_ShellsWipeAll
+// (round restart).  The serial guard in CSQC_EjectaTrack does not catch either,
+// because a freed edict keeps its field values until something reuses it — so
+// `old.shell_serial == csqc_ejecta_serial[slot]` still compares equal on an
+// entity that is already gone, and the remove() lands on free memory.
+//
+// It is not a rare race either.  Fire cl_ejecta_max shots spread over more than
+// the 20 s lifetime and the ring MUST wrap onto a slot whose casing has already
+// expired.  That is ordinary sustained fire, which is why two different weapons
+// produced it within a session.
+//
+// Fixed at both ends.  The entity remembers its own slot, so a self-inflicted
+// death clears it in O(1); and the serial is zeroed on the way out, so even a
+// removal path nobody added an untrack to cannot match a stale slot again.
+void(entity e) CSQC_EjectaUntrack =
+{
+    float slot = e.shell_slot - 1;      // stored 1-based; 0 means untracked
+    if (slot >= 0 && slot < CSQC_EJECTA_RING
+        && csqc_ejecta_ring[slot] == e
+        && csqc_ejecta_serial[slot] == e.shell_serial)
+    {
+        csqc_ejecta_ring  [slot] = world;
+        csqc_ejecta_serial[slot] = 0;
+    }
+    e.shell_slot   = 0;
+    e.shell_serial = 0;
+};
 
 // ------------------------------------------------------------
 //  Model lookup by shell/mag type
@@ -124,6 +214,7 @@ void() CSQC_ShellTouch =
 
 void() CSQC_ShellExpire =
 {
+    CSQC_EjectaUntrack(self);   // or the ring evicts this edict again in 20 s
     remove(self);
 };
 
@@ -183,7 +274,16 @@ void(string mdl, vector origin_offset, vector base_velocity, vector velocity_jit
     // multiplies the per-mesh dlight loop cost (gl_alias.c:1515-1559)
     // for zero visual gain.  EF_FULLBRIGHT early-outs that loop entirely.
     accessory.effects |= EF_FULLBRIGHT;
+    // AND OUT OF THE SHADOW-CASTER SET.  EF_FULLBRIGHT only skips the per-mesh
+    // dlight relight loop; it says nothing to r_shadows, which under mode 2
+    // pays a world traceline and three cascade re-draws PER CASTER PER FRAME
+    // with no distance reject (gl_shadow.c caster loop).  RF_NOSHADOW is the
+    // first flag that loop tests, so this removes all of it in one line — the
+    // same escape the explosion sprite takes in cl_bulletimpact.qc for the same
+    // reason.  A 3-inch brass case casting a cascade shadow buys nothing.
+    accessory.renderflags |= RF_NOSHADOW;
     setsize(accessory, '0 0 0', '0 0 0');
+    CSQC_EjectaTrack(accessory);
 
     accessory_origin = self.origin + self.view_ofs
         + (v_forward * origin_offset_x)
@@ -252,9 +352,13 @@ void(string mdl, vector org, vector vel, vector avel, float move_type, float lif
     accessory.shell_delay = time + 0.05;
     accessory.shell_deadline = time + 10;
     accessory.drawmask = MASK_ENGINE;
-    // See CSQC_SpawnAccessory — skip dlight mesh-relight for ejecta.
+    // See CSQC_SpawnAccessory — skip dlight mesh-relight AND shadow casting for
+    // ejecta, and count it against the same population cap.  Remote casings come
+    // from other players' fire, so an MG nest of three bots is three belts.
     accessory.effects |= EF_FULLBRIGHT;
+    accessory.renderflags |= RF_NOSHADOW;
     setsize(accessory, '0 0 0', '0 0 0');
+    CSQC_EjectaTrack(accessory);
 
     setorigin(accessory, org);
     accessory.velocity = vel;
@@ -289,9 +393,26 @@ void() CSQC_ShellsWipeAll =
     {
         next = nextent(e);
         if (e.classname == "csqc_debris")
+        {
+            e.shell_slot   = 0;
+            e.shell_serial = 0;
             remove(e);
+        }
         e = next;
     }
+
+    // The ring was pointing at a good number of those.  Untracking one at a time
+    // would work, but the sweep above also takes breakable gibs and impact chips
+    // (cl_breakable.qc, cl_bulletimpact.qc share the csqc_debris classname and are
+    // NOT ring-tracked), so clearing the ring outright is both cheaper and the only
+    // version that cannot leave a straggler.
+    float i;
+    for (i = 0; i < CSQC_EJECTA_RING; i = i + 1)
+    {
+        csqc_ejecta_ring  [i] = world;
+        csqc_ejecta_serial[i] = 0;
+    }
+    csqc_ejecta_next = 0;
 };
 
 // ------------------------------------------------------------

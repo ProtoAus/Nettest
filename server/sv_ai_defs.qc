@@ -296,11 +296,61 @@ const int COND_FRIEND_DAMAGED      = 8192;
 const int COND_IN_SCRIPT           = 16384;
 const int COND_NO_PATH             = 32768;
 const int COND_ENEMY_FACING_ME     = 65536;
+// A DANGER sound - HL's bits_SOUND_DANGER, the one that makes a squad scatter when
+// a grenade lands among them.  Distinct from COND_HEAR_SOUND because the response is
+// opposite: a heard gunshot makes a monster look TOWARDS it, a danger sound makes it
+// run AWAY.  Nothing in this tree emitted one, which is why grenades have always
+// been free damage against anything that was not already moving.
+const int COND_HEAR_DANGER         = 131072;
+// The player is shoving me out of the way.  CTalkMonster::Touch sets this when a
+// player with more than 50 u/s of horizontal speed walks into a talker
+// (talkmonster.cpp:876-896), and it is the ONLY input that makes an ally step
+// aside - "you should be able to bump into a scientist to move them around" is
+// the reported symptom of it not existing.
+const int COND_CLIENT_PUSH         = 262144;
 
 // Interrupt masks worth naming once rather than re-deriving per schedule.
 const int COND_DAMAGE              = 48;	// LIGHT|HEAVY
 const int COND_ATTACK_READY        = 192;	// CAN_MELEE1|CAN_RANGE1
 const int COND_LOST_ENEMY          = 14;	// ENEMY_DEAD|OCCLUDED|TOOFAR
+
+// ---------------------------------------------------------------------------
+// world-sound TYPES  —  Half-Life's bits_SOUND_*, soundent.h:23-30
+// ---------------------------------------------------------------------------
+// A NOISE WITHOUT A TYPE IS THE SAME NOISE AS EVERY OTHER NOISE, and that single
+// omission is the whole of "the scientists gently follow me around and don't care
+// when I shoot".  Both symptoms are one bug seen from two ends:
+//
+//   * A footstep and a gunshot arrived here as the same event, so AI_HeardNoise
+//     promoted MS_IDLE -> MS_ALERT for either, and the ALERT ladder handed out
+//     SCHED_INVESTIGATE_SOUND - a WALK to wherever the player was standing.  Every
+//     0.35s of walking re-aimed it.  That is not following; it is a scientist
+//     repeatedly setting off to look at your feet.
+//
+//   * ...and the reverse: nothing could ask "was that a GUN", so the cower that
+//     Half-Life gates on exactly that question could not be written at all.
+//
+// Half-Life filters twice and both halves matter.  CBaseMonster::Listen
+// (monsters.cpp:211-217) ANDs the monster's own ISoundMask with the mask of the
+// SCHEDULE it is currently running - `iMySounds &= m_pSchedule->iSoundMask` - and
+// the SDK's comment on that line is "!!!WATCH THIS SPOT IF YOU ARE HAVING SOUND
+// RELATED BUGS!  Make sure your schedule AND personal sound masks agree!".
+//
+// The values are Half-Life's own, unshifted, so the SDK reads across 1:1.
+const int SND_COMBAT   = 1;	// gunshots, explosions
+const int SND_WORLD    = 2;	// doors, breaking glass
+const int SND_PLAYER   = 4;	// footsteps, splashing - anything the player emits
+const int SND_CARCASS  = 8;	// unused here; kept so the bit numbering stays HL's
+const int SND_MEAT     = 16;	// ditto
+const int SND_DANGER   = 32;	// a grenade about to go off
+
+// What a monster listens for when its class says nothing.  CBaseMonster::ISoundMask
+// (monsters.cpp) is "all sounds, no scents", and CScientist::ISoundMask
+// (scientist.cpp:791-796) is WORLD|COMBAT|DANGER|PLAYER - the same set.  Read
+// through AI_SoundMaskNow so an unset .ai_soundmask means "the default", not
+// "deaf": a zero mask fails every & test, and defaulting it per class would have
+// meant editing 20 spawn functions to keep the status quo.
+const int SND_DEFAULT  = 39;	// COMBAT|WORLD|PLAYER|DANGER
 
 // ---------------------------------------------------------------------------
 // classification  (Half-Life CLASS_*, consumed from the map's `classify` key)
@@ -350,6 +400,136 @@ const float CLASS_ALIEN_BIOWEAPON  = 13;
 .float  ai_nextflinch;		// flinch rate limit, so sustained fire cannot stunlock
 .float  ai_dead_done;		// death schedule has finished; the corpse may stop thinking
 
+// WHERE AND FROM WHAT DIRECTION THE LAST HIT LANDED.  Half-Life's m_LastHitGroup
+// (monsters.h) and g_vecAttackDir (globals.cpp:34), which between them are the
+// entire input to GetDeathActivity and GetSmallFlinchActivity - the two functions
+// that decide a monster falls forward when shot in the back, clutches its head
+// when shot in the head, and grabs the arm that was hit.  Neither existed here,
+// which is why every monster in the game died the same way from every angle.
+//
+// The hitgroup is COPIED off .death_hitgroup rather than re-derived: the weapon
+// layer already resolves a hitgroup per bullet (W_BoneToHitgroup and the OBB
+// fallback, sh_weapon_logic.qc:560-670) and stamps it on the victim before
+// calling W_ApplyDamage, so re-tracing here would be a second, differently-wrong
+// answer to a question already answered.
+//
+// PER-HIT, NOT STICKY, and that is a deliberate divergence.  .death_hitgroup is
+// written by the eleven paths that KNOW a hitgroup and by nobody else, while
+// W_ApplyDamage has 63 callers - doors, lasers, radius blasts, debug commands.
+// Left sticky (which is what Half-Life does: m_LastHitGroup is only ever written
+// in TraceAttack) a monster shot once in the head and later crushed by a door
+// plays the headshot death.  AI_ConsumeHit resets it, so a path that does not
+// stamp reads HITGROUP_GENERIC - which is precisely what GENERIC means to both
+// of the pickers: "no region, use the direction".
+.float  ai_lasthitgroup;	// HITGROUP_*, valid only for the hit being processed
+.vector ai_attackdir;		// unit vector from the victim's centre TOWARD the inflictor
+// The activity the last death or flinch pick RESOLVED to, latched at the moment
+// the task ran.  A latch rather than reading .ai_activity afterwards, because a
+// flinch is over in about half a second: any test that samples the field later is
+// racing the animation and would report "generic flinch" for a monster that had
+// already gone back to idle.  Read by sv_ai_deathtest and by `cmd ai_hurt`.
+.float  ai_dbg_hitact;
+
+// ---------------------------------------------------------------------------
+// the gargantua's flame
+// ---------------------------------------------------------------------------
+// Declared here rather than in mon_bigfoes.qc because sv_ai_sched.qc builds the
+// schedule that carries the duration and compiles long before any class file.
+//
+// Numbers are Half-Life's own: GARG_FLAME_LENGTH 330 (gargantua.cpp:55),
+// GARG_ATTACKDIST 80 (:37), the 0.8 facing dot and the 6-second cooldown
+// (:938-946, :1092), and the 4.5-second sweep (:401).
+const float GARG_FLAME_LENGTH  = 330;
+const float GARG_FLAME_MINDIST = 80;	// closer than this and it slashes instead
+const float GARG_FLAME_DOT     = 0.8;	// must be facing the enemy this squarely
+const float GARG_FLAME_SECONDS = 4.5;	// how long one sweep burns
+const float GARG_FLAME_COOLDOWN = 6;	// before it may flame again
+
+// HL's m_seeTime, the STOMP's gate.  Two things write it: the stomp event pushes it
+// 12 seconds out, and PrescheduleThink resets it to time + 5 on every think where
+// the gargantua cannot see its enemy (gargantua.cpp:693-703).  So a gargantua needs
+// five continuous seconds of line-of-sight before its first stomp and twelve between
+// them, which is most of the difference between a boss you can outmanoeuvre and one
+// that shockwaves you every four seconds.  Same shape as ai_flametime above.
+.float ai_seetime;
+.float  ai_flametime;		// earliest time this gargantua may flame again
+
+// ---------------------------------------------------------------------------
+// squads  (Half-Life CSquadMonster, squadmonster.h / squadmonster.cpp)
+// ---------------------------------------------------------------------------
+// Nothing here had a QC equivalent, and the tell was that COND_FRIEND_DAMAGED
+// (above) had exactly one reference tree-wide: its own declaration.  Three
+// behaviours fall out of the absence, and all three are things players notice
+// without being able to name:
+//
+//   grunts never call out, so a squad only knows about you one man at a time;
+//   grunts all fire at once, because nothing rations who may engage;
+//   houndeyes never form the pack, so their blast is stuck on the solo colour.
+//
+// A CHAIN, not Half-Life's five handles.  m_hSquadMember[4] plus the
+// "MySquadMember(4) returns the leader" trick exists because the C++ side needed
+// a fixed-size save/restore block; a QC entity chain has neither constraint, and
+// the cap is enforced on the way in instead.  The leader is the HEAD of its own
+// chain, so "walk the squad" is one loop with no special case for the leader.
+.entity ai_squad_leader;	// self if leader, world if not in a squad
+.entity ai_squad_next;		// next member along the leader's chain
+.float  ai_squad_tried;		// recruitment has been attempted (once per monster)
+
+// The attack slots, which are what stop a squad firing as one animal.  Held on
+// the LEADER as a bitfield; each member remembers which single bit it took.
+// squadmonster.h:22-48 exactly, because the bit layout is per-family and a class
+// asking for the wrong pair would silently share a slot with another species.
+.int    ai_squad_slots;		// leader only: which bits are taken
+.int    ai_slot;		// this monster's bit, or SQSLOT_NONE
+
+const int SQSLOT_NONE            = 0;
+const int SQSLOT_ENGAGE1         = 1;
+const int SQSLOT_ENGAGE2         = 2;
+const int SQSLOTS_ENGAGE         = 3;
+const int SQSLOT_GRENADE1        = 4;
+const int SQSLOT_GRENADE2        = 8;
+const int SQSLOTS_GRENADE        = 12;
+const int SQSLOT_AGRUNT_HORNET1  = 16;
+const int SQSLOT_AGRUNT_HORNET2  = 32;
+const int SQSLOT_AGRUNT_CHASE    = 64;
+const int SQSLOTS_AGRUNT_HORNET  = 48;
+const int SQSLOT_HOUND_ATTACK1   = 128;
+const int SQSLOT_HOUND_ATTACK2   = 256;
+const int SQSLOT_HOUND_ATTACK3   = 512;
+const int SQSLOTS_HOUND_ATTACK   = 896;
+// squadmonster.h:47.  When the squad is not all fighting the same enemy the
+// slot system is DISABLED rather than enforced - otherwise a member whose enemy
+// is nobody else's can be locked out of attacking by slots that have nothing to
+// do with its fight.
+const int SQSLOT_SQUAD_SPLIT     = 1024;
+const float SQUAD_NUM_SLOTS    = 11;	// squadmonster.h:49
+
+const float SQUAD_MAX_MEMBERS  = 5;	// squadmonster.h:51, leader included
+const float SQUAD_RECRUIT_DIST = 1024;	// hgrunt.cpp / houndeye.cpp StartMonster
+
+// Which slots a class wants for its ranged attack.  0 means "this class has no
+// slot discipline" - most do not, and giving every monster slots would make a
+// pair of headcrabs take turns, which is not a behaviour Half-Life has.
+.int    ai_slots_attack;
+
+// ---------------------------------------------------------------------------
+// take cover  (sv_ai_cover.qc)
+// ---------------------------------------------------------------------------
+// TASK_FIND_COVER_ENEMY has two successful outcomes that finish differently: a
+// sidestep is a LOCAL move and is ready at once, a nav-node relocation has a
+// path request in flight and must be waited on.  The task cannot tell them apart
+// from its opcode, so the finder records which it was.
+.float  ai_coverwait;		// TRUE while a cover path request is outstanding
+// When this monster may next go looking.  A search that finds nothing is not
+// free - it is a gather plus up to COVER_TRACE_MAX tracelines - and a monster
+// standing in an open room under fire would otherwise run one every time it
+// re-selected, for as long as the fight lasted.
+.float  ai_covernext;
+.vector ai_dangerpos;		// where the danger sound came from - cover is taken FROM this
+.float  ai_danger_until;	// how long that position stays the thing worth fleeing
+.vector ai_soundpos;		// where the last heard noise was, for going to look at it
+.float  ai_investigate_next;	// rate limit on leaving a post to investigate
+
 .float  ai_activity;		// ACT_* currently playing
 .string ai_seqname;		// ...or the sequence NAME, for models with no activity tags
 .float  ai_seq;			// resolved sequence index for it
@@ -360,6 +540,20 @@ const float CLASS_ALIEN_BIOWEAPON  = 13;
 
 .float  ai_yaw_ideal;		// desired facing; turned toward at ai_yaw_speed
 .float  ai_yaw_speed;
+// When AI_ChangeYaw last actually rotated this monster.  Half-Life's
+// m_flLastYawTime, and here for the same reason: ChangeYaw is called from two
+// places in a tick - inside AI_MoveAlongPath right after the ideal is computed,
+// and again after the schedule for monsters that turn without moving - and the
+// rotation must not stack.  The second call of a frame finds zero elapsed and
+// returns without moving anything.
+.float  ai_yawtime;
+// Throttle for the `sv_ai_debug 2` blocked-step diagnostic in AI_StepToward.
+.float  ai_dbg_blockgripe;
+// The floor under ai_nextpath that a route-less monster may NOT skip.  ai_nextpath
+// is the ordinary courtesy throttle and a monster with no path at all is allowed
+// past it; this one is set only by a real failure (queue full, goal unreachable)
+// and is what keeps that exemption from becoming a retry storm.
+.float  ai_nextpath_hard;
 
 .float  ai_lastseen;		// time the enemy was last visible
 .vector ai_lastseenpos;		// where it was then, for search behaviour
@@ -370,6 +564,16 @@ const float CLASS_ALIEN_BIOWEAPON  = 13;
 .float  ai_stuck;		// consecutive decision ticks that made no progress
 .vector ai_lastorg;		// origin at the previous tick, for the stuck test
 .float  ai_avoidside;	// latched corner-avoidance side: 0 none, +1 left, -1 right
+// Expiry stamp for a straight-line move granted by AI_LocalMoveClear, i.e. the
+// case Half-Life's BuildRoute returns on before it ever consults the node graph.
+// While this is in the future AI_MoveAlongPath walks at ai_goalpos and ignores
+// any stored route entirely.  See the block above AI_LocalMoveClear.
+.float  ai_directmove;
+// ...and the bar on being granted another one, set when a route ends BLOCKED.
+// AI_LocalMoveClear traces MOVE_NOMONSTERS, so the one obstruction it cannot
+// see is another monster; without a bar, a monster blocked by a squadmate is
+// re-granted the same still-"clear" line every 0.25s forever.
+.float  ai_nodirect;
 .float  ai_turnticks;	// consecutive ticks spent turning without ever stepping
 
 // Per-ACTIVITY turn rate, Half-Life's CBaseMonster::SetYawSpeed.
@@ -469,10 +673,40 @@ const float AIMODE_STATIC = 3;	// bolted down: turrets, barnacles, tripmines
 const float SF_MON_WAIT_TILL_SEEN  = 1;
 const float SF_MON_GAG             = 2;		// silent until provoked
 const float SF_MON_MONSTERCLIP     = 4;
-const float SF_MON_PRISONER        = 16;	// never fights, never targeted
+const float SF_MON_PRISONER        = 16;	// never fights, never targeted; latched into .ai_prisoner
+// Bit 32 belongs to squadmonster.h, not monsters.h - CSquadMonster::StartMonster
+// (squadmonster.cpp:415-435) reads it as "this one is allowed to form the squad".
+// A monster that names a squad in `netname` but does NOT carry it recruits nobody
+// and waits to be recruited; without the gate every member tried to lead.
+const float SF_SQUADMONSTER_LEADER = 32;
 const float SF_MON_WAIT_FOR_SCRIPT = 128;	// inert until a scripted_sequence takes it
 const float SF_MON_PRE_DISASTER    = 256;	// pre-cascade: passive, will not follow
 const float SF_MON_FADE_CORPSE     = 512;
+
+// monster_generic ONLY, and it collides with SF_MONSTER_MONSTERCLIP on every
+// other class - genericmonster.cpp:25 reuses bit 4 for its own meaning, which is
+// why it is named after its class rather than filed with the shared flags above.
+// 94 of the corpus's 166 placements set it.
+const float SF_GENERICMONSTER_NOTSOLID = 4;
+
+// SF_MON_PRISONER, decoded once at spawn.  AI_ValidEnemy asks this per candidate
+// per tick and a spawnflag decode there would be the same answer computed a few
+// hundred times a second.
+.float ai_prisoner;
+
+// Set by AI_Spawn when the body cannot be stood anywhere.  The caller keeps an
+// unplaced map-placed monster as an inert prop (its targetname may anchor a
+// chain), but squadmaker removes its own and retries next interval - which it can
+// only decide if it is told, and the FALSE return never reached it through
+// Monster_Build.
+.float ai_placefail;
+
+// The inverse switch: set by Monster_Spawn from the maker's spawn_mode 2, "Force
+// spawn, never block" (sven-coop.fgd:5451).  AI_Spawn keeps a body that failed
+// placement instead of stripping it to an inert prop, so the maker books a slot
+// and the wave arrives even when the spawn point is occupied.  22 of
+// pizza_ya_san1's 97 makers ask for this.
+.float ai_forceplace;
 
 // ---------------------------------------------------------------------------
 // scripted_sequence possession  (server/sv_scripted.qc)
@@ -504,6 +738,12 @@ const float SCRIPTST_PLAY = 4;	// playing m_iszPlay
 .float  ai_scriptstate;		// SCRIPTST_*
 .float  ai_scriptgo;		// the script has been told to play; wake up and do it
 .float  ai_scriptretry;		// re-paths spent trying to reach the current mark
+// Latched TRUE the first time a scripted_sequence hands this monster back
+// (Script_Release).  It exists so "still waiting for its script" can be asked as
+// a question: SF_MON_WAIT_FOR_SCRIPT is a spawnflag and is never cleared, and
+// .ai_script is world both BEFORE a script claims the actor and AFTER it lets go,
+// so neither of them can tell those two states apart on its own.
+.float  ai_script_played;
 
 // Sven Co-op's arrival tolerance at a script mark (157 uses corpus-wide).  It is
 // a scripted_sequence KEY and belongs with the rest of them in sv_scripted.qc,
@@ -511,6 +751,33 @@ const float SCRIPTST_PLAY = 4;	// playing m_iszPlay
 // which compiles first - so the declaration has to be here or the interpreter
 // cannot see the field.
 .float  moveto_radius;
+
+// ---------------------------------------------------------------------------
+// world-sound hearing  (server/sv_ai_core.qc)
+// ---------------------------------------------------------------------------
+// .ai_soundmask is HL's ISoundMask - the TYPES this class cares about.  Left 0 by
+// every class today, which AI_SoundMaskNow reads as SND_DEFAULT; a class that
+// wants to be deaf to something sets its own.
+//
+// .ai_soundtype is HL's PBestSound()->m_iType: the type of the noise currently
+// sitting in .ai_soundpos.  Recorded at the same instant as the position, because
+// the two are one fact and the schedule picker has to ask about both - "walk over
+// and look" is right for a gunshot and wrong for a footstep, and until this field
+// existed the picker could not tell them apart.
+.int    ai_soundmask;
+.int    ai_soundtype;
+
+// Where the player was standing when they shoved me.  TASK_GET_PATH_AWAY needs a
+// threat POSITION for its cover fallback and cannot use .ai_enemy, because the
+// whole point of COND_CLIENT_PUSH is that the person in the way is a friend.
+.vector ai_pushpos;
+
+// Cower rate-limit.  CScientist::GetSchedule (scientist.cpp:948-953) refuses to
+// duck again within 3 seconds of the last time - `m_fearTime` - so a firefight
+// nearby startles a scientist once rather than pinning him in a crouch loop for
+// its duration.  It is also stamped on SEEING the enemy, which is what stops him
+// ducking at the gun that is already pointed at him.
+.float  ai_feartime;
 
 // ---------------------------------------------------------------------------
 // CTalkMonster state  (server/sv_ai_talk.qc)
@@ -531,6 +798,32 @@ const float SCRIPTST_PLAY = 4;	// playing m_iszPlay
 // because HL allies follow the specific person who asked, not "the players".
 .entity ai_follow;
 .float  ai_followsay;		// rate limit on the follow/wait acknowledgement
+.float  ai_enemy_since;		// time this engagement began; HL's bits_COND_NEW_ENEMY
+
+// --- CScientist's syringe (scientist.cpp:1080-1100) -------------------------
+// m_healTime: absolute time before which CanHeal refuses.  HL sets it to
+// time+60 only on a heal that actually LANDED, never on one refused for range,
+// which is what lets a scientist keep chasing a hurt player instead of going on
+// cooldown for a near miss.
+.float  ai_healtime;
+// Who the needle is for.  HL has no separate field - it heals m_hTargetEnt, the
+// person being escorted, because in HL a scientist only ever heals someone who
+// asked him to follow.  We seat this separately so the far more common case in
+// this corpus (a hurt player walks up to a scientist who is not escorting
+// anybody) also works; when an escort IS in progress it holds ai_follow and the
+// behaviour is Half-Life's.  See Scientist_CanHeal.
+.entity ai_healtarget;
+
+// --- Sven guard_ent / freeroam (see AI_WantsToGuard / AI_WantsToRoam) --------
+// The RESOLVED guard goal.  Resolved lazily rather than at spawn, because the
+// thing being guarded frequently does not exist yet when the guard does:
+// desertcircle creates every one of its guard objects at runtime with
+// trigger_createentity, after the first wave of grunts has already spawned.
+.entity ai_guard;
+.float  ai_guard_next;		// re-resolve throttle; a missing goal is the common case
+.float  ai_guard_retry;		// backoff after a guard walk that never arrived
+.vector ai_roam_goal;		// current wander destination (world coords)
+.float  ai_roam_next;		// earliest time a new wander leg may be picked
 
 .float  ai_movemode;		// AIMODE_*; 0 is GROUND, so the default needs no help
 .float  ai_flyheight;		// FLY: wanted clearance under the hull, 0 = keep placement height
@@ -538,6 +831,26 @@ const float SCRIPTST_PLAY = 4;	// playing m_iszPlay
 // --- per-class data, filled in by the class init ---
 .float  ai_melee_range;
 .float  ai_range_range;
+// FIELD OF VIEW, as a dot threshold against the monster's own forward - Half-Life's
+// m_flFieldOfView, and the whole thing was missing.  AI_CanSee is a bare line of
+// sight, so a monster could ACQUIRE a target standing directly behind it: not blind,
+// omniscient, with no blind side to flank and no way to sneak past anything.
+//
+// 0.5 is CBaseMonster's default (60 degrees off centre, 120 total).  0 means 360 and
+// is right for things with eyes all round or no eyes at all.  Read ONLY on
+// acquisition, never on tracking or shooting - HL's Look() tests FInViewCone &&
+// FVisible while FVisible alone has no cone, so once a monster has you it keeps you.
+.float  ai_fov;
+// Per-class acquisition range, 0 = "use the global sv_ai_sight".
+//
+// sv_ai_sight is one number for every monster in the game, and for most of them
+// that is right - HL's own default is 1024 and the classes cluster around it.
+// It is badly wrong for the small ones.  CRoach::Look is a 150-unit sphere
+// (roach.cpp:425-430), so a Half-Life cockroach only notices you when you are
+// almost on top of it; ours noticed at 2048 and spent the entire map in a
+// permanent panic, which is what "are they supposed to run away from the player?"
+// was actually asking about.
+.float  ai_sight;
 .float  ai_spread;		// hitscan cone, HL's vecSpread (sine of the half-angle)
 .float  ai_dmg_scale;		// size scale for rescaled variants (babygarg vs gargantua)
 .float  ai_speed_walk;
@@ -637,6 +950,18 @@ float ai_dbg_shots_assassin;
 // rather than one per signature.
 .float() ai_selectsched;	// conditions -> SCHED_*; 0 means "use the generic pick"
 .void()  ai_checkattack;	// veto COND_CAN_MELEE1/RANGE1 the generic gather just set
+// Half-Life's CBaseMonster::TakeDamage override, as a virtual: the last chance to
+// change or refuse an incoming hit BEFORE it is subtracted from health.  It has to
+// run before rather than after, which is what .on_damaged (AI_Damaged) cannot do -
+// that hook only fires once the health is already gone, and only while the target
+// still has some, so nothing installed there can stop a killing blow.
+//
+// The gonarch is the first caller and the reason it exists: she is unkillable
+// until she has finished walking her info_bigmomma chain, so a fatal hit has to be
+// cut down to leave her at 1 health and advance a stage instead.  Returns the
+// damage to actually apply.  Unset means "apply it unchanged", so this costs one
+// null test per hit for every monster that has no opinion.
+.float(entity m, float damage, float dmgbits) ai_damagefilter;
 // Unconditional per-decision-tick hook, for behaviour that is not an attack and
 // not driven by an anim event.  ai_checkattack cannot serve this purpose: it only
 // runs when COND_ATTACK_READY is already set, which requires a non-zero attack
@@ -649,6 +974,52 @@ float ai_dbg_shots_assassin;
 .void()  ai_idlesound;
 .void()  ai_alertsound;
 .void()  ai_painsound;		// rate-limited by AI_Damaged, not by the class
+// The same four voices as DATA rather than as code.  A family is a space-separated
+// list of complete sound paths; AI_SndPlay picks one, AI_SndPrecache walks the
+// identical string.  Each is consulted only when the matching .void() virtual is
+// unset, so no existing class changes behaviour.
+//
+// Two things this buys that a per-class sprintf("...%g...", ceil(random()*n))
+// cannot:
+//
+//   FAMILIES HAVE GAPS.  Half-Life's ichthyosaur takes pain 2, 3 and 5; the
+//   gonarch takes 2, 4 and 5; the islave takes alert 1, 3 and 4.  Every %g
+//   formulation is an unwritten claim that the family runs 1..n unbroken, and the
+//   audit that produced these fields found four places where that claim is false
+//   and the missing file has never existed in any mount: ichy_bite3, gon_pain3,
+//   con_fire1 and con_fire2.
+//
+//   ONE STRING PRECACHES AND PLAYS.  Precached-but-never-played and
+//   played-but-never-precached are the two failure modes of a hand-maintained
+//   sound list, and both of them are present in this tree today.  Sharing the
+//   literal makes them unrepresentable rather than merely detectable.
+.string ai_snd_pain;
+.string ai_snd_die;
+.string ai_snd_idle;
+.string ai_snd_alert;
+// Two more families, owned by the CLASS rather than by the AI core: nothing here
+// plays them, the class's own event handler does.  They exist as fields instead of
+// as constants because a class can arrive wearing either of two rigs - a pitdrone
+// without Opposing Force mounted is a bullsquid, and it must not ask for a
+// gearbox-only sample it has no file for.  Same reasoning as .ai_seqfor.
+.string ai_snd_shoot;
+.string ai_snd_melee;
+// The two knobs Half-Life's per-class emit macros vary.  0 means HL's own default
+// for that knob: ATTN_NORM, and +/-5 of pitch jitter.  The ichthyosaur overrides
+// the attenuation to 0.6 and the leech its alert to 0.4 - both engines cut a
+// sound off at 1000/attenuation units, so those numbers carry across unchanged.
+// A negative ai_snd_pitch means no jitter at all.
+.float  ai_snd_atten;
+.float  ai_snd_pitch;
+// A looping sample the class started at spawn - the apache's rotor is the first,
+// the turret's spin loop is the obvious second.  Held on the entity so AI_Died can
+// stop it: SOUNDFLAG_FORCELOOP runs until something replaces it on that entity
+// channel, and a wrecked helicopter still beating its rotor is a worse bug than a
+// silent one.  Stopping is a re-emit at volume 0, this codebase's existing idiom
+// (AmbientGeneric_Stop, sv_ambient_generic.qc:464-477).
+.string ai_snd_loop;
+.float  ai_snd_loopchan;
+.float  ai_snd_loopatten;	// 0 = ATTN_NORM
 .void()  ai_event;		// anim event fired; reads ai_event_code / ai_event_data
 // The gun report, split out from the event handler because the RIG and the WEAPON
 // are independent: strooper.mdl shares the hgrunt's entire event vocabulary and
@@ -670,4 +1041,94 @@ string ai_event_data;
 float  ai_cached_enable;
 float  ai_cached_sight;
 float  ai_cached_debug;
+float  ai_cached_arcturns;	// sv_ai_arcturns: travel along the BODY, not the wanted heading
 float  ai_cached_forcemode;	// sv_ai_forcemode: debug override of ai_movemode
+float  ai_cached_engageslots;	// sv_ai_engageslots: shooters per squad, 2 == HL
+
+// ---------------------------------------------------------------------------
+// info_bigmomma
+// ---------------------------------------------------------------------------
+// The gonarch's patrol nodes (bigmomma.cpp:33-96, CInfoBM).  DECLARED HERE, not
+// in the file that spawns them: the spawn function belongs with the other HL
+// point entities in server/sv_hl_entities.qc, which compiles at :356 - long
+// AFTER monsters/mon_bosses.qc at :292, where the walk that READS these keys
+// lives.  Fields have to precede both, and sv_ai_defs.qc at :29 is the only
+// place that satisfies that for the AI layer.
+//
+// FIVE OF THE SIX ARE HL's OWN KEY NAMES SPELLED STRAIGHT.  Half-Life overloads
+// stock entvars for all of them - radius onto pev->scale, reachdelay onto
+// pev->speed, reachtarget onto pev->message, reachsequence onto pev->netname -
+// because CInfoBM has nowhere else to put them.  We are not short of fields, and
+// an overload here would be actively dangerous: .scale is the RENDER scale in
+// this engine and .speed is read by half the brush entities.  Every name below
+// was checked to be free tree-wide before it was taken.
+// .radius IS SHARED, and was already declared before this patch: sv_env_sound.qc
+// re-declares it at :9 for env_sound's own reverb radius, and
+// ScriptedSentence_Speaker reads it as the search radius for the 342 corpus
+// scripted_sentences that set the key.  Three unrelated classes, one field name,
+// because "radius" is what all three spell it in the BSP - which is fine (no
+// entity is two of these at once) but is worth stating, since the alternative
+// reading is that one of them has quietly taken another's data.  This
+// declaration is simply the EARLIEST: sv_env_sound.qc compiles at :202 and the
+// gonarch's walk needs the field by :292.
+.float  radius;			// arrival tolerance; HL's pev->scale
+.float  reachdelay;		// seconds to hold at the node; HL's pev->speed
+.string reachtarget;		// fired on arrival; HL's pev->message
+.string reachsequence;		// played at the node; HL's pev->netname
+.string presequence;		// played BEFORE setting off for the node
+
+// Runtime state for the walk.  HL keeps the first in pev->netname on the MONSTER
+// (which is why a map seeds the chain by putting the first node's name in the
+// gonarch's own netname key) and the rest in private members and memory bits.
+.string ai_bm_next;		// name of the node to head for next
+.entity ai_bm_node;		// the node currently being worked; HL's m_hTargetEnt
+.float  ai_bm_mem;		// BMMEM_* below; HL's bits_MEMORY_*
+.float  ai_bm_nodetime;		// earliest re-attempt after a failed leg; m_nodeTime
+
+const float BMMEM_ADVANCE   = 1;	// bits_MEMORY_ADVANCE_NODE: move on
+const float BMMEM_FIRED     = 2;	// bits_MEMORY_FIRED_NODE: reachtarget already went
+const float BMMEM_FINISHED  = 4;	// bits_MEMORY_PATH_FINISHED: no node left
+// bits_MEMORY_COMPLETED_NODE.  SET AND NEVER READ, here and in Half-Life alike -
+// the SDK has exactly two references to it, its own #define and the one Remember()
+// in TakeDamage (bigmomma.cpp:163, :594).  Kept because it costs a bit in a field
+// that already exists and it is the only record of WHY a stage ended; dropping it
+// would make the next reader wonder what the SDK's fourth memory bit did.
+const float BMMEM_COMPLETED = 8;	// health gate satisfied, rather than timed out
+
+const float SF_INFOBM_RUN   = 1;	// run rather than walk to this node
+const float SF_INFOBM_WAIT  = 2;	// hold here until something else moves her on
+
+// Sven's "Max Attack Range" (sven-coop.fgd:4597 and two siblings), default 1200.
+// 202 corpus uses over 31 maps, and it is overwhelmingly a TURRET key -
+// monster_miniturret 116, monster_sentry 44, monster_turret 32, squadmaker 10 -
+// because a turret's reach is the one thing a mapper genuinely needs to tune per
+// placement: the same model guards a corridor and an open yard.  186 of the 202
+// write 1200, which is the default and therefore a no-op; the ones that matter
+// are the 8 at 3000, the 6 at 1600 and the 2 at 4000.
+.float  attackrange;
+
+// ---------------------------------------------------------------------------
+//  Deferred ground placement — HL's MonsterInit / StartMonster split
+//
+//  Half-Life never drops a monster to the floor inside its own spawn function.
+//  MonsterInit arms a think (monsters.cpp:2047-2048) and StartMonster does the
+//  DROP_TO_FLOOR afterwards (monsters.cpp:2085-2089), so by the time anything
+//  asks what is underneath a monster, every brush entity in the map exists.
+//
+//  Doing it during the lump parse means a monster standing on a func_wall that
+//  appears LATER in the .bsp falls straight through it — measured on
+//  th_ep1_03's raft (func_wall entity #266 under monster_otis entity #26) and
+//  again on th_ep1_04.  Corpus-wide, a few hundred map-placed monsters stand on
+//  a brush entity with a higher entity index.
+// ---------------------------------------------------------------------------
+
+// Set on a map-placed GROUND body whose drop was deferred; consumed once by
+// AI_DeferredPlacePass.
+.float  ai_needplace;
+
+// TRUE only while ED_LoadFromFile is still reading the map's entity lump.
+// Raised by worldspawn (which is entity 0, so it always spawns first) and
+// cleared by AI_DeferredPlacePass at time+0.001 — so a monster created at
+// RUNTIME, by a squadmaker or the console, still places immediately and
+// synchronously, which is what the squadmaker's .ai_placefail retry needs.
+float   ai_lump_parsing;

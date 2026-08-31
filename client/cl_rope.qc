@@ -40,6 +40,46 @@ const string ROPE_SHADER_BODY =
     "  }\n"
     "}\n";
 
+// The barnacle grapple's tongue is NOT this rope.  Opposing Force draws it with
+// sprites/tongue.spr, which is mounted (steam:Half-Life/gearbox) and was simply
+// never referenced -- the grapple was borrowing the generic rope PNG, which is
+// what "the tongue is the default rope, not the actual correct texture" means.
+//
+// It uses the sprite's ORDINARY shader, not the additive "_beam" ribbon variant
+// the HL energy beams use.  Checked against the file rather than assumed:
+// tongue.spr is texFormat 0 (SPR_NORMAL) and its 64x32 frame is 0% palette-index
+// 255 and 0% near-black — solid, full-bleed art with no transparency of any
+// kind.  Drawing that additively adds its own dark tones to the background
+// instead of covering it, which is why the first attempt came out washed out and
+// see-through.  A tongue is meat, not light.
+//
+// It also does NOT tile: sprite frames are uploaded IF_CLAMP, so a U beyond 1
+// would smear the last column rather than repeat.  One stretched span suits an
+// elastic tongue anyway.
+const string ROPE_TONGUE_SPRITE = "sprites/tongue.spr";
+string rope_tongue_shader;      // resolved on first use; "" until then
+
+string() Rope_TongueShader =
+{
+    if (rope_tongue_shader != "")
+        return rope_tongue_shader;
+
+    // getmodelindex first: spriteframe() needs the sprite LOADED, and the
+    // queryonly form tells us whether it is without forcing a load on a client
+    // that never got the precache.
+    if (getmodelindex(ROPE_TONGUE_SPRITE, TRUE) == 0)
+        return "";              // not precached / not mounted — caller falls back
+
+    // spriteframe takes the model NAME, not an index, and returns "" for a
+    // non-sprite or an out-of-range frame.
+    string frame_shader = spriteframe(ROPE_TONGUE_SPRITE, 0, 0);
+    if (frame_shader == "")
+        return "";
+
+    rope_tongue_shader = frame_shader;
+    return rope_tongue_shader;
+};
+
 // Width + tile rate are runtime-tunable so the user can dial the rope's
 // look without rebuilding.  Defaults (1.5 / 16) match a 187×32 rope.png
 // rendered ~3 u thick with a roughly natural texture aspect.
@@ -70,7 +110,8 @@ const vector ROPE_REMOTE_WAIST = '0 0 6';
 //  Draw one rope segment (waist -> tip) as a screen-facing tiled
 //  textured quad.  Shared by the local and remote rope paths.
 // ----------------------------------------------------------------
-void(vector p_waist, vector p_tip) Rope_DrawSegment =
+// `use_tongue` picks the barnacle grapple's own art over the generic rope.
+void(vector p_waist, vector p_tip, float use_tongue) Rope_DrawSegment =
 {
     vector dir = p_tip - p_waist;
     float  len = vlen(dir);
@@ -127,7 +168,17 @@ void(vector p_waist, vector p_tip) Rope_DrawSegment =
     //   p2p (anchor, edge2)→ U=u_tile,   V=1
     //   p2n (anchor, edge1)→ U=u_tile,   V=0
     vector colour = '1 1 1';
-    R_BeginPolygon(ROPE_SHADER, 0, 0);
+    string shader = ROPE_SHADER;
+    if (use_tongue)
+    {
+        string t = Rope_TongueShader();
+        if (t != "")
+        {
+            shader = t;
+            u_tile = 1;   // clamped sprite frame — stretch, don't repeat
+        }
+    }
+    R_BeginPolygon(shader, 0, 0);
     R_PolygonVertex(p1n, '0 0 0',         colour, 1);
     R_PolygonVertex(p1p, '0 1 0',         colour, 1);
     R_PolygonVertex(p2p, [u_tile, 1, 0],  colour, 1);
@@ -164,7 +215,8 @@ void() CSQC_Rope_Draw =
     vector waist = Rope_HandAnchor(
         predicted_player.origin + predicted_player.view_ofs + '0 0 -16',
         view_angles_y);
-    Rope_DrawSegment(waist, predicted_player.grapple_anchor);
+    Rope_DrawSegment(waist, predicted_player.grapple_anchor,
+                     predicted_player.weapon == WEP_BGRAPPLE);
 };
 
 // ----------------------------------------------------------------
@@ -194,7 +246,8 @@ void() CSQC_Rope_DrawRemotes =
                     + (proxy.grapple_anchor - proxy.grapple_anchor_render) * k;
             }
             Rope_DrawSegment(Rope_HandAnchor(proxy.origin + ROPE_REMOTE_WAIST, proxy.angles_y),
-                             proxy.grapple_anchor_render);
+                             proxy.grapple_anchor_render,
+                             proxy.vis_weapon_id == WEP_BGRAPPLE);
         }
         else
             proxy.grapple_render_init = 0;   // reset so the next throw snaps fresh

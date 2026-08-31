@@ -34,6 +34,11 @@
 
 // Externs from earlier compile units.
 void(entity caller, entity who, float useType) SUB_UseTargets;  // sv_triggers.qc
+// Sven InventoryRules gate - defined in sv_item_inventory.qc (position 265), which
+// compiles after this file; the KEY FIELDS it reads live in sv_customdefs.qc for
+// exactly that reason.
+float(entity rules, entity who) Inv_Gate;                            // sv_item_inventory.qc
+float(entity rules) Inv_HasRules;                                    // sv_item_inventory.qc
 float(string landmark_name) Trigger_Transition_PlayerInside;    // sv_trigger_transition.qc
 
 // HL bit layout — keep so .bsp entdata decodes the spawnflags correctly.
@@ -145,6 +150,10 @@ void() trigger_changelevel_touch =
     if (self.spawnflags & SF_CHANGELEVEL_USE_ONLY)
         return;
     if (other.classname != "player")
+        return;
+    // Sven's InventoryRules — "Prevent level from changing".  The canonical use
+    // is "you cannot leave without the objective in your hands".
+    if (!Inv_Gate(self, other))
         return;
     trigger_changelevel_fire();
 };

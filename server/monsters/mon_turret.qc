@@ -36,19 +36,37 @@ const float TUR_RETIRE_DELAY   = 5.0;		// seconds without a target before foldin
 // sequence would break the moment a sequence failed to resolve.
 .float ai_deployed;
 .float ai_lostsight;		// time the enemy was last both alive and visible
+.float ai_pingtime;		// next search ping (turret.cpp:418-432, one a second)
+// The gun report, per class rather than per file.  All three models share this
+// code and only ONE of them shares Half-Life's gun: the ceiling turret fires
+// turret/tu_fire1.wav (turret.cpp:622) while the miniturret and the sentry fire
+// weapons/hks1-3.wav (turret.cpp:633-635 and :1193-1195).  Every turret in this
+// mod fired tu_fire1, and the three hks files were precached in mon_grunt.qc -
+// a class that cannot play them - and so were never heard at all.
+.string tur_gunsnd;
+
+const string SND_TUR_FIRE = "turret/tu_fire1.wav";
+const string SND_TUR_HKS  = "weapons/hks1.wav weapons/hks2.wav weapons/hks3.wav";
+const string SND_TUR_DIE  = "turret/tu_die.wav turret/tu_die2.wav turret/tu_die3.wav";
 
 void() Turret_Precache =
 {
 	precache_model("models/sentry.mdl");
 	precache_model("models/miniturret.mdl");
 	precache_model("models/turret.mdl");
-	precache_sound("weapons/357_shot1.wav");
+
+	AI_SndPrecache(SND_TUR_HKS);
+	AI_SndPrecache(SND_TUR_DIE);
+	// Literal, because these four are played by direct sound() calls and fteqcc's
+	// F210 check can still see them.  weapons/357_shot1.wav used to be here: it is
+	// not a turret sound in Half-Life, nothing in this tree ever played it, and it
+	// was one of the dead precaches the audit was looking for.
 	precache_sound("turret/tu_fire1.wav");
 	precache_sound("turret/tu_ping.wav");
-	precache_sound("turret/tu_active2.wav");
-	precache_sound("turret/tu_die.wav");
+	precache_sound("turret/tu_alert.wav");
 	precache_sound("turret/tu_deploy.wav");
-	precache_sound("turret/tu_retract.wav");
+	precache_sound("turret/tu_spinup.wav");
+	precache_sound("turret/tu_spindown.wav");
 };
 
 // ---------------------------------------------------------------------------
@@ -68,7 +86,7 @@ void() Turret_Event =
 
 	AI_FireBullets(self, self.ai_enemy, 1, TUR_SPREAD, d);
 	if (!self.gag)
-		sound(self, CHAN_WEAPON, "turret/tu_fire1.wav", 1, ATTN_NORM);
+		AI_Sound(self, CHAN_WEAPON, AI_SndPick(self.tur_gunsnd), 1, ATTN_NORM);
 };
 
 // ---------------------------------------------------------------------------
@@ -127,12 +145,23 @@ float() Turret_SelectSched =
 		if (!see)
 			return SCHED_TURRET_IDLE;
 		self.ai_deployed = TRUE;
+		// The deploy is a MACHINE moving, and until now it moved in silence: both
+		// tu_deploy and tu_retract were precached by this file and played by
+		// nothing.  Two sounds because HL uses two - the mount swinging out
+		// (CHAN_BODY, turret.cpp:650) and the barrel coming up to speed
+		// (turret.cpp:740).  This branch runs exactly once per deployment.
+		if (!self.gag)
+		{
+			AI_Sound(self, CHAN_BODY, "turret/tu_deploy.wav", 1, ATTN_NORM);
+			AI_Sound(self, CHAN_ITEM, "turret/tu_spinup.wav", 1, ATTN_NORM);
+		}
 		return SCHED_TURRET_DEPLOY;
 	}
 
 	// Deployed.
 	if (see)
 	{
+		self.ai_pingtime = 0;		// re-arm the search ping for the next sweep
 		if (vlen(self.ai_enemy.origin - self.origin) <= TUR_RANGE)
 			return SCHED_TURRET_ATTACK;
 		return SCHED_TURRET_SCAN;
@@ -143,15 +172,34 @@ float() Turret_SelectSched =
 	if (time - self.ai_lostsight > TUR_RETIRE_DELAY)
 	{
 		self.ai_deployed = FALSE;
+		if (!self.gag)
+		{
+			AI_Sound(self, CHAN_ITEM, "turret/tu_spindown.wav", 1, ATTN_NORM);
+			// HL reuses the deploy sample at pitch 120 for the retract rather than
+			// spending a second slot on tu_retract (turret.cpp:700, and the comment
+			// at :284 says so outright).
+			AI_SoundEx(self, CHAN_BODY, "turret/tu_deploy.wav", 1, ATTN_NORM, 120, 0);
+		}
 		return SCHED_TURRET_RETIRE;
+	}
+
+	// The search ping, one a second while sweeping (turret.cpp:418-432).  It is
+	// most of what tells a player a turret is awake and has not found them yet.
+	if (time >= self.ai_pingtime)
+	{
+		self.ai_pingtime = time + 1;
+		if (!self.gag)
+			AI_Sound(self, CHAN_ITEM, "turret/tu_ping.wav", 1, ATTN_NORM);
 	}
 	return SCHED_TURRET_SCAN;
 };
 
 void() Turret_Death =
 {
-	if (!self.gag)
-		sound(self, CHAN_VOICE, "turret/tu_die.wav", 1, ATTN_NORM);
+	// One of three, evenly (turret.cpp:931-938).  CHAN_BODY, not CHAN_VOICE: a
+	// machine has no voice, and HL puts it on the body channel so the shot that
+	// killed it does not cut it off.
+	AI_SndPlay(self, CHAN_BODY, SND_TUR_DIE);
 	// By name, for the same reason the selector avoids SCHED_DIE: there is no
 	// ACT_DIESIMPLE on this model, so asking for the activity plays sequence 0.
 	AI_SetSequenceNamed(self, "die", FALSE);
@@ -159,8 +207,12 @@ void() Turret_Death =
 
 void() Turret_AlertSound =
 {
+	// tu_alert.wav, which nothing in this tree had ever precached.  It used to play
+	// tu_active2 - that is the RUNNING-SPIN loop, a sample meant to sit under the
+	// turret continuously on CHAN_STATIC, not a one-shot alert (turret.cpp:748 vs
+	// :915).  The spin loop is still unused and is noted as such.
 	if (!self.gag)
-		sound(self, CHAN_VOICE, "turret/tu_active2.wav", 1, ATTN_NORM);
+		AI_Sound(self, CHAN_BODY, "turret/tu_alert.wav", 1, ATTN_NORM);
 };
 
 // ---------------------------------------------------------------------------
@@ -180,6 +232,12 @@ void(entity m) Turret_CommonInit =
 	m.ai_melee_range = 0;
 	m.ai_range_range = TUR_RANGE;
 
+	// VIEW_FIELD_FULL (turret.cpp:271), and in CommonInit rather than on one
+	// variant because it is load-bearing for all three: a turret that could only
+	// acquire inside a forward cone would stop covering the room it was placed to
+	// cover, and it cannot walk round to look.
+	m.ai_fov         = -1;
+
 	m.ai_yaw_speed   = 120;		// the base swivels; the gun leads it - see Turret_Aim
 	m.ai_selectsched = Turret_SelectSched;
 	m.ai_tick        = Turret_Aim;
@@ -193,13 +251,16 @@ void(entity m) Turret_CommonInit =
 void(entity m) Sentry_ClassInit =
 {
 	Turret_CommonInit(m);
+	m.tur_gunsnd = SND_TUR_HKS;		// turret.cpp:1193-1195
 	// The sentry is the free-standing one: it starts deployed and never retires,
 	// which is what makes it read as a walking hazard rather than a wall fixture.
 	m.ai_deployed = TRUE;
 };
 
-void(entity m) Miniturret_ClassInit = { Turret_CommonInit(m); };
-void(entity m) Turret_ClassInit     = { Turret_CommonInit(m); };
+void(entity m) Miniturret_ClassInit
+	= { Turret_CommonInit(m); m.tur_gunsnd = SND_TUR_HKS;  };	// turret.cpp:633-635
+void(entity m) Turret_ClassInit
+	= { Turret_CommonInit(m); m.tur_gunsnd = SND_TUR_FIRE; };	// turret.cpp:622
 
 float() Turret_DefaultHealth
 	= { float h = cvar("sv_ai_turret_health"); return (h > 0) ? h : 50; };

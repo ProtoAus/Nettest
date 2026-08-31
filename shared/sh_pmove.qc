@@ -41,6 +41,11 @@ float  PM_MAX_CLIP_PLANES  = 8;   // raised from 5 to match ramp-fix bump count
 float  PM_MAX_JUMPFIX_DP   = -0.1;  // ramp-fix dot-product threshold
 float  PM_BTN_JUMP         = 2;     // bit in input_buttons
 float  PM_BTN_DUCK         = 32;    // +button6 via DP_INPUTBUTTONS
+
+// Half-Life's PLAYER_LONGJUMP_SPEED (pm_shared/pm_shared.c:121).  Declared up
+// here rather than beside the jump code because PM_CheckJump uses it and QC
+// requires a constant to be declared before its first use.
+const float PM_LONGJUMP_SPEED = 350;
 float  PM_BTN_SPRINT       = 8;     // +button4  — sv_shiftspeed multiplier: >1 sprint, <1 walk
 float  PM_BTN_USE          = 128;   // +button8 / +use     — high friction
 float  PM_BTN_FIRE         = 1;     // +attack — bit 0 of input_buttons
@@ -221,6 +226,13 @@ float() Weapon_LowerBlocksFire =
     // HL2 carry — both hands on the prop, weapon lowered + firing blocked
     // (+attack is repurposed as the throw in Carry_Tick).
     if (self.pm_carrying)
+        return 1;
+    // Sven item_inventory effect_block_weapons — "Holder can't use weapons".
+    // Deliberately the SAME gate rather than a parallel one: th_escape spells
+    // its items' descriptions "carried with both hands", which is the identical
+    // statement the HL2 carry above makes, so they should look identical too
+    // (gun lowered, not just fire refused).
+    if (self.pm_inv_blockfire)
         return 1;
     // Driving a prop_car / func_car — both hands on the wheel, weapon lowered + firing blocked.
     if (self.pm_incar)
@@ -872,6 +884,14 @@ void PM_CheckDuck()
         && !(self.flags & FL_DUCKING)
         && pm_onground
         && !self.gravshift_active      // slide entry is world-Z (lift + horizontal speed); skip on walls
+        // A player carrying the long jump module gets Half-Life's super-jump
+        // instead of this mod's slide, and the two CANNOT coexist: slide entry
+        // sets pm_duck_msec = 0 below and returns, while HL's longjump requires
+        // pm_duck_msec > 0 (pm_shared.c:2582).  Both are entered by pressing
+        // crouch while running, so without this gate the module would be
+        // granted, replicated and predicted correctly and STILL never fire —
+        // the failure mode is silent and looks like the longjump is broken.
+        && !self.pm_longjump
         && self.pm_movetype != PM_MOVETYPE_NOCLIP
         && PM_ReadMovevar("sv_sliding", 0)
         && PM_ReadMovevar("sv_slidingcrouch", 0)
@@ -2204,9 +2224,48 @@ void PM_CheckJump()
         PM_EmitStepSound(FS_SOUND_STEP_BASE  + floor(random() * FS_SOUND_STEP_COUNT),  1.0);
 
     pm_onground       = FALSE;
-    // CS 1.6 jump impulse: sqrt(2 * sv_gravity * 45) — 45-unit apex at g=800
-    // gives the canonical 268.328 u/s.  Scales correctly with custom gravity.
-    pm_velocity += gup * sqrt(2 * mv_gravity * 45);
+
+    // Half-Life's long jump module, transcribed from pm_shared.c:2571-2596.
+    // Every condition maps 1:1:
+    //     slj physinfo key       -> self.pm_longjump   (player.cpp:3195)
+    //     bInDuck || FL_DUCKING  -> pm_in_duck || FL_DUCKING
+    //     cmd.buttons & IN_DUCK  -> input_buttons & PM_BTN_DUCK
+    //     flDuckTime > 0         -> pm_duck_msec > 0
+    //     Length(velocity) > 50  -> vlen(pm_velocity) > 50
+    //
+    // gravshift_active is an EXTRA gate with no HL counterpart: the launch
+    // writes world X/Y directly, which is only "horizontal" while gravity points
+    // down — the same reasoning the slide entry carries.
+    float lj = (self.pm_longjump
+                && !self.gravshift_active
+                && (self.pm_in_duck || (self.flags & FL_DUCKING))
+                && (input_buttons & PM_BTN_DUCK)
+                && self.pm_duck_msec > 0
+                && vlen(pm_velocity) > 50);
+
+    if (lj)
+    {
+        // 350 * 1.6 = 560.  DELIBERATELY NOT NORMALISED: HL writes only
+        // forward[0] and forward[1] of the raw look vector, so looking up or
+        // down shortens the jump.  Valve's own "UNDONE" at pm_shared.c:2580
+        // flags it as a wart, but hc2's gaps were measured against this
+        // behaviour, so reproducing it is what makes those jumps land.
+        makevectors(input_angles);
+        pm_velocity_x = v_forward_x * PM_LONGJUMP_SPEED * 1.6;
+        pm_velocity_y = v_forward_y * PM_LONGJUMP_SPEED * 1.6;
+
+        // HL SETS velocity[2]; this tree ADDS along gup.  Zero the along-gravity
+        // component first so the two agree exactly, then apply HL's 56-unit apex
+        // instead of the usual 45.
+        pm_velocity = pm_velocity - gup * (pm_velocity * gup)
+                                  + gup * sqrt(2 * mv_gravity * 56);
+    }
+    else
+    {
+        // CS 1.6 jump impulse: sqrt(2 * sv_gravity * 45) — 45-unit apex at g=800
+        // gives the canonical 268.328 u/s.  Scales correctly with custom gravity.
+        pm_velocity += gup * sqrt(2 * mv_gravity * 45);
+    }
     self.spread_penalty = SPREAD_PENALTY_JUMP;
 
     // sv_codstamina: jumps eat a fixed slice of the pool (the user
@@ -2814,7 +2873,7 @@ void() PM_RefreshMovevarCache =
     pm_mv_cache_valid = TRUE;
     pm_mv_cache_stamp = cache_stamp;
     pm_mv_cache_hull_height         = PM_ReadMovevarUncached("sv_hull_height", 72);
-    pm_mv_cache_eye_height          = PM_ReadMovevarUncached("sv_eye_height", 56);
+    pm_mv_cache_eye_height          = PM_ReadMovevarUncached("sv_eye_height", 64);
     pm_mv_cache_gravity             = PM_ReadMovevarUncached("sv_gravity", 800);
     pm_mv_cache_maxspeed            = PM_ReadMovevarUncached("sv_maxspeed", 270);
     pm_mv_cache_shiftspeed          = PM_ReadMovevarUncached("sv_shiftspeed", 1.0);
@@ -2938,17 +2997,27 @@ void PM_ReadMovevars()
     PM_MAXS_x = 16;         PM_MAXS_y = 16;         PM_MAXS_z = h - zo;
     PM_DUCK_MINS_x = -16;   PM_DUCK_MINS_y = -16;   PM_DUCK_MINS_z = h * 0.25 - zo;
     PM_DUCK_MAXS_x = 16;    PM_DUCK_MAXS_y = 16;    PM_DUCK_MAXS_z = h * 0.75 - zo;
-    // Standing eye height controlled by sv_eye_height (mod default 56).
+    // Standing eye height controlled by sv_eye_height (mod default 64).
      // Origin sits zo above the feet, so subtract zo to land the eye at
      // sv_eye_height units above the ground. Server pushes this cvar into
      // serverinfo via SV_UpdateMovementServerInfo; CSQC's PM_ReadMovevar
      // reads it back via serverkeyfloat — both sides converge on the
      // same value so prediction and view stay in sync.
+     //
+     // 64, NOT 56.  Half-Life's VEC_VIEW is (0,0,28) above a hull whose origin
+     // is centred in a 72-unit box, i.e. 36 + 28 = 64 above the floor, and
+     // Sven Co-op never changed it (its changelog records hull changes for the
+     // bullsquid, gargantua and the giant cockroach, and none for the player).
+     // This tree shipped 56, which is why players here stand visibly lower than
+     // in either reference — and it contradicted the derivation comment two
+     // lines below, which says "eye heights: h-8 standing", i.e. 72-8 = 64.
+     // The default is the only number that changed; the cvar is still live and
+     // serverinfo-replicated, so an admin can retune it without a rebuild.
     float eye_h;
 #ifdef CSQC
     eye_h = pm_mv_cache_eye_height;
 #else
-    eye_h = PM_ReadMovevar("sv_eye_height", 56);
+    eye_h = PM_ReadMovevar("sv_eye_height", 64);
 #endif
     PM_VIEW_OFS_x = 0;      PM_VIEW_OFS_y = 0;      PM_VIEW_OFS_z = eye_h - zo;
     PM_DUCK_VIEW_OFS_x = 0; PM_DUCK_VIEW_OFS_y = 0; PM_DUCK_VIEW_OFS_z = h * 0.75 - 4 - zo;
@@ -2975,6 +3044,19 @@ void PM_ReadMovevars()
         if (ph_ms > 0)
             mv_maxspeed = mv_maxspeed * ph_ms;
     }
+
+    // Sven Co-op item_inventory holder effects.  Same shape as the Prop Hunt
+    // multiplier directly above, and prediction-safe for the same reason: the
+    // three percentages ride the prediction proxy, so they are present on the
+    // server player AND on the client's predicted player, and both sides scale
+    // by the identical value.
+    //
+    // 0 is treated as "unchanged" as well as 100, so a player who has never
+    // touched an item_inventory — i.e. everyone, on every map that does not use
+    // the system — pays three compares and nothing else.  th_escape's items set
+    // effect_speed 50, which is what makes carrying a car battery feel heavy.
+    if (self.pm_inv_speed_pct    > 0) mv_maxspeed = mv_maxspeed * (self.pm_inv_speed_pct    * 0.01);
+    if (self.pm_inv_gravity_pct  > 0) mv_gravity  = mv_gravity  * (self.pm_inv_gravity_pct  * 0.01);
 
     // Per-weapon weight scaling.  self is the player entity in both
     // SSQC and CSQC (= predicted_player during prediction), so reading
@@ -3024,6 +3106,16 @@ void PM_ReadMovevars()
     mv_waterfriction     = PM_ReadMovevar("sv_waterfriction", 1);
     mv_accelerate        = PM_ReadMovevar("sv_accelerate", 5);
 #endif
+
+    // item_inventory effect_friction.  Applied HERE rather than beside the
+    // speed and gravity scales above because mv_friction is not assigned until
+    // this block — scaling it earlier would have been overwritten by the
+    // branch and silently done nothing.
+    if (self.pm_inv_friction_pct > 0)
+    {
+        mv_friction      = mv_friction      * (self.pm_inv_friction_pct * 0.01);
+        mv_waterfriction = mv_waterfriction * (self.pm_inv_friction_pct * 0.01);
+    }
 
     // sv_airaccelerate: mod default 150 (high-accel strafe feel). If the
     // movevar is 0 for some reason, fall back to mv_accelerate rather
@@ -4422,7 +4514,41 @@ void(entity trig) PM_ApplyTriggerPush =
     vector offset;
     float  current, delta;
 
-    if (trig.spawnflags & PUSH_SOURCE)
+    // Sven's "No Clients" (sven-coop.fgd:6555).  This function only ever runs
+    // for a player, so the flag means "do nothing at all".
+    if (trig.spawnflags & PUSH_NOCLIENTS)
+        return;
+
+    if (trig.spawnflags & PUSH_EXACT)
+    {
+        // Sven pushmode 2, "Forced (exact velocity)" — overwrite outright.
+        pm_velocity = trig.movedir * trig.speed;
+        if (trig.movedir_z > 0)
+        {
+            float gs_x = PM_ReadMovevar("pm_groundstick_suppress_jump", 0.05);
+            if (gs_x > 0)
+                self.pm_jump_groundstick_off_until = time + gs_x;
+        }
+    }
+    else if (trig.spawnflags & PUSH_FLOOR)
+    {
+        // Sven pushmode 1, "Forced (minimum velocity)" — raise the component
+        // along movedir up to `speed`, never trim a player already moving
+        // faster that way.  This is the behaviour that used to be applied
+        // unconditionally to every vertical push, which is what made
+        // th_ep1_03's speed-2800 steam vent a 4900-unit launch.  It is opt-in
+        // in Sven and it is opt-in here.
+        float along = pm_velocity * trig.movedir;
+        if (along < trig.speed)
+            pm_velocity = pm_velocity + trig.movedir * (trig.speed - along);
+        if (trig.movedir_z > 0)
+        {
+            float gs_f = PM_ReadMovevar("pm_groundstick_suppress_jump", 0.05);
+            if (gs_f > 0)
+                self.pm_jump_groundstick_off_until = time + gs_f;
+        }
+    }
+    else if (trig.spawnflags & PUSH_SOURCE)
     {
         // Jump-pad style — uncapped velocity add along movedir.  The
         // previous "set to max(current, speed)" clamp held player
@@ -4446,64 +4572,83 @@ void(entity trig) PM_ApplyTriggerPush =
     }
     else
     {
-        // Default (HL basevelocity model).  Always do positional
-        // displacement so slow horizontal triggers (e.g. speed=10 for
-        // shoving AFK players into a death pit) actually push the
-        // player at exactly the configured speed.  The velocity
-        // treatment then splits on movedir.z because vertical and
-        // horizontal pushes want fundamentally different things:
+        // Default — Half-Life's basevelocity model, which splits the push by
+        // AXIS, not by a movedir.z threshold.
         //
-        //  - Vertical pushes (jumppads, updrafts): need a velocity
-        //    FLOOR along movedir, not a per-tick add.  Per-tick add
-        //    can never overcome gravity (gravity = 800 qu/s² vs a
-        //    push of speed*dt per tick), so the player exits with
-        //    large negative vz and drops.  Floor sets the upward
-        //    component of velocity to >= trig.speed each tick the
-        //    player is in the trigger; on exit, they keep that
-        //    upward velocity and arc back down naturally under
-        //    gravity.  Mid-air players falling into a jumppad get
-        //    their fall cancelled (vz bumped up to trig.speed)
-        //    instead of riding through with downward momentum.
-        //    max(current, trig.speed) — never slows a player who
-        //    was already moving along movedir faster than the pad's
-        //    rated speed.
+        // CTriggerPush::Touch (triggers.cpp:1863-1869) writes speed*movedir
+        // into pev->basevelocity every frame the toucher overlaps, and the
+        // engine then treats the two halves completely differently:
         //
-        //  - Horizontal pushes: per-tick cumulative add.  Player
-        //    input adds independently and friction drains on the
-        //    ground, so pushes stay fightable; the positional
-        //    component is what actually moves AFK players.  A
-        //    floor here would harshly wipe opposite motion (e.g.
-        //    walking west against an east-pointing trigger would
-        //    snap velocity to +trig.speed east — the "can't fight
-        //    at all" symptom this code exists to avoid).
+        //   Z  — PM_AddCorrectGravity, pm_shared.c:762-763:
+        //            velocity[2] += basevelocity[2] * frametime;
+        //            basevelocity[2] = 0;
+        //        `speed` is an ACCELERATION in qu/s^2, integrated over the
+        //        time spent inside the brush.  It is consumed and zeroed
+        //        BEFORE the move runs, so a vertical push contributes NO
+        //        positional displacement whatsoever.
         //
-        // Threshold 0.5 = 30° above horizontal — anything steeper
-        // is treated as a vertical push.  Mappers angle their push
-        // brushes either flat or straight up in practice; the
-        // diagonal case is rare and 0.5 covers both intuitively.
+        //   XY — added before the move and subtracted after (pm_shared.c:3132
+        //        and :3181), i.e. a positional carry at `speed` qu/s that
+        //        never accumulates into velocity.
         //
-        // Tracebox guards positional from shoving players through
-        // walls — partial move on hit, no move on stuck-against.
-        vector tstep = trig.movedir * (trig.speed * pm_frametime);
-        vector tnew  = pm_origin + tstep;
-        tracebox(pm_origin, PM_CurrentMins(), PM_CurrentMaxs(),
-                 tnew, MOVE_NORMAL, self);
-        if (trace_fraction >= 1.0)
-            pm_origin = tnew;
-        else if (trace_fraction > 0)
-            pm_origin = trace_endpos;
+        // What was here before treated `speed` as a velocity FLOOR on the
+        // vertical axis AND applied the push positionally on all three axes.
+        // On th_ep1_03's steam vent (*126: angles "-90 0 0", speed 2800, a
+        // 176-unit-tall brush) that snapped the player to 2800 qu/s on the
+        // first tick — a 4900-unit apex and a fatal landing — plus a free
+        // ~28 unit/tick upward teleport on top.  Integrating instead gives
+        // 2800 - 800 = 2000 qu/s^2 over 176 units, exiting near 860 qu/s.
+        //
+        // Sven exposes the old floor behaviour as the OPT-IN `pushmode 1`
+        // ("Forced (minimum velocity)", sven-coop.fgd:6562-6567).  It is not
+        // the default there and must not be unconditional here; PUSH_SOURCE
+        // below is its home.
+        //
+        // DELIBERATELY NOT BUG-COMPATIBLE, and this is the one place the port
+        // knowingly diverges.  A GoldSrc player STANDING in a vertical push
+        // gets nothing at all: pm_shared.c:3158 sets velocity[2] = 0.0 every
+        // tick while onground (and PM_WalkMove does it twice more at :1082 and
+        // :1084), so the acceleration cannot accumulate until the player is
+        // already airborne.  Reproducing that would make every vertical push
+        // brush in the corpus a no-op for the player standing on it, which is
+        // plainly not what the mappers built.  Instead the Z impulse breaks
+        // ground stick the way HL's own PUSH_ONCE branch does
+        // (`pevToucher->flags &= ~FL_ONGROUND`, triggers.cpp:1857-1858).
+        // Without that, PM_StayOnGround (:5625) re-snaps the player to the
+        // floor until vz crosses the 180 airborne gate at :1997 — about nine
+        // ticks at sv_mintic 0.01, a visible dead beat before the launch.
 
-        if (trig.movedir_z >= 0.5)
+        // Z: acceleration into velocity.  No positional component — HL zeroes
+        // basevelocity[2] before the move specifically so there is none.
+        if (trig.movedir_z != 0 && trig.speed != 0)
         {
-            // Vertical-ish — velocity floor along movedir.
-            float along = pm_velocity * trig.movedir;
-            if (along < trig.speed)
-                pm_velocity = pm_velocity + trig.movedir * (trig.speed - along);
+            pm_velocity_z = pm_velocity_z
+                          + trig.speed * trig.movedir_z * pm_frametime;
+
+            // Break the ground stick so the accumulating impulse can actually
+            // lift the player off the floor — see the divergence note above.
+            if (trig.movedir_z > 0)
+            {
+                float gs_off = PM_ReadMovevar("pm_groundstick_suppress_jump", 0.05);
+                if (gs_off > 0)
+                    self.pm_jump_groundstick_off_until = time + gs_off;
+            }
         }
-        else
+
+        // XY: positional carry only, never accumulated into velocity.  Traced
+        // so it cannot shove the player through a wall — partial move on hit,
+        // no move when already stuck against one.
+        vector tstep = [trig.movedir_x, trig.movedir_y, 0]
+                     * (trig.speed * pm_frametime);
+        if (tstep != '0 0 0')
         {
-            // Horizontal-ish — cumulative velocity-add.
-            pm_velocity = pm_velocity + trig.movedir * (trig.speed * pm_frametime);
+            vector tnew = pm_origin + tstep;
+            tracebox(pm_origin, PM_CurrentMins(), PM_CurrentMaxs(),
+                     tnew, MOVE_NORMAL, self);
+            if (trace_fraction >= 1.0)
+                pm_origin = tnew;
+            else if (trace_fraction > 0)
+                pm_origin = trace_endpos;
         }
     }
 
@@ -4575,6 +4720,10 @@ void() PM_CheckTeleportTriggers =
     player_absmin = pm_origin + PM_CurrentMins();
     player_absmax = pm_origin + PM_CurrentMaxs();
 
+    // Set while we are standing in ANY teleport volume this step; used at the
+    // bottom to decide whether the arrival latch below has been left behind.
+    float in_any_trigger = FALSE;
+
     // Safety cap — same rationale as PM_CheckLadder / PM_CheckTriggerPushes.
     float iter_count = 0;
     for (trig = teleport_trigger_list; trig; trig = trig.tele_next)
@@ -4584,6 +4733,14 @@ void() PM_CheckTeleportTriggers =
             break;
 
         if (!trig.tele_resolved) continue;
+
+        // SWITCHED OFF.  Sven's trigger_teleport can be toggled by map logic and
+        // hl_c05_a2's silo pair is driven entirely that way - see
+        // trigger_teleport_use in sv_teleport.qc.  Tested here rather than by
+        // unlinking the entity because the teleport is client-predicted: the state
+        // has to be a value both sides can read off the same replicated field, not
+        // a server-side solidity change the client never hears about.
+        if (trig.spawnflags & TELEPORT_INACTIVE) continue;
 
         trig_absmin = trig.origin + trig.mins;
         trig_absmax = trig.origin + trig.maxs;
@@ -4600,45 +4757,177 @@ void() PM_CheckTeleportTriggers =
         if (!PM_BoxInTriggerBrush(trig))
             continue;
 
+        // From here down we are genuinely inside this volume, whether or not it
+        // ends up firing - which is the fact the latch needs.
+        in_any_trigger = TRUE;
+
+        // THE ARRIVAL LATCH.  Refuse to fire a trigger whose volume contains the
+        // point this player was last teleported to, until they have left it.
+        //
+        // Without this a bidirectional portal is an infinite loop, and hl_c05_a2's
+        // secret silo pair is exactly that shape:
+        //
+        //   st_silo01_in   brush at (-249 1597 -1422) -> st_silo01_in_dest
+        //   st_silo01_in_dest             (-2077 7580 -428)
+        //   st_silo01_out  brush at (-2077 7580 -428) -> st_silo01_out_dest
+        //   st_silo01_out_dest            (-249 1597 -1422)
+        //
+        // Each destination is the other trigger's own origin, and both triggers
+        // carry spawnflag 128 (Sven's "Relative Teleport", sven-coop.fgd:6837), so
+        // you arrive at the same offset inside the far volume that you entered the
+        // near one at.  That is what makes it seamless - and it means you land
+        // standing in a live teleporter every single time.
+        //
+        // The map's own keys prove the anti-bounce cannot be a timer: the author
+        // set teleport_cooldown 0.001 on both triggers, 0.0001 on both
+        // destinations, and teleport_ignore_delay 1 - against an FGD default of
+        // "1" second.  Every time-based refusal Sven offers is deliberately turned
+        // off here, so the rule that keeps the pair working has to be positional.
+        // The mod's own 0.2s pm_teleport_time was doing precisely what any timer
+        // must in this geometry: setting the rate of the ping-pong, five times a
+        // second, rather than preventing it.
+        //
+        // Kept as a POSITION rather than an entity reference on purpose - it has to
+        // survive prediction rollback and cross the wire with the rest of the pmove
+        // state, and the server and client hold different entity handles for the
+        // same trigger.
+        if (self.pm_teleport_org != '0 0 0')
+        {
+            if (self.pm_teleport_org_x > trig_absmin_x && self.pm_teleport_org_x < trig_absmax_x &&
+                self.pm_teleport_org_y > trig_absmin_y && self.pm_teleport_org_y < trig_absmax_y &&
+                self.pm_teleport_org_z > trig_absmin_z && self.pm_teleport_org_z < trig_absmax_z)
+                continue;
+        }
+
         // Sven's "No Clients" (translated to TELEPORT_NOCLIENTS at spawn):
         // the volume teleports pushables/monsters but must leave players
         // alone.  pizza_ya_san1's only teleport is exactly this.
         if (trig.spawnflags & TELEPORT_NOCLIENTS)
             continue;
 
-        // snap to destination
-        pm_origin   = trig.tele_dest_origin;
-        pm_onground = FALSE;
+        // RELATIVE, i.e. Sven's spawnflag 128 - the seamless kind.
+        //
+        // A relative teleport does not put you AT the destination, it moves you BY
+        // the offset between the trigger and the destination, so you arrive holding
+        // the same position within the volume, the same facing and the same
+        // velocity.  Walk into the trigger a foot off the left wall doing 200 and
+        // you come out a foot off the left wall doing 200: nothing about the arrival
+        // reads as a teleport, which is the entire point of the flag.
+        //
+        // th_ep1_01 uses it for the lift shaft.  `*531` sits at origin
+        // (1372 -160 70) pointed at lower_tp_dest, `*528` at (3808 -4816 -1906)
+        // pointed at higher_tp_dest, and both carry spawnflags 901
+        // = 512 Keep velocity | 256 Keep Angles | 128 Relative | 4 Pushables
+        // | 1 Monsters.  Dropping bit 128 turned an endless shaft into two ordinary
+        // teleporters that slam you onto one fixed spot with your view snapped -
+        // "just acts like normal teleport, and not a fancy seamless transition".
+        //
+        // THE OFFSET IS MEASURED FROM .origin, not from the brush centre.  Sven
+        // works in pev->origin and these triggers all carry an explicit origin key
+        // for exactly that reason - an origin brush is how a mapper anchors the
+        // pair.  Both ends are already on the wire (trigger_teleport_SendEntity
+        // writes origin and tele_dest_origin), so this needs no protocol change.
+        //
+        // The '0 0 1' that trigger_teleport_resolve adds to every destination is
+        // taken back off here: it is an unstick nudge for an absolute arrival and
+        // has no business accumulating on a relative one, which is exact by
+        // construction and may be crossed hundreds of times in a shaft loop.
+        //
+        // Keeping velocity and angles is not read off the other two flags: a
+        // relative teleport that zeroed either would not be relative.  Both maps'
+        // triggers set 512|256 anyway; this makes the behaviour a property of the
+        // mode rather than of the mapper remembering.
+        float relative = (trig.spawnflags & TELEPORT_RELATIVE) != 0;
 
-        // GoldSrc info_teleport_destination convention is "origin at
-        // the player's FEET", not hull center.  Quake-style players
-        // have origin at the bbox center, so dest entities authored
-        // for HL maps can leave us startsolid in the floor.  Probe
-        // the snapped position; if our hull is in solid, trace
-        // straight down a hull-height-and-change to find the surface
-        // just below and lift the bbox onto it (+1 qu so we're not
-        // resting exactly on the plane).  No-op when the dest origin
-        // is already valid (Quake-authored maps and any HL map that
-        // placed the dest at hull center).
-        tracebox(pm_origin, PM_CurrentMins(), PM_CurrentMaxs(),
-                 pm_origin, MOVE_NORMAL, self);
-        if (trace_startsolid)
+        // snap to destination
+        if (relative)
+            pm_origin = pm_origin + ((trig.tele_dest_origin - '0 0 1') - trig.origin);
+        else
         {
-            vector probe = pm_origin - '0 0 80';
-            tracebox(pm_origin, PM_CurrentMins(), PM_CurrentMaxs(),
-                     probe, MOVE_NORMAL, self);
-            if (trace_fraction < 1)
-                pm_origin = trace_endpos + '0 0 1';
+            pm_origin   = trig.tele_dest_origin;
+            pm_onground = FALSE;
         }
 
-        if (!(trig.spawnflags & TELEPORT_KEEPVEL))
+        vector tmins = PM_CurrentMins();
+        vector tmaxs = PM_CurrentMaxs();
+
+        // GoldSrc puts info_teleport_destination's origin at the player's FEET
+        // and this mod's origin is at the hull CENTRE, so the destination has to
+        // be lifted by the hull's own bottom or the player lands half buried.
+        //
+        // This is Half-Life's own line, not a heuristic - CTriggerTeleport::
+        // TeleportTouch is:
+        //
+        //     tmp = pentTarget->origin;
+        //     if (pOther->IsPlayer()) tmp.z -= pOther->pev->mins.z;
+        //     tmp.z++;
+        //
+        // The `tmp.z++` half was already here (trigger_teleport_resolve adds
+        // '0 0 1'); the `-= mins.z` half was missing, and with sv_hull_height 72
+        // that is 36 units out of a 72-unit hull.  Exactly "stuck half way into
+        // the ground, like it thinks the centre of the player is the base point".
+        //
+        // The two conventions really are different on purpose, and the FGDs say
+        // so out loud: info_player_start inherits PlayerClass's (-16 -16 -36)
+        // (16 16 36) - origin at the centre - while info_teleport_destination
+        // OVERRIDES it to (-8 -8 0) (8 8 16), origin at the base.  The mod's own
+        // spawn path already honours the first half of that split
+        // (sv_player.qc:3383-3393 lifts by pm_player_z_offset after placing on
+        // the spawn point); this is the other half.
+        //
+        // Read from PM_CurrentMins() rather than a constant so it is duck-aware
+        // the way HL's pev->mins is: a crouched player arriving in a vent gets
+        // lifted 18, not 36, and does not headbutt the ceiling.
+        //
+        // Gated, because nettest.fgd:113 declares info_teleport_destination as a
+        // symmetric 64-cube - native maps are authored against THIS convention
+        // and must not be lifted.
+        // ...and NOT for a relative one: the feet/centre convention cancels out of a
+        // difference of two origins, so applying the lift here would raise the player
+        // half a hull on every pass through the shaft.
+        if (Map_IsGoldSrcShared() && !relative)
+            pm_origin_z = pm_origin_z - tmins_z;
+
+        // Safety net, and it had to be rewritten rather than kept: the probe
+        // that was here traced DOWNWARD from a point already inside the floor,
+        // and an all-solid trace never sets trace_fraction - q1bsp.c:1018
+        // returns at `if (trace->allsolid) return false` before fraction is
+        // assigned, so `trace_fraction < 1` was never true and the lift it was
+        // written for has never once fired.  Up is the direction that leaves
+        // solid, so trace up.
+        tracebox(pm_origin, tmins, tmaxs, pm_origin, MOVE_NORMAL, self);
+        if (trace_startsolid)
+        {
+            float lift = tmaxs_z - tmins_z;     // one hull height is enough
+            tracebox(pm_origin, tmins, tmaxs, pm_origin + [0, 0, lift],
+                     MOVE_NORMAL, self);
+            // allsolid means the whole sweep was buried and there is nothing
+            // this can do; trace_endpos is only meaningful when it got out.
+            if (!trace_allsolid && trace_fraction > 0)
+                pm_origin = trace_endpos;
+        }
+
+        if (!relative && !(trig.spawnflags & TELEPORT_KEEPVEL))
             pm_velocity = '0 0 0';
 
         self.pm_teleport_time = 0.2;
 
+        // Arm the latch at the place we actually ended up - after the GoldSrc hull
+        // lift and after the un-embed probe above, not at trig.tele_dest_origin.
+        // The two differ by up to half a hull, and the test that reads this is a
+        // containment check against a brush, so it has to be the real position.
+        self.pm_teleport_org = pm_origin;
+
         // only one teleport per step
         return;
     }
+
+    // Left every teleport volume: disarm.  Placed after the loop rather than
+    // inside it because "am I still in the one I arrived in" is a question about
+    // the whole sweep - an early clear would re-open a trigger the player is
+    // standing in the moment any OTHER trigger failed to match them.
+    if (!in_any_trigger)
+        self.pm_teleport_org = '0 0 0';
 };
 
 // ============================================================================
@@ -5243,6 +5532,61 @@ void PM_PlayerMoveStep()
     // --- read cvars ---
     PM_ReadMovevars();
 
+    // EMPLACED: KILL THE COAST.
+    //
+    // Cutting acceleration is NOT the same as stopping.  Both locks this mod has —
+    // zeroing input_movevalues, and SH_DeploySpeedFactor driving mv_maxspeed to 0 —
+    // land on wishspeed 0, which makes PM_Accelerate a no-op; neither of them
+    // touches PM_Friction, which runs unconditionally in the ground branch.  So a
+    // player who sprints up to a sandbag and plants keeps their momentum and decays
+    // out of it over roughly a third of a second and 30-60 units, sliding past the
+    // firing position they picked.  That slide is the "quality of the lock" — the
+    // round freeze only seems to stop dead because it starts from a standing spawn.
+    //
+    // Zeroing the IN-PLANE component every tick is a pure function of replicated
+    // state, so the live pass, the replay and the server all converge on it; an
+    // edge-triggered impulse would not.  The gravity axis is left alone so a
+    // deployed player still falls (and gravity-shifted walls still work).
+    //
+    // It also has to happen BEFORE PM_CheckDuck further down this function: the
+    // crouch-slide entry there triggers on a DUCK press edge while horizontal speed
+    // is above sv_sliding_start_speed, and with the velocity already zeroed that
+    // test cannot fire.
+    //
+    // Side effect, and it is the right one: an emplaced gunner can no longer be
+    // shoved off their position by explosion knockback.
+    //
+    // AND HOLD THE CROUCH — ON THE MORTAR ONLY.  Every deployable gates the plant
+    // on FL_DUCKING, but the gate only ran at the PRESS, so releasing +duck stood
+    // an emplaced gunner straight up while the baseplate stayed planted and the
+    // movement lock stayed on.  Reported against the mortar as "doesn't lock you
+    // crouched".
+    //
+    // SH_DeployHoldsCrouch, not SH_DeployLocksPlayer: applying this to all five
+    // deployables was an overreach and was reported straight back as "the machine
+    // guns weapon special, plus the mount, slowly lower you to crouched to perform
+    // the action, like the button acts like a crouch button as well?" — which is
+    // literally what it was doing.  A mortar is worked from a kneel; a bipod is
+    // not.  See weapon_deploy_crouched in sh_weapons.qc.
+    //
+    // Forcing the BUTTON rather than the flag is what makes this prediction-exact:
+    // PM_CheckDuck runs below in this same function and derives FL_DUCKING, the
+    // hull and pm_in_duck from input_buttons, so both sides reach the identical
+    // state from the identical input and replay reproduces it.  Setting FL_DUCKING
+    // directly would leave the hull, the view offset and the stand-up trace out of
+    // step with it.
+    //
+    // It covers WS_SPECIAL too (SH_DeployLocksPlayer returns TRUE for it), so the
+    // player also stays down through the plant and the stand-up take and is only
+    // released on the frame the stance actually ends.
+    if (SH_DeployLocksPlayer(self))
+    {
+        vector dep_up = '0 0 0' - (self.gravshift_active ? self.gravitydir : '0 0 -1');
+        pm_velocity = dep_up * (pm_velocity * dep_up);
+        if (SH_DeployHoldsCrouch(self))
+            input_buttons |= PM_BTN_DUCK;
+    }
+
     // Shift speed multiplier (+button4): scales input magnitude AND
     // max speed by sv_shiftspeed.  Applied on both CSQC prediction and
     // SSQC so client/server agree.
@@ -5428,7 +5772,29 @@ void PM_PlayerMoveStep()
         float gs_off_stay = (time < self.pm_jump_groundstick_off_until)
                          || (self.grapple_attached
                              && !(input_buttons & PM_BTN_JUMP));
-        if (was_onground && pm_velocity_z <= 180 && !gs_off_stay)
+
+        // ...AND NOT WHILE SWIMMING UP OUT OF WATER, which is the reported
+        // "trouble swimming upwards to the surface, player z instant jumping down
+        // 10-20 units".
+        //
+        // PM_StayOnGround snaps the player down by up to PM_STEPSIZE - 18 units,
+        // which is exactly the range reported - and it runs from the WALK branch,
+        // i.e. whenever pm_waterlevel < 2.  At the surface of a pool the water
+        // level flips between 1 and 2 tick by tick as the player bobs: on a
+        // level-2 tick PM_WaterMove carries them up, and on the very next level-1
+        // tick this call finds the pool floor within a step and puts them straight
+        // back on it.  The two fight, and the player cannot climb out.
+        //
+        // th_ep1_01's `water_pool` makes it unmissable because the pool RISES: the
+        // player starts standing on a floor that is well inside step range, so the
+        // snap has something to grab from the moment the water reaches them.
+        //
+        // Vanilla Quake never had this problem because it has no StayOnGround -
+        // the call is Source's, imported for slope walking, and a swimmer is not
+        // walking a slope.  Gating on "wet and moving up" keeps every dry-land case
+        // byte-identical: pm_waterlevel is 0 out of water, so nothing else changes.
+        float wet_climb = (pm_waterlevel >= 1 && pm_velocity_z > 0);
+        if (was_onground && pm_velocity_z <= 180 && !gs_off_stay && !wet_climb)
             PM_StayOnGround();
     }
 
@@ -5707,8 +6073,26 @@ done:
         // would refill while +button4 is held.
         // Legacy zoomstage snipers (e.g. G3SG1) keep draining via the
         // zoomstage>0 clause; CoD-scope weapons via weapon_scope_class.
+        // A ZOOM IS NOT ALWAYS A SCOPE, and the legacy clause below reads
+        // zoomstage RAW.  The binoculars magnify without being a weapon — they
+        // cannot fire, they have no sway to steady and no shot to steady it for —
+        // but they do raise zoomstage, so holding +sprint while glassing drained
+        // the pool at 1/8 per second, emptied it in eight seconds, played
+        // outofbreath.wav, turned the bar red and locked sprint out until it
+        // refilled.  Reported as "can you make the binocs disable the +sprint
+        // breath since it's not used on this item".
+        //
+        // Expressed through the Weapon_HasZoomView / Weapon_HasScope split rather
+        // than as `wep == WEP_DODBINOCS`, because that split exists for exactly
+        // this distinction (sh_weapons.qc) and the next magnifying non-weapon
+        // should inherit the answer.  It is TRUE only for the binoculars today:
+        // for every real scope the two predicates agree, so the term is FALSE and
+        // nothing else changes — including the scout / AWP / sniper rifle, where
+        // BOTH return 0 under sv_codscopes and the codscopes clause owns them.
+        float zoom_not_a_scope = Weapon_HasZoomView(self.weapon)
+                              && !Weapon_HasScope(self.weapon);
         float st_scope = !fire_suppressed
-                      && ( (self.zoomstage > 0)
+                      && ( (self.zoomstage > 0 && !zoom_not_a_scope)
                         || (self.weapon_scope_class != SCOPE_CLASS_NONE
                             && PM_ReadMovevar("sv_codscopes", 0)
                             && (input_buttons & 4)) );
@@ -5964,6 +6348,12 @@ void PM_PlayerMove()
     float saved_timelength;
     float noblock_active;
 
+    // Approach speed for this frame, latched BEFORE any substep can clip it.
+    // See .pm_impact_speed in sh_customdefs.qc — func_breakable's touch gate
+    // needs the speed the player hit the brush AT, and self.velocity after the
+    // move has had exactly that component reflected out of it.
+    self.pm_impact_speed = vlen(self.velocity);
+
     // ---- Gravity Shift (gravity gun) ----
     // Computed identically on client-predict + server (input-driven) so the owner
     // stays in lockstep.  We do NOT delegate to runstandardplayerphysics — it
@@ -6008,6 +6398,31 @@ void PM_PlayerMove()
     {
         if (self.car_driving == world)
             self.pm_incar = FALSE;
+        else
+            input_movevalues = '0 0 0';
+    }
+#endif
+
+    // func_tracktrain: zero the driver's walk input.  HL does the same thing with
+    // `pev->velocity = g_vecZero` in CBasePlayer::PreThink (player.cpp:2039) — a
+    // train driver cannot walk, they can only work the throttle.
+    //
+    // SERVER-ONLY, exactly like the two locks above and for the same reason: if
+    // the CLIENT also zeroed input_movevalues its sent usercmd would carry no
+    // movement, and the server's throttle capture (sv_player.qc) would read
+    // fwd=0 every tick — so +forward would never register as a tap and the
+    // throttle would be dead.
+    //
+    // Note the walk input is zeroed but the player is NOT pinned to a seat the
+    // way a func_vehicle driver is.  A train driver stands on the deck and is
+    // carried by the ordinary platform carry below, which is what HL does too.
+#ifdef SSQC
+    if (self.pm_ontrain)
+    {
+        // Self-heal, same shape as the two above: a lock with no live link
+        // would freeze the player forever.
+        if (self.tt_driving == world)
+            self.pm_ontrain = FALSE;
         else
             input_movevalues = '0 0 0';
     }

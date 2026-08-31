@@ -12,24 +12,36 @@
 .float mag_ak47;
 .float ammo_ak47;
 
-// --- Animation frames ---
-const float AK47_FRAME_INTERVAL      = 0.0333334;   // 1/30
+// --- Sequence indices (GoldSrc IDST viewmodel, models/v_ak47.mdl) ---
+//
+// FALLBACKS ONLY.  Every one resolves by NAME at runtime through SH_SeqForName,
+// because cstrike AND czero are both mounted (fs_addons.txt) and both ship
+// models/v_ak47.mdl with the same labels at different frame counts.  Scaling
+// every event mark by that model's own duration keeps the sounds on the
+// animation whichever mount wins.  Same treatment as sh_wpn_csaug.qc.
+//
+// Read out of cstrike/models/v_ak47.mdl itself:
+//   [0] idle1   30fps  17f  0.533s
+//   [1] reload  37fps  91f  2.432s   f13 "ak47_clipout"  f57 "ak47_clipin"
+//   [2] draw    30fps  31f  1.000s   f11 "ak47_boltpull"
+//   [3] shoot1  20fps  17f  0.800s   f0 5001 (muzzleflash, attachment 2)
+//   [4] shoot2  20fps  17f  0.800s
+//   [5] shoot3  20fps  17f  0.800s
+const float AK47_SEQ_IDLE   = 0;
+const float AK47_SEQ_RELOAD = 1;
+const float AK47_SEQ_DRAW   = 2;
+const float AK47_SEQ_SHOOT1 = 3;
+const float AK47_SEQ_SHOOT2 = 4;
+const float AK47_SEQ_SHOOT3 = 5;
 
-const float AK47_DRAW_START          = 111;
-const float AK47_DRAW_END            = 138;
-const float AK47_DRAW_BOLTPULL_FRAME = 120;
-
-const float AK47_FIRE_START          = 140;
-const float AK47_FIRE_END            = 147;
+const float AK47_FRAME_INTERVAL      = 0.0333334;   // state-machine tick rate
 const float AK47_FIRE_DELAY          = 0.1;
 
-const float AK47_RELOAD_START        = 18;
-const float AK47_RELOAD_END          = 108;
-const float AK47_RELOAD_CLIPOUT      = 30;
-const float AK47_RELOAD_CLIPIN       = 72;
-const float AK47_RELOAD_APPLY        = 83;
-
-const float AK47_IDLE_FRAME          = 20;
+// Event marks as a FRACTION of their sequence — see the fps note above.
+const float AK47_DRAW_F_BOLT         = 0.3667;   // frame 11 / 30
+const float AK47_RELOAD_F_CLIPOUT    = 0.1444;   // frame 13 / 90
+const float AK47_RELOAD_F_CLIPIN     = 0.6333;   // frame 57 / 90
+const float AK47_RELOAD_F_APPLY      = 0.7000;   // just after the fresh mag seats
 
 const float MAX_MAG_AK47             = 30;
 const float MAX_AMMO_AK47            = 90;
@@ -61,16 +73,48 @@ const float AK47_MUZZLE_FORWARD = 42;
 const float AK47_MUZZLE_RIGHT   = 10;
 const float AK47_MUZZLE_DOWN    = 7;
 
-// --- Pre-computed state durations ---
-const float AK47_DRAW_DURATION      = (AK47_DRAW_END - AK47_DRAW_START) * AK47_FRAME_INTERVAL;
-const float AK47_FIRE_DURATION      = (AK47_FIRE_END - AK47_FIRE_START) * AK47_FRAME_INTERVAL;
-const float AK47_RELOAD_DURATION    = (AK47_RELOAD_END - AK47_RELOAD_START) * AK47_FRAME_INTERVAL;
-const float AK47_RELOAD_APPLY_TIME  = (AK47_RELOAD_APPLY - AK47_RELOAD_START) * AK47_FRAME_INTERVAL;
-
-const string AK47_VIEWMODEL    = "models/weapons/wpn_csak47/v_ak47.mdl";
-const string AK47_WORLDMODEL   = "models/weapons/wpn_csak47/w_ak47.mdl";
+// models/v_ak47.mdl, models/w_ak47.mdl and models/p_ak47.mdl all resolve
+// through the mounted cstrike gamedir — the same route sh_wpn_csaug.qc takes for
+// v_aug.mdl.  The w_ and p_ paths were ALREADY the mount; only the viewmodel was
+// a mod-bundled IDPO (Quake-format) bake under models/weapons/wpn_csak47/, which
+// is what made the AK look like the HD pack rather than stock CS.  Switching the
+// path alone would have played a different animation at every index, so the
+// whole animation half of this file moved from frame-stepping to sequence-driven
+// with it.  Sounds stay on the mod's own copies (byte-for-byte the CS samples,
+// already precached) — only their timing was re-derived from the new model.
+const string AK47_VIEWMODEL    = "models/v_ak47.mdl";
+const string AK47_WORLDMODEL   = "models/w_ak47.mdl";
 const string AK47_DEPLOY_SOUND = "";
 const string AK47_DISPLAY_NAME = "AK47";
+
+// Sound stage latch.  A sequence-driven model never steps weaponframe, so the
+// timed reload/draw events latch off elapsed time instead of a frame number.
+.float ak47_snd_stage;
+
+// ============================================================
+//  SHARED — sequence resolution
+// ============================================================
+
+float() SH_AK47SeqIdle   = { return SH_SeqForName(AK47_VIEWMODEL, "idle1",  AK47_SEQ_IDLE); };
+float() SH_AK47SeqReload = { return SH_SeqForName(AK47_VIEWMODEL, "reload", AK47_SEQ_RELOAD); };
+float() SH_AK47SeqDraw   = { return SH_SeqForName(AK47_VIEWMODEL, "draw",   AK47_SEQ_DRAW); };
+float() SH_AK47SeqShoot1 = { return SH_SeqForName(AK47_VIEWMODEL, "shoot1", AK47_SEQ_SHOOT1); };
+float() SH_AK47SeqShoot2 = { return SH_SeqForName(AK47_VIEWMODEL, "shoot2", AK47_SEQ_SHOOT2); };
+float() SH_AK47SeqShoot3 = { return SH_SeqForName(AK47_VIEWMODEL, "shoot3", AK47_SEQ_SHOOT3); };
+
+// Deterministic shoot-sequence pick from wep_action_id so client and server
+// agree which take plays for this shot — the CSAUG/CFGLOCK pattern.
+float(float action_id) SH_AK47PickShootSeq =
+{
+    float r = SH_SpreadHash(action_id);
+    if (r < 0.3334) return SH_AK47SeqShoot1();
+    if (r < 0.6667) return SH_AK47SeqShoot2();
+    return SH_AK47SeqShoot3();
+};
+
+// Durations come from the model that actually loaded, never from a constant.
+float() SH_AK47DrawDuration   = { return SH_SeqDuration(AK47_VIEWMODEL, SH_AK47SeqDraw(),   1.000); };
+float() SH_AK47ReloadDuration = { return SH_SeqDuration(AK47_VIEWMODEL, SH_AK47SeqReload(), 2.432); };
 
 // ============================================================
 //  SHARED — state machine
@@ -78,9 +122,11 @@ const string AK47_DISPLAY_NAME = "AK47";
 
 float(float now) SH_AK47TickState =
 {
+    float rel = SH_AK47ReloadDuration();
     return SH_StandardTickState(now, mag_ak47, ammo_ak47, MAX_MAG_AK47,
-        AK47_DRAW_DURATION, AK47_FIRE_DURATION,
-        AK47_RELOAD_DURATION, AK47_RELOAD_APPLY_TIME);
+        SH_AK47DrawDuration(),
+        SH_SeqDuration(AK47_VIEWMODEL, self.weaponframe, 0.5),
+        rel, rel * AK47_RELOAD_F_APPLY);
 };
 
 float(float now) SH_AK47TryFire =
@@ -90,7 +136,7 @@ float(float now) SH_AK47TryFire =
 
 float(float now) SH_AK47TryReload =
 {
-    return SH_StandardTryReload(now, mag_ak47, ammo_ak47, MAX_MAG_AK47, AK47_RELOAD_DURATION);
+    return SH_StandardTryReload(now, mag_ak47, ammo_ak47, MAX_MAG_AK47, SH_AK47ReloadDuration());
 };
 
 // ============================================================
@@ -118,8 +164,9 @@ void() W_AK47Fire =
 
     if (r == 1)
     {
-        self.weaponframe   = AK47_FIRE_START;
-        self.wep_nextframe = time + AK47_FRAME_INTERVAL;
+        self.weaponframe    = SH_AK47PickShootSeq(self.wep_action_id);
+        self.wep_nextframe  = time + AK47_FRAME_INTERVAL;
+        self.ak47_snd_stage = 0;
 
         W_AK47Shoot();
 
@@ -140,49 +187,68 @@ void() W_AK47Reload =
 {
     if (SH_AK47TryReload(time))
     {
-        self.weaponframe   = AK47_RELOAD_START;
-        self.wep_nextframe = time + AK47_FRAME_INTERVAL;
+        self.weaponframe    = SH_AK47SeqReload();
+        self.wep_nextframe  = time + AK47_FRAME_INTERVAL;
+        self.ak47_snd_stage = 0;
     }
 };
 
 void() W_AK47Frame =
 {
     float result;
+    float elapsed = (self.wep_anim_start > 0) ? (time - self.wep_anim_start) : 0;
 
-    self.weaponframe  += 1;
+    // Sequence-driven model — DO NOT step weaponframe per tick.  The engine
+    // animates within the sequence; this only ticks the state machine and fires
+    // the timed sound events.  CHAN_AUTO so the predicted-sound dedup window
+    // matches CSQC_RecordPredictedAutoSound on the client.
     self.wep_nextframe += AK47_FRAME_INTERVAL;
 
-    if (self.weaponstate == WS_DRAW && self.weaponframe == AK47_DRAW_BOLTPULL_FRAME)
-        sound(self, CHAN_AUTO, "sounds/weapons/wpn_csak47/boltpull.wav", 1, ATTN_NORM);
-
-    if (self.weaponstate == WS_RELOAD)
+    if (self.weaponstate == WS_DRAW)
     {
-        if (self.weaponframe == AK47_RELOAD_CLIPOUT)
+        if (elapsed >= SH_AK47DrawDuration() * AK47_DRAW_F_BOLT
+            && self.ak47_snd_stage < 1)
+        {
+            sound(self, CHAN_AUTO, "sounds/weapons/wpn_csak47/boltpull.wav", 1, ATTN_NORM);
+            self.ak47_snd_stage = 1;
+        }
+    }
+    else if (self.weaponstate == WS_RELOAD)
+    {
+        float rel = SH_AK47ReloadDuration();
+
+        if (elapsed >= rel * AK47_RELOAD_F_CLIPOUT && self.ak47_snd_stage < 1)
         {
             sound(self, CHAN_AUTO, "sounds/weapons/wpn_csak47/clipout.wav", 1, ATTN_NORM);
             W_MagDropEffect(MAG_RIFLE, '4 -4 -6', '0 -30 -20');
+            self.ak47_snd_stage = 1;
         }
-        if (self.weaponframe == AK47_RELOAD_CLIPIN)
+        if (elapsed >= rel * AK47_RELOAD_F_CLIPIN && self.ak47_snd_stage < 2)
+        {
             sound(self, CHAN_AUTO, "sounds/weapons/wpn_csak47/clipin.wav", 1, ATTN_NORM);
+            self.ak47_snd_stage = 2;
+        }
     }
 
     result = SH_AK47TickState(time);
     if (result & 1)
     {
-        self.weaponframe   = AK47_IDLE_FRAME;
-        self.wep_nextframe = 0;
+        self.weaponframe    = SH_AK47SeqIdle();
+        self.wep_nextframe  = 0;
+        self.ak47_snd_stage = 0;
     }
 };
 
 void() W_AK47Equip =
 {
     W_SetADSProfile(TRUE, "cl_ads_ak47", SCOPE_CLASS_NONE);
-    W_StandardEquipSetup(AK47_VIEWMODEL, AK47_DISPLAY_NAME, AK47_DRAW_START,
+    W_StandardEquipSetup(AK47_VIEWMODEL, AK47_DISPLAY_NAME, SH_AK47SeqDraw(),
         AK47_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
     self.fire     = W_AK47Fire;
     self.reload   = W_AK47Reload;
     self.wepframe = W_AK47Frame;
     self.shoot    = W_AK47Shoot;
+    self.ak47_snd_stage = 0;
     W_SetCrosshairProfile(AK47_BASE_SPREAD, AK47_MOVE_SPREAD, AK47_FULL_SPREAD_SPEED, 1.85, TRUE);
 };
 
@@ -196,7 +262,7 @@ void() W_AK47Drop =
     self.mag_ak47  = 0;
     self.ammo_ak47 = 0;
 
-    setmodel(tgt, "models/weapons/wpn_csak47/w_ak47.mdl");
+    setmodel(tgt, "models/w_ak47.mdl");
     setsize(tgt, '-16 -16 0', '16 16 48');
     tgt.classname    = "weapon_ak47";
     tgt.solid        = SOLID_NOT;
@@ -213,7 +279,7 @@ void() W_AK47Drop =
 
 void() weapon_ak47 =
 {
-    setmodel(self, "models/weapons/wpn_csak47/w_ak47.mdl");
+    setmodel(self, "models/w_ak47.mdl");
     setsize(self, '-16 -16 0', '16 16 48');
     self.classname     = "weapon_ak47";
     self.solid         = SOLID_TRIGGER;
@@ -237,32 +303,18 @@ void() weapon_ak47 =
 
 #ifdef CSQC
 
-// Pre-computed time for boltpull sound during draw
-const float AK47_DRAW_BOLTPULL_TIME = (AK47_DRAW_BOLTPULL_FRAME - AK47_DRAW_START) * AK47_FRAME_INTERVAL;
-const float AK47_RELOAD_CLIPOUT_TIME = (AK47_RELOAD_CLIPOUT - AK47_RELOAD_START) * AK47_FRAME_INTERVAL;
-const float AK47_RELOAD_CLIPIN_TIME = (AK47_RELOAD_CLIPIN - AK47_RELOAD_START) * AK47_FRAME_INTERVAL;
-
-float csqc_ak47_draw_snd_played;
-float csqc_ak47_reload_snd_stage;
+float csqc_ak47_snd_stage;
+float csqc_ak47_snd_action;
 
 void() CSQC_PredictAK47Command =
 {
     float r;
+    float elapsed;
 
-    // Play draw boltpull sound at the correct frame time
-    if (self.weaponstate == WS_DRAW && !pm_suppress_sounds && !csqc_ak47_draw_snd_played)
+    if (predicted_player.wep_action_id != csqc_ak47_snd_action)
     {
-        float elapsed = (self.wep_anim_start > 0) ? (csqc_pred_time - self.wep_anim_start) : 0;
-        if (elapsed >= AK47_DRAW_BOLTPULL_TIME)
-        {
-            localsound("sounds/weapons/wpn_csak47/boltpull.wav");
-            CSQC_RecordPredictedAutoSound();
-            csqc_ak47_draw_snd_played = TRUE;
-        }
-    }
-    else if (self.weaponstate != WS_DRAW)
-    {
-        csqc_ak47_draw_snd_played = FALSE;
+        csqc_ak47_snd_action = predicted_player.wep_action_id;
+        csqc_ak47_snd_stage  = 0;
     }
 
     if (input_buttons & 1)
@@ -305,18 +357,40 @@ void() CSQC_PredictAK47Command =
         }
     }
 
-    // Predicted reload sounds
-    if (self.weaponstate == WS_RELOAD && !pm_suppress_sounds && self.wep_anim_start > 0)
+    // Predicted draw / reload sounds, timed off the loaded model's own
+    // sequence durations rather than a stepped frame number.
+    if (!pm_suppress_sounds && self.wep_anim_start > 0)
     {
-        float reload_elapsed = csqc_pred_time - self.wep_anim_start;
-        if (csqc_ak47_reload_snd_stage < 1 && reload_elapsed >= AK47_RELOAD_CLIPOUT_TIME)
+        elapsed = csqc_pred_time - self.wep_anim_start;
+
+        if (self.weaponstate == WS_DRAW)
         {
-            localsound("sounds/weapons/wpn_csak47/clipout.wav"); CSQC_RecordPredictedAutoSound();
-            CSQC_SpawnMag("models/weapons/riflemag.mdl", '4 -4 -6', '0 -30 -20', '4 8 8', '0 180 0', '0 90 90');
-            csqc_ak47_reload_snd_stage = 1;
+            if (csqc_ak47_snd_stage < 1
+                && elapsed >= SH_AK47DrawDuration() * AK47_DRAW_F_BOLT)
+            {
+                localsound("sounds/weapons/wpn_csak47/boltpull.wav");
+                CSQC_RecordPredictedAutoSound();
+                csqc_ak47_snd_stage = 1;
+            }
         }
-        if (csqc_ak47_reload_snd_stage < 2 && reload_elapsed >= AK47_RELOAD_CLIPIN_TIME)
-        { localsound("sounds/weapons/wpn_csak47/clipin.wav"); CSQC_RecordPredictedAutoSound(); csqc_ak47_reload_snd_stage = 2; }
+        else if (self.weaponstate == WS_RELOAD)
+        {
+            float rel = SH_AK47ReloadDuration();
+
+            if (csqc_ak47_snd_stage < 1 && elapsed >= rel * AK47_RELOAD_F_CLIPOUT)
+            {
+                localsound("sounds/weapons/wpn_csak47/clipout.wav");
+                CSQC_RecordPredictedAutoSound();
+                CSQC_SpawnMag("models/weapons/riflemag.mdl", '4 -4 -6', '0 -30 -20', '4 8 8', '0 180 0', '0 90 90');
+                csqc_ak47_snd_stage = 1;
+            }
+            if (csqc_ak47_snd_stage < 2 && elapsed >= rel * AK47_RELOAD_F_CLIPIN)
+            {
+                localsound("sounds/weapons/wpn_csak47/clipin.wav");
+                CSQC_RecordPredictedAutoSound();
+                csqc_ak47_snd_stage = 2;
+            }
+        }
     }
 
     SH_AK47TickState(csqc_pred_time);
@@ -325,16 +399,24 @@ void() CSQC_PredictAK47Command =
 void() CSQC_PredictAK47Reload =
 {
     if (SH_AK47TryReload(csqc_pred_time))
-    { csqc_ak47_reload_snd_stage = 0; CSQC_MarkPendingWeaponAck(); }
+    {
+        csqc_ak47_snd_stage  = 0;
+        csqc_ak47_snd_action = predicted_player.wep_action_id;
+        CSQC_MarkPendingWeaponAck();
+    }
 };
 
+// Sequence-driven: return the SEQUENCE index, not a stepped frame.
 float(float elapsed) CSQC_AK47DisplayFrame =
 {
-    return CSQC_StandardDisplayFrame(elapsed, AK47_FRAME_INTERVAL,
-        AK47_DRAW_START, AK47_DRAW_END,
-        AK47_FIRE_START, AK47_FIRE_END,
-        AK47_RELOAD_START, AK47_RELOAD_END,
-        AK47_IDLE_FRAME);
+    if (predicted_player.weaponstate == WS_DRAW)
+        return SH_AK47SeqDraw();
+    if (predicted_player.weaponstate == WS_RELOAD)
+        return SH_AK47SeqReload();
+    if (predicted_player.weaponstate == WS_FIRE)
+        return SH_AK47PickShootSeq(predicted_player.wep_action_id);
+
+    return SH_AK47SeqIdle();
 };
 
 void() CSQC_AK47DropClear =
@@ -354,23 +436,18 @@ void() CSQC_AK47Equip =
 	self.csqc_predict_reload = CSQC_PredictAK47Reload;
 	self.csqc_display_frame  = CSQC_AK47DisplayFrame;
 	self.csqc_drop_clear     = CSQC_AK47DropClear;
+    // GoldSrc-format viewmodel: .frame holds the SEQUENCE index and the engine
+    // animates within it via .frame1time.  Without this flag
+    // CSQC_AddPredictedViewmodel takes the frame-stepping branch and the model
+    // sits frozen on the first frame of whatever sequence we set.
+    self.weapon_uses_sequences = TRUE;
+    // FLIPPED.  The FALSE that used to sit here described the OLD bundled
+    // viewmodel (models/weapons/wpn_csak47/v_ak47.mdl), which was a re-baked
+    // IDPO copy.  This weapon now draws the stock cstrike models/v_ak47.mdl,
+    // whose rhand/lhand meshes are the same ones v_aug / v_glock18 / v_usp use,
+    // and every one of those is flipped.  Reported left-handed in game.
+    // cl_lefthand XORs against this, so reverting is one word.
     self.weapon_viewmodel_flip = TRUE;
-
-	// Snapshot-driven equip suppresses the predicted boltpull sound.
-	// CSQC_PredictSelectWeapon (cl_weapons.qc) sets weaponstate=WS_DRAW
-	// BEFORE calling CSQC_WeaponEquip, so on a LOCAL switch we see
-	// WS_DRAW here.  The snapshot reconcile path (cl_player.qc:830)
-	// calls CSQC_WeaponEquip BEFORE setting WS_DRAW — at this point
-	// weaponstate is the prior frame's (WS_DEAD on respawn, WS_IDLE
-	// on fresh spawn, etc.).  When the server is the driver, its
-	// W_AK47Frame already emits the boltpull on CHAN_AUTO; that
-	// sound rides the same snapshot packet as the WS_DRAW state and
-	// gets played by the engine BEFORE any CSQC predict tick can
-	// stamp csqc_last_predicted_auto_sound_time, so the dedup window
-	// is empty.  Latching here means the next predict tick skips its
-	// own localsound, avoiding the double boltpull.
-	if (self.weaponstate != WS_DRAW)
-		csqc_ak47_draw_snd_played = TRUE;
 };
 
 #endif // CSQC

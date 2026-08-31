@@ -228,6 +228,10 @@ void() W_CFKs23Shoot =
 
     src = self.origin + self.view_ofs;
 
+    // Tag every impact this loop emits as one pellet of a single blast, so
+    // remote viewers bypass their per-shot decal/effect caps (all pellets
+    // share one wep_action_id).  See sv_impact_is_blast in sv_weapons.qc.
+    sv_impact_is_blast = 1;
     for (i = 0; i < CFKS23_PELLETS; i++)
     {
         sx  = SH_SpreadJitter(self.wep_action_id + i, 0) * CFKS23_SPREAD;
@@ -266,6 +270,7 @@ void() W_CFKs23Shoot =
             W_DebugImpact(trace_endpos, damage, W_BoneToHitgroup(trace_bone_id));
         }
     }
+    sv_impact_is_blast = 0;
 };
 
 void() W_CFKs23Fire =

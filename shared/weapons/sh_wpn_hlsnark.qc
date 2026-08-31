@@ -43,16 +43,20 @@ const float SNARK_POP_RADIUS     = 12.5 * 2.5;  // pop damage * 2.5, HL's derive
 const float SNARK_FUSE           = 15.0;   // SQUEEK_DETONATE_DELAY, squeakgrenade.cpp:76
 const float SNARK_THROW_FORWARD  = 200;    // squeakgrenade.cpp:456
 const float SNARK_GRAVITY        = 0.5;    // squeakgrenade.cpp:112
-const float SNARK_FRICTION       = 0.5;    // squeakgrenade.cpp:113
+const float SNARK_FRICTION       = 0.5;    // squeakgrenade.cpp:132 — bounce damping
 const float SNARK_SIGHT_RANGE    = 512;    // squeakgrenade.cpp:206 Look(512)
 const float SNARK_HUNT_INTERVAL  = 2.0;    // squeakgrenade.cpp:196
 const float SNARK_ATTACK_DELAY   = 0.3;    // squeakgrenade.cpp:468
 
 const string SNARK_VIEWMODEL     = "models/v_squeak.mdl";
-// w_sqknest.mdl is the nest HL uses for the ground pickup.  It is NOT on this
-// mount, so the pickup is a snark instead - visibly a snark rather than a nest
-// of them, and the one asset compromise in this weapon.
-const string SNARK_WORLDMODEL    = "models/w_squeak.mdl";
+// w_sqknest.mdl is the nest HL uses for the ground pickup.  This used to read
+// "It is NOT on this mount, so the pickup is a snark instead - visibly a snark
+// rather than a nest of them, and the one asset compromise in this weapon."
+// That was wrong: valve/models/w_sqknest.mdl is present and always has been
+// (listed alongside w_squeak.mdl, w_squeakt.mdl and w_sqknestt.mdl).  The
+// pickup is the nest now, which is what Half-Life shows and what the pickup
+// giving FIVE snarks has always implied.
+const string SNARK_WORLDMODEL    = "models/w_sqknest.mdl";
 const string SNARK_LIVE_MODEL    = "models/w_squeak.mdl";
 const string SNARK_DEPLOY_SOUND  = "";
 const string SNARK_DISPLAY_NAME  = "SNARK";
@@ -87,6 +91,39 @@ float(float now) SH_SnarkTickState =
     }
 
     return 0;
+};
+
+// IS THERE ROOM TO LET THE CREATURE GO?
+//
+// squeakgrenade.cpp:444 traces 24→60 units out and releases only if that space
+// is clear, or you would spawn a live monster inside the wall you are facing.
+// This port ran that trace AFTER stamping SNARK_SEQ_THROW, so facing a wall
+// played a full throw animation and produced nothing — the same shape as the
+// tripmine's place take.  Both weapons are server-autonomous, so CSQC ran the
+// identical permissive gate and animated too.
+//
+// THE ANGLES ARE A PARAMETER, not read from self, and that is load-bearing:
+// predicted_player carries no .v_angle on CSQC (sh_wpn_csknife.qc:610 and
+// csshield.qc:310 both record this), so a shared body reading self.v_angle would
+// trace along world +X on the client and gate on where the player is standing
+// rather than where they are looking.  SSQC passes self.v_angle, CSQC passes
+// input_angles.
+//
+// The penguin calls this too — it is a re-skin of the snark and already
+// delegates its spawn to W_SnarkSpawn.
+//
+// Client and server WILL disagree occasionally: the third traceline argument is
+// FALSE, so monsters, players and doors block it, and the client's entity set is
+// not the server's.  That is accepted, not solved — Half-Life itself does not
+// even use the same trace on both sides (a point trace server-side, a hull trace
+// with a 0.25 fraction floor client-side).  The client's copy is cosmetic; the
+// server's is authoritative.
+float(vector aim_angles) SH_SnarkHasReleaseRoom =
+{
+    makevectors(aim_angles);
+    vector src = self.origin + self.view_ofs;
+    traceline(src + v_forward * 24, src + v_forward * 60, FALSE, self);
+    return !(trace_allsolid || trace_startsolid || trace_fraction <= 0);
 };
 
 float(float now) SH_SnarkTryThrow =
@@ -156,7 +193,13 @@ void() W_SnarkPop =
     WriteByte(MSG_MULTICAST, floor(random() * 3));
     multicast(self.origin, MULTICAST_PVS);
 
-    W_RadiusExplode(self.origin, dmg * 2.5, dmg, 1, 200, 100, self.snark_owner);
+    // squeakgrenade.cpp:184 falls back to the snark ITSELF when m_hOwner is
+    // NULL, and an ownerless snark is now common: every map-placed one and every
+    // squadmaker child spawns with owner == world (monstermaker.cpp:211-212 sets
+    // the owner only after DispatchSpawn).  Without the fallback all 76 corpus
+    // makers' explosions would be credited to `world`.
+    W_RadiusExplode(self.origin, dmg * 2.5, dmg, 1, 200, 100,
+                    self.snark_owner ? self.snark_owner : self);
     remove(self);
 };
 
@@ -166,9 +209,23 @@ void() W_SnarkDie = { W_SnarkPop(); };
 // if that thing can be hurt, and squeaks either way.
 void() W_SnarkTouch =
 {
-    if (other == self.owner)
+    // squeakgrenade.cpp:327 — `if ( pev->owner && pOther->edict() == pev->owner )`.
+    // THE NULL-CHECK IS LOAD-BEARING and was dropped in the port.  FTE delivers a
+    // world contact with other == world (world.c:2632 deliberately "misreports"
+    // trace.ent as the world edict, and sv_phys.c:1437 only skips the impact when
+    // trace.ent is null), so once line below has set .owner to world, EVERY
+    // subsequent world bounce matched `other == self.owner` and returned here.
+    // Consequences, all of which this restores:
+    //   * the hunt re-arm at the bottom stopped happening from the second bounce
+    //     on, so a snark steered on the 2 s HuntThink timer where HL re-steers on
+    //     every bounce;
+    //   * the bounce squeak was skipped on every world bounce after the first;
+    //   * a MAP-PLACED monster_snark is spawned with thrower == world
+    //     (sv_monsters.qc), so its owner IS world and it returned on its very
+    //     first floor contact — it never re-armed at all.
+    if (self.owner != world && other == self.owner)
         return;
-    self.owner = world;             // squeakgrenade.cpp:266 — after one bounce it is nobody's
+    self.owner = world;             // squeakgrenade.cpp:331 — after one bounce it is nobody's
 
     if (time < self.snark_next_hit)
         return;
@@ -298,9 +355,50 @@ entity(entity thrower, vector org, vector vel) W_SnarkSpawn =
     s.solid     = SOLID_BBOX;
     setmodel(s, SNARK_LIVE_MODEL);
     setsize(s, '-4 -4 0', '4 4 8');      // squeakgrenade.cpp:103
+    // FORCE THE POINT HULL.  FTE picks the world clipping hull from the bbox
+    // SIZE, and its point-hull threshold is Quake's `size[0] < 3`
+    // (q1bsp.c:1554), not GoldSrc's `size[0] <= 8`.  An 8-wide snark therefore
+    // falls through to hulls[3], which on a Half-Life BSP is HL's 32x32x36
+    // CROUCH hull (gl_model.c:5564).  Worse, the hull offset is
+    // clip_mins - mins = (-16,-16,-18) - (-4,-4,0) = (-12,-12,-18)
+    // (q1bsp.c:1569), so the real collision volume sits at
+    // origin+(-4,-4,0)..(28,28,36) — correct at one corner and 28/28/36 units
+    // oversized at the other.  That is the entire "stuck in the air, doesn't
+    // move, doesn't fly around accurately" report: the snark rests on a point
+    // 12 units diagonally off the model it draws at, and needs a crouching
+    // player's worth of clearance to travel anywhere.
+    //
+    // .hull overrides the choice (q1bsp.c:1532) and World_Move honours it for
+    // physics pushes (world.c:2749).  1 == hulls[0] == the point hull, whose
+    // clip_mins are zero, so the Z offset becomes exactly 0 and ground contact
+    // is exact.  The bbox stays 8x8x8, so the snark is still shootable and
+    // still touch-tests against players and monsters at its real size.
+    //
+    // Consequence to expect: hull 0 on a Q1/HL bsp carries no CONTENTS_CLIP
+    // (qcsg only emits clip brushes into hulls 1-3), so the snark now passes
+    // through player-clip brushes — exactly as a GoldSrc snark does.
+    s.hull = 1;
     setorigin(s, org);
     s.velocity   = vel;
     s.gravity    = SNARK_GRAVITY;
+    // squeakgrenade.cpp:132 sets friction 0.5 alongside gravity 0.5.  In FTE the
+    // MOVETYPE_BOUNCE damping is NOT read from .friction — nothing in the server
+    // physics touches that field (the only engine reader is the ODE rigid-body
+    // path, com_phys_ode.c:2771, i.e. MOVETYPE_PHYSICS).  The bounce backoff
+    // comes from .bouncefactor: sv_phys.c:1447 does
+    // `backoff = ent->xv->bouncefactor ? 1 + bouncefactor : 1.5`.
+    // So the old `s.friction = 0.5` was a no-op, which is why the
+    // "snarks float around a little too much" report came back after it.
+    // GoldSrc's bounce backoff is `2.0 - pev->friction` (engine-side; not in the
+    // SDK on disk), so the CONVERSION IS `bouncefactor = 1 - friction`, NOT
+    // `bouncefactor = friction`.  Those two agree only at 0.5, which is exactly
+    // the snark's value — write it as the subtraction anyway so the next weapon
+    // ported through here (the satchel is at 0.8) does not copy the wrong rule.
+    // 1 + (1 - 0.5) == 1.5 == HL's 2.0 - 0.5 == FTE's own default, so the damping
+    // was already right by accident and this only makes it explicit.  The real
+    // cause of the float-around/stuck report is the collision hull forced above
+    // — do NOT damp harder as a substitute for it.
+    s.bouncefactor = 1 - SNARK_FRICTION;
     s.frame      = SNARK_W_SEQ_RUN;      // squeakgrenade.cpp:124
     s.takedamage = DAMAGE_AIM;
     s.health     = SNARK_HEALTH;
@@ -310,9 +408,26 @@ entity(entity thrower, vector org, vector vel) W_SnarkSpawn =
     s.snark_die_time   = time + SNARK_FUSE;
     s.snark_pop_damage = SNARK_DMG_POP;
     s.snark_prev_pos   = org;
-    // squeakgrenade.cpp:108 parks the first hunt a million seconds out so a
-    // freshly thrown snark flies where you aimed it before it starts steering.
-    s.snark_next_hunt  = time + 1.0;
+    // squeakgrenade.cpp:108 parks the first hunt a million seconds out.  That is
+    // NOT a one-second flight grace period, which is how it was ported: it is an
+    // effectively infinite gate, and the ONLY thing that ever opens it is the
+    // first bounce — SuperBounceTouch sets m_flNextHunt = gpGlobals->time on
+    // every touch (squeakgrenade.cpp:376), which W_SnarkTouch already mirrors.
+    // A HL snark that has not touched anything yet never steers; its throw arc
+    // is pure ballistics.  With `time + 1.0` this one got a free 300-unit
+    // steering kick toward the target's eyes while still airborne.
+    // ORDER MATTERS: this line is only safe because W_SnarkTouch's owner guard
+    // above has been given back its null-check.  Without that, a map-placed
+    // monster_snark (thrower == world, sv_monsters.qc) returns from its very
+    // first floor contact, never re-arms, and a million-second gate would leave
+    // all 18 corpus placements inert lumps until the 15 s fuse.  With the guard
+    // fixed it lands, touches, re-arms and hunts exactly as HL does.
+    //
+    // Honest scope note: at SNARK_GRAVITY 0.5 x sv_gravity 800 = 400 u/s^2 from
+    // eye height, an ordinary throw hits the floor at ~0.5-0.7 s — BEFORE the old
+    // 1.0 s gate — so on a normal throw this changes nothing visible.  It is
+    // faithfulness, not the cure for floaty snarks; the hull above is that.
+    s.snark_next_hunt  = time + 1000000;
 
     s.touch     = W_SnarkTouch;
     s.think     = W_SnarkThink;
@@ -322,19 +437,27 @@ entity(entity thrower, vector org, vector vel) W_SnarkSpawn =
 
 void() W_SnarkFire =
 {
+    // BEFORE the try-throw, so a blocked release costs no WS_FIRE, no action-id
+    // bump, no weaponframe and no cooldown.  Silent, like Half-Life: both
+    // squeakgrenade.cpp:565 and ev_hldm.cpp:1663 simply skip the animation with
+    // no sound — a thrown creature has no dry-fire.
+    if (!SH_SnarkHasReleaseRoom(self.v_angle)) return;
     if (!SH_SnarkTryThrow(time)) return;
 
     self.weaponframe   = SNARK_SEQ_THROW;
-    self.wep_nextframe = 0;
+    // MUST schedule, not clear -- the same defect the satchel and tripmine both
+    // had.  sv_weapons.qc only calls wepframe while wep_nextframe > 0, and
+    // W_SnarkFrame below is the ONLY route to SH_WeaponEnterIdle, so a 0 here
+    // retires the frame function permanently: weaponstate pins at WS_FIRE and
+    // SH_SnarkTryThrow's `weaponstate != WS_IDLE` gate then refuses every later
+    // throw.  One snark per equip.
+    self.wep_nextframe = time + SNARK_FRAME_INTERVAL;
 
-    // squeakgrenade.cpp:444 traces from 24 to 60 units out and only releases
-    // the snark if that space is clear - otherwise you would spawn a live
-    // monster inside the wall you are facing.
-    makevectors(self.v_angle);
-    vector src = self.origin + self.view_ofs;
-    traceline(src + v_forward * 24, src + v_forward * 60, FALSE, self);
-
-    if (trace_allsolid || trace_startsolid || trace_fraction <= 0)
+    // Re-run for the spawn point.  SH_SnarkHasReleaseRoom above already proved
+    // the space is clear and left makevectors pointing the right way, but the
+    // try-throw sits between them, so trace_endpos is re-derived here rather than
+    // assumed to have survived.
+    if (!SH_SnarkHasReleaseRoom(self.v_angle))
         return;
 
     W_SnarkSpawn(self, trace_endpos, v_forward * SNARK_THROW_FORWARD + self.velocity);
@@ -439,7 +562,12 @@ void() CSQC_PredictSnarkCommand =
 {
     if (input_buttons & 1)
     {
-        if (SH_SnarkTryThrow(csqc_pred_time))
+        // input_angles, NOT self.v_angle — predicted_player has no v_angle on
+        // CSQC.  This is the half that actually stops the phantom animation:
+        // the client stamps its own WS_FIRE and reconcile never rewinds it
+        // (client/cl_player.qc:1022), so a server-only gate would be invisible.
+        if (SH_SnarkHasReleaseRoom(input_angles)
+            && SH_SnarkTryThrow(csqc_pred_time))
             CSQC_MarkPendingWeaponAck();
     }
 

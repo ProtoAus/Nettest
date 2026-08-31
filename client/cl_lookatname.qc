@@ -65,6 +65,97 @@ string lookat_target_name;
 float  lookat_last_pulse;
 float  lookat_last_seen;       // cltime stamp of the most recent successful pulse
 
+// --- NPC target (server-driven, see server/sv_lookatnpc.qc) ---
+//
+// This is an ENGINE ENTITY INDEX, not a player slot; the two number spaces are
+// unrelated and that is why the draw paths below stay separate rather than
+// folding into the player one.  The client does not resolve it itself: it COULD
+// (getentity + the CSQC_EVENT_MONSTER_MODELS whitelist is exactly what
+// cl_monstertrace.qc does) but no GE_* property carries health, so the health
+// has to be unicast regardless and the server may as well own the trace too.
+//
+// The tag still tracks the monster at RENDER rate, not at the 10 Hz the server
+// pulses, because the world-space anchor is re-read from getentity() every
+// frame — same treatment the player tag gives its proxy.
+float  lookat_npc_entnum;      // 0 = none
+string lookat_npc_name;        // strzone'd — readstring's buffer is recycled by the next parse
+float  lookat_npc_hp;
+float  lookat_npc_maxhp;
+float  lookat_npc_last_seen;   // shares LOOKAT_HOLD_TIME with the player tag
+
+// HP text colour.  Mirrors the low-HP reddening the damage report already uses
+// (cl_hud.qc) so the two readouts agree about what "hurt" looks like.
+const float LOOKAT_NPC_HURT_FRAC = 0.30;
+
+vector(float frac) Lookat_HPColour =
+{
+    if (frac <= LOOKAT_NPC_HURT_FRAC) return '1.00 0.35 0.30';
+    if (frac <= 0.65)                 return '1.00 0.82 0.35';
+    return '0.70 1.00 0.70';
+};
+
+void() CSQC_LookatNPC_Parse =
+{
+    float en = readshort();
+    if (!en)
+    {
+        lookat_npc_entnum = 0;
+        return;
+    }
+    lookat_npc_hp    = readshort();
+    lookat_npc_maxhp = readshort();
+    float fresh = readbyte();
+    if (fresh)
+    {
+        if (lookat_npc_name)
+            strunzone(lookat_npc_name);
+        lookat_npc_name = strzone(readstring());
+    }
+    lookat_npc_entnum    = en;
+    lookat_npc_last_seen = cltime;
+
+    // The client half of the same "did it run at all" problem the server print
+    // documents: a HUD label leaves no trace in a headless log.  developer-gated, and
+    // only on the frame the TARGET changes (an HP-only update re-sends nothing worth
+    // reading), so it is silent in normal play.
+    if (fresh && cvar("developer"))
+        print(sprintf("[lookat-cl] ent=%g \"%s\" hp=%g/%g\n",
+                      en, lookat_npc_name, lookat_npc_hp, lookat_npc_maxhp));
+};
+
+// Sibling of CSQC_LookatName_ShouldShow, with the same hold-window forgiveness
+// plus a same-frame liveness re-check that costs no wire bytes at all:
+// GE_ACTIVE drops to 0 the moment the monster leaves PVS, and the box INVERTS
+// the moment it stops being SOLID_BBOX/SLIDEBOX — which is what a corpse is.
+// See the header of cl_monstersolid.qc:38-47; this is the exact test at :118.
+// Without it the tag would hang over a monster you just killed for the whole
+// hold window, because the server's change-gate has nothing new to send once
+// the corpse stops being a valid target.
+float() CSQC_LookatNPC_ShouldShow =
+{
+    if (!lookat_npc_entnum) return 0;
+    // The name arrives only on the frame the target CHANGES, so a target with no
+    // name means the change packet was missed.  It cannot be — MSG_ONE is the
+    // reliable per-client channel — but drawing a null string is not worth the
+    // certainty, and this also covers a target set by a future non-change path.
+    if (lookat_npc_name == "" || lookat_npc_name == __NULL__) return 0;
+    if (cltime - lookat_npc_last_seen > LOOKAT_HOLD_TIME)
+    {
+        lookat_npc_entnum = 0;
+        return 0;
+    }
+    if ((float)getentity(lookat_npc_entnum, GE_ACTIVE) == 0)
+        return 0;                        // out of PVS — hold, don't clear
+    vector bmin = (vector)getentity(lookat_npc_entnum, GE_ABSMIN);
+    vector bmax = (vector)getentity(lookat_npc_entnum, GE_ABSMAX);
+    if (bmax_z <= bmin_z)
+    {
+        lookat_npc_entnum = 0;           // corpse / went non-solid — clear outright
+        return 0;
+    }
+    return 1;
+};
+
 // Helper: linear interp + clamp used by both size and alpha falloff.
 float(float t, float a, float b) lookat_lerp =
 {
@@ -175,10 +266,12 @@ float() CSQC_LookatName_ShouldShow =
 
 // HUD label — small GoogleMed text down-and-left of the
 // screen-centre crosshair.  Drawn during the 2D HUD pass.
+// A PLAYER IN THE CROSSHAIR ALWAYS WINS over a monster behind them: the server's
+// NPC trace and the client's player pulse are independent, so both can be live at
+// once (a teammate standing in front of a grunt), and naming the teammate is the
+// useful answer.  Both draw functions test the player first for that reason.
 void() CSQC_LookatName_DrawHUD =
 {
-    if (!CSQC_LookatName_ShouldShow()) return;
-
     float cx = g_width * 0.5;
     float cy = g_height * 0.5;
     float x = cx + LOOKAT_HUD_OFFSET_X;
@@ -186,9 +279,25 @@ void() CSQC_LookatName_DrawHUD =
 
     vector sz = [LOOKAT_HUD_FONT_SIZE, LOOKAT_HUD_FONT_SIZE, 0];
     float prev = drawfont;
-    drawfont = hud_font_mono;       // GoogleMed
-    // Single draw — readability border is the font's baked outline (outline=1).
-    drawstring([x, y],         lookat_target_name, sz, '1 1 1', 1.0, 0);
+
+    if (CSQC_LookatName_ShouldShow())
+    {
+        drawfont = hud_font_mono;       // GoogleMed
+        // Single draw — readability border is the font's baked outline (outline=1).
+        drawstring([x, y],         lookat_target_name, sz, '1 1 1', 1.0, 0);
+        drawfont = prev;
+        return;
+    }
+
+    if (!cvar("cl_lookatnpc"))        return;
+    if (!CSQC_LookatNPC_ShouldShow()) return;
+
+    float mx = (lookat_npc_maxhp > 0) ? lookat_npc_maxhp : 1;
+    drawfont = hud_font_mono;
+    drawstring([x, y], lookat_npc_name, sz, '1 1 1', 1.0, 0);
+    drawstring([x, y + LOOKAT_HUD_FONT_SIZE + 2],
+               sprintf("%g / %g", lookat_npc_hp, mx), sz,
+               Lookat_HPColour(lookat_npc_hp / mx), 1.0, 0);
     drawfont = prev;
 };
 
@@ -196,9 +305,75 @@ void() CSQC_LookatName_DrawHUD =
 // 2D screen coords and draws the name there, scaled + faded by
 // distance from the viewer.  Drawn in the 2D HUD pass (after
 // renderscene) since project() returns 2D coords.
+// The monster half of the world-space label.  Structurally separate from the
+// player one below because there is no proxy to findchain for — the anchor comes
+// straight off the networked box.
+void() CSQC_LookatNPC_DrawWorld =
+{
+    if (!cvar("cl_lookatnpc"))        return;
+    if (!CSQC_LookatNPC_ShouldShow()) return;
+
+    // AABB MIDPOINT, not GE_ORIGIN, for the reason cl_monstersolid.qc states: a
+    // GoldSrc .origin cannot be trusted to be inside the box (zombie.mdl's is
+    // about 12 units in front of the model).  And the TOP of the box rather than
+    // a fixed z offset, because a headcrab and a gargantua differ by 128 units of
+    // height — the player tag can use a constant only because every player is the
+    // same size.
+    vector bmin = (vector)getentity(lookat_npc_entnum, GE_ABSMIN);
+    vector bmax = (vector)getentity(lookat_npc_entnum, GE_ABSMAX);
+    vector world_pos = [(bmin_x + bmax_x) * 0.5,
+                        (bmin_y + bmax_y) * 0.5,
+                        bmax_z + 8];
+
+    vector screen = (vector)project(world_pos);
+    if (screen_z <= 0) return;          // behind camera
+
+    vector view_pos = (vector)getproperty(VF_ORIGIN);
+    float dist = vlen(world_pos - view_pos);
+
+    // Same three native loadfont buckets and the same NEAR->FAR alpha lerp as the
+    // player label — see the note on LOOKAT_WORLD_*_DIST for why the size SNAPS.
+    float font_h;
+    if (dist <= LOOKAT_WORLD_NEAR_DIST)     font_h = 16;
+    else if (dist <= LOOKAT_WORLD_MID_DIST) font_h = 12;
+    else                                    font_h = 8;
+
+    float t = (dist - LOOKAT_WORLD_NEAR_DIST)
+            / (LOOKAT_WORLD_FAR_DIST - LOOKAT_WORLD_NEAR_DIST);
+    if (t < 0) t = 0;
+    if (t > 1) t = 1;
+    float alpha = lookat_lerp(t, LOOKAT_WORLD_NEAR_ALPHA, LOOKAT_WORLD_FAR_ALPHA);
+
+    float mx = (lookat_npc_maxhp > 0) ? lookat_npc_maxhp : 1;
+    string hpline = sprintf("%g / %g", lookat_npc_hp, mx);
+
+    vector sz = [font_h, font_h, 0];
+    float prev = drawfont;
+    drawfont = hud_font;
+
+    float w = stringwidth(lookat_npc_name, FALSE, sz);
+    drawstring([screen_x - w * 0.5, screen_y - font_h * 0.5],
+               lookat_npc_name, sz, '1 1 1', alpha, 0);
+    // HP one line BELOW the name, so the name keeps the same anchor a player's
+    // name has and the extra line grows downward into empty space.
+    w = stringwidth(hpline, FALSE, sz);
+    drawstring([screen_x - w * 0.5, screen_y - font_h * 0.5 + font_h],
+               hpline, sz, Lookat_HPColour(lookat_npc_hp / mx), alpha, 0);
+
+    drawfont = prev;
+};
+
 void() CSQC_LookatName_DrawWorld =
 {
-    if (!CSQC_LookatName_ShouldShow()) return;
+    if (!CSQC_LookatName_ShouldShow())
+    {
+        // No player in the crosshair — the monster label gets the frame.  Note the
+        // LOOKAT_VOIP_OFFSET_BUMP coordination below is deliberately NOT applied to
+        // it: that exists to dodge a player's overhead VOIP icon, and monsters have
+        // none.
+        CSQC_LookatNPC_DrawWorld();
+        return;
+    }
 
     // Re-resolve the proxy each frame so the label tracks the
     // player's current position (not the stale cached pulse-time

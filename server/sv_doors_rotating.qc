@@ -34,6 +34,11 @@
 // Externs from earlier compile units.
 // ---------------------------------------------------------------------------
 void() SV_InitReplicatedSolidBrush;                                  // sv_brushsync.qc
+// Sven InventoryRules gate - defined in sv_item_inventory.qc (position 265), which
+// compiles after this file; the KEY FIELDS it reads live in sv_customdefs.qc for
+// exactly that reason.
+float(entity rules, entity who) Inv_Gate;                            // sv_item_inventory.qc
+float(entity rules) Inv_HasRules;                                    // sv_item_inventory.qc
 float(entity attacker, entity target, float damage) W_ApplyDamage;   // sv_weapons.qc
 string(float idx) Door_LookupMoveSound;                              // sv_doors.qc
 string(float idx) Door_LookupStopSound;                              // sv_doors.qc
@@ -438,11 +443,12 @@ float() Brush_RotateCarry =
                     if (p3_tan_speed > 0.01)
                     {
                         vector p3_tan_dir = p3_tangent * (1.0 / p3_tan_speed);
-                        float p3_hz = cvar("sv_func_tickrate");
-                        if (p3_hz <= 0)  p3_hz = 40;
-                        if (p3_hz > 200) p3_hz = 200;
+                        // Same interval the door itself moves on, so the rider's
+                        // slide probe covers exactly one tick of travel — see
+                        // Mover_TickInterval in sv_customdefs.qc.
                         vector p3_new_pos = p3.origin
-                                        + p3_tan_dir * (p3_tan_speed / p3_hz + 4);
+                                        + p3_tan_dir
+                                          * (p3_tan_speed * Mover_TickInterval(40) + 4);
                         self.solid = SOLID_NOT;       // exclude self from slide trace
                         tracebox(p3.origin, p3.mins, p3.maxs,
                                  p3_new_pos, MOVE_NORMAL, p3);
@@ -659,6 +665,11 @@ void() rotdoor_hit_bottom =
     self.SendFlags   = 1;
     RotatingBrush_RemoveFromList(self);
     Door_PlayStopSound();
+    // Sven's OpenClosable chains, shared with func_door — sv_doors.qc owns the
+    // helpers, and the START_OPEN inversion they apply is correct here too
+    // because this class swaps pos1/pos2 at spawn the same way (see rotdoor
+    // spawn, DOORROT_START_OPEN).
+    Door_FireArrival(FALSE);
 };
 
 void() rotdoor_go_down =
@@ -668,6 +679,7 @@ void() rotdoor_go_down =
     self.door_state  = DOOR_STATE_DOWN;
     self.mover_state = MOVER_STATE_DOWN;
     Door_PlayMoveSound();
+    Door_FireDeparture(FALSE);
     Mover_RotateStart(self.pos1, self.speed, rotdoor_hit_bottom);
 };
 
@@ -680,6 +692,7 @@ void() rotdoor_hit_top =
     self.SendFlags   = 1;
     RotatingBrush_RemoveFromList(self);
     Door_PlayStopSound();
+    Door_FireArrival(TRUE);
     if ((self.door_flags & DOORROT_TOGGLE) || self.wait < 0)
         return;
     self.nextthink = self.ltime + self.wait;
@@ -712,23 +725,48 @@ void() rotdoor_go_up =
     {
         float sign_eff = (self.door_flags & DOORROT_REVERSE) ? -1 : 1;
 
-        // Open away from player — flip the rotation sign when the
-        // activator stands on the FRONT side, so the leaf swings
-        // away from them (toward the back).  Player on the back
-        // side gets the un-flipped default sign which swings the
-        // leaf forward, again away from the player.  ONE_WAY skips
-        // the auto-flip entirely.  The facing test uses the door's
-        // local forward at the closed pose.
+        // Open away from the player.  This is a straight port of
+        // CBaseDoor::DoorGoUp (halflife/dlls/doors.cpp:583-597):
+        //
+        //     Vector vec   = pevActivator->origin - pev->origin;
+        //     UTIL_MakeVectors( pevActivator->angles );
+        //     Vector vnext = (pevActivator->origin + v_forward*10) - pev->origin;
+        //     if ( (vec.x*vnext.y - vec.y*vnext.x) < 0 ) sign = -1.0;
+        //
+        // vnext is algebraically redundant — substituting it out leaves
+        // 10 * (vec.x*fwd.y - vec.y*fwd.x) — so the test is just the 2D
+        // cross product of (pivot -> activator) with the ACTIVATOR'S FACING.
+        // It asks "which way round the hinge is this player looking", and the
+        // door then swings the other way.
+        //
+        // What was here before used the DOOR's forward vector, taken from
+        // makevectors(self.pos1).  On a func_door_rotating `angles` is the
+        // initial rotation, not a facing: AxisDir consumes the 64/128 flags to
+        // pick the spin axis and the key itself is almost always "0 0 0" —
+        // it is on all 11 rotating doors in pizza_ya_san1.  So v_forward came
+        // out (1,0,0) and the test reduced to "is the player on the +X side of
+        // the hinge", which is unrelated to the door's geometry and is exactly
+        // backwards for every door facing the other way.  Doors opened into
+        // the player, and ones with a wall behind them jammed on the first
+        // press.
+        //
+        // Axis-gated like HL's `pev->movedir.y` test: only a yaw door swings
+        // away from anyone.  ONE_WAY (16) opts out, which is why the five
+        // kamado doors that carry it were the ones that behaved.
         if (!(self.door_flags & DOORROT_ONE_WAY)
+            && !(self.door_flags & (DOORROT_X_AXIS | DOORROT_Y_AXIS))
             && activator && activator != world)
         {
-            vector saved = self.angles;
-            self.angles = self.pos1;       // facing test against closed pose
-            makevectors(self.angles);
-            self.angles = saved;
+            makevectors(activator.angles);
             vector to_act = activator.origin - Mover_RotationPivot();
-            if (to_act * v_forward > 0)
+            float  cross  = to_act_x * v_forward_y - to_act_y * v_forward_x;
+            if (cross < 0)
                 sign_eff = -sign_eff;
+
+            if (cvar("sv_debug_doors"))
+                dprint(sprintf("[rotdoor %s] activator %s cross=%g -> sign %g (distance %g)\n",
+                               self.targetname, activator.netname, cross,
+                               sign_eff, self.distance));
         }
 
         self.pos2 = self.pos1 + self.movedir * (self.distance * sign_eff);
@@ -737,6 +775,7 @@ void() rotdoor_go_up =
     self.door_state  = DOOR_STATE_UP;
     self.mover_state = MOVER_STATE_UP;
     Door_PlayMoveSound();
+    Door_FireDeparture(TRUE);
     Mover_RotateStart(self.pos2, self.speed, rotdoor_hit_top);
 };
 
@@ -813,6 +852,10 @@ void() rotdoor_use =
     // attack_finished debounce so a rejected press doesn't burn the cooldown.
     if (Door_MasterBlocks()) return;
 
+    // Sven's InventoryRules — "Prevent door being used".  Same position and
+    // same reasoning as the copy in door_use.
+    if (!Inv_Gate(self, activator)) return;
+
     // NO_TRIGGER rejects target-trigger fires — exactly the behaviour
     // func_door's NO_TRIGGER flag implements.  On a GoldSrc map the
     // normaliser never sets it, so Hammer's trigger chains reach the door
@@ -821,6 +864,19 @@ void() rotdoor_use =
     if (!sv_use_is_player_direct
         && (self.door_flags & DOORROT_NO_TRIGGER))
         return;
+
+    // `onlytrigger` USED TO REJECT THE PRESS HERE.  It no longer does: it is a
+    // func_breakable key ("only a trigger can BREAK it"), not an activation
+    // gate — see the note on the field in sv_customdefs.qc for the FGD grouping,
+    // the func_train_fg counter-example and the corpus scan.  Its only remaining
+    // effect on a door is in rotdoor_killed, gating the DAMAGE-open path.
+    //
+    // What this unblocks: pizza_ya_san1's *38 is the one entity in the corpus
+    // with onlytrigger and no targetname, so under the old reading nothing could
+    // open it at all — no +use (rejected here and again in sv_use.qc), no
+    // shoulder push (rejected in rotdoor_touch), no damage (no health key), no
+    // trigger chain (no name to call).  With the gate gone its empty targetname
+    // makes door_player_usable 1 below and +use opens it normally.
 
     // Direct +use gate — see the long note in door_use (sv_doors.qc).
     // GoldSrc doors are only player-usable with SF_DOOR_USE_ONLY (256).
@@ -858,8 +914,17 @@ void() rotdoor_use =
 void() rotdoor_touch =
 {
     entity oldself, oldactivator;
+    float  oldtouch;
     if (other.classname != "player") return;
     if (self.door_flags & DOORROT_USE_ONLY) return;
+    // `onlytrigger` used to reject the shoulder-push here too.  Removed with the
+    // gate in rotdoor_use — see the note there and on the field itself.
+
+    // See the matching gate in door_trigger_touch (sv_doors.qc): HL's
+    // SetTouch(NULL)-while-moving, which is what stops a TOGGLE door oscillating
+    // under a persistent trigger (rotdoor_use flips at TOP).
+    if (self.owner.door_state != DOOR_STATE_BOTTOM)
+        return;
 
     // Push-only activation: brushing past the proximity bbox
     // shouldn't open the door, only an actual push into it.
@@ -874,11 +939,25 @@ void() rotdoor_touch =
     if ((other.velocity * to_door) < 50)
         return;
 
-    oldself = self; oldactivator = activator;
+    // doors.cpp:502-507, the named-door locked click.  Same arm as
+    // door_trigger_touch; see the note there for why .door_player_usable is the
+    // right field to reuse.  110 of the 128 corpus doors that gain a touch field
+    // are rotating, so this is the busy half of the change.
+    if (!self.owner.door_player_usable && cvar("sv_door_use_only"))
+    {
+        entity o = self;
+        self = self.owner;
+        Door_PlayLockedSound();
+        self = o;
+        return;
+    }
+
+    oldself = self; oldactivator = activator; oldtouch = sv_use_is_player_touch;
     activator = other;
+    sv_use_is_player_touch = TRUE;      // lets Door_MasterBlocks click
     self = self.owner;
     rotdoor_use();
-    self = oldself; activator = oldactivator;
+    self = oldself; activator = oldactivator; sv_use_is_player_touch = oldtouch;
 };
 
 // Damage-driven open path — the .on_killed callback, fired when the door's
@@ -904,6 +983,13 @@ void() rotdoor_killed =
 
     if (cvar("mp_disabledoors")) return;
     if (Door_MasterBlocks())    return;
+
+    // Sven's "Only Trigger" in its REAL meaning: only a trigger may open this,
+    // damage may not — the door-shaped equivalent of func_breakable's
+    // BREAKABLE_TRIGGER_ONLY, which is the spawnflag this key re-exposes on the
+    // Door base class (sven-coop.fgd:976 vs :2129, identical display string).
+    // This is the one place onlytrigger belongs; see sv_customdefs.qc.
+    if (self.onlytrigger) return;
 
     if (self.attack_finished > time) return;
     self.attack_finished = time + 0.1;
@@ -1000,6 +1086,11 @@ void() func_door_rotating =
 
     // See the matching line in func_door — suppresses CSQC +use prediction
     // for doors whose master may reject the press.
+    //
+    // `|| self.onlytrigger` used to ride this field, on the reasoning that a
+    // door the player can never open is the strongest possible case of "do not
+    // predict this press".  That premise is gone with the gate it came from, and
+    // suppressing prediction on these doors now costs a round trip for nothing.
     self.door_has_master = (self.master && self.master != "");
 
     // See the long note on the matching line in func_door: GoldSrc doors accept
@@ -1105,9 +1196,10 @@ void() func_door_rotating =
     self.door_state  = DOOR_STATE_BOTTOM;
     self.mover_state = MOVER_STATE_BOTTOM;
 
-    // Proximity trigger OFF by default (sv_door_proximity 0) — rotating doors open only on +use /
-    // target-chain / damage, never on walk-near.  Mirrors the func_door gate in sv_doors.qc.
-    if (cvar("sv_door_proximity")
-        && !self.targetname && !(self.door_flags & DOORROT_PASSABLE))
+    // Touch field, mirroring the func_door gate in sv_doors.qc.  Half-Life's only
+    // condition is the 256 bit (doors.cpp:317-323), enforced inside rotdoor_touch
+    // rather than here.  `!self.targetname` is gone: a named door keeps its touch
+    // field so it can answer a shoulder with the locked click.
+    if (cvar("sv_door_proximity") && !(self.door_flags & DOORROT_PASSABLE))
         rotdoor_spawn_trigger();
 };

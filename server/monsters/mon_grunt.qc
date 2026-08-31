@@ -86,6 +86,17 @@ const float ASN_GREN_RECHECK = 6.0;	// hassassin.cpp:255
 .float ai_shot_spread;		// the assassin's running deviation
 .float ai_lastshot;			// when she last pulled the trigger
 
+// Per-RIG damage override; 0 means "use the class cvar".
+//
+// The rig-override hook already knows which models carry a Desert Eagle instead
+// of the 9 mm or the MP5 - that is where the SOUND was fixed - and the damage is
+// the other half of the same fact.  Sven prices sk_otis_bullet at 34 against
+// Barney's 10, which is the difference between a hand cannon and a service
+// pistol, and until now the model decided the noise and the classname decided
+// the number.  Three rigs are affected: otis.mdl, hgrunt_torch.mdl and
+// hgrunt_medic.mdl, all three of which visibly hold the same gun.
+.float ai_shot_dmg;
+
 const float GRU_MELEE_REACH  = 70;
 const float GRU_RANGE        = 1600;
 // The base delay between attack sequences.  0 is Half-Life's own figure for this
@@ -110,6 +121,46 @@ const float GRU_SPREAD_SHOTGUN  = 0.13053;	// VECTOR_CONE_15DEGREES - hgrunt.cpp
 // the shipped GRU_GREN_SPEED (sk_hgrunt_gspeed2 = 600) was already taken from.
 const float GRU_SHOTGUN_PELLETS = 5;
 
+// ---------------------------------------------------------------------------
+// the two specialist loadouts
+// ---------------------------------------------------------------------------
+// Neither of these needs a firing loop, because the MODELS already carry one.
+// Dumped from the studio headers rather than assumed:
+//
+//   crouching_m40a1 / standing_m40a1   act 28, 13 frames @ 15 fps = 0.867 s,
+//                                      ONE event (f1:e4)
+//   rpg_shoot                          act 28, 16 frames @ 30 fps = 0.533 s,
+//                                      ONE event (f10:e4)
+//
+// against the MP5's 13 @ 20 fps carrying three (e4/e5/e6) on HL's rig.  So a
+// sniper or rocket sequence raises BURST1 exactly once and the burst count is
+// already right; all these constants have to supply is the ballistics.
+//
+// Pinpoint, matching the player M40A1's SNIPER_BASE_SPREAD = 0
+// (sh_wpn_opsniperrifle.qc:65).  A sniper that sprays is not a sniper.
+const float GRU_SPREAD_SNIPER = 0;
+
+// The bolt cycle.  ai_attackrate is a FLOOR - AI_ArmAttackCooldown adds its
+// distance term on top and never lowers a longer figure - so this is the minimum
+// gap between shots, not the whole of it.  The player's M40A1 gates on its
+// 1.733 s fire animation (SNIPER_FIRE_DELAY); a monster that has to reacquire
+// between shots gets a little more.
+const float GRU_SNIPER_REFIRE = 2.0;
+
+// The rocket is slower still, and deliberately: it is the tree's full-strength
+// RPG round, so the rate limit is what keeps an RPG grunt from being a delete
+// button.  See Grunt_FireRocket.
+const float GRU_RPG_REFIRE    = 4.0;
+
+// Both specialists shoot further than the 1600 the family gets by default, and
+// 2048 is where it stops mattering - sv_ai_sight bounds AI_CanSee, and
+// COND_CAN_RANGE1 is only ever raised inside the branch that saw the enemy.
+const float GRU_SPECIALIST_RANGE = 2048;
+
+// Self-preservation on the rocket, the same figure and the same reason as
+// GRU_GREN_MINRANGE below: RPG_EXPLOSION_RADIUS is 300 and he is standing in it.
+const float GRU_RPG_MINRANGE  = 256;
+
 // The shocktrooper's shock rifle.  Declared up here with the other constants
 // because Grunt_Precache below names it and QC needs a constant declared before
 // the line that reads it.
@@ -121,6 +172,19 @@ const string SND_SHOCK_FIRE = "weapons/shock_fire.wav";
 // alternate, not the one the NPC uses.
 const string SND_DEAGLE_FIRE = "weapons/desert_eagle_fire.wav";
 
+// The M40A1, for the grunt-family rigs that carry a sniper submodel.  Precached
+// globally already (sh_customdefs.qc:1690-1694, unconditionally, as part of the
+// player weapon set) but named here too because that is this file's convention -
+// every sound its handlers play appears in Grunt_Precache - and because fteqcc's
+// F210 check only recognises a literal precache_sound(), not one reached through
+// another file.
+const string SND_SNIPER_FIRE = "weapons/sniper_fire.wav";
+
+// Is Sven's friendly-grunt voice folder mounted?  Answered once in Grunt_Precache
+// and read by HGruntAlly_ClassInit - a per-body whichpack() would be a filesystem
+// query per spawn for a fact that cannot change during a map.
+float grunt_ally_hasfgrunt;
+
 void() Grunt_Precache =
 {
 	precache_model("models/hgrunt.mdl");
@@ -128,6 +192,7 @@ void() Grunt_Precache =
 	precache_model("models/hassassin.mdl");
 
 	precache_sound("weapons/sbarrel1.wav");
+	precache_sound(SND_SNIPER_FIRE);
 	precache_sound("weapons/pl_gun1.wav");		// hassassin.cpp:277-278
 	precache_sound("weapons/pl_gun2.wav");
 	precache_sound("hgrunt/gr_pain1.wav");
@@ -136,6 +201,29 @@ void() Grunt_Precache =
 	precache_sound("hgrunt/gr_die1.wav");
 	precache_sound("hgrunt/gr_die2.wav");
 	precache_sound("hgrunt/gr_die3.wav");
+	// The FRIENDLY grunt's own set, which is a different folder and not a copy:
+	// Sven ships sound/fgrunt/ with 195 files, six pain lines and six deaths (note
+	// "death%g", not "gr_die%g" - the friendly rig renamed them).  Every grunt ally
+	// in this mod was playing the enemy grunt's voice, which is wrong on its own
+	// and is also what made pizza_ya_san1's soundlist a no-op: that map remaps
+	// fgrunt/* and nothing here ever emitted an fgrunt path to be remapped.
+	//
+	// GUARDED, because fgrunt/ is Sven content and this mod also runs against a
+	// valve-only mount.  Swapping the voice unconditionally would trade "an ally
+	// grunt sounds like an enemy grunt" for "an ally grunt is silent", which is the
+	// worse of the two; grunt_ally_hasfgrunt is what HGruntAlly_ClassInit tests.
+	grunt_ally_hasfgrunt = Monster_SoundExists("fgrunt/death1.wav");
+	float fg;
+	if (grunt_ally_hasfgrunt)
+		for (fg = 1; fg <= 6; fg = fg + 1)
+		{
+			precache_sound(sprintf("fgrunt/gr_pain%g.wav", fg));
+			precache_sound(sprintf("fgrunt/death%g.wav",   fg));
+		}
+	// The scientist's, which nothing precached because nothing played them - see
+	// Scientist_PainSound.
+	for (fg = 1; fg <= 5; fg = fg + 1)
+		precache_sound(sprintf("scientist/sci_pain%g.wav", fg));
 	precache_sound("hgrunt/gr_mgun1.wav");		// the MP5 report; see Grunt_GunSound
 	precache_sound("weapons/glauncher.wav");	// M203
 	precache_sound("barney/ba_pain1.wav");
@@ -144,12 +232,11 @@ void() Grunt_Precache =
 	precache_sound("barney/ba_die1.wav");
 	precache_sound("barney/ba_die2.wav");
 	precache_sound("barney/ba_die3.wav");
-	// The 9mm/shotgun report.  These are the weapon sounds HL's grunts use, and
-	// they are already precached by the player weapons - restating them is free
-	// and keeps this class independent of which guns a map happens to include.
-	precache_sound("weapons/hks1.wav");
-	precache_sound("weapons/hks2.wav");
-	precache_sound("weapons/hks3.wav");
+	// weapons/hks1-3.wav USED TO BE PRECACHED HERE, described as "the 9mm/shotgun
+	// report ... the weapon sounds HL's grunts use".  They are not: hks1-3 are the
+	// MINITURRET and SENTRY guns (turret.cpp:633-635, :1193-1195), no grunt in
+	// Half-Life ever plays one, and no line in this file ever did either.  They now
+	// live in mon_turret.qc beside the class that fires them.
 
 	// The REAL Half-Life monster gun reports, which are not the player's.
 	// hgrunt.cpp:922 picks at random between gr_mgun1 and gr_mgun2 (gr_mgun3 is
@@ -188,6 +275,21 @@ const float HGRUNT_9MMAR          = 1;
 const float HGRUNT_HANDGRENADE    = 2;
 const float HGRUNT_GRENADELAUNCHER= 4;
 const float HGRUNT_SHOTGUN        = 8;
+// Sven's additions to the same field (sven-coop.fgd:5508).  SAW is annotated
+// "human_grunt_ally only!" and NO_WEAPONS "male_assassin only!", which is exactly
+// how pizza_ya_san1 uses them: the pizza shop owner is `weapons 16` and the
+// employee uboa is `weapons 32`.  Both bits fell outside the mod's set, so a key
+// that says "this NPC carries a machine gun" and a key that says "this NPC is
+// unarmed" produced the same thing - an hgrunt loadout with no matching bit.
+const float HGRUNT_SAW            = 16;
+const float HGRUNT_NOWEAPONS      = 32;
+// The rest of the grunt's own list, which had no constants at all - so a map
+// saying "rocket launcher" or "sniper rifle" set a bit nothing tested, the
+// loadout defaulted, and the NPC quietly carried an MP5 instead.  desertcircle
+// has four squadmakers on `weapons 64`.
+const float HGRUNT_RPG            = 64;
+const float HGRUNT_SNIPER         = 128;
+const float HGRUNT_NODROP         = 256;	// "Don't drop weapon (HWG etc)"
 
 // ---------------------------------------------------------------------------
 // firing
@@ -211,6 +313,104 @@ void(entity m, float count, float dmg, float spread) Grunt_FireOne =
 };
 
 // ---------------------------------------------------------------------------
+// the rocket, for `weapons 64`
+// ---------------------------------------------------------------------------
+// sven-coop.fgd:4339 and :5518 both spell bit 64 "Rocket Launcher", on
+// monster_human_grunt and on squadmaker.  desertcircle has four squadmakers set
+// to it and the bit had no reader at all, so those grunts quietly carried an MP5.
+//
+// THIS IS THE TREE'S OWN ROCKET, not a new projectile type: same entity as
+// W_RPGFire (sh_wpn_hlrpg.qc:414) and TankRocket_Launch (sv_th_entities.qc:2074)
+// build, down to reusing W_RPGRocketThink - whose laser-guidance branch is gated
+// on self.owner.rpg_laser_active, which a monster never sets, so it falls through
+// to the plain acceleration path exactly as it does for a brush-fired rocket.
+//
+// NOT calling TankRocket_Launch itself, for two independent reasons.  It compiles
+// later than this file (sv_progs.src:317 against :272), and its explode handler
+// does `atk = self.tankrocket_operator; if (atk.classname != "player") atk = world;`
+// - which is right for a brush that would otherwise bill the kill to a func_tank,
+// and wrong here, because it would strip a live monster attacker off the blast and
+// with it every faction and friendly-fire decision W_CanDamageTarget makes.
+void() Grunt_RocketExplode =
+{
+	entity atk;
+
+	// Identical wire shape to TankRocket_RocketExplode (sv_th_entities.qc:2010)
+	// and op4mortar_shell_explode.  17 bytes, fixed by cl_main.qc:1954 - the
+	// element mask stays 0 so the full GoldSrc boom plays.
+	WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
+	WriteByte(MSG_MULTICAST, CSQC_EVENT_ENV_EXPLOSION);
+	WriteCoord(MSG_MULTICAST, self.origin_x);
+	WriteCoord(MSG_MULTICAST, self.origin_y);
+	WriteCoord(MSG_MULTICAST, self.origin_z + 8);
+	WriteShort(MSG_MULTICAST, RPG_EXPLOSION_DAMAGE);
+	WriteByte(MSG_MULTICAST, 0);
+	multicast(self.origin, MULTICAST_PVS);
+
+	// Kill the SOUNDFLAG_FOLLOW motor loop on the channel that owns it.
+	sound(self, CHAN_VOICE, "sounds/null.wav", 1, ATTN_NORM);
+
+	// The grunt keeps the credit while he is alive to hold it.  Shooting him out
+	// from under his own rocket recycles the edict, so re-verify rather than
+	// trust the reference - world is what an unattributed blast passes.
+	atk = self.owner;
+	if (!atk || wasfreed(atk) || atk.classname == "")
+		atk = world;
+
+	float d = cvar("sv_ai_rpg_dmg");
+	if (d <= 0)
+		d = RPG_EXPLOSION_DAMAGE;
+
+	W_RadiusExplode(self.origin, RPG_EXPLOSION_RADIUS,
+	                d, RPG_EXPLOSION_MIN_DAMAGE,
+	                RPG_KNOCKBACK_PUSH, RPG_KNOCKBACK_UPLIFT, atk);
+
+	remove(self);
+};
+
+void() Grunt_RocketTouch =
+{
+	if (other == self.owner)
+		return;
+	Grunt_RocketExplode();
+};
+
+void(entity m) Grunt_FireRocket =
+{
+	if (!m.ai_enemy)
+		return;
+
+	vector src = AI_MuzzlePos(m);
+	// Zero spread: the launcher is aimed, and RPG_EXPLOSION_RADIUS is 300, so a
+	// cone would only decide which side of the player it lands on.
+	vector dir = AI_AimDir(m, src, m.ai_enemy, 0);
+
+	entity rocket = spawn();
+	// Owner is the grunt, which buys the touch pass-through AND the damage
+	// credit in one - unlike the tank, whose owner has to be the brush.
+	rocket.owner     = m;
+	rocket.classname = "proj_rpg_rocket";
+	rocket.movetype  = MOVETYPE_FLYMISSILE;
+	rocket.solid     = SOLID_BBOX;
+	setmodel(rocket, RPG_ROCKET_MODEL);
+	setsize(rocket, '-2 -2 -2', '2 2 2');
+	setorigin(rocket, src);
+	rocket.velocity  = dir * RPG_INITIAL_SPEED;
+	rocket.angles    = W_ModelAngles(rocket.velocity, TRUE);
+	rocket.touch     = Grunt_RocketTouch;
+	// projectile_SendEntity hides the rocket from its owner (sv_weapons.qc:2619)
+	// by comparing against the receiving PLAYER, so a monster owner hides it from
+	// nobody - every client sees it, which is what we want with no predicted fake.
+	rocket.proj_type  = PROJ_TYPE_RPG_ROCKET;
+	rocket.SendEntity = projectile_SendEntity;
+	rocket.SendFlags  = 1;
+	rocket.think      = W_RPGRocketThink;
+	rocket.nextthink  = time + Toss_NextThinkInterval();
+
+	sound(rocket, CHAN_VOICE, RPG_FLY_SOUND, 1, ATTN_NORM, 0, SOUNDFLAG_FOLLOW);
+};
+
+// ---------------------------------------------------------------------------
 // gun reports
 // ---------------------------------------------------------------------------
 // One hook per rig, installed by the class init, because the barney rig and the
@@ -221,26 +421,42 @@ void(entity m, float count, float dmg, float spread) Grunt_FireOne =
 // `weapons/hks*.wav` - which is what everything here used to play - is the
 // PLAYER's MP5.  Half-Life's monsters have their own reports and they are
 // different samples.
+//
+// NO `.gag` GATE HERE, OR IN ANY OF THE PAIN / DEATH / REPORT HANDLERS BELOW, AND
+// PUTTING ONE BACK IS A BUG.  SF_MONSTER_GAG reaches exactly one function in the
+// SDK - FOkToSpeak (hgrunt.cpp:331-345) - and gates SENTENCE SPEECH only; the gun
+// report at hgrunt.cpp:913-937, PainSound at :1162 and DeathSound at :1204 have no
+// gag test at all.  Thirteen such gates lived in this file and made every gagged
+// monster fire, bleed and die in silence, which is what hl_c06 (9 of its 14 grunts
+// carry the flag) was reporting as "place holders with no actual function".
+// The speech path that DOES honour it is AI_SndSpeak (sv_ai_anim.qc) and the
+// talk tick's own gate at sv_ai_talk.qc:372.
 void(entity m) Grunt_GunSound =
 {
-	if (m.gag)
+	// The M40A1.  Above the shotgun test because Assassin_ClassInit translates
+	// this class's bit 8 into HGRUNT_SNIPER and a grunt can carry both bits;
+	// whichever gun is in his hands should be the one you hear.
+	if (m.weapons & HGRUNT_SNIPER)
+	{
+		AI_Sound(m, CHAN_WEAPON, SND_SNIPER_FIRE, 1, ATTN_NORM);
 		return;
+	}
 
 	// Shotgun grunts get the shotgun (hgrunt.cpp:933).  HGRUNT_SHOTGUN has been
 	// declared since the class landed and nothing ever read it, which is why
 	// weapons/sbarrel1.wav was precached and never once played.
 	if (m.weapons & HGRUNT_SHOTGUN)
 	{
-		sound(m, CHAN_WEAPON, "weapons/sbarrel1.wav", 1, ATTN_NORM);
+		AI_Sound(m, CHAN_WEAPON, "weapons/sbarrel1.wav", 1, ATTN_NORM);
 		return;
 	}
 
 	// Two samples, picked at random - hgrunt.cpp:918 is a straight RANDOM_LONG(0,1).
 	// gr_mgun3.wav exists in the mount but HL's burst code never reaches it.
 	if (random() < 0.5)
-		sound(m, CHAN_WEAPON, "hgrunt/gr_mgun1.wav", 1, ATTN_NORM);
+		AI_Sound(m, CHAN_WEAPON, "hgrunt/gr_mgun1.wav", 1, ATTN_NORM);
 	else
-		sound(m, CHAN_WEAPON, "hgrunt/gr_mgun2.wav", 1, ATTN_NORM);
+		AI_Sound(m, CHAN_WEAPON, "hgrunt/gr_mgun2.wav", 1, ATTN_NORM);
 };
 
 // The Opposing Force torch and medic allies.  See the bodygroup dump in
@@ -252,16 +468,24 @@ void(entity m) Grunt_GunSound =
 // six identical shots is the most obvious case of that in the game.
 void(entity m) Grunt_DeagleSound =
 {
-	if (m.gag)
-		return;
-
 	float shift = floor(random() * 21);
 	if (shift > 10)
 		shift = 0;
 	else
 		shift = shift - 5;
 
-	sound(m, CHAN_WEAPON, SND_DEAGLE_FIRE, 1, ATTN_NORM, 100 + shift, 0);
+	AI_SoundEx(m, CHAN_WEAPON, SND_DEAGLE_FIRE, 1, ATTN_NORM, 100 + shift, 0);
+};
+
+// ...and what it does when it lands.  Named after the gun rather than after Otis
+// because three rigs carry it; sk_otis_bullet is simply where Sven Co-op happens
+// to keep the number (skill.cfg, "Otis" block).
+float() Grunt_DeagleDamage =
+{
+	float d = cvar("sv_ai_otis_dmg");
+	if (d <= 0)
+		d = 34;
+	return d;
 };
 
 // The HW grunt's minigun, which had NO sound call of any kind - the muzzleflash
@@ -280,16 +504,14 @@ const float HWG_BURSTSND_GAP = 1.15;	// just under the shortest of the three
 
 void(entity m) HWGrunt_GunSound =
 {
-	if (m.gag)
-		return;
 	if (time < m.ai_nextburstsnd)
 		return;
 	m.ai_nextburstsnd = time + HWG_BURSTSND_GAP;
 
 	float r = floor(random() * 3);
-	if (r < 1)	sound(m, CHAN_WEAPON, "hassault/hw_shoot1.wav", 1, ATTN_NORM);
-	else if (r < 2)	sound(m, CHAN_WEAPON, "hassault/hw_shoot2.wav", 1, ATTN_NORM);
-	else		sound(m, CHAN_WEAPON, "hassault/hw_shoot3.wav", 1, ATTN_NORM);
+	if (r < 1)	AI_Sound(m, CHAN_WEAPON, "hassault/hw_shoot1.wav", 1, ATTN_NORM);
+	else if (r < 2)	AI_Sound(m, CHAN_WEAPON, "hassault/hw_shoot2.wav", 1, ATTN_NORM);
+	else		AI_Sound(m, CHAN_WEAPON, "hassault/hw_shoot3.wav", 1, ATTN_NORM);
 };
 
 // The report DISPATCHER.  A rig and a weapon are independent things: strooper.mdl
@@ -312,9 +534,6 @@ void(entity m) Grunt_FireSound =
 // asymmetry is what stops a long exchange sounding like a synthesiser sweep.
 void(entity m) Barney_GunSound =
 {
-	if (m.gag)
-		return;
-
 	float shift = floor(random() * 21);	// RANDOM_LONG(0, 20)
 	if (shift > 10)
 		shift = 0;
@@ -324,7 +543,7 @@ void(entity m) Barney_GunSound =
 	// The 6th argument of `sound` is speedpct (fteextensions.qc:1693), where 100
 	// is unmodified - the same scale HL's EMIT_SOUND_DYN pitch argument uses, so
 	// the value carries across unconverted.
-	sound(m, CHAN_WEAPON, "barney/ba_attack2.wav", 1, ATTN_NORM, 100 + shift, 0);
+	AI_SoundEx(m, CHAN_WEAPON, "barney/ba_attack2.wav", 1, ATTN_NORM, 100 + shift, 0);
 };
 
 // ---------------------------------------------------------------------------
@@ -332,6 +551,13 @@ void(entity m) Barney_GunSound =
 // ---------------------------------------------------------------------------
 // The grenade's own .gravity, which sv_gravity is scaled by for the arc maths.
 // It must match W_HLGrenadeSpawn or every throw lands somewhere else.
+// How long an engagement must have been running before a grenade is on the
+// table.  Stands in for Half-Life's bits_COND_NEW_ENEMY branch, which occupies
+// the grunt with suppressing fire or cover for its first exchange - see the gate
+// in Grunt_CheckGrenade.  Not a Valve constant: HL's equivalent is "until the
+// NEW_ENEMY condition clears", which is one schedule, and two seconds is one
+// schedule's worth of shooting.
+const float GRU_GREN_OPENING  = 2;
 const float GRU_GREN_GRAVITY  = 0.5;
 const float GRU_GREN_SPEED    = 600;	// M203 muzzle speed (HL skill: hgruntGrenadeSpeed)
 const float GRU_GREN_FUSE     = 3.5;	// hand grenade, hgrunt.cpp ShootTimed
@@ -368,6 +594,34 @@ float(entity m) Grunt_CheckGrenade =
 		return FALSE;
 	if (time < m.ai_grencheck)
 		return FALSE;
+
+	// NOT AS THE OPENING MOVE.  Reported as "their first reaction is always to
+	// throw a grenade at you", and that is exactly what this file's own ladder
+	// produced: Grunt_SelectSched runs ahead of the generic combat block, so the
+	// throw was the first thing tested once the cover rolls declined.
+	//
+	// Half-Life cannot do that, structurally.  CHGrunt::GetSchedule tests
+	// bits_COND_NEW_ENEMY BEFORE it ever reaches the grenade branch, and that
+	// branch returns SCHED_TAKE_COVER_FROM_ENEMY for a non-leader or
+	// SCHED_GRUNT_SUPPRESS / SCHED_GRUNT_ESTABLISH_LINE_OF_FIRE for the leader.
+	// A grunt's first answer to seeing you is bullets or cover, never a grenade;
+	// the grenade is what he does once the fight has settled.
+	if (time < m.ai_enemy_since + GRU_GREN_OPENING)
+	{
+		Grunt_GrenVeto(m, "engagement just started - shoot first");
+		return FALSE;
+	}
+
+	// STATIONARY ONLY - hgrunt.cpp:482-486, "if the grunt isn't moving, it's ok
+	// to check", which is the SDK's way of saying a moving grunt never throws.
+	// This gate was missing entirely, and without it a grunt lobs while walking,
+	// which is both unlike HL and the reason throws felt constant rather than
+	// occasional.
+	if (vlen(m.velocity) > 8)
+	{
+		Grunt_GrenVeto(m, "moving - HL only throws from a standstill");
+		return FALSE;
+	}
 
 	// Don't lob at something that is not on the ground - it will simply be
 	// somewhere else by the time the grenade lands.
@@ -429,11 +683,95 @@ float(entity m) Grunt_CheckGrenade =
 
 // A grunt prefers the gun.  The grenade is for an enemy it cannot shoot - behind
 // cover, or far enough away that suppressing fire is not landing.
+//
+// Ordered as hgrunt.cpp:2040-2175 orders it, which is not the order it would be
+// written in from scratch: cover comes BEFORE the attacks.  A grunt that has just
+// been hit gives up its turn to shoot and moves, and that single ordering choice
+// is most of what separates Half-Life's grunts from a firing line.
 float() Grunt_SelectSched =
 {
-	if (self.ai_state != MS_COMBAT || !self.ai_enemy)
+	entity m = self;
+	if (m.ai_state != MS_COMBAT || !m.ai_enemy)
 		return SCHED_NONE;
-	if (time < self.ai_nextattack)
+
+	// PINNED.  hgrunt.cpp:1571 is the only place in the SDK that reaches
+	// SCHED_COWER - the fail schedule of take-cover-from-best-sound, commented
+	// "duck and cover if cannot move from explosion".  This mod has no danger
+	// sounds, so that exact trigger does not exist; what is kept is the intent,
+	// and it is also the first thing in the tree ever to READ COND_BLOCKED, which
+	// has been raised at sv_ai_core.qc's movement failure since the AI landed and
+	// tested by nothing at all.
+	//
+	// Being hit is part of the condition on purpose.  A grunt merely wedged on a
+	// doorframe should keep trying to walk, not fold up; a grunt wedged on a
+	// doorframe while under fire has run out of options, which is what the
+	// animation depicts.
+	if (m.ai_cond & COND_BLOCKED)
+		if (m.ai_cond & COND_DAMAGE)
+			if (AI_HasActivity(m, ACT_COWER))
+			{
+				ai_dbg_cover_cower = ai_dbg_cover_cower + 1;
+				return SCHED_COWER;
+			}
+
+	// NO SLOT TO SHOOT FROM.
+	//
+	// hgrunt.cpp's MONSTERSTATE_COMBAT ladder ends in "if I cannot occupy an
+	// attack slot, take cover / establish a line of fire" - and that single rule
+	// is most of what makes a GoldSrc grunt squad look alive.  Without it the
+	// rationing this mod already has produces the opposite of the intended
+	// effect: one grunt fires and the other three stand in the open holding a
+	// rifle they are not allowed to use.
+	//
+	// ABOVE the friend-damaged trigger because it is the commoner case by far and
+	// costs nothing when a slot is available - Squad_SlotsFree is a loop over two
+	// bits, and everything expensive is behind it.
+	{
+		float crowded = Cover_ScheduleIfCrowded(m);
+		if (crowded != SCHED_NONE)
+			return crowded;
+	}
+
+	// A SQUADMATE IS BEING SHOT AT.
+	//
+	// Stated plainly as a stand-in rather than a port: Half-Life's trigger here is
+	// bits_COND_NEW_ENEMY on a squad member that is not the leader
+	// (hgrunt.cpp:2048-2056), and this mod has no COND_NEW_ENEMY.  What it does
+	// have is COND_FRIEND_DAMAGED, which the squad work raised for the first time
+	// last patch and which nothing consumed - and "the man beside me was just hit
+	// and I did not find this fight myself" lands in almost exactly the place
+	// Valve's condition does: the grunt who spotted you holds his ground and the
+	// others break.
+	//
+	// Cleared on consumption, in the same spirit as the flinch cooldown in
+	// AI_SelectSchedule: nothing else clears it, and a condition left set is a
+	// grunt that takes cover, arrives, re-selects, and takes cover again for the
+	// rest of the fight.
+	if (m.ai_cond & COND_FRIEND_DAMAGED)
+	{
+		m.ai_cond = m.ai_cond & ~COND_FRIEND_DAMAGED;
+		if (Squad_In(m))
+			if (!Squad_IsLeader(m))
+				if (Cover_Allowed(m))
+				{
+					ai_dbg_cover_sched = ai_dbg_cover_sched + 1;
+					return SCHED_TAKE_COVER;
+				}
+	}
+
+	// HURT.  hgrunt.cpp:2100-2124 - 90 % cover, 10 % flinch, and the roll is HL's
+	// own.  Returning SCHED_NONE on the other 10 % drops through to the generic
+	// ladder, whose damage branch produces the flinch (and rate-limits it), so the
+	// split needs no second implementation here.
+	if (m.ai_cond & COND_DAMAGE)
+		if (random() < 0.9)
+		{
+			float cs = Cover_ScheduleIfHurt(m);
+			if (cs != SCHED_NONE)
+				return cs;
+		}
+
+	if (time < m.ai_nextattack)
 		return SCHED_NONE;
 
 	// NO occlusion or minimum-distance test here, and that is deliberate after
@@ -456,6 +794,13 @@ float() Grunt_SelectSched =
 // different weapon.
 void(entity m) Grunt_ThrowGrenade =
 {
+	// THE CALLOUT, and this is the second half of a fix from the last patch.  The
+	// MP5 burst report that used to play out of the grunt's throat here was removed
+	// because HL plays no SOUND on HGRUNT_AE_GREN_TOSS - but it does speak: the
+	// callout is the HG_THROW sentence (hgrunt.cpp:216).  Removing the wrong noise
+	// without restoring the right one left a silent grenade throw.
+	AI_TalkSay(m, "THROW", CHAN_VOICE, ATTN_NORM);
+
 	makevectors('0 1 0' * m.angles_y);
 	vector src = m.origin + v_forward * 34 + '0 0 32';
 	entity g = W_HLGrenadeSpawn(m, src, m.ai_tossvel, time + GRU_GREN_FUSE);
@@ -491,15 +836,18 @@ void() Grunt_ContactGrenadeTouch =
 
 void(entity m) Grunt_LaunchGrenade =
 {
+	AI_TalkSay(m, "THROW", CHAN_VOICE, ATTN_NORM);
+
 	makevectors('0 1 0' * m.angles_y);
 	vector src = m.origin + v_forward * 34 + '0 0 32';
 
 	entity g = W_HLGrenadeSpawn(m, src, m.ai_tossvel, time + 6);
 	g.touch = Grunt_ContactGrenadeTouch;
 
-	// 0.8, which is hgrunt.cpp:896's own volume, not 1.
-	if (!m.gag)
-		sound(m, CHAN_WEAPON, "weapons/glauncher.wav", 0.8, ATTN_NORM);
+	// 0.8, which is hgrunt.cpp:896's own volume, not 1.  Ungated: HL's report at
+	// hgrunt.cpp:896 carries no gag test, and a silent grenade launcher is exactly
+	// the "placeholder" symptom this round removed.
+	AI_Sound(m, CHAN_WEAPON, "weapons/glauncher.wav", 0.8, ATTN_NORM);
 };
 
 // Dropped at his feet, short fuse: in HL this is what a dying grunt does, and it
@@ -516,6 +864,10 @@ void() Grunt_Event =
 	float dmg = cvar("sv_ai_grunt_dmg");
 	if (dmg <= 0)
 		dmg = 8;
+	// The rig gets the last word on what its gun does - see .ai_shot_dmg.  The
+	// melee below deliberately keeps the class figure: a kick is a kick whatever
+	// is holstered.
+	float gundmg = (self.ai_shot_dmg > 0) ? self.ai_shot_dmg : dmg;
 
 	if (ai_event_code == GRU_AE_BURST1
 	 || ai_event_code == GRU_AE_BURST2
@@ -527,18 +879,44 @@ void() Grunt_Event =
 		// VECTOR_CONE_15DEGREES.  Only BURST1 carries it; the other two codes
 		// belong to the MP5's second and third rounds and must not fire a
 		// second and third shell.
+		// THE ROCKET AND THE SNIPER SHOT ARE BOTH "BURST1 ONLY", the same shape
+		// as the shotgun below and for the same reason.  rpg_shoot and
+		// crouching_m40a1 each carry exactly ONE event, so on their own rigs the
+		// guard costs nothing - but a reskin whose m40a1 pose is missing falls
+		// through to the activity and can land on crouching_m16a2, which carries
+		// three.  Without the return, that rig would fire three rockets.
+		if (self.weapons & HGRUNT_RPG)
+		{
+			if (ai_event_code == GRU_AE_BURST1)
+				Grunt_FireRocket(self);
+			return;
+		}
+
+		if (self.weapons & HGRUNT_SNIPER)
+		{
+			if (ai_event_code == GRU_AE_BURST1)
+			{
+				float sd = cvar("sv_ai_sniper_dmg");
+				if (sd <= 0)
+					sd = 40;
+				Grunt_FireOne(self, 1, sd, GRU_SPREAD_SNIPER);
+				Grunt_FireSound(self);
+			}
+			return;
+		}
+
 		if (self.weapons & HGRUNT_SHOTGUN)
 		{
 			if (ai_event_code == GRU_AE_BURST1)
 			{
-				Grunt_FireOne(self, GRU_SHOTGUN_PELLETS, dmg, GRU_SPREAD_SHOTGUN);
+				Grunt_FireOne(self, GRU_SHOTGUN_PELLETS, gundmg, GRU_SPREAD_SHOTGUN);
 				Grunt_FireSound(self);
 			}
 			return;
 		}
 
 		ai_dbg_shots_grunt = ai_dbg_shots_grunt + 1;
-		Grunt_FireOne(self, 1, dmg, self.ai_spread);
+		Grunt_FireOne(self, 1, gundmg, self.ai_spread);
 
 		// ONE report per burst, on the first round only (hgrunt.cpp:913-937).
 		if (ai_event_code == GRU_AE_BURST1)
@@ -627,13 +1005,21 @@ void() Barney_Event =
 		float dmg = cvar("sv_ai_barney_dmg");
 		if (dmg <= 0)
 			dmg = 10;
+		// Otis shares this handler and does not share this gun - see .ai_shot_dmg.
+		if (self.ai_shot_dmg > 0)
+			dmg = self.ai_shot_dmg;
 		// GRU_SPREAD is the grunt's 5 degrees, and Barney is not firing a grunt's
 		// gun.  barney.cpp:355 is VECTOR_CONE_2DEGREES - a pistol, aimed, one
 		// round at a time - so he is markedly more accurate than the squad that
 		// used to share his spread by accident.
 		ai_dbg_shots_barney = ai_dbg_shots_barney + 1;
 		Grunt_FireOne(self, 1, dmg, GRU_SPREAD_PISTOL);
-		Barney_GunSound(self);
+		// Through the DISPATCHER, not straight to Barney_GunSound: this handler is
+		// shared by barney.mdl and otis.mdl, and they are not carrying the same gun
+		// - see the otis branch of Grunt_RigOverride.  Classes that install no
+		// .ai_gunsound still land on Grunt_GunSound, so put Barney's back explicitly
+		// in Barney_ClassInit rather than relying on the default.
+		Grunt_FireSound(self);
 		return;			// cooldown: AI_ArmAttackCooldown, at sequence end
 	}
 	// DRAW / HOLSTER are the weapon-in-hand beats; nothing here tracks that yet.
@@ -676,9 +1062,9 @@ void() Assassin_Event =
 		// hassassin.cpp:219-227 — one of two pistol reports, and deliberately
 		// quiet (0.6..0.8): she is supposed to be hard to place by ear.
 		if (random() < 0.5)
-			sound(self, CHAN_WEAPON, "weapons/pl_gun1.wav", 0.6 + random() * 0.2, ATTN_NORM);
+			AI_Sound(self, CHAN_WEAPON, "weapons/pl_gun1.wav", 0.6 + random() * 0.2, ATTN_NORM);
 		else
-			sound(self, CHAN_WEAPON, "weapons/pl_gun2.wav", 0.6 + random() * 0.2, ATTN_NORM);
+			AI_Sound(self, CHAN_WEAPON, "weapons/pl_gun2.wav", 0.6 + random() * 0.2, ATTN_NORM);
 		return;
 	}
 
@@ -745,6 +1131,25 @@ void() Grunt_CheckAttack =
 	if (!self.ai_enemy)
 		return;
 
+	// THE ROCKET HAS A MINIMUM RANGE, and this hook is the only place to put one:
+	// AI_GatherConditions raises COND_CAN_RANGE1 on a maximum-distance test alone
+	// (sv_ai_core.qc:530-536) and the generic ladder has no minimum anywhere.
+	// Without this an RPG grunt fires RPG_EXPLOSION_RADIUS (300) into a target
+	// standing on top of him and takes the blast himself, which is the same
+	// self-preservation Grunt_CheckGrenade already applies to the toss.
+	//
+	// Vetoing the range attack leaves melee and chase, both of which he can still
+	// reach - unlike the grenade veto, which only declines an option.
+	if (self.weapons & HGRUNT_RPG)
+	{
+		if (vlen(self.ai_enemy.origin - self.origin) <= GRU_RPG_MINRANGE
+		 || AI_FriendlyNear(self, self.ai_enemy.origin, GRU_RPG_MINRANGE))
+		{
+			self.ai_cond = self.ai_cond & ~COND_CAN_RANGE1;
+			return;
+		}
+	}
+
 	// Only refuse the gun at contact range if there IS something to refuse it in
 	// favour of.  Barney and the other barney-rigged allies have no melee at all
 	// (no act 30 in the model), so vetoing their gun up close left them with
@@ -759,30 +1164,83 @@ void() Grunt_CheckAttack =
 
 void() Grunt_PainSound =
 {
-	if (self.gag)
-		return;
-	sound(self, CHAN_VOICE, sprintf("hgrunt/gr_pain%g.wav", ceil(random() * 3)), 1, ATTN_NORM);
+	AI_Sound(self, CHAN_VOICE, sprintf("hgrunt/gr_pain%g.wav", ceil(random() * 3)), 1, ATTN_NORM);
+};
+
+// ---------------------------------------------------------------------------
+// the sentence callouts
+// ---------------------------------------------------------------------------
+// The grunt family speaks in SENTENCES, not in wavs, and this is the half of that
+// the talk layer did not already cover.  AI_MakeTalker gives every one of these
+// classes IDLE, HELLO, SHOT, MAD, SCARED, OK, WAIT and POK; what none of them had
+// was the line they say the moment they SEE you - which in Half-Life is the single
+// most recognisable noise a grunt makes.
+//
+// The groups are confirmed present in all three mounted sentences.txt files
+// (valve 404 groups, gearbox 323, bshift 293): HG_ALERT and HG_THROW in every one,
+// BA_ATTACK in valve and gearbox.  AI_TalkSay resolves through the same table and
+// returns FALSE for a group that is missing, so a mount without one goes quiet
+// rather than erroring.
+//
+// hgrunt.cpp:210-217 names all seven grunt sentences; the ones still unreached are
+// HG_MONSTER, HG_COVER, HG_CHARGE and HG_TAUNT, and all four belong to the squad
+// and take-cover work rather than here.
+void() Grunt_AlertSound =
+{
+	AI_TalkSay(self, "ALERT", CHAN_VOICE, ATTN_NORM);
+};
+
+// barney.cpp:270-279: Barney says "Freeze!", and it is BA_ATTACK rather than a
+// BA_ALERT - there is no such group in any sentences.txt.  ATTN_IDLE is HL's own
+// on this one line, which is why he does not shout it across the map.
+void() Barney_AlertSound =
+{
+	AI_TalkSay(self, "ATTACK", CHAN_VOICE, ATTN_IDLE);
 };
 
 void() Grunt_Death =
 {
-	if (self.gag)
-		return;
-	sound(self, CHAN_VOICE, sprintf("hgrunt/gr_die%g.wav", ceil(random() * 3)), 1, ATTN_NORM);
+	AI_Sound(self, CHAN_VOICE, sprintf("hgrunt/gr_die%g.wav", ceil(random() * 3)), 1, ATTN_NORM);
+};
+
+// The friendly grunt's own voice.  Sven's fgrunt is not a re-skinned hgrunt: it
+// has its own sound folder with six pain lines and six deaths, and the deaths are
+// spelled "death%g" rather than "gr_die%g".
+//
+// This is also the hinge the whole soundlist layer turns on for pizza_ya_san1.
+// The map's ownershin/empenuze/emptake lists remap fgrunt/gr_pain1-6 and
+// fgrunt/death1-6 onto Japanese lines; a lookup keyed on the LEFT column can only
+// match what the class actually emits, so with hgrunt paths here every one of
+// those pairs was unreachable no matter how correct the parser was.
+void() GruntAlly_PainSound =
+{
+	AI_Sound(self, CHAN_VOICE, sprintf("fgrunt/gr_pain%g.wav", ceil(random() * 6)), 1, ATTN_NORM);
+};
+
+void() GruntAlly_Death =
+{
+	AI_Sound(self, CHAN_VOICE, sprintf("fgrunt/death%g.wav", ceil(random() * 6)), 1, ATTN_NORM);
 };
 
 void() Barney_PainSound =
 {
-	if (self.gag)
-		return;
-	sound(self, CHAN_VOICE, sprintf("barney/ba_pain%g.wav", ceil(random() * 3)), 1, ATTN_NORM);
+	AI_Sound(self, CHAN_VOICE, sprintf("barney/ba_pain%g.wav", ceil(random() * 3)), 1, ATTN_NORM);
+};
+
+// scientist.cpp:801-824.  Scientist_ClassInit set neither .ai_painsound nor
+// .ai_death, and AI_Damaged requires one of the two before it will make any noise
+// at all (sv_ai_core.qc:2062) - so all 271 placements took a crowbar and died
+// without a sound.  HL picks from sci_pain1-5, and its DeathSound is literally
+// `PainSound()` (scientist.cpp:826) - there is no SC_DIE group in valve's
+// sentences.txt and no scientist death wav, so the two really are the same call.
+void() Scientist_PainSound =
+{
+	AI_Sound(self, CHAN_VOICE, sprintf("scientist/sci_pain%g.wav", ceil(random() * 5)), 1, ATTN_NORM);
 };
 
 void() Barney_Death =
 {
-	if (self.gag)
-		return;
-	sound(self, CHAN_VOICE, sprintf("barney/ba_die%g.wav", ceil(random() * 3)), 1, ATTN_NORM);
+	AI_Sound(self, CHAN_VOICE, sprintf("barney/ba_die%g.wav", ceil(random() * 3)), 1, ATTN_NORM);
 };
 
 // Defined below, beside the pickup classes they name.  Forward-declared because
@@ -885,8 +1343,56 @@ string(entity m, float act) Grunt_SeqFor =
 		if (random() < 0.1)
 			m.ai_standing = (random() < 0.5);
 
+		// The rocket has ONE sequence, not a standing/crouching pair: Sven's
+		// hgrunt.mdl carries rpg_idle / rpg_aim / rpg_shoot, and only rpg_shoot
+		// is tagged act 28 and carries the fire event (f10:e4, 16 frames @ 30).
+		//
+		// desertcircle's models/descrcl/hgrunt.mdl has the RPG *submodel* but not
+		// the sequences, so its rocket grunts degrade to the activity lottery and
+		// fire from an MP5 pose.  That is the safe end of the failure - they still
+		// launch - and it is why this asks by name rather than adding an activity.
+		if (m.weapons & HGRUNT_RPG)
+			return "rpg_shoot";
+
+		// The M40A1.  13 frames @ 15 fps against the MP5's 20, and ONE event
+		// where HL's mp5 pose carries three - the model is the bolt action.
+		// Present on massn, massnf, hgrunt_sniper and Sven's own hgrunt; absent
+		// from Half-Life's, which is why this is a name and not an activity.
+		if (m.weapons & HGRUNT_SNIPER)
+			return m.ai_standing ? "standing_m40a1" : "crouching_m40a1";
+
 		if (m.weapons & HGRUNT_SHOTGUN)
 			return m.ai_standing ? "standing_shotgun" : "crouching_shotgun";
+		// Sven's SAW, which is grunt-ally-only and carries its own pair of firing
+		// sequences.  pizza_ya_san1's shop owner is `weapons 16` on owner_shin.mdl,
+		// which has standing_saw / crouching_saw / reload_saw and no *_mp5 at all -
+		// so without this he asked for a sequence his rig does not own, fell through
+		// to the activity lottery and fired from an idle pose.  AI_SeqOrAct degrades
+		// safely for a rig that has no SAW animation, so the test costs nothing on
+		// the stock models.
+		if (m.weapons & HGRUNT_SAW)
+			return m.ai_standing ? "standing_saw" : "crouching_saw";
+
+		// THE M16, newly reachable.  HGRUNT_GRENADELAUNCHER already picks the M16
+		// SUBMODEL through iM16 in Grunt_BodyInit, but the POSE fell through to
+		// the MP5 pair below, so a `weapons 4` grunt held a rifle and fired it
+		// like an SMG.  That was not a choice - Half-Life's hgrunt.mdl has no M16
+		// firing sequence at all, so there was nothing to ask for.
+		//
+		// Sven Co-op's rigs do: hgrunt.mdl, hgrunt_opfor.mdl and massn.mdl all
+		// carry standing_m16a2 / crouching_m16a2 (massn even renamed its shotgun
+		// pair to them), and Sven is the master mount now, so the sequence is
+		// there to be used.
+		//
+		// PROBED, unlike the branches above, and the asymmetry is deliberate.
+		// Those degrade to the activity lottery, which still fires; this one has
+		// a strictly better fallback available - the MP5 pose, i.e. exactly what
+		// this rig did before - so it is worth one frameforname to keep a
+		// Half-Life-rigged grunt on it instead.
+		if ((m.weapons & HGRUNT_GRENADELAUNCHER)
+		    && AI_SeqNameExists(m.modelindex, "standing_m16a2"))
+			return m.ai_standing ? "standing_m16a2" : "crouching_m16a2";
+
 		return m.ai_standing ? "standing_mp5" : "crouching_mp5";
 	}
 
@@ -953,6 +1459,10 @@ void(entity m) Grunt_CommonInit =
 	m.ai_melee_range = GRU_MELEE_REACH;
 	m.ai_range_range = GRU_RANGE;
 	m.ai_spread      = GRU_SPREAD;
+	// hgrunt.cpp:1027 - `m_flFieldOfView = 0.2` - wider than CBaseMonster's 0.5,
+	// about 157 degrees across.  A soldier is meant to be hard to walk up on from
+	// the side; you have to get genuinely behind him.
+	m.ai_fov         = 0.2;
 
 	// MEASURED OUT OF hgrunt.mdl, not chosen.  Half-Life does not carry monster
 	// speeds as constants at all: GetSequenceInfo (animation.cpp:245-249) derives
@@ -973,10 +1483,11 @@ void(entity m) Grunt_CommonInit =
 	m.ai_checkattack = Grunt_CheckAttack;
 	m.ai_event       = Grunt_Event;
 	m.ai_painsound   = Grunt_PainSound;
+	m.ai_alertsound  = Grunt_AlertSound;	// HG_ALERT, hgrunt.cpp:211
 	m.ai_death       = Grunt_Death;
 	m.ai_tick        = Grunt_Aim;	// the spine controller tracks the enemy
 
-	if (m.bloodcolor <= 0)
+	if (m.bloodcolor == 0)
 		m.bloodcolor = 247;		// HL BLOOD_COLOR_RED
 };
 
@@ -989,6 +1500,12 @@ void(entity m) Grunt_CommonInit =
 void(entity m) Grunt_GrenadeInit =
 {
 	m.ai_selectsched = Grunt_SelectSched;
+	// TWO ENGAGE SLOTS PER SQUAD, squadmonster.h:25-27.  This is the single
+	// biggest difference between Half-Life's grunts and a firing line: at most
+	// two of a four-man squad shoot at any moment and the other two reposition,
+	// which is what makes a squad read as coordinated rather than as four copies
+	// of one monster.  A grunt with no squad is never rationed.
+	m.ai_slots_attack = SQSLOTS_ENGAGE;
 
 	// HL's default loadout when the map sets no `weapons` key.
 	if (!m.weapons)
@@ -1011,10 +1528,32 @@ void(entity m) HGruntAlly_ClassInit =
 {
 	Grunt_CommonInit(m);
 	Grunt_GrenadeInit(m);
-	// The faction matrix lands with the ally work; until then the classification
-	// is stored so nothing has to be re-derived later.
 	m.ai_class       = CLASS_PLAYER_ALLY;
 	m.is_player_ally = TRUE;
+
+	// Sven's friendly grunt voice, replacing the enemy grunt's that CommonInit
+	// installed.  See GruntAlly_PainSound, and the guard in Grunt_Precache for why
+	// this is conditional rather than unconditional.
+	if (grunt_ally_hasfgrunt)
+	{
+		m.ai_painsound = GruntAlly_PainSound;
+		m.ai_death     = GruntAlly_Death;
+	}
+
+	// A TALKER, which he was not - so 406 grunt allies plus this map's shop owner
+	// and chief had no head turn, no jaw and no idle behaviour at all, because
+	// AI_TalkTick only runs for .ai_talker.
+	//
+	// The group is "FG", Sven's own prefix, and that choice is deliberate on both
+	// sides of the fence.  The only sentences.txt this install actually loads is
+	// valve's (Sentences_Load reads exactly one, sv_sentences.qc:152), and valve's
+	// has no FG_ groups - so AI_TalkSay returns FALSE and he gets the head-turn and
+	// look-at behaviour while staying QUIET on the sentence channel, which is what
+	// a Japanese shopkeeper should do rather than shouting Half-Life's English
+	// military callouts.  If op4's sentences.txt is ever mounted - it has 145 FG_
+	// groups over fgrunt/* words - those lines light up AND land on the soundlist
+	// remap, which is exactly what the map is built for.
+	AI_MakeTalker(m, "FG");
 };
 
 void(entity m) HWGrunt_ClassInit =
@@ -1047,6 +1586,24 @@ void(entity m) Assassin_ClassInit =
 	m.ai_event      = Assassin_Event;
 	m.ai_dropweapon = Barney_DropWeapon;	// hassassin.cpp fires a 9mm pistol
 	m.ai_class      = CLASS_HUMAN_MILITARY;
+
+	// SVEN'S `weapons` FIELD IS CLASS-DEPENDENT, and bit 8 is where that bites.
+	// From the two weapons(Choices) blocks in sven-coop.fgd:
+	//
+	//   monster_human_grunt      8 = Shotgun        64 = Rocket Launcher
+	//                          128 = Sniper Rifle
+	//   monster_male_assassin    8 = Sniper Rifle   10 = Sniper Rifle + HG
+	//                          256 = Sniper - No drop
+	//
+	// One bit, two different guns.  This tree read HGRUNT_SHOTGUN everywhere, so
+	// every assassin a map armed as a SNIPER fired a shotgun - sound, pellet
+	// spread and all.  desertcircle's eight tower marksmen are `weapons 8` and
+	// were doing exactly that, from a tower, at range.
+	//
+	// Translated on the class that means something different by it, so nothing
+	// downstream has to know: from here on, one bit means one gun.
+	if (m.weapons & HGRUNT_SHOTGUN)
+		m.weapons = m.weapons - (m.weapons & HGRUNT_SHOTGUN) + HGRUNT_SNIPER;
 
 	// NO MELEE, for the same reason Barney has none, and measured out of the model
 	// rather than assumed: hassassin.mdl's kick (seq 7, act 30) and kickshort
@@ -1095,9 +1652,57 @@ void(entity m) Assassin_ClassInit =
 // What is genuinely its own is the WEAPON.  It carries a shock rifle, not an MP5.
 void(entity m) Shocktrooper_GunSound =
 {
-	if (m.gag)
+	AI_Sound(m, CHAN_WEAPON, SND_SHOCK_FIRE, 1, ATTN_NORM);
+};
+
+// ...and the weapon is why it needed a handler after all.  This is a THIN one:
+// it intercepts exactly the firing and kick codes and hands everything else
+// straight back to Grunt_Event, so the rig's shared vocabulary stays shared.
+//
+// The reported bug was "the shock troopers shot is invisible", and hitscan was
+// not merely invisible - it was the wrong primitive.  A shock rifle fires a bolt
+// of energy, so this goes down AI_FireBeam (the islave's and the voltigore's
+// path) with its own beam kind, rather than AI_FireBullets.  Fixing the tracer
+// blindness in cl_monstertrace.qc would have given this class a lead streak.
+//
+// The numbers are Sven Co-op's own, out of svencoop/skill.cfg on disk rather
+// than out of an SDK this machine does not have:
+//     sk_plr_shockrifle    15   the bolt.  There is no sk_shocktrooper_dmg
+//                               entry because the monster fires the player's
+//                               weapon, which is the whole point of the class -
+//                               kill one and you can pick its shockroach up.
+//     sk_shocktrooper_kick 12   the melee, which was dmg*2 = 16 by inheritance.
+void() Shocktrooper_Event =
+{
+	if (ai_event_code == GRU_AE_BURST1
+	 || ai_event_code == GRU_AE_BURST2
+	 || ai_event_code == GRU_AE_BURST3)
+	{
+		float d = cvar("sv_ai_shocktrooper_dmg");
+		if (d <= 0)
+			d = 15;
+
+		// strooper.mdl's crouching_mp5 raises ONE firing code (4 @0.07) - the
+		// dump at the top of this section - so this is one bolt per trigger
+		// pull, not three.  The other two codes stay handled because the class
+		// shares the hgrunt rig and a map is free to ship one that raises them.
+		if (self.ai_enemy)
+			AI_FireBeam(self, self.ai_enemy, HL_BEAM_SHOCK, d);
+		ai_dbg_shots_grunt = ai_dbg_shots_grunt + 1;
+		Grunt_FireSound(self);
 		return;
-	sound(m, CHAN_WEAPON, SND_SHOCK_FIRE, 1, ATTN_NORM);
+	}
+
+	if (ai_event_code == GRU_AE_KICK)
+	{
+		float k = cvar("sv_ai_shocktrooper_kick");
+		if (k <= 0)
+			k = 12;
+		AI_MeleeHull(self, GRU_MELEE_REACH, k, 16);
+		return;
+	}
+
+	Grunt_Event();
 };
 
 void(entity m) Shocktrooper_ClassInit =
@@ -1106,12 +1711,15 @@ void(entity m) Shocktrooper_ClassInit =
 	Grunt_GrenadeInit(m);
 	m.ai_class = CLASS_ALIEN_MILITARY;
 	m.ai_gunsound = Shocktrooper_GunSound;
+	// AFTER Grunt_CommonInit, which points ai_event at Grunt_Event.  Grunt_Event
+	// is still the fallthrough - see above.
+	m.ai_event = Shocktrooper_Event;
 	// No drop.  Grunt_CommonInit installed the MP5 drop and this monster does not
 	// carry one - in Opposing Force it drops a SHOCKROACH, which is a live weapon
 	// this mod has no pickup for.  Dropping nothing is honest; dropping an MP5
 	// because it shares the hgrunt rig would not be.
 	m.ai_dropweapon = __NULL__;
-	if (m.bloodcolor <= 0)
+	if (m.bloodcolor == 0)
 		m.bloodcolor = 195;		// alien, not human
 };
 
@@ -1123,9 +1731,38 @@ void(entity m) Robogrunt_ClassInit =
 	m.bloodcolor = -1;			// DONT_BLEED: it is a robot
 };
 
+// barney.cpp:720-721.  HEAVY damage only, which is a real distinction and not a
+// simplification of the grunt's rule: Barney shrugs off a graze and keeps
+// shooting, and only breaks when something hits him hard.  A guard who dived for
+// cover every time a headcrab clipped him would be useless as an escort, and
+// this is the same threshold AI_HEAVY_DMG already draws for the flinch.
+//
+// Otis and the medic ally share this init, so they share the behaviour - which
+// is correct, they share the class in Half-Life too.
+float() Barney_SelectSched =
+{
+	entity m = self;
+	if (m.ai_state != MS_COMBAT || !m.ai_enemy)
+		return SCHED_NONE;
+
+	if (m.ai_cond & COND_HEAVY_DAMAGE)
+		if (Cover_Allowed(m))
+		{
+			ai_dbg_cover_sched = ai_dbg_cover_sched + 1;
+			return SCHED_TAKE_COVER;
+		}
+
+	return SCHED_NONE;
+};
+
 void(entity m) Barney_ClassInit =
 {
 	Grunt_CommonInit(m);
+	// VIEW_FIELD_WIDE, and barney.cpp:418 says why in Valve's own words: "we need
+	// a wide field of view so npc will notice player and say hello".  Overrides
+	// the 0.2 CommonInit just set for the soldier.
+	m.ai_fov         = -0.7;
+	m.ai_selectsched = Barney_SelectSched;
 	m.ai_class       = CLASS_PLAYER_ALLY;
 	m.is_player_ally = TRUE;
 
@@ -1144,8 +1781,10 @@ void(entity m) Barney_ClassInit =
 	AI_MakeTalker(m, "BA");
 
 	m.ai_event       = Barney_Event;	// one round per shot, on code 3
+	m.ai_gunsound    = Barney_GunSound;	// the 9 mm; otis overrides it below
 	m.ai_dropweapon  = Barney_DropWeapon;	// barney.cpp:623, weapon_9mmhandgun
 	m.ai_painsound   = Barney_PainSound;
+	m.ai_alertsound  = Barney_AlertSound;	// BA_ATTACK, barney.cpp:276
 	m.ai_death       = Barney_Death;
 	m.ai_yawspeed    = Barney_YawSpeed;	// barney.cpp:285-307, replaces the grunt's
 	//   barney.mdl [4] walk 32f @30fps ->  61.4
@@ -1257,6 +1896,12 @@ void(entity m) Grunt_DropWeapon =
 	if (m.bloodcolor < 0)
 		return;
 
+	// Sven's two "leave nothing behind" bits, neither of which was read: 256 is
+	// the explicit "Don't drop weapon", 32 is "No Weapons" and there is nothing to
+	// drop.  Without these an unarmed NPC dropped an MP5 it was never carrying.
+	if (m.weapons & (HGRUNT_NODROP | HGRUNT_NOWEAPONS))
+		return;
+
 	if (m.weapons & HGRUNT_SHOTGUN)
 		Grunt_DropOne(m, weapon_hlshotgun);
 	else
@@ -1298,36 +1943,209 @@ void(entity m) Barney_DropWeapon =
 //
 // Otis has no "blank" gun submodel, so his dropped state is the holster: he has
 // put it away rather than had it vanish, which is the closest the rig allows.
+// Defined below, beside the rig table they were written for.  Used here too,
+// because this function had the SAME exact-path bug and it is the one a player
+// actually sees: a reskinned grunt kept bodygroup 0 whatever its loadout said.
+string(string mdl) Rig_Stem;
+float(string stem, string known) Rig_StemIs;
+float(string stem, string known) Rig_StemHas;
+
 void(entity m) Grunt_BodyInit =
 {
-	string mdl = m.model;
+	// MATCHED ON THE STEM, for the reason Grunt_RigOverride is - and this is the
+	// half you can SEE.
+	//
+	// A CORRECTION TO THE LAST ROUND, which said the stem match was the whole fix
+	// for desertcircle: it was not.  Making the branch RUN still composes body 0
+	// for an ordinary grunt, and body 0 on that rig is the M4 - so the reported
+	// "carries a low quality looking assault rifle" survived the fix.  Only the
+	// shotgun grunt was corrected by it.
+	//
+	// The real problem is that THREE different models answer to the stem `hgrunt`
+	// and no two of them lay their weapon bodygroup out the same way.  Dumped from
+	// the studio headers:
+	//
+	//   Half-Life/valve/models/hgrunt.mdl
+	//       heads   n=4 base=1  weapons n=3 base=4
+	//       [0] MP5  [1] shotgun  [2] blank
+	//   svencoop/models/hgrunt.mdl
+	//       heads   n=5 base=1  weapons n=6 base=5
+	//       [0] M16  [1] spas12  [2] unarmed  [3] RPG  [4] MP5  [5] M40A1
+	//   svencoop/models/descrcl/hgrunt.mdl
+	//       heads   n=4 base=1  weapons n=5 base=4
+	//       [0] M4   [1] shotgun  [2] blank    [3] RPG  [4] MP5
+	//
+	// The formula that was here describes the FIRST of those and only that one.
+	//
+	// WHICH OF THEM IS LIVE, measured rather than assumed: `sv_ai_selftest 1`
+	// prints a sequence count per rig, and models/hgrunt.mdl reports 82 - which is
+	// Half-Life's (Sven's is 95, desertcircle's 88).  fs_addons.txt lists
+	// steam:Half-Life/valve above steam:Sven Co-op/svencoop and valve wins the
+	// name, so on this install the old formula was right for the plain classname.
+	//
+	// So exactly one of the two bugs is on screen today, and it is the one that
+	// was reported: desertcircle names its rig by explicit path, nothing can
+	// shadow it, and its index 0 is an M4.  Sven's own rig is the LATENT case -
+	// unmount valve, or ship a map that names svencoop's hgrunt.mdl directly, and
+	// an ordinary grunt composes 0 and picks up an M16, a shotgun grunt takes the
+	// commander head instead of the shotgun one, and `gone` (head+8) lands on the
+	// spas12 rather than the blank so a disarmed corpse keeps a shotgun.  Handled
+	// here because the cost is one probe and the failure is silent.
+	//
+	// So this resolves a per-rig INDEX TABLE instead of doing arithmetic per
+	// branch, and the three hgrunt rigs are told apart by the sequences they
+	// carry - AI_SeqNameExists (sv_ai_anim.qc:522), which exists for exactly this
+	// ("finding out that a replacement model lacks the names a class needs").
+	// Sequence names are the right discriminator because they are also what
+	// decides whether the loadout can be ANIMATED: a rig with rpg_shoot has an RPG
+	// submodel, and one without has neither.
+	//
+	// An unrecognised reskin falls to the Half-Life layout, which is what this
+	// function already did for everything, so nothing regresses into a worse
+	// state than it was in.
+	string mdl = Rig_Stem(m.model);
 
-	if (mdl == "models/barney.mdl" || mdl == "models/bodyguard.mdl")
+	// The table: base multiplier, then the submodel index per gun.  -1 means the
+	// rig has no submodel for it and the selector must fall back.
+	float wb    = 0;	// weapon bodygroup base
+	float iMP5  = -1;
+	float iSG   = -1;
+	float iM40  = -1;
+	float iRPG  = -1;
+	float iSAW  = -1;
+	float iNONE = -1;	// the empty-handed submodel
+	float iM16  = -1;	// the M16 that carries the M203 — HGRUNT_GRENADELAUNCHER
+	float head  = 0;
+	float wi    = -1;	// the index the selector settles on, hoisted for the probe
+	string rig  = "none";	// which branch of the table claimed this model
+
+	// UNARMED, and it has to be decided here because this is the last hook in
+	// AI_ClassInit - after the rig override, so nothing can put the gun back.
+	// Zeroing the range instead of adding a "can he shoot" test everywhere is the
+	// same mechanism the scientist uses (Scientist_ClassInit): the generic
+	// schedule ladder can only offer an attack whose range is non-zero, so one
+	// assignment removes the behaviour everywhere at once.
+	if (m.weapons & HGRUNT_NOWEAPONS)
+		m.ai_range_range = 0;
+
+	// bgman.mdl, monster_bodyguard's own rig (sven-coop.fgd:4005), and it is NOT
+	// laid out like barney's: bodypart[1] is a 2-model HEAD group at base 1 and
+	// bodypart[2] is an 8-model GUN group at base 2, so the gun costs two per index
+	// and submodel 0 is the blank rather than a holster.  The eight guns are in the
+	// FGD's own order - blank, pistol, deagle, shotgun, akimbo uzis, mp5, sniper,
+	// minigun - which is also what its `weapons` key selects, so the key indexes
+	// the group directly instead of going through the hgrunt bitfield.
+	//
+	// Tested BEFORE the barney branch because "bodyguard" used to land there and
+	// take barney's 0/1/2 - which on this rig is "blank gun, second head" for
+	// armed, i.e. an empty-handed bodyguard, and "deagle" for a dropped weapon.
+	if (Rig_StemIs(mdl, "bgman"))
+	{
+		float bgun = bound(0, rint(m.weapons), 7);
+		if (bgun <= 0)
+			bgun = 1 + floor(random() * 7);	// FGD's "Random"
+		m.ai_body_armed   = bgun * 2;
+		m.ai_body_holster = m.ai_body_armed;	// no holstered pose on this rig
+		m.ai_body_gone    = 0;			// submodel 0 IS the blank
+	}
+	// Rig_StemHas, not Rig_StemIs, and that one word is the whole of "barney does
+	// not hold his glock".
+	//
+	// Every reskin of this rig puts the family name at the END of the filename -
+	// They Hunger's hungerbarney.mdl and hungerotis.mdl, Half-Life's own
+	// barney_helmet.mdl and barney_vest.mdl - so a PREFIX test matched none of
+	// them.  A rig that matched nothing fell out of this ladder with wb still 0
+	// and .ai_body_armed still 0, and 0 on all four of these models is the
+	// HOLSTERED submodel.  So the guard drew, aimed, fired and killed you with an
+	// empty hand and the pistol still on his hip.
+	//
+	// Verified against the models rather than assumed: barney.mdl (valve, valve_hd
+	// and svencoop), hungerbarney.mdl, sheriff.mdl and pilot.mdl all carry a
+	// 3-submodel "gun" group at bodypart[1] base 1, in the order
+	// holstered / drawn / blank.  otis.mdl and hungerotis.mdl carry the same group
+	// in the same place with a DONUT where the blank would be, which is why that
+	// branch keeps its own `gone`.
+	else if (Rig_StemHas(mdl, "barney") || Rig_StemHas(mdl, "bodyguard")
+	      || Rig_StemIs(mdl, "sheriff") || Rig_StemIs(mdl, "pilot"))
 	{
 		m.ai_body_holster = 0;
 		m.ai_body_armed   = 1;
 		m.ai_body_gone    = 2;
 	}
-	else if (mdl == "models/otis.mdl")
+	else if (Rig_StemHas(mdl, "otis"))
 	{
 		m.ai_body_holster = 0;
 		m.ai_body_armed   = 1;
 		m.ai_body_gone    = 0;		// no blank submodel on this rig
 	}
-	else if (mdl == "models/hgrunt.mdl")
+	// The "hgrunt_" exclusion is what lets this sit above the three specialists
+	// without swallowing them: every one of their stems begins with this one.
+	else if (Rig_StemIs(mdl, "hgrunt") && !Rig_StemIs(mdl, "hgrunt_"))
 	{
-		// hgrunt.mdl: heads n=4 base=1, weapons n=3 base=4, so
-		// body = head*1 + weapon*4 with weapon 0=MP5 1=shotgun 2=blank.
-		//
-		// Head first so the weapon multiplier lands on top of it.  A shotgun
-		// grunt gets the shotgun head, which is HL's own pairing and the reason
-		// that head exists.
-		float head = (m.weapons & HGRUNT_SHOTGUN) ? 2 : 0;
-		m.ai_body_armed   = head + ((m.weapons & HGRUNT_SHOTGUN) ? 4 : 0);
-		m.ai_body_holster = m.ai_body_armed;	// no holstered pose on this rig
-		m.ai_body_gone    = head + 8;
+		// THREE RIGS, ONE STEM.  Told apart by the sequences they carry, because
+		// that is the same fact that decides whether the loadout can be animated.
+		// Head first in every case, so the weapon multiplier lands on top of it -
+		// a shotgun grunt gets the shotgun head, which is HL's own pairing and the
+		// reason that head exists.
+		// crouching_m40a1 IS THE MARKER FOR THE SIX-WEAPON RIG, and that is not a
+		// coincidence worth hiding: the M40A1 is the sixth submodel, so the rig
+		// that animates it is exactly the rig that owns six of them.  rpg_shoot is
+		// NOT the marker - it looked like one until desertcircle's grunts came out
+		// holding an M4 anyway, because that rig carries rpg_idle/aim/shoot/reload
+		// too and still lays its weapons out on base 4.
+		if (AI_SeqNameExists(m.modelindex, "crouching_m40a1"))
+		{
+			// svencoop/models/hgrunt.mdl, 95 sequences.
+			// heads n=5 base=1 : gasmask / commander / shotgun / black / ROCKET
+			// weapons n=6 base=5 : [0] M16 [1] spas12 [2] unarmed [3] RPG
+			//                      [4] MP5 [5] M40A1
+			// Note the base is FIVE, and index 0 is an M16, not the MP5 - both of
+			// which the old formula got wrong.
+			rig = "sven-hgrunt";
+			wb = 5;  iMP5 = 4;  iSG = 1;  iRPG = 3;  iM40 = 5;  iNONE = 2;
+			iM16 = 0;
+			if (m.weapons & HGRUNT_RPG)          head = 4;
+			else if (m.weapons & HGRUNT_SHOTGUN) head = 2;
+		}
+		else if (AI_SeqNameExists(m.modelindex, "rpg_shoot"))
+		{
+			// The desertcircle shape: models/descrcl/hgrunt.mdl, 88 sequences.
+			// heads n=4 base=1 : mask / commander / shotgun / grunt
+			// weapons n=5 base=4 : [0] M4 [1] shotgun [2] blank [3] RPG [4] MP5
+			// Same base as Half-Life's, but index 0 is an M4 and the MP5 has moved
+			// to 4 - which is why an ordinary grunt here still showed a rifle after
+			// the last round made this branch run at all.  No rocket head on this
+			// rig; its four heads are mask / commander / shotgun / grunt.
+			rig = "descrcl-hgrunt";
+			wb = 4;  iMP5 = 4;  iSG = 1;  iRPG = 3;  iNONE = 2;
+			iM16 = 0;			// that M4 IS this rig's "M16 + GL"
+			if (m.weapons & HGRUNT_SHOTGUN) head = 2;
+		}
+		else
+		{
+			// Half-Life's own, and the fallback for any rig we do not recognise.
+			// heads n=4 base=1, weapons n=3 base=4 : [0] MP5 [1] shotgun [2] blank
+			// No M16 submodel at all here, so a `weapons 5` grunt on stock HL keeps
+			// the MP5 in hand - which is what Half-Life itself shows, since the bit
+			// is Sven's addition and valve's rig was never given the gun.
+			rig = "hl-hgrunt";
+			wb = 4;  iMP5 = 0;  iSG = 1;  iNONE = 2;
+			if (m.weapons & HGRUNT_SHOTGUN) head = 2;
+		}
 	}
-	else if (mdl == "models/massn.mdl")
+	else if (Rig_StemIs(mdl, "hgrunt_sniper"))
+	{
+		// A STOCK SVEN RIG THAT MATCHED NOTHING AT ALL until now: the "hgrunt_"
+		// exclusion above pushes it past the generic branch and no specialist
+		// claimed it, so it fell to `else return;` and wore bodygroup 0 - an MP5 -
+		// whatever the map asked for.  It is the same shape as massn but on base 4:
+		//   heads n=4 base=1, weapons n=4 base=4 : [0] MP5 [1] M40A1 [2] blank [3] M4
+		// and it carries crouching_m40a1 / standing_m40a1, so the sniper animation
+		// resolves on it too.
+		rig = "hgrunt_sniper";
+		wb = 4;  iMP5 = 0;  iM40 = 1;  iNONE = 2;  iM16 = 3;
+	}
+	else if (Rig_StemIs(mdl, "massn"))
 	{
 		// SPLIT OUT OF THE HGRUNT BRANCH, because the bases are not the same and
 		// sharing them produced values that are not indices at all.  Dumped:
@@ -1338,50 +2156,190 @@ void(entity m) Grunt_BodyInit =
 		// the division, so "gone" landed on the M40A1 and a disarmed corpse was
 		// handed a sniper rifle.
 		//
-		// No shotgun submodel on this rig at all; the second weapon is the M40A1,
-		// which is a different loadout and not yet modelled (see the TESTING.md
-		// note).  Until it is, he carries the MP5 he already visibly carries.
-		float mhead = 0;
-		m.ai_body_armed   = mhead + 0 * 3;	// MP5
-		m.ai_body_holster = m.ai_body_armed;
-		m.ai_body_gone    = mhead + 2 * 3;	// blank
+		// No shotgun submodel on this rig at all, and now none is wanted: the
+		// second weapon IS the M40A1, and Assassin_ClassInit has already turned
+		// this class's bit 8 into HGRUNT_SNIPER, so the loadout the map asked for
+		// and the submodel that exists finally name the same gun.
+		//
+		// Verified against both rigs rather than assumed - stock massn.mdl and
+		// desertcircle's models/descrcl/massnf.mdl are the same shape:
+		//   heads n=3 base=1, weapons n=4 base=3 : [0] MP5 [1] M40A1 [2] blank
+		//                                          [3] M16/M4
+		// That fourth submodel is the "M16 + GL" one - massn.mdl names it
+		// Weapons\weapon_m16 outright and massnf.mdl calls it hgrunt_m4_Reference.
+		rig = "massn";
+		wb = 3;  iMP5 = 0;  iM40 = 1;  iNONE = 2;  iM16 = 3;
 	}
-	else if (mdl == "models/hgrunt_torch.mdl")
+	else if (Rig_StemIs(mdl, "hgrunt_torch"))
 	{
 		m.ai_body_armed   = 0;		// Desert Eagle
 		m.ai_body_holster = 2;
 		m.ai_body_gone    = 2;
 	}
-	else if (mdl == "models/hgrunt_medic.mdl")
+	else if (Rig_StemIs(mdl, "hgrunt_medic"))
 	{
 		m.ai_body_armed   = 0;		// Desert Eagle, head 0
 		m.ai_body_holster = 6;		// weapon slot 3 (holster) * base 2
 		m.ai_body_gone    = 6;
 	}
-	else if (mdl == "models/hwgrunt.mdl")
+	else if (Rig_StemIs(mdl, "hwgrunt"))
 	{
 		// weapons group, base 1: minigun / beretta / deagle / python / blank.
 		m.ai_body_armed   = HWG_BODY_MINIGUN;
 		m.ai_body_holster = HWG_BODY_MINIGUN;	// no holstered pose on this rig
 		m.ai_body_gone    = HWG_BODY_BLANK;
 	}
-	else if (mdl == "models/hgrunt_opfor.mdl")
+	else if (Rig_StemIs(mdl, "hgrunt_opfor"))
 	{
-		float wep = 0;					// MP5
-		if (m.weapons & HGRUNT_SHOTGUN)
-			wep = 1;
-		m.ai_body_armed   = wep * 32;
-		m.ai_body_holster = m.ai_body_armed;
-		m.ai_body_gone    = 3 * 32;		// the blank weapon submodel
+		// TWO rigs answer to this name, and which one wins is now a MOUNT-ORDER
+		// question, so this branch probes instead of assuming:
+		//   gearbox/models/hgrunt_opfor.mdl   73 seqs, weapons n=4 base=32
+		//       [0] MP5  [1] shotgun  [2] SAW  [3] blank
+		//   svencoop/models/hgrunt_opfor.mdl  75 seqs, weapons n=5 base=32
+		//       [0] M16  [1] spas12  [2] SAW  [3] blank  [4] MP5
+		//
+		// THE NOTE THAT USED TO SIT HERE IS NOW WRONG, and it is worth saying why
+		// rather than deleting it: it read "hgrunt_opfor.mdl reports 73, so
+		// Opposing Force's own rig wins and index 0 is genuinely the MP5", which
+		// was true only because fs_addons.txt listed valve/gearbox above
+		// svencoop.  Sven Co-op is the master mount now, so its 75-sequence rig
+		// wins the name and index 0 is the M16 - a `weapons 5` OpFor grunt would
+		// have been handed a rifle while the code believed it was an MP5.
+		//
+		// Probed by NAME, not by sequence count, for the same reason the hgrunt
+		// trio above is: a count is a fact about one pair of files, a name is a
+		// fact about the rig.  standing_m16a2 / crouching_m16a2 / walk_new exist
+		// only on Sven's copy (diffed: gearbox has walk1 where Sven has walk_new,
+		// and gearbox has no *_m16a2 at all).
+		//
+		// THE SAW IS ON INDEX 2 ON BOTH.  Grunt_SeqFor has answered "standing_saw"
+		// for HGRUNT_SAW since pizza_ya_san1, but the body never moved off
+		// submodel 0, so a `weapons 16` grunt mimed a SAW while holding an MP5.
+		rig = "hgrunt_opfor";
+		wb = 32;  iSG = 1;  iSAW = 2;  iNONE = 3;
+		if (AI_SeqNameExists(m.modelindex, "standing_m16a2"))
+		{
+			// svencoop/models/hgrunt_opfor.mdl - the MP5 moved to 4 and a real
+			// M16 submodel appeared at 0, so this rig can finally honour an M16
+			// loadout instead of silently substituting the MP5.
+			rig  = "sven-hgrunt_opfor";
+			iM16 = 0;  iMP5 = 4;
+		}
+		else
+		{
+			// Opposing Force's own rig.  No M16 submodel exists on it at all, so
+			// iM16 stays -1 and a `weapons 5` grunt keeps the MP5.
+			iMP5 = 0;
+		}
 	}
 	else
-		return;				// rig has no weapon bodygroup; leave .body alone
+	{
+		// Rig has no weapon bodygroup, or one this table does not describe; leave
+		// .body alone.  Still worth a probe line - "which monsters fell through"
+		// is exactly the question this print exists to answer.
+		if (cvar("sv_monster_probe"))
+			dprint(sprintf("[bodygroup] %s rig=%s(%s) weapons=%g -> NO TABLE, body left at %g\n",
+			               m.classname, mdl, rig, m.weapons, m.body));
+		return;
+	}
+
+	// ONE selector for every rig that filled the table in.  Precedence matches
+	// Grunt_SeqFor and Grunt_Event exactly - RPG, sniper, shotgun, SAW, then the
+	// M16 - so what he holds, what he plays and what comes out of the barrel can
+	// never disagree.  A rig missing a submodel keeps the MP5 rather than
+	// composing an index it does not own.
+	//
+	// THE M16 IS NEW HERE, and it is the same shape of bug the SAW was: bit 4
+	// (HGRUNT_GRENADELAUNCHER) has driven the grenade arc since this file was
+	// written - Grunt_ThrowGrenade already fires the M203's flat contact shot
+	// instead of a lob for it - but the body never moved, so the grunt launched
+	// rifle grenades while visibly holding an MP5.  Sven's FGD spells the loadout
+	// "M16 + GL" and writes it as weapons 5; desertcircle has two (base2sm3 and
+	// castlesm4) and the corpus has many more.
+	//
+	// It sits LAST because its bit travels WITH the MP5's - 5 is bit 1 | bit 4,
+	// so every M16 grunt is also nominally an MP5 grunt.  Testing it after the
+	// exclusive loadouts means a map writing 5|8 still gets the shotgun it asked
+	// for, and a rig with no M16 submodel (Half-Life's own, and gearbox's OpFor)
+	// keeps the MP5 rather than composing an index it does not own.
+	if (wb > 0)
+	{
+		wi = iMP5;
+		if      ((m.weapons & HGRUNT_RPG)     && iRPG >= 0)	wi = iRPG;
+		else if ((m.weapons & HGRUNT_SNIPER)  && iM40 >= 0)	wi = iM40;
+		else if ((m.weapons & HGRUNT_SHOTGUN) && iSG  >= 0)	wi = iSG;
+		else if ((m.weapons & HGRUNT_SAW)     && iSAW >= 0)	wi = iSAW;
+		else if ((m.weapons & HGRUNT_GRENADELAUNCHER) && iM16 >= 0)	wi = iM16;
+		if (wi < 0)
+			wi = 0;
+
+		m.ai_body_armed   = head + wi * wb;
+		m.ai_body_holster = m.ai_body_armed;	// no holstered pose on these rigs
+		m.ai_body_gone    = head + ((iNONE >= 0) ? iNONE : wi) * wb;
+	}
+
+	// THE MEASUREMENT, because "the sniper is holding an assault rifle" is not a
+	// question the source can answer on its own: every step of this function
+	// traces clean for a massnf marksman and still produced the wrong gun on
+	// screen, which means the interesting failure is somewhere between here and
+	// the renderer.  This prints what the SERVER decided, so a run tells you
+	// which side of the wire to look at.  One line per body, behind the probe
+	// cvar that already gates the rest of the spawn dump.
+	// Two prints, not one: sprintf carries at most 8 varargs.  wi and iNONE are
+	// left out because both are recoverable from the line - wi = (armed-head)/wb
+	// and iNONE = (gone-head)/wb.
+	if (cvar("sv_monster_probe"))
+	{
+		dprint(sprintf("[bodygroup] %s rig=%s(%s) weapons=%g m16=%g -> armed=%g gone=%g\n",
+		               m.classname, mdl, rig, m.weapons, iM16,
+		               m.ai_body_armed, m.ai_body_gone));
+		dprint(sprintf("[bodygroup]   wb=%g head=%g | mp5=%g sg=%g m40=%g rpg=%g saw=%g\n",
+		               wb, head, iMP5, iSG, iM40, iRPG, iSAW));
+	}
+
+	// ...and if the map said "No Weapons", the empty-handed submodel is the armed
+	// one.  Down here rather than beside the range test at the top because
+	// ai_body_gone is not known until the rig branch above has run.
+	if (m.weapons & HGRUNT_NOWEAPONS)
+	{
+		m.ai_body_armed   = m.ai_body_gone;
+		m.ai_body_holster = m.ai_body_gone;
+	}
 
 	// Armed on spawn.  Half-Life holsters its talkers until they go alert and
 	// draws on BAR_AE_DRAW, and that beat is honoured in Barney_Event - but the
 	// initial state has to be something, and an armed guard is both what the
 	// player expects and what every non-talker in the family wants anyway.
 	m.body = m.ai_body_armed;
+};
+
+// The two specialist loadouts change more than the model and the bullet: a bolt
+// action is not an MP5's cadence and neither gun is a 1600-unit weapon.
+//
+// SEPARATE FROM THE CLASS INIT because the loadout is not a property of the
+// class - `weapons` comes off the map key, one classname can carry any of the
+// bits, and Grunt_RigOverride can still rewrite them (the torch and medic rigs
+// have their MP5 bit cleared there).  So this runs where Grunt_BodyInit runs,
+// after the rig table has had its say, and reads exactly what the body is about
+// to be composed from.
+void(entity m) Grunt_LoadoutInit =
+{
+	// The rocket first, matching every other precedence in this file.
+	if (m.weapons & HGRUNT_RPG)
+	{
+		m.ai_attackrate  = GRU_RPG_REFIRE;
+		m.ai_range_range = GRU_SPECIALIST_RANGE;
+		return;
+	}
+
+	if (m.weapons & HGRUNT_SNIPER)
+	{
+		// ai_attackrate is a FLOOR, not the whole gap: AI_ArmAttackCooldown
+		// (sv_ai_core.qc:201) adds its distance term on top and never lowers a
+		// longer figure, so a sniper engaging across the map waits longer still.
+		m.ai_attackrate  = GRU_SNIPER_REFIRE;
+		m.ai_range_range = GRU_SPECIALIST_RANGE;
+	}
 };
 
 // ---------------------------------------------------------------------------
@@ -1417,11 +2375,78 @@ void(entity m) Grunt_BodyInit =
 // whatever the class init installed.  It is deliberately keyed on the model rather
 // than on "did the fallback happen", because a map is free to set its own model
 // key on any monster and the same reasoning applies.
+//
+// MATCHED ON THE BASENAME STEM, NOT THE FULL PATH.  Exact-path compares looked
+// safe and quietly failed for every map that reskins a stock NPC into its own
+// directory - which is the normal way a Sven map ships a custom-looking grunt.
+// desertcircle is the case that found it: all 18 of its squadmakers and all 10 of
+// its placed NPCs point at models/descrcl/*.mdl, so NOT ONE override fired.
+//
+// Its "models/descrcl/massnf.mdl" is a massn rig wearing a new skin - 55 bones /
+// 53 sequences / 2 bone controllers against stock massn.mdl's 56 / 53 / 2, where
+// hassassin.mdl is 62 / 17 / 0 - so the eight tower snipers and four assassin
+// squadmakers were running Assassin_Event (codes 1/2/3) on a rig that raises the
+// HGRUNT vocabulary (3/4/5/6).  Every round of every burst fell off the end of the
+// dispatch, and code 2 - the massn RELOAD - was read as a grenade toss, arming a
+// six-second attack lockout each time they reloaded.  That is the identical defect
+// described at the top of this block for the gearbox-mounted male assassin, coming
+// back in through the custom-model door.
+//
+// Prefix matching on the stem is what makes "massnf" resolve to the massn rig.
+// The specialists are therefore tested BEFORE any shorter stem that prefixes them,
+// so hgrunt_opfor can never collapse into a bare hgrunt.
+string(string mdl) Rig_Stem =
+{
+	string s = strtolower(mdl);
+	float  n = strlen(s);
+	float  i, cut = -1;
+
+	// Last separator wins - forward scan, keep the highest index.  Both slashes,
+	// because a map cfg or a .res line can spell either.
+	for (i = 0; i < n; i = i + 1)
+	{
+		string c = substring(s, i, 1);
+		if (c == "/" || c == "\\")
+			cut = i;
+	}
+	if (cut >= 0)
+		s = substring(s, cut + 1, n - cut - 1);
+
+	n = strlen(s);
+	if (n > 4 && substring(s, n - 4, 4) == ".mdl")
+		s = substring(s, 0, n - 4);
+	return s;
+};
+
+// Does `stem` begin with `known`?  substring() clamps, so a stem SHORTER than the
+// candidate simply returns itself and fails the compare - no length guard needed.
+float(string stem, string known) Rig_StemIs =
+{
+	return substring(stem, 0, strlen(known)) == known;
+};
+
+// Does `stem` CONTAIN `known` anywhere?
+//
+// Prefix matching is right for telling hgrunt_opfor from hgrunt, and wrong for
+// reskins that put the family name at the END: They Hunger ships hungerbarney.mdl
+// and hungerotis.mdl, Half-Life itself ships barney_helmet.mdl and
+// barney_vest.mdl, and not one of them begins with the name of the rig it IS.
+//
+// Used only for the bodygroup layout, which is the one question where a reskin
+// answers the same as its parent by construction - a model that borrowed barney's
+// skeleton borrowed his three-submodel gun group with it.  The rig DISPATCH above
+// deliberately keeps prefix matching, because that is where a wrong answer swaps
+// an entire event handler.
+float(string stem, string known) Rig_StemHas =
+{
+	return strstrofs(stem, known, 0) >= 0;
+};
+
 void(entity m) Grunt_RigOverride =
 {
-	string mdl = m.model;
+	string mdl = Rig_Stem(m.model);
 
-	if (mdl == "models/massn.mdl")
+	if (Rig_StemIs(mdl, "massn"))
 	{
 		// The hgrunt rig, so the hgrunt handler - and the kick range it took away
 		// from the female, because THIS model's frontkick does raise code 3.
@@ -1429,11 +2454,12 @@ void(entity m) Grunt_RigOverride =
 		m.ai_dropweapon  = Grunt_DropWeapon;	// an MP5, not the female's pistol
 		m.ai_melee_range = GRU_MELEE_REACH;
 		m.ai_painsound   = Grunt_PainSound;
+		m.ai_alertsound  = Grunt_AlertSound;
 		m.ai_death       = Grunt_Death;
 		return;
 	}
 
-	if (mdl == "models/hwgrunt.mdl")
+	if (Rig_StemIs(mdl, "hwgrunt"))
 	{
 		// Sven's heavy weapons grunt: a minigun that fires on 5001 and a pistol
 		// that fires on code 1, neither of which the hgrunt handler knows.
@@ -1442,7 +2468,26 @@ void(entity m) Grunt_RigOverride =
 		return;
 	}
 
-	if (mdl == "models/hassassin.mdl")
+	if (Rig_StemIs(mdl, "otis"))
+	{
+		// Otis carries a DESERT EAGLE, and the model says so in its own texture
+		// lump - otis.mdl's five textures are otis.BMP, Desert_Eagle.bmp, donut.bmp
+		// and two heads.  There is no OpFor SDK on this machine to read the class
+		// out of, so the model is the authority, and it is not ambiguous: barney.mdl
+		// carries no such texture.
+		//
+		// He shares Barney's rig, his event vocabulary, his sentence group and his
+		// whole class init, so this is the ONE thing that differs - which is exactly
+		// what the rig-override hook is for.  Until now he fired barney/ba_attack2,
+		// the 9 mm Glock.
+		m.ai_gunsound = Grunt_DeagleSound;
+		// ...and it hit like one.  sk_otis_bullet is 34; he was doing Barney's 10,
+		// because the sound came from the model and the damage came from the class.
+		m.ai_shot_dmg = Grunt_DeagleDamage();
+		return;
+	}
+
+	if (Rig_StemIs(mdl, "hassassin"))
 	{
 		// Reached by monster_human_assassin normally, and by monster_male_assassin
 		// on an install with no gearbox mount.  Her kick sequences carry no events,
@@ -1475,7 +2520,30 @@ void(entity m) Grunt_RigOverride =
 	// also getting the grunt's 5-degree burst cone instead of a handgun's aimed
 	// 2 degrees, and were being handed a grenade loadout they have no sequence
 	// for.
-	if (mdl == "models/hgrunt_torch.mdl" || mdl == "models/hgrunt_medic.mdl")
+	// A REPLACEMENT MODEL KEEPS THE RIG AND LOSES THE NAME, and the stem test
+	// above only knows names.  pizza_ya_san1's squadmaker "leader" is
+	// monstertype monster_human_medic_ally on new_model
+	// models/pizza_ya_san/emptake.mdl, so Rig_Stem answers "emptake", no branch
+	// claims it, and the class keeps Barney_Event.  emptake.mdl IS the medic rig
+	// - weapons bodygroup [0]"de" [1]"blank" [2]"pizzamed" [3]"blank", plus
+	// pull_needle / give_shot / heal_crouch - and its crouching_mp5 and
+	// standing_mp5 each carry exactly code 4 + 5001.  Code 4 is HGRUNT_AE_BURST1
+	// (hgrunt.cpp:81); in Barney's vocabulary it is BARNEY_AE_HOLSTER
+	// (barney.cpp:37).  So he played the firing pose, the event arrived, and the
+	// handler PUT HIS GUN AWAY: no bullet, no report, no muzzleflash.  Reported
+	// as "leader doesn't make any sound or fire any bullets when he plays his
+	// firing animation".
+	//
+	// BOTH HALVES ARE REQUIRED.  The classname is the mapper's statement of
+	// intent; the sequence is the proof that the model can honour it.  A medic
+	// reskinned onto a barney-rigged model (shootgun, code 3) must stay on
+	// Barney_Event, and crouching_mp5 is exactly the discriminator that says so -
+	// the same test, for the same reason, that tells the three "hgrunt" rigs
+	// apart in Grunt_BodyInit.  A model that failed to load reports modelindex 0,
+	// AI_SeqNameExists returns FALSE, and this falls back to today's behaviour.
+	if (Rig_StemIs(mdl, "hgrunt_torch") || Rig_StemIs(mdl, "hgrunt_medic")
+	 || (m.classname == "monster_human_medic_ally"
+	     && AI_SeqNameExists(m.modelindex, "crouching_mp5")))
 	{
 		// THE MEDIC HAD NEVER FIRED A SHOT, and this is where that is fixed.
 		// monster_human_medic_ally runs Barney_ClassInit (sv_ai_core.qc:2022),
@@ -1485,6 +2553,7 @@ void(entity m) Grunt_RigOverride =
 		// raises against the codes its handler consumes.
 		m.ai_event      = Grunt_Event;		// hgrunt vocabulary, verified above
 		m.ai_gunsound   = Grunt_DeagleSound;
+		m.ai_shot_dmg   = Grunt_DeagleDamage();	// the same hand cannon Otis carries
 		m.ai_spread     = GRU_SPREAD_PISTOL;
 		m.ai_dropweapon = Barney_DropWeapon;	// a pistol, not an MP5
 
@@ -1503,7 +2572,7 @@ void(entity m) Grunt_RigOverride =
 		return;
 	}
 
-	if (mdl == "models/hgrunt_opfor.mdl")
+	if (Rig_StemIs(mdl, "hgrunt_opfor"))
 	{
 		// The OpFor line grunt.  Same three weapons the base hgrunt has plus the
 		// SAW, whose firing sequence raises SEVEN burst codes (4 5 5 5 5 5 6)
@@ -1530,10 +2599,141 @@ void(entity m) Grunt_RigOverride =
 // that W8 consumes.  Nothing here touches those: this is the ambient behaviour
 // only, so a map's own scripted_sequences will drive the same body later without
 // having to undo anything.
+// A SCIENTIST RUNS.  He has no attack at all, and until this existed the fear
+// path was dead code: the generic ladder in AI_SelectSchedule reaches its
+// R_FEAR branch (sv_ai_core.qc:986) only AFTER the MS_COMBAT block, the follow
+// test and the MS_ALERT block, and every one of those returns first for a
+// scientist who has just been shot.  The measured chain was AI_Damaged -> MS_ALERT
+// -> SCHED_WAKE_ANGRY -> MS_COMBAT -> and then, because both attack ranges are 0,
+// straight out of the bottom of the combat block to SCHED_CHASE_ENEMY.  He walked
+// at you, playing ACT_RUN, forever.
+//
+// A class selector runs BEFORE that whole ladder (sv_ai_core.qc:874-882), which is
+// how the cockroach has always fled correctly with the identical faction answer.
+// This is that function, and the parallel is deliberate - see Cockroach_SelectSched.
+//
+// The condition set is HL's trigger list for fear, collapsed: scientist.cpp:771-782
+// (any player damage provokes), :1001-1011 (a new or visible enemy in
+// MONSTERSTATE_COMBAT takes cover/panics) and :939-956 (danger or combat sound
+// startles).  COND_PROVOKED covers the first, COND_SEE_ENEMY the second,
+// COND_DAMAGE the third's practical case.
+// scientist.cpp:1080 CScientist::CanHeal, plus the range gate that HL keeps one
+// level up at :979 ("If I'm already close enough to my target ... Heal
+// opportunistically", TargetDistance() <= 128).
+//
+// Seats .ai_healtarget as a side effect and returns whether there is anyone to
+// treat.  Two conditions are HL's exactly: the 60-second cooldown, and "health
+// above half of max means you are fine" - which is where the user's "below 50"
+// comes from, since a player's max_health is 100.
+//
+// ONE DELIBERATE WIDENING.  Half-Life only ever heals m_hTargetEnt, the player
+// who asked the scientist to follow, so a scientist standing in a corridor will
+// watch you bleed out.  That is a consequence of HL's scientists being almost
+// always escorts by the time you are hurt, and it reads as broken here, where
+// the follow gate (+use) is rarely used.  So: prefer the escorted player, and
+// fall back to the nearest hurt player inside HL's own 128-unit trigger radius.
+// Everything past this point - the walk, the 100-unit injection range, the
+// cooldown, the amount - is Half-Life's.
+float(entity m) Scientist_CanHeal =
+{
+	m.ai_healtarget = world;
+
+	if (m.ai_healtime > time)
+		return FALSE;
+	// A frightened scientist runs; he does not stop to do paperwork.  Matches the
+	// enclosing `relationship != R_DL && relationship != R_HT` gate at :977.
+	if (m.ai_enemy)
+		return FALSE;
+
+	// The escort first, at HL's range.
+	entity best = world;
+	float  bestd = 128;
+
+	if (m.ai_follow)
+	if (m.ai_follow.health > 0)
+	if (m.ai_follow.health <= m.ai_follow.max_health * 0.5)
+	if (vlen(m.ai_follow.origin - m.origin) <= 128)
+	{
+		m.ai_healtarget = m.ai_follow;
+		return TRUE;
+	}
+
+	entity p = player_chain_head;
+	while (p)
+	{
+		if (p.health > 0)
+		if (p.solid != SOLID_NOT)
+		if (p.max_health > 0)
+		if (p.health <= p.max_health * 0.5)
+		{
+			float d = vlen(p.origin - m.origin);
+			if (d < bestd)
+			{
+				best  = p;
+				bestd = d;
+			}
+		}
+		p = p.player_chain_next;
+	}
+
+	if (!best)
+		return FALSE;
+
+	m.ai_healtarget = best;
+	return TRUE;
+};
+
+float() Scientist_SelectSched =
+{
+	if (self.ai_state == MS_DEAD)
+		return SCHED_NONE;		// let the generic ladder run the death path
+
+	// Deliberately NOT gated on AI_Fears: the faction layer already answers R_FEAR
+	// for CLASS_HUMAN_PASSIVE against everything hostile, and for a provoked player
+	// AI_RelationshipEnt returns R_FEAR too precisely because this class has no
+	// attack (sv_ai_factions.qc:185-186).  Anything that got as far as becoming his
+	// ai_enemy is something he should be running from.
+	if (self.ai_enemy)
+		if (self.ai_cond & (COND_SEE_ENEMY | COND_DAMAGE | COND_PROVOKED))
+		{
+			// Point and scream, on the TRANSITION only.  .ai_sched still holds the
+			// previous schedule when a selector runs, so comparing against it is the
+			// whole edge test - without that he would re-say it ten times a second
+			// for as long as he ran.  Sentences_Speak is a second guard behind this
+			// one (it will not cut its own line short), so the two together give
+			// HL's one utterance per fright.
+			//
+			// scientist.cpp:491-502 picks by who the enemy is: SC_PLFEAR when the
+			// thing frightening him is the PLAYER - which is the case the report is
+			// about - and SC_FEAR for a monster.  Both groups are in HL's
+			// sentences.txt and reach the mixer through the "SC" talk group set in
+			// AI_MakeTalker below.
+			if (self.ai_sched != SCHED_FLEE_ENEMY)
+			{
+				if (self.ai_enemy.classname == "player")
+					AI_TalkSay(self, "PLFEAR", CHAN_VOICE, ATTN_NORM);
+				else
+					AI_TalkSay(self, "FEAR", CHAN_VOICE, ATTN_NORM);
+			}
+			return SCHED_FLEE_ENEMY;
+		}
+
+	// The syringe.  Below the fear branch for the same reason HL puts it inside
+	// the "nothing scary" arm at scientist.cpp:977 - a scientist being chased does
+	// not stop to treat anyone, including himself.
+	if (Scientist_CanHeal(self))
+		return SCHED_HEAL;
+
+	return SCHED_NONE;
+};
+
 void(entity m) Scientist_ClassInit =
 {
 	m.ai_class       = CLASS_HUMAN_PASSIVE;
+	m.ai_fov         = -0.7;	// VIEW_FIELD_WIDE, scientist.cpp:682 - same reason
+					// as barney: he has to notice you to greet you
 	m.is_player_ally = TRUE;
+	m.ai_selectsched = Scientist_SelectSched;
 
 	m.ai_melee_range = 0;
 	m.ai_range_range = 0;
@@ -1552,6 +2752,9 @@ void(entity m) Scientist_ClassInit =
 	// which is what nearly every scientist in hl_c01_a1 actually uses.
 	AI_MakeTalker(m, "SC");
 
+	m.ai_painsound = Scientist_PainSound;
+	m.ai_death     = Scientist_PainSound;	// HL's DeathSound IS PainSound here
+
 	// scientist.cpp:771-778: the first round from a player provokes him outright,
 	// with none of Barney's escalation.  See AI_TalkDamaged for why the two
 	// classes genuinely differ rather than this being an inconsistency.
@@ -1562,7 +2765,7 @@ void(entity m) Scientist_ClassInit =
 	// to come, but marking them usable now means the +use path is exercised.
 	m.monster_player_usable = TRUE;
 
-	if (m.bloodcolor <= 0)
+	if (m.bloodcolor == 0)
 		m.bloodcolor = 247;
 };
 
@@ -1582,5 +2785,39 @@ float() Barney_DefaultHealth =
 	float h = cvar("sv_ai_barney_health");
 	if (h <= 0)
 		h = 35;				// HL sk_barney_health
+	return h;
+};
+
+// ---------------------------------------------------------------------------
+// ...and the three in this family that are NOT Half-Life classes
+// ---------------------------------------------------------------------------
+// All three used to fall through to Grunt_DefaultHealth or Barney_DefaultHealth,
+// which is how the heaviest human in Opposing Force and a shock trooper both
+// ended up with a line grunt's 50 HP.  Nothing chose that; it is what sharing a
+// rig gets you when the health table is keyed on the rig's owner.
+//
+// Half-Life has no number for any of them, so Sven Co-op's skill.cfg is not a
+// second opinion here - it is the only one.
+float() Shocktrooper_DefaultHealth =
+{
+	float h = cvar("sv_ai_shocktrooper_health");
+	if (h <= 0)
+		h = 200;			// sk_shocktrooper_health
+	return h;
+};
+
+float() HWGrunt_DefaultHealth =
+{
+	float h = cvar("sv_ai_hwgrunt_health");
+	if (h <= 0)
+		h = 200;			// sk_hwgrunt_health
+	return h;
+};
+
+float() Otis_DefaultHealth =
+{
+	float h = cvar("sv_ai_otis_health");
+	if (h <= 0)
+		h = 65;				// sk_otis_health
 	return h;
 };

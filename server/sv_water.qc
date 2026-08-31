@@ -26,9 +26,20 @@
 
 void() func_door;        // sv_doors.qc
 
-// Mapper key — wave amplitude override.  Engine may or may not read
-// this; declared so the BSP entity-block parser populates the field
-// (rather than dropping the key on the floor).
+// Mapper key — wave amplitude override.  Declared so the BSP entity-block
+// parser populates the field rather than dropping the key on the floor, and
+// DELIBERATELY inert beyond that.
+//
+// In Half-Life this is renderer state, not game state: CBaseDoor::KeyValue
+// stores it as `pev->scale = atof(value) * (1.0/8.0)` (dlls/doors.cpp:238) and
+// the client draws the surface warp from the entity's scale.  The worldspawn
+// form does the same and pushes it to the `sv_wateramp` cvar
+// (dlls/world.cpp:685).  FTE has neither — zero hits for `wateramp` or
+// `WaveHeight` across the whole engine — so there is nothing for QC to set.
+// Honouring this key needs an engine change to the water warp, and until then
+// reading it here could only mean inventing a behaviour.
+//
+// 260 placements in the corpus, 91 of them the 3.2 FGD default.
 .float WaveHeight;
 
 /*QUAKED func_water (0 .5 .8) ? STARTS_OPEN x DONTLINK PASSABLE x TOGGLE x x USE_ONLY
@@ -70,6 +81,41 @@ void() func_water =
     self.dmg = 0;
 
     func_door();
+
+    // Drop func_door's "unnamed door is touch-openable, so let +use do it too"
+    // superset (sv_doors.qc:1420).  It is a deliberate and correct widening for a
+    // SOLID door; it is wrong for water, and both halves of its justification
+    // fail here:
+    //
+    //   - GoldSrc.  CBaseDoor::Spawn forces `pev->solid = SOLID_NOT` for any
+    //     func_water with skin != 0 (doors.cpp:284-294), and a SOLID_NOT brush is
+    //     never linked for collision, so the DoorTouch installed at doors.cpp:322
+    //     can never fire.  There is no touch activation to be a superset OF.
+    //   - Here.  func_water forces PASS_THROUGH (above), and door_spawn_trigger()
+    //     is gated on !PASS_THROUGH (sv_doors.qc:1588-1591), so no pool in the
+    //     corpus ever gets a touch field either.
+    //
+    // What is left is CBaseDoor::ObjectCaps (doors.cpp:42-47): FCAP_IMPULSE_USE
+    // only with SF_ITEM_USE_ONLY / SF_DOOR_USE_ONLY (256, cbase.h:513), and
+    // PlayerUse never even considers an entity without it (player.cpp:1637).  So a
+    // func_water without 256 is trigger-only, full stop.
+    //
+    // pizza_ya_san1's *56 (unnamed, flags 0) was opening on +use because of the
+    // targetname term, and *173 "mt_jaguti" (flags 33) was answering with the
+    // buttons/button2.wav locked click from door_use's gate — both silent no-ops
+    // in Sven.  Zero of the 22 func_water entities across the corpus
+    // (pizza_ya_san1 5, th_ep1_01 3, th_ep1_03 1, th_escape 13) set 256, so this
+    // costs no map any activation it actually had.
+    //
+    // Native maps keep today's permissive behaviour, same escape hatch func_door
+    // uses.  Three separate statements, not a ||-chain — see the warning at
+    // sv_doors.qc:1411-1416.
+    //
+    // This also feeds sv_brushsync.qc's predict_block byte (sv_brushsync.qc:465),
+    // so CSQC stops predicting an open the server is going to refuse.
+    self.door_player_usable = 0;
+    if (!Map_IsGoldSrc())                self.door_player_usable = 1;
+    if (self.door_flags & DOOR_USE_ONLY) self.door_player_usable = 1;
 
     // SOLID_BSP, not SOLID_NOT — and this is the opposite of what it looks like.
     //

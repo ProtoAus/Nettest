@@ -1,5 +1,12 @@
 ../qwprogs.dat
 sv_defs.qc
+// MUST be second, immediately after the defs.  It defines the QC functions
+// `precache_model` and `setmodel` (the defs bind the builtins as *_raw), so any
+// unit compiled ahead of it would bind straight to nothing.  See its header.
+shared/sh_modellist.qc
+// ...and the sound half, same rule: it owns `sound`, `precache_sound` and (in
+// CSQC) `localsound`, so nothing may be compiled ahead of it either.
+shared/sh_soundlist_global.qc
 shared/sh_customdefs.qc
 shared/sh_carryrot.qc
 shared/sh_cvar_table.qc
@@ -11,6 +18,11 @@ shared/sh_matsounds.qc
 shared/sh_player_sini.qc
 shared/sh_player_anims.qc
 shared/sh_weapon_logic.qc
+// The tactical shield sits BEFORE sh_weapon_standard.qc on purpose: the standard
+// fire gate calls SH_ShieldBlocksFire, and it takes nothing from standard in
+// return.  Only sh_weapons.qc (compiled earlier still, for the PANIM_* and WEP_*
+// constants this needs) forward-declares into it.
+shared/weapons/sh_wpn_csshield.qc
 shared/sh_weapon_standard.qc
 server/sv_customdefs.qc
 // nettest: MOVED UP from just above server/sv_bots.qc.  QC forward-declares FUNCTIONS but not ARRAYS, so anything that touches nav_* storage directly must compile after this file.  sv_navnodes.qc itself calls only builtins (cvar, dprint, find, remove, sprintf, tracebox, traceline, vlen) and its own functions, so it can sit this early with no forward references of its own.
@@ -24,6 +36,16 @@ server/sv_progression.qc
 server/sv_money.qc
 shared/sh_hlbeamfx.qc
 shared/sh_shockwave.qc
+shared/sh_alienfx.qc
+// env_blood's wire + client spray.  Same shape and same reason as sh_alienfx.qc
+// (the particle config only exists in the CLIENT VM), so it lives beside it.
+// The entity half is server/sv_goldsrc_effects.qc, far below.
+shared/sh_envblood.qc
+// env_funnel's wire.  Beside sh_envblood.qc for the third time for the same
+// reason: the effect is a particle recipe, recipe names only resolve inside the
+// CLIENT VM, so the server half can only ever be a multicast.  The entity half
+// is server/sv_hl_entities.qc, far below.
+shared/sh_envfunnel.qc
 server/sv_breakable.qc
 server/sv_weapons.qc
 shared/weapons/sh_wpn_csdeagle.qc
@@ -59,6 +81,10 @@ shared/weapons/sh_wpn_hlsatchel.qc
 shared/weapons/sh_wpn_hltripmine.qc
 shared/weapons/sh_wpn_hlsnark.qc
 shared/weapons/sh_wpn_hlhornetgun.qc
+shared/weapons/sh_wpn_opshockrifle.qc
+shared/weapons/sh_wpn_opdisplacer.qc
+shared/weapons/sh_wpn_svjetpack.qc
+shared/weapons/sh_wpn_opbgrapple.qc
 shared/weapons/sh_wpn_csgrenades.qc
 shared/weapons/sh_wpn_snowball.qc
 shared/weapons/sh_wpn_paintball.qc
@@ -97,6 +123,104 @@ shared/weapons/sh_wpn_cfmsg90.qc
 shared/weapons/sh_wpn_cfsg552.qc
 shared/weapons/sh_wpn_cfsl8.qc
 shared/weapons/sh_wpn_gravitygun.qc
+// They Hunger's eight, promoted out of server/sv_goldsrc_pickups.qc's alias
+// block.  Position is not arbitrary: they must compile AFTER
+// shared/sh_weapon_standard.qc (they call SH_StandardTryFire, SH_StandardTickState
+// and the new SH_SeqIdleDisplay) and BEFORE shared/sh_weapon_slotammo.qc, which
+// reads their .mag_*/.ammo_* fields directly -- QC forward-declares functions
+// but not FIELDS.
+shared/weapons/sh_wpn_th1911.qc
+shared/weapons/sh_wpn_thtommygun.qc
+shared/weapons/sh_wpn_thgreasegun.qc
+shared/weapons/sh_wpn_thm14.qc
+shared/weapons/sh_wpn_thm16a1.qc
+shared/weapons/sh_wpn_thsawedoff.qc
+shared/weapons/sh_wpn_thspanner.qc
+shared/weapons/sh_wpn_thtesla.qc
+// Sven Co-op and Opposing Force, promoted out of the pickup-alias block in
+// server/sv_goldsrc_pickups.qc — every one of these was a classname that handed
+// you a different gun.  sh_wpn_svuziakimbo.qc must follow sh_wpn_svuzi.qc: it
+// shares the single UZI's viewmodel and reuses its sequence constants.
+shared/weapons/sh_wpn_svmedkit.qc
+shared/weapons/sh_wpn_svuzi.qc
+shared/weapons/sh_wpn_svuziakimbo.qc
+shared/weapons/sh_wpn_svminigun.qc
+shared/weapons/sh_wpn_svm16.qc
+shared/weapons/sh_wpn_oppipewrench.qc
+shared/weapons/sh_wpn_opsniperrifle.qc
+shared/weapons/sh_wpn_opsporelauncher.qc
+shared/weapons/sh_wpn_opeagle.qc
+// The last three Opposing Force weapons -- gearbox names ten in its own
+// sprites/weapon_*.txt and only seven were ever built here.  sh_wpn_oppenguin.qc
+// MUST follow sh_wpn_hlsnark.qc (line 72): its thrown creature IS the snark's,
+// so it calls W_SnarkSpawn and re-models the result rather than duplicating the
+// hunt/bite/pop AI.  See that file's header for why the classname stays
+// "monster_snark".
+shared/weapons/sh_wpn_opknife.qc
+shared/weapons/sh_wpn_opsaw.qc
+shared/weapons/sh_wpn_oppenguin.qc
+// pizza_ya_san1's two AngelScript weapons, ported from its own scripts.
+shared/weapons/sh_wpn_asshotgun.qc
+shared/weapons/sh_wpn_assoflam.qc
+// --- The thirteen Counter-Strike 1.6 guns that finish the arsenal. ---
+//
+// Position: after every other weapon and BEFORE shared/sh_weapon_slotammo.qc,
+// which names each one's .mag_cs* / .ammo_cs* fields in its two dispatch tables.
+// QC forward-declares functions but NOT fields, so the declarations must have
+// been compiled already.  Nothing among the thirteen depends on another.
+shared/weapons/sh_wpn_csp228.qc
+shared/weapons/sh_wpn_csfiveseven.qc
+shared/weapons/sh_wpn_cselite.qc
+shared/weapons/sh_wpn_cstmp.qc
+shared/weapons/sh_wpn_csmac10.qc
+shared/weapons/sh_wpn_csump45.qc
+shared/weapons/sh_wpn_csp90.qc
+shared/weapons/sh_wpn_csgalil.qc
+shared/weapons/sh_wpn_csfamas.qc
+shared/weapons/sh_wpn_csaug.qc
+shared/weapons/sh_wpn_cssg552.qc
+shared/weapons/sh_wpn_cssg550.qc
+shared/weapons/sh_wpn_csxm1014.qc
+
+// --- Day of Defeat, the infantry core of both sides. ---
+//
+// Same position and the same reason as the thirteen above: each one declares
+// .mag_dod* / .ammo_dod* fields that shared/sh_weapon_slotammo.qc names in its
+// dispatch tables, and QC forward-declares functions but NOT fields.  None of
+// the twelve depends on another.  sh_wpn_dod98k.qc is NOT here -- it predates
+// the dod mount and sits with the older weapons further up.
+shared/weapons/sh_wpn_dodcolt.qc
+shared/weapons/sh_wpn_dodluger.qc
+shared/weapons/sh_wpn_dodwebley.qc
+shared/weapons/sh_wpn_dodgarand.qc
+shared/weapons/sh_wpn_dodcarbine.qc
+shared/weapons/sh_wpn_dodk43.qc
+shared/weapons/sh_wpn_dodtommy.qc
+shared/weapons/sh_wpn_dodmp40.qc
+shared/weapons/sh_wpn_dodsten.qc
+shared/weapons/sh_wpn_dodgrease.qc
+shared/weapons/sh_wpn_dodmp44.qc
+shared/weapons/sh_wpn_dodbar.qc
+// Day of Defeat, second batch.  Four files for thirteen weapons: the three
+// snipers differ enough in their sequence sets to warrant one apiece, while the
+// machine guns, the anti-tank launchers and the melee weapons are each a family
+// that differs only in numbers, so each family shares one parameterised file the
+// way sh_wpn_csgrenades.qc already does for the three CS grenades.
+shared/weapons/sh_wpn_dodscoped98k.qc
+shared/weapons/sh_wpn_dodspring.qc
+shared/weapons/sh_wpn_dodenfieldscoped.qc
+shared/weapons/sh_wpn_dodmgs.qc
+shared/weapons/sh_wpn_dodat.qc
+shared/weapons/sh_wpn_dodmelee.qc
+// Day of Defeat, third batch.  sh_wpn_dodmortar.qc MUST come after
+// sh_wpn_dodat.qc: it reuses DodAT_SendEntity for its bomb (the shooter sees the
+// real projectile rather than a CSQC fake), and QuakeC has no forward
+// declarations for entity-field function pointers.
+shared/weapons/sh_wpn_dodauto.qc
+shared/weapons/sh_wpn_dodfcarb.qc
+shared/weapons/sh_wpn_dodenfield.qc
+shared/weapons/sh_wpn_dodmortar.qc
+shared/weapons/sh_wpn_dodbinocs.qc
 shared/sh_weapon_slotammo.qc
 server/sv_combat.qc
 server/sv_enemies.qc
@@ -104,12 +228,42 @@ shared/sh_renderfx.qc
 server/sv_brushsync.qc
 server/sv_env_render.qc
 server/sv_doors.qc
+// Half-Life's global state table (CGlobalState).  FIRST of the four files that
+// touch it, because QC forward-declares functions but NOT constants, and
+// GLOBAL_ON is named directly by sv_triggers.qc's IsMasterTriggered,
+// sv_multisource.qc, sv_trigger_logic.qc's trigger_auto and env_global in
+// sv_goldsrc_compat.qc.  Depends on nothing but builtins.
+server/sv_globalstate.qc
 server/sv_triggers.qc
 server/sv_trigger_once_multi.qc
+// th_escape's two map-local ambush triggers.  AFTER sv_triggers.qc, which owns
+// SUB_UseTargets / IsMasterTriggered / the player chain they walk.  Neither is
+// a stock Sven class — both are AngelScript that ships beside the .bsp — and
+// both declare BSP key spellings (mode / threshold / interval / difference /
+// trigger / delaychecks / inverse) that a corpus-wide scan of all 141 maps
+// found on no other classname.
+server/sv_trigger_playercheck.qc
+server/sv_trigger_look.qc
 server/sv_func_buyzone.qc
 server/sv_trigger_logic.qc
 server/sv_multisource.qc
+// Sven's "$" custom keyvalues.  BEFORE sv_multi_manager.qc, whose
+// ED_ParseUnknownEpair is the only thing that harvests them, and therefore also
+// before both readers: sv_trigger_copyvalue.qc (:180) and sv_th_entities.qc,
+// whose trigger_condition compares them.  Pure storage, no entity of its own.
+server/sv_customkeys.qc
 server/sv_multi_manager.qc
+// Cross-map persistent state: func_global (Sven/kmkz) and trigger_save/_load.
+// AFTER sv_multi_manager.qc, which declares findentityfield/putentityfieldstring
+// — QC forward-declares functions but not builtins' declarations, so the order
+// is load-bearing.  Also after sv_customkeys.qc, whose "$" store trigger_save
+// reads through, and after sv_triggers.qc for Trigger_UseTargets.
+//
+// Its store is a QC global array backed by a FILE, and the file is not an
+// optimisation: SV_SpawnServer calls PR_Deinit on every map load (engine
+// sv_init.c:945), so QC globals do not survive a changelevel at all.  Measured;
+// see the file header.
+server/sv_mapglobals.qc
 server/sv_game_team_master.qc
 server/sv_buttons.qc
 server/sv_doors_rotating.qc
@@ -124,6 +278,10 @@ server/sv_env_sun.qc
 server/sv_fogvolume.qc
 server/sv_env_hud.qc
 server/sv_env_explosion.qc
+// env_shake + UTIL_ScreenShake.  AFTER sv_env_hud.qc for .duration and after
+// sv_ai_defs.qc for .radius, both of which it reuses rather than redeclares;
+// BEFORE sv_goldsrc_compat.qc, which used to own env_shake as an inert stub.
+server/sv_screenshake.qc
 server/sv_ambient_generic.qc
 server/sv_env_sound.qc
 server/sv_env_beam.qc
@@ -139,8 +297,26 @@ server/sv_path_track.qc
 server/sv_platform_carry.qc
 server/sv_momentary.qc
 server/sv_func_train.qc
+// func_guntarget — a func_train with hit points.  IMMEDIATELY after
+// sv_func_train.qc, and that is a hard requirement rather than tidiness: it
+// reuses that file's FIELD declarations (.movesnd, .stopsnd, .volume, .dmg,
+// .train_target, .train_state, the resolved sound paths) and its PATH_*
+// corner spawnflags.  QC forward-declares FUNCTIONS but not FIELDS, so the
+// mover functions it calls would resolve from anywhere below — the fields
+// would not.
+server/sv_func_guntarget.qc
 server/sv_func_tracktrain.qc
 server/sv_func_traincontrols.qc
+// th_escape's drivable truck.  IMMEDIATELY after the two files above, and that
+// is a hard requirement: it reuses sv_func_tracktrain.qc's TT_* CONSTANTS and
+// .tt_* / .train_* FIELDS wholesale (it is that class with a car's accelerator
+// bolted on), and QC forward-declares neither.  The driver code in
+// sv_func_traincontrols.qc reaches back into this file by forward declaration,
+// which is legal, and the one FIELD that has to cross the boundary the other
+// way (.tt_is_vehicle) is declared in sv_func_tracktrain.qc for the same reason.
+// `.acceleration` moved from sv_trigger_camera.qc (433) to sv_customdefs.qc to
+// be visible here at all.
+server/sv_func_trackvehicle.qc
 server/sv_func_trackautochange.qc
 server/sv_func_vehicle.qc
 server/sv_func_pushable.qc
@@ -149,8 +325,24 @@ server/sv_player_weaponstrip.qc
 server/sv_cycler_sprite.qc
 server/sv_cycler.qc
 server/sv_item_generic.qc
+// item_inventory + the InventoryRules gate.  IMMEDIATELY AFTER
+// sv_item_generic.qc, which declares .sequencename / .minhullsize /
+// .maxhullsize — item_inventory inherits the same FGD baseclass and reuses
+// them rather than redeclaring.  BEFORE sv_use.qc, which calls Inv_TryPickup
+// for the +use half of collection, and before sv_player.qc, which drops the
+// inventory on death and owns the `inventory` / `dropitem` commands; both of
+// those reach it by forward declaration, but sv_player.qc also READS its
+// player fields, which it could not do from earlier in the list.
+// The InventoryRules KEY FIELDS are not here at all — the eleven classes that
+// honour them compile as early as position 185, so they live in
+// sv_customdefs.qc.  See the block there.
+server/sv_item_inventory.qc
 server/sv_env_sprite.qc
 server/sv_env_spark.qc
+// gibshooter / env_shooter / env_glow / env_blood.  AFTER sv_cycler.qc (whose
+// .body it reuses) and after sv_env_sprite.qc, whose .vmt guard and render-key
+// handling it mirrors.  SetMovedir is forward-declared: sv_push.qc is lower.
+server/sv_goldsrc_effects.qc
 server/sv_physprop.qc
 server/sv_use.qc
 server/sv_props.qc
@@ -159,6 +351,15 @@ server/sv_prop_vehicle.qc
 server/sv_push.qc
 server/sv_teleport.qc
 server/sv_monsters.qc
+// The monster half of the look-at name tag.  AFTER sv_monsters.qc for
+// Monster_DisplayName and the .displayname field; before sv_main.qc, which is the
+// only caller (one line in the per-frame per-player walk).
+server/sv_lookatnpc.qc
+// Sven's per-monster sound replacement layer.  After sv_monsters.qc because it
+// reads .sl_table, before the AI layer because AI_SndPlay and every class voice
+// handler emit through its AI_Sound chokepoint.  sv_monsters.qc calls back into
+// it through a forward-declared Soundlist_Load, the same way it reaches AI_Spawn.
+server/sv_soundlist.qc
 // AI layer.  AFTER sv_monsters.qc, not before: these files read its per-monster
 // keys (.gag, .bloodcolor, .displayname) and QC requires a FIELD to be declared
 // before use.  The other direction needs no ordering at all - sv_monsters.qc
@@ -173,6 +374,15 @@ server/sv_ai_move.qc
 // Faction matrix.  Before sv_ai_core.qc, which consults it on every enemy test.
 server/sv_ai_factions.qc
 server/sv_ai_combat.qc
+// Squads.  Before sv_ai_core.qc, which calls into it on enemy acquisition, on
+// every schedule change and on death; before the class files, which declare
+// which attack slots their family rations.
+server/sv_ai_squad.qc
+// Take cover.  After sv_ai_squad.qc, because a cover spot is validated against
+// where the monster's squadmates are standing; after server/sv_navnodes.qc,
+// because it reads nav_pos[]/nav_air[] and the lookup grid directly rather than
+// through an accessor; before sv_ai_core.qc, which owns TASK_FIND_COVER_ENEMY.
+server/sv_ai_cover.qc
 server/sv_ai_core.qc
 // Gibs.  After sv_ai_core.qc because choosing a gib set reads .ai_class, and
 // the damage path in sv_weapons.qc (compiled far earlier) reaches Monster_Gib
@@ -190,6 +400,20 @@ server/monsters/mon_swimfly.qc
 server/monsters/mon_barnacle.qc
 server/monsters/mon_bigfoes.qc
 server/monsters/mon_bosses.qc
+// monster_generic.  A real CBaseMonster with the combat removed, NOT scenery —
+// scripted_sequence has to be able to walk it, and until it entered the registry
+// every m_fMoveTo 1/2 script snapped its actor to the mark instead.
+server/monsters/mon_generic.qc
+// Not an AI monster at all — a self-driving entity that borrows AI_ApplySequence,
+// AI_AnimPump and .ai_damagefilter.  Placed with the monster files because that is
+// what it is to a mapper; anywhere after sv_ai_core.qc would compile.
+server/monsters/mon_tentacle.qc
+// The Xen boids.  Same shape as the tentacle — its own think loop, no schedules —
+// and it borrows AI_ApplySequence for the one sequence boid.mdl carries.
+server/monsters/mon_flock.qc
+// The last boss.  AFTER sv_monsters.qc for monster_alien_slave /
+// monster_alien_controller, which MakeFriend calls directly to summon his help.
+server/monsters/mon_nihilanth.qc
 // NPC test bench.  After the monster files (it names their classes) and before
 // sv_player.qc, which dispatches to it from SV_ParseClientCommand.
 server/sv_ai_debugcmds.qc
@@ -206,16 +430,87 @@ server/sv_ai_talk.qc
 // sv_goldsrc_compat.qc, which used to own the class and now only owns
 // scripted_sentence.
 server/sv_scripted.qc
+// Xen flora (dlls/xen.cpp).  AFTER sv_ai_defs.qc for the ACT_* constants that
+// Xen_SetActivity resolves against, and after sh_weapon_standard.qc for
+// W_ApplyDamage (forward-declared in the file, but the real one must exist).
+// Nothing else depends on it, so its position is otherwise free.
+server/sv_xen_flora.qc
 server/sv_goldsrc_compat.qc
+// Native stand-ins for a map's AngelScript, plus trigger_script (moved out of
+// sv_goldsrc_compat.qc).  AFTER that file for GoldSrc_UnknownRelay_Use, which
+// trigger_script still forwards through; BEFORE sv_mapcfg_equip.qc, which feeds
+// it the cfg's map_script value, and before sv_player.qc, whose PlayerSpawn
+// calls MapScript_PlayerSpawn.
+//
+// th_escape's 17 script functions live in their own file, IMMEDIATELY before
+// the registry that dispatches to them — the registry names THEsc_Call,
+// THEsc_ResetForMap, THEsc_MapInit, THEsc_PlayerSpawn, THEsc_Frame and
+// THEsc_CheckEndConditions directly rather than by forward declaration, so the
+// order is fixed.  That file reaches three functions defined later
+// (SV_ApplyConfigFile, GoldSrc_GiveByClassname, PlayerApplyModel) by forward
+// declaration, and needs no field or constant from any of them.
+server/sv_mapscript_thescape.qc
+server/sv_mapscript.qc
 server/sv_goldsrc_entities.qc
+// Sven's trigger_createentity — spawns a child entity at runtime.  AFTER
+// sv_goldsrc_entities.qc so the classes it is asked to create are already
+// compiled (it dispatches by NAME through isfunction/callfunction, so this is
+// about the FGD-visible set being complete rather than about linkage), and
+// after sv_multi_manager.qc, whose ED_ParseUnknownEpair harvests its '-' keys
+// and whose GoldSrc_TryCaseFoldedField / findentityfield / putentityfieldstring
+// it replays them with.
+server/sv_trigger_createentity.qc
+// The last eleven campaign classnames the 22-map census reported unimplemented —
+// the th_ep3_07 ending three (trigger_condition / ambient_music /
+// trigger_changesky) plus the cheap stock-HL siblings.  AFTER sv_goldsrc_compat
+// and sv_goldsrc_entities, whose helpers and sibling classes it builds on, and
+// after sv_trigger_copyvalue (:179), whose DP_QC_ENTITYDATA field-read idiom
+// trigger_condition reuses.
+server/sv_th_entities.qc
+// Opposing Force's emplaced mortar and its two aiming brushes.  AFTER
+// sv_th_entities.qc, which owns func_tankrocket: the shell reuses that file's
+// CSQC_EVENT_ENV_EXPLOSION convention and W_RadiusExplode call verbatim rather
+// than growing a second explosion idiom, and the controller brushes are
+// func_tankcontrols' mount/dismount shape with a per-axis latch.
+server/sv_op4mortar.qc
+// Sven's two co-op progression entities — point_checkpoint (32 placements /
+// 16 They Hunger maps) and player_respawn_zone (25 / 14).  Both reuse
+// trigger_respawn's relocation shape from sv_goldsrc_compat.qc rather than
+// growing a second one; sv_player.qc's half is forward-declared, same as there.
+server/sv_checkpoint.qc
 // GoldSrc / OpFor / Blue Shift pickups.  AFTER the weapon files (it aliases
 // their spawn functions) and after sv_goldsrc_compat.qc, which owns the two
 // ammo classes that already worked.
 server/sv_goldsrc_pickups.qc
+// Stock Half-Life point entities that had no spawn function.  AFTER
+// sv_goldsrc_pickups.qc, whose item_antidote / item_security / item_battery /
+// item_suit world_items re-enters as; and after sv_sentences.qc (:295), whose
+// Sentences_Speak / Sentences_Speaking the speaker announces through.
+server/sv_hl_entities.qc
+// Counter-Strike point entities — armoury_entity, which is how 1802 of the 1837
+// ground weapons in the local CS map corpus are placed.  AFTER the
+// shared/weapons/ files (it calls their spawn functions directly rather than by
+// classname, so index 13 cannot land on this mod's unrelated weapon_m249), and
+// AFTER sv_goldsrc_pickups.qc for GoldSrc_SpawnPickup / GoldSrc_PickupTaken,
+// which item_kevlar and item_assaultsuit are built on.
+server/sv_cs_entities.qc
 // Ammo, on a reserve model: a pickup always takes, and banks what the player
 // cannot use yet until they find the matching gun.  AFTER sv_goldsrc_pickups.qc,
 // whose GoldSrc_SpawnPickup / GoldSrc_PickupTaken it shares.
 server/sv_goldsrc_ammo.qc
+// func_healthcharger / func_recharge.  AFTER sv_goldsrc_pickups.qc for
+// SUIT_ARMOR_MAX, and BEFORE sv_player.qc, whose PlayerPreThink drives
+// Charger_TickInteraction (the held-+use poll, exactly as it drives
+// Momentary_TickInteraction).
+server/sv_chargers.qc
+// Sven's maps/<mapname>.cfg equipment manifest (weapons / ammo / armour),
+// which SV_ApplyConfigFile's cvar parser used to drop on the floor.  AFTER
+// sv_goldsrc_ammo.qc for Ammo_GiveToCarried and the CAL_* set, AFTER
+// sv_goldsrc_pickups.qc for SUIT_ARMOR_MAX, AFTER sv_goldsrc_entities.qc for
+// the SF_GPE_* flags and the gpe_item chain fields, and BEFORE sv_player.qc,
+// whose PlayerSpawn applies it.  W_GiveWeaponToSlot is forward-declared, the
+// same way sv_goldsrc_entities.qc does it.
+server/sv_mapcfg_equip.qc
 server/sv_ladder.qc
 server/sv_cameras.qc
 server/sv_trigger_camera.qc
@@ -226,6 +521,13 @@ server/sv_infodecal.qc
 shared/sh_pmove.qc
 server/sv_grapple.qc
 server/sv_player.qc
+// Server half of the F5 weapon panel.  AFTER sv_player.qc, which owns
+// W_GiveWeaponToSlot / SV_DebugSpawnWeaponId / SV_DebugWeaponOrigin, and after
+// sv_goldsrc_pickups.qc, whose 16 alias spawn functions it dispatches by
+// classname.  SV_ParseClientCommand lives in sv_player.qc and reaches the
+// dispatcher through a forward declaration there — the mirror of
+// sv_ai_debugcmds.qc, which compiles BEFORE sv_player.qc and needs none.
+server/sv_weapondebugcmds.qc
 server/sv_prophunt.qc
 server/sv_lagcomp.qc
 server/sv_killcam.qc

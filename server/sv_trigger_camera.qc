@@ -64,7 +64,9 @@ const float CAMF_IGNORE_HOLDTIME = 512;
 // ---------------------------------------------------------------------------
 .string moveto;                 // first path_corner / path_track
 .float  turnspeed;              // degrees/sec when tracking a moving target
-.float  acceleration;           // units/sec^2
+// .acceleration moved to sv_customdefs.qc — func_trackvehicle reads the same
+// BSP key spelling and compiles at position 257, far above this file (433).
+// See the block there.
 .float  deceleration;           // units/sec^2
 .float  max_player_count;
 .string max_player_target;      // fired when a player is turned away at the cap
@@ -603,7 +605,25 @@ void() trigger_camera_use =
                        self.targetname, bound, hold,
                        self.moveto != "" ? self.moveto : "(static)", self.spawnflags));
 
-    SUB_UseTargets(self, activator, USE_TOGGLE);
+    // DELIBERATELY NO `SUB_UseTargets(self, ...)` HERE.
+    //
+    // There used to be one, and it was wrong: on a trigger_camera, `target` is
+    // the entity to LOOK AT, not a fire target.  Cutscene_AimEntity reads it for
+    // exactly that (:243-250), and Half-Life's CTriggerCamera::Use only ever
+    // assigns it to m_hTarget via GetNextTarget() — it never calls FireTargets
+    // on pev->target at all.  Firing it as well meant every camera triggered
+    // whatever it was pointed at.
+    //
+    // Mostly invisible, because 211 of the 276 camera targets in the corpus are
+    // info_target (no .use, so the fire was a no-op).  Not invisible on the 45
+    // func_train and 10 func_tracktrain look-at targets: th_ep1_00's `firstcam`
+    // has `target pickup`, so opening the intro shot STARTED the truck ~7 s
+    // early, and `startballmngr`'s authored `pickup` slot at t=8 — a toggle —
+    // then STOPPED it.  The intro drove backwards through its own script.
+    //
+    // Sven's own fire-on-start key is m_iszTargetWhenPlayerStartsUsing, handled
+    // a few lines above, and every other fire in this file goes through a
+    // dedicated key with a throwaway relay.  This one was the odd one out.
 };
 
 /*QUAKED trigger_camera (.3 .3 .8) (-8 -8 -8) (8 8 8) START_AT_PLAYER FOLLOW_PLAYER FREEZE_PLAYER ALL_PLAYERS FORCE_VIEW NO_INSTANT_TURN INSTANT_MOVE MOUSE_CURSOR INVULNERABLE IGNORE_HOLDTIME

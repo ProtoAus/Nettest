@@ -58,7 +58,7 @@ void() Zombie_IdleSound =
 {
 	if (self.gag)
 		return;
-	sound(self, CHAN_VOICE, sprintf("zombie/zo_idle%g.wav", ceil(random() * 4)), 1, ATTN_IDLE);
+	AI_Sound(self, CHAN_VOICE, sprintf("zombie/zo_idle%g.wav", ceil(random() * 4)), 1, ATTN_IDLE);
 };
 
 void() Zombie_AlertSound =
@@ -66,14 +66,14 @@ void() Zombie_AlertSound =
 	if (self.gag)
 		return;
 	// The alert files are named 10/20/30, not 1/2/3.
-	sound(self, CHAN_VOICE, sprintf("zombie/zo_alert%g0.wav", ceil(random() * 3)), 1, ATTN_NORM);
+	AI_Sound(self, CHAN_VOICE, sprintf("zombie/zo_alert%g0.wav", ceil(random() * 3)), 1, ATTN_NORM);
 };
 
 void() Zombie_PainSound =
 {
 	if (self.gag)
 		return;
-	sound(self, CHAN_VOICE, sprintf("zombie/zo_pain%g.wav", ceil(random() * 2)), 1, ATTN_NORM);
+	AI_Sound(self, CHAN_VOICE, sprintf("zombie/zo_pain%g.wav", ceil(random() * 2)), 1, ATTN_NORM);
 };
 
 // Growl as the swing starts.  Separate from the claw connecting, which is what
@@ -82,7 +82,7 @@ void() Zombie_StartAttack =
 {
 	if (self.gag)
 		return;
-	sound(self, CHAN_VOICE, sprintf("zombie/zo_attack%g.wav", ceil(random() * 2)), 1, ATTN_NORM);
+	AI_Sound(self, CHAN_VOICE, sprintf("zombie/zo_attack%g.wav", ceil(random() * 2)), 1, ATTN_NORM);
 };
 
 // ---------------------------------------------------------------------------
@@ -104,9 +104,9 @@ void(float dmg) Zombie_ClawAttack =
 	// second thing to get wrong.  What stays here is the part that is actually
 	// the zombie's: which sound plays on a hit and which on a miss.
 	if (AI_MeleeHull(self, ZOM_MELEE_REACH, dmg, 16) != world)
-		sound(self, CHAN_WEAPON, sprintf("zombie/claw_strike%g.wav", ceil(random() * 3)), 1, ATTN_NORM);
+		AI_Sound(self, CHAN_WEAPON, sprintf("zombie/claw_strike%g.wav", ceil(random() * 3)), 1, ATTN_NORM);
 	else
-		sound(self, CHAN_WEAPON, sprintf("zombie/claw_miss%g.wav", ceil(random() * 2)), 1, ATTN_NORM);
+		AI_Sound(self, CHAN_WEAPON, sprintf("zombie/claw_miss%g.wav", ceil(random() * 2)), 1, ATTN_NORM);
 };
 
 void() Zombie_Event =
@@ -169,7 +169,7 @@ void(entity m) Zombie_ClassInit =
 	m.ai_startattack = Zombie_StartAttack;
 	m.ai_event       = Zombie_Event;
 
-	if (m.bloodcolor <= 0)
+	if (m.bloodcolor == 0)
 		m.bloodcolor = 247;		// HL BLOOD_COLOR_RED
 };
 

@@ -103,7 +103,14 @@ void() Corpse_Build =
     }
 
     if (seq >= 0)
+    {
         self.frame = seq;
+        // Pose clock, same reason as sv_monsters.qc's sequence override: this
+        // writes .frame without going through AI_ApplySequence, and
+        // W_MonstersExpandHitboxes reads .ai_seqstart to pose the server's
+        // hitboxes.  A corpse is static, so the value only has to be sane.
+        self.ai_seqstart = time;
+    }
 
     if (cvar("sv_debug_monsters"))
         dprint(sprintf("[corpse] %s model=%s pose=%g sequence=%g -> frame=%g\n",

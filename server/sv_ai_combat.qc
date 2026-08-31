@@ -295,6 +295,14 @@ void(entity m, float radius, float peak, float mindmg) AI_BlastAttack =
 // would collide the first time a monster projectile touched something that uses
 // the same slot for its own purpose.
 .float ai_proj_dmg;
+// ALIENFX_* PLUS ONE for the effect this projectile leaves where it lands, or 0
+// for none.  Plus-one because 0 is a valid kind and an unset field is also 0 -
+// the same shape sv_proj_test's cvar uses, for the same reason.
+//
+// Set by the launcher's caller rather than taken as a parameter here: only the
+// class knows whether its projectile is a glob of acid or a hornet, and adding a
+// parameter would have made every existing caller name one.
+.float ai_proj_fx;
 
 void() AI_ProjTouch =
 {
@@ -306,13 +314,37 @@ void() AI_ProjTouch =
 		// The owner is the attacker, so kills credit
 		// the monster rather than the world.
 		W_ApplyDamage(self.owner, other, self.ai_proj_dmg);
-		W_ImpactEffectFrom(self.origin, normalize(self.origin - other.origin),
-		                   W_ClassifyImpactMaterial(other), self.owner);
+		// ...NoTracer, and this is the whole of the "a bullet trace comes from the
+		// bullsquid and hits where the spit landed" report.  W_ImpactEffectFrom
+		// hard-codes is_entry = 1, i.e. "a bullet travelled this line, draw the
+		// streak", and the client duly anchored one on the owner's muzzle through
+		// Montrace_ResolveMuzzle.  A projectile flew here as a visible entity; there
+		// is no line to draw.  The owner is still passed, because .wep_action_id is
+		// what buckets the remote per-shot decal cap.
+		//
+		// Four monsters route through this touch and all four had it: bullsquid
+		// (mon_aliens.qc:317), alien grunt (:235 - five hornets a volley, so five
+		// streaks), pitdrone (:391) and gonome (:486).
+		W_ImpactEffectFromNoTracer(self.origin, normalize(self.origin - other.origin),
+		                           W_ClassifyImpactMaterial(other), self.owner);
 	}
 	else
 	{
-		W_ImpactEffectFrom(self.origin, trace_plane_normal,
-		                   W_ClassifyImpactMaterial(other), self.owner);
+		W_ImpactEffectFromNoTracer(self.origin, trace_plane_normal,
+		                           W_ClassifyImpactMaterial(other), self.owner);
+	}
+
+	// Half-Life sprays the spit AGAIN where it lands (bullsquid.cpp:157-164), and
+	// that second spray is the half that tells you a glob went past you rather
+	// than through you.  Direction is the surface normal so the splash comes back
+	// off the wall; on a body hit trace_plane_normal is whatever the impact trace
+	// left, so fall back to straight up rather than to a stale value.
+	if (self.ai_proj_fx > 0)
+	{
+		vector fxn = trace_plane_normal;
+		if (fxn == '0 0 0')
+			fxn = '0 0 1';
+		AlienFX_Multicast(self.ai_proj_fx - 1, self.origin, fxn);
 	}
 
 	remove(self);
@@ -365,10 +397,31 @@ entity(entity m, string mdl, vector dir, float speed, float dmg, float grav) AI_
 // CheckTraceHullAttack sweeps a HULL, so a claw connects with a player who is
 // beside the monster's centre line rather than exactly on it.  A traceline here
 // makes melee monsters feel like they are missing constantly, because they are.
+// HL's CheckTraceHullAttack sweeps `head_hull`, which on a GoldSrc BSP is
+// (-16,-16,-18)..(16,16,18) — 36 units TALL, not 32.  The extra 2 units either
+// side is not why the sweep was missing, but it is free correctness and the
+// number is the model for the vertical slack below.
+const float AI_MELEE_HULL_Z = 18;
+
+// How far off the sweep's own vertical band the enemy's centre may sit before
+// the sweep tilts to follow it.  Zero would mean "always aim at the enemy",
+// which is wrong for a GROUND monster: HL's is a flat forward sweep, and a
+// zombie that tracked its target in 3D would connect on lunges HL cannot make.
+const float AI_MELEE_TILT_SLACK = 8;
+
 entity(entity m, float reach, float dmg, float hullsize) AI_MeleeHull =
 {
 	vector src = m.origin;
 	src_z = src_z + (m.maxs_z * 0.5);
+
+	// Z is RAISED to HL's head_hull half-height, never lowered.  X/Y stay the
+	// caller's number, because that is what each class was tuned against — and
+	// so does Z for the classes that already ask for more: the gargantua and the
+	// big foes sweep at 32 and the stukabat at 32, and clamping those DOWN to 18
+	// would be a reach regression dressed up as a fidelity fix.  Only the 8/16
+	// callers move, and they move upward.
+	vector hs = '1 1 1' * hullsize;
+	hs_z = max(hullsize, AI_MELEE_HULL_Z);
 
 	vector end;
 	if (m.ai_movemode != AIMODE_GROUND && m.ai_enemy)
@@ -385,18 +438,104 @@ entity(entity m, float reach, float dmg, float hullsize) AI_MeleeHull =
 	}
 	else
 	{
-		// GROUND is untouched, byte for byte: the horizontal sweep is what the
-		// zombie, grunt, islave and gargantua were all verified against.
 		makevectors('0 1 0' * m.angles_y);
 		end = src + v_forward * reach;
+
+		// GROUND USED TO BE A STRICTLY HORIZONTAL SWEEP, and that is the whole of
+		// "zombies attack a slightly elevated player and the swing misses".
+		//
+		// The range test that SELECTS the attack is a 3D distance (AI_CheckAttacks
+		// -> vlen(enemy - self)), so a player one step up at 60 units away is
+		// comfortably "in melee range".  The sweep that has to cash that cheque
+		// was pinned to the monster's own eye plane and spanned z +/- 16 from
+		// there, so the claw passed under a player standing on anything taller
+		// than a crate lip and the attack could never land — the monster swung,
+		// the miss sound played, and it swung again forever.
+		//
+		// Half-Life gets away with the flat sweep because UTIL_MakeAimVectors
+		// (util.cpp:157) feeds pev->angles.x into the forward vector, so a monster
+		// that has pitched toward its enemy sweeps along that pitch.  This tree
+		// keeps monster pitch at zero — nothing sets angles_x on a ground monster —
+		// so the equivalent has to come from the target instead.
+		//
+		// The tilt only engages when the enemy's centre is genuinely outside the
+		// hull's own vertical band.  On flat ground that test never fires and the
+		// sweep is byte-for-byte the horizontal one the zombie, grunt, islave and
+		// gargantua were verified against.
+		if (m.ai_enemy)
+		{
+			vector aim = AI_AimPoint(m.ai_enemy);
+			float dz = aim_z - src_z;
+			if (fabs(dz) > hs_z + AI_MELEE_TILT_SLACK)
+			{
+				vector tilt = aim - src;
+				if (tilt != '0 0 0')
+					end = src + normalize(tilt) * reach;
+			}
+		}
 	}
 
-	vector hs = '1 1 1' * hullsize;
-	tracebox(src, '0 0 0' - hs, hs, end, MOVE_NORMAL, m);
+	// SWEEP PAST YOUR OWN SIDE, up to a couple of bodies deep.
+	//
+	// tracebox stops at the FIRST solid thing, and a mob of zombies crowding one
+	// doorway means the first solid thing in front of a zombie is usually another
+	// zombie.  That is the reported "their swing misses and they just hit each
+	// other": the claw landed 20 damage on a squadmate, the squadmate's pain
+	// sound played, and the player standing right behind it took nothing.
+	//
+	// Half-Life has the same single-hit trace and mostly dodges the problem
+	// because its monsters push each other apart harder than this tree's do, so
+	// the fix here is to skip what HL would never have wanted damaged rather than
+	// to widen the sweep: a hit the attacker does not HATE is stepped over and the
+	// trace resumes just past it.  Two skips is enough for any realistic pile-up
+	// and bounds the cost at three traces per swing.
+	//
+	// The current ENEMY is never skipped even if the faction layer says otherwise
+	// — a monster that has decided to attack something has already made that call.
+	// The skip is done by making the friendly briefly non-solid and re-tracing
+	// from the SAME start, not by advancing the start point past it.  Advancing
+	// needs the blocker's depth along the sweep axis, which a trace does not
+	// report, and guessing it either re-hits the same body or steps clean over
+	// the player standing behind it.  World_ClipToLinks reads .solid live, so
+	// clearing it is exact and costs no relink.
+	entity skip1 = world, skip2 = world;
+	float  ssol1 = 0,     ssol2 = 0;
+	entity hit   = world;
+	float  skips = 0;
 
-	entity hit = trace_ent;
-	if (hit && hit != world && hit != m
-	    && (hit.takedamage == DAMAGE_YES || hit.classname == "player"))
+	while (skips < 3)
+	{
+		tracebox(src, '0 0 0' - hs, hs, end, MOVE_NORMAL, m);
+		hit = trace_ent;
+
+		if (!hit || hit == world || hit == m)
+		{
+			hit = world;
+			break;
+		}
+
+		if (hit.takedamage != DAMAGE_YES && hit.classname != "player")
+		{
+			// Solid but not damageable (a func_wall, a closed door): the claw is
+			// stopped, exactly as in HL.
+			hit = world;
+			break;
+		}
+
+		if (hit == m.ai_enemy || !(hit.flags & FL_MONSTER) || AI_Hates(m, hit))
+			break;
+
+		if (skips == 0)      { skip1 = hit; ssol1 = hit.solid; hit.solid = SOLID_NOT; }
+		else if (skips == 1) { skip2 = hit; ssol2 = hit.solid; hit.solid = SOLID_NOT; }
+		else                 { hit = world; break; }
+		hit   = world;
+		skips = skips + 1;
+	}
+
+	if (skip1) skip1.solid = ssol1;
+	if (skip2) skip2.solid = ssol2;
+
+	if (hit != world)
 	{
 		W_ApplyDamage(m, hit, dmg);
 		return hit;

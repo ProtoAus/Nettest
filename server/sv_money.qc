@@ -143,6 +143,22 @@ float(entity player, float item) BuyItem_Apply =
     case BUYITEM_DEFUSEKIT:
         player.has_defusekit = 1;
         return TRUE;
+    case BUYITEM_SHIELD:
+        if (player.has_shield)
+            return FALSE;               // already carrying one; don't charge
+        // Rule 2: the shield is one hand.  Refusing (rather than force-dropping
+        // the rifle) keeps the money, which is the behaviour a player who
+        // mis-clicked in the buy menu wants — and it is CS's own.
+        if (!SH_ShieldAllowsWeapon(player.weapon))
+        {
+            sprint(player, PRINT_HIGH,
+                   "You cannot carry a shield with that weapon.\n");
+            return FALSE;
+        }
+        player.has_shield      = TRUE;
+        player.shield_deployed = FALSE;
+        sound(player, CHAN_ITEM, "items/gunpickup2.wav", 1, ATTN_NORM);
+        return TRUE;
     }
     return FALSE;
 };

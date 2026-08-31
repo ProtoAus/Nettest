@@ -176,6 +176,11 @@ void() trackauto_arrive =
         return;
     }
 
+    if (cvar("sv_debug_func_train"))
+        print(sprintf("[trackauto %s] arrived at %s, relinking train to \"%s\"\n",
+                      self.targetname, (self.tac_state == 0) ? "TOP" : "BOTTOM",
+                      track_name));
+
     setorigin(self, dest_origin);
     self.angles    = dest_angles;
     self.velocity  = '0 0 0';
@@ -209,23 +214,61 @@ void() trackauto_arrive =
             t.train_target = new_corner;
             t.target = new_corner.targetname;
 
-            if (self.spawnflags & SF_TAC_AUTO_ACTIVATE)
+            // RESTART THE TRAIN.  Unconditionally — no spawnflag test.
+            //
+            // This used to be gated on SF_TAC_AUTO_ACTIVATE, and that gate was
+            // the second half of why hl_c00's lift was a dead end: neither of
+            // the map's two func_trackautochanges sets any spawnflags, so even
+            // once the platform moved the train would be relinked to the new
+            // track and then left parked on it forever.
+            //
+            // Half-Life has no such test for THIS class.  SF_TRACK_ACTIVATETRAIN
+            // is #defined at plats.cpp:1604 and never read by anything;
+            // CFuncTrackAuto::UpdateAutoTargets (plats.cpp:2023-2050) restarts
+            // the train at :2043-2044 with no flag test at all.  The sibling
+            // func_trackchange in sv_th_entities.qc:5335 DOES keep a flag gate,
+            // and correctly so — that class is manually driven and th_ep1_04
+            // depends on the train staying parked — but CFuncTrackAuto is the
+            // automatic one; restarting is its entire job.
+            entity saved_self = self;
+            self = t;
+            if (t.classname == "func_tracktrain")
             {
-                // Kick the train into motion along the new path.
-                // func_train_use handles both the "stopped → start"
-                // and "moving → re-resolve" cases.  We invoke it
-                // with the train as self so its self-relative
-                // references resolve correctly.
-                entity saved_self = self;
-                self = t;
-                func_train_use();
-                self = saved_self;
+                // MANDATORY, same trap as sv_th_entities.qc:5343 and
+                // sv_func_tracktrain.qc:562: sub_use_type is a global holding
+                // whatever ran last, and if that is 0 (USE_OFF) then
+                // func_tracktrain_use's ShouldToggle guard rejects the start.
+                sub_use_type = USE_ON;
+                func_tracktrain_use();
             }
+            else
+            {
+                // func_train handles both "stopped -> start" and
+                // "moving -> re-resolve".  Kept for a plain func_train rider;
+                // every corpus placement is a func_tracktrain.
+                func_train_use();
+            }
+            self = saved_self;
         }
     }
 
     // Clear carry latch so the next move re-captures the offset.
     self.tac_train_ofs_known = 0;
+};
+
+// .blocked — see the note at the assignment in the spawn function.
+void() trackauto_blocked =
+{
+    if (cvar("sv_debug_func_train"))
+        print(sprintf("[trackauto %s] BLOCKED by %s(\"%s\") at %v — ltime %g "
+                      "is frozen and the tick chain will not resume\n",
+                      self.targetname, other.classname, other.targetname,
+                      other.origin, self.ltime));
+
+    // plats.cpp:213 — crush whatever is in the way.  Players are DAMAGE_NO in
+    // this mod and W_ApplyDamage decides for itself, same as the carry path.
+    if (self.dmg > 0 && other != world)
+        W_ApplyDamage(self, other, self.dmg);
 };
 
 // Per-tick movement think.  Same shape as func_train_move_tick:
@@ -261,6 +304,10 @@ void() trackauto_move_tick =
         return;
     }
 
+    if (cvar("sv_debug_func_train"))
+        print(sprintf("[trackauto %s] tick ltime=%g at %v, %g to go\n",
+                      self.targetname, self.ltime, self.origin, dist));
+
     self.velocity  = (delta / dist) * spd;
     // avelocity already configured in func_trackautochange_use;
     // keep it as-is.  The engine integrates angles per tick from it.
@@ -269,7 +316,17 @@ void() trackauto_move_tick =
     Trackauto_CarryTrain();
 
     self.think     = trackauto_move_tick;
-    self.nextthink = time + TAC_TICK_INTERVAL;
+    // ltime, NOT time.  This is a MOVETYPE_PUSH brush, and the engine schedules
+    // a pusher's think against its OWN clock: WPhys_Physics_Pusher fires only
+    // when `thinktime > oldltime && thinktime <= ent->v->ltime`
+    // (engine/server/sv_phys.c:1145-1163), and .ltime starts at 0 and only
+    // advances by the movetime the pusher is actually granted.  Scheduling
+    // against `time` — which is in the hundreds by the time a player reaches
+    // hl_c00's lift — asks for a think when ltime crawls up to that value, i.e.
+    // effectively never.  The tick chain died on its first hop and the platform
+    // stood still with the train parked on it.  func_trackchange next door has
+    // always done this correctly (sv_th_entities.qc:5397).
+    self.nextthink = self.ltime + TAC_TICK_INTERVAL;
 };
 
 // .use — toggle position.  No-op while a move is already in flight
@@ -340,8 +397,13 @@ void() func_trackautochange_use =
     self.SendFlags = 1;
     Trackauto_PlayMoveSound();
 
+    if (cvar("sv_debug_func_train"))
+        print(sprintf("[trackauto %s] use -> %s, %g units in %gs, train \"%s\"\n",
+                      self.targetname, (self.tac_state == 2) ? "TOP" : "BOTTOM",
+                      dist, move_time, self.train));
+
     self.think     = trackauto_move_tick;
-    self.nextthink = time + TAC_TICK_INTERVAL;
+    self.nextthink = self.ltime + TAC_TICK_INTERVAL;   // ltime: see trackauto_move_tick
 };
 
 /*QUAKED func_trackautochange (.5 .5 .5) ? AUTO_ACTIVATE RELINK_TRACK x START_AT_BOTTOM ROTATE_ONLY x X_AXIS Y_AXIS
@@ -405,6 +467,14 @@ void() func_trackautochange =
     string sp = FuncTrain_StopSound(self.stopsnd);
     if (mv != "") precache_sound(mv);
     if (sp != "") precache_sound(sp);
+
+    // .blocked — CBasePlatTrain::Blocked (plats.cpp:206-215).  A pusher with no
+    // blocked handler is not merely undamaging: WPhys_PushMove only advances
+    // .ltime WHEN THE PUSH SUCCEEDS (engine/server/sv_phys.c:1157-1160), and the
+    // think is scheduled against ltime — so anything standing in the way freezes
+    // the platform's clock and the tick chain never resumes, silently and
+    // permanently.  Reporting it is worth as much as the damage.
+    self.blocked = trackauto_blocked;
 
     self.use = func_trackautochange_use;
 };

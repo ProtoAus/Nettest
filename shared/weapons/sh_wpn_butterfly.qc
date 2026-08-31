@@ -256,7 +256,7 @@ float(float attack_range, float damage) W_ButterflyTraceAttack =
     makevectors(self.v_angle);
     src = self.origin + self.view_ofs;
     end = src + (v_forward * attack_range);
-    W_WeaponTraceLine(src, end);
+    W_MeleeTrace(src, end);     // line, then HL's head-hull fallback
 
     if (trace_fraction >= 1.0)
         return FALSE;
@@ -630,7 +630,16 @@ void() CSQC_PredictButterflyCommand =
                         else if (r < 0.75) localsound(BUTTERFLY_SND_HIT3);
                         else               localsound(BUTTERFLY_SND_HIT4);
                     }
-                    else
+                    // A MONSTER GETS NEITHER, and it has to be tested for
+                    // explicitly here.  This weapon passes empty sounds to the
+                    // helper and does its own pick, which bypasses the helper's
+                    // monster branch entirely — so a swing that only clipped a
+                    // zombie's bounding box rang the stone-chip sample, which is
+                    // the exact defect that branch exists to prevent.  Silence is
+                    // the point: the server plays the real body sample on a real
+                    // hit, and it reaches the attacker because this path arms the
+                    // AUTO echo window, not the WEAPON one the server uses.
+                    else if (trace_ent.classname != "csqc_monster_proxy")
                     {
                         localsound(BUTTERFLY_SND_HITWALL);
                     }
@@ -674,7 +683,16 @@ void() CSQC_PredictButterflyCommand =
                         else if (r < 0.75) localsound(BUTTERFLY_SND_HIT3);
                         else               localsound(BUTTERFLY_SND_HIT4);
                     }
-                    else
+                    // A MONSTER GETS NEITHER, and it has to be tested for
+                    // explicitly here.  This weapon passes empty sounds to the
+                    // helper and does its own pick, which bypasses the helper's
+                    // monster branch entirely — so a swing that only clipped a
+                    // zombie's bounding box rang the stone-chip sample, which is
+                    // the exact defect that branch exists to prevent.  Silence is
+                    // the point: the server plays the real body sample on a real
+                    // hit, and it reaches the attacker because this path arms the
+                    // AUTO echo window, not the WEAPON one the server uses.
+                    else if (trace_ent.classname != "csqc_monster_proxy")
                     {
                         localsound(BUTTERFLY_SND_HITWALL);
                     }

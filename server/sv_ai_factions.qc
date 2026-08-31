@@ -87,14 +87,15 @@ float(float a, float b) AI_Relationship =
 	}
 
 	// --- aliens -----------------------------------------------------------
-	// ALIENS DO NOT FIGHT EACH OTHER.  An earlier draft of this matrix had
-	// predators hating prey and alien monsters hating everything non-alien, which
-	// read plausibly and is wrong: Half-Life's own table (monsters.cpp) is R_NO
-	// across the whole alien block, so a zombie ignores a headcrab and a bullsquid
-	// ignores an alien grunt.  Checked against the real values rather than
-	// reasoned about, because "surely a predator eats prey" is exactly the kind of
-	// assumption that produces a map full of monsters killing each other before
-	// the player arrives.
+	// ALIENS MOSTLY DO NOT FIGHT EACH OTHER.  The broad rule still holds and is
+	// worth keeping stated, because the tempting assumption is the wrong one:
+	// Half-Life's table (monsters.cpp:2199-2216) is R_NO across nearly the whole
+	// alien block, so a zombie ignores a headcrab and a bullsquid ignores an alien
+	// grunt.  "Surely a predator eats prey" is exactly the kind of reasoning that
+	// produces a map full of monsters killing each other before the player arrives.
+	//
+	// But HL does carry TWO deliberate exceptions inside that block, and this
+	// matrix used to flatten both to R_NONE.  They are restored below.
 	if (a == CLASS_ALIEN_MILITARY || a == CLASS_ALIEN_MONSTER
 	 || a == CLASS_ALIEN_PREDATOR || a == CLASS_ALIEN_PREY
 	 || a == CLASS_ALIEN_PASSIVE)
@@ -106,8 +107,26 @@ float(float a, float b) AI_Relationship =
 			return (a == CLASS_ALIEN_MILITARY) ? R_HATE : R_DISLIKE;
 		if (b == CLASS_MACHINE)
 			return (a == CLASS_ALIEN_MILITARY) ? R_HATE : R_DISLIKE;
-		// The one intra-alien exception HL does keep: prey is afraid of predators.
-		if (a == CLASS_ALIEN_PREY && b == CLASS_ALIEN_PREDATOR)	return R_FEAR;
+
+		// PREDATOR HUNTS PREY.  monsters.cpp:2212, the ALIENPREDATOR row, ALIENPREY
+		// column, is R_HT - a bullsquid genuinely hunts headcrabs, and watching one
+		// chase down a crab is a piece of Half-Life's world that was missing here.
+		//
+		// This is the one change in this patch that ADDS monster-on-monster combat,
+		// so it wants keeping straight from the accidental kind: the headcrab's
+		// missing LeapTouch Classify() guard (mon_headcrab.qc) and the unordered
+		// enemy pick in AI_FindEnemy were bugs and are fixed; this is authored
+		// behaviour and is deliberate.
+		if (a == CLASS_ALIEN_PREDATOR && b == CLASS_ALIEN_PREY)		return R_HATE;
+
+		// ...and predators squabble with each other (same row, ALIENPREDATOR column
+		// is R_DL).  Dislike rather than hate: they will fight if nothing better is
+		// available, but anything they actually hate outranks it - which is only
+		// true now that AI_FindEnemy sorts by relationship before distance.
+		if (a == CLASS_ALIEN_PREDATOR && b == CLASS_ALIEN_PREDATOR)	return R_DISLIKE;
+
+		// Prey is afraid of predators - the mirror of the first exception.
+		if (a == CLASS_ALIEN_PREY && b == CLASS_ALIEN_PREDATOR)		return R_FEAR;
 		return R_NONE;			// every other alien-on-alien pairing
 	}
 
@@ -186,6 +205,21 @@ float(entity m, entity e) AI_RelationshipEnt =
 			return R_FEAR;
 		return R_HATE;
 	}
+
+	// THE LEECH IS AN EXCEPTION TO ITS OWN CLASS, in Half-Life too.  CLeech is
+	// CLASS_INSECT for classification (leech.cpp:113) but overrides
+	// IRelationship to return R_DL against the player (leech.cpp:268-272) — it
+	// is the one insect that comes at you.  The mod copied the classification
+	// and not the override, so the blanket `CLASS_INSECT -> R_FEAR` rule above
+	// made every leech swim AWAY from the player and put its bite permanently
+	// out of reach.
+	//
+	// Handled here, per entity, rather than by editing the CLASS_INSECT row:
+	// the cockroach is that row's only other user and genuinely does want
+	// R_FEAR.
+	if (e.classname == "player" && m.classname == "monster_leech")
+		return R_DISLIKE;
+
 	return AI_Relationship(AI_ClassOf(m), AI_ClassOf(e));
 };
 

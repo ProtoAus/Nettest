@@ -24,6 +24,23 @@ const float WRENCH_IDLE_FRAME         = 0;
 const float WRENCH_DAMAGE             = 60;
 const float WRENCH_RANGE              = 72;
 
+// --- NO CHARGED SWING ---
+//
+// This weapon carried a hold-+attack2 charged swing for one release.  It was
+// asked for on the OPPOSING FORCE pipe wrench (sh_wpn_oppipewrench.qc) and built
+// here by mistake, and it never belonged: Opposing Force's wrench has
+// attackbigwind / attackbigloop / attackbighit / attackbigmiss authored for it
+// and a pwrench_big_* sound set to go with them, while THIS viewmodel is a Quake
+// MDL with 71 unnamed frames, no wind-up take of its own and no second sound set.
+// The wind pose was a borrowed mid-swing frame and the 150-damage payoff had no
+// animation to justify it.
+//
+// The pipe wrench now has the real thing, predicted end to end.  This one is a
+// single-swing melee weapon again, which is what it always was.
+//
+// +attack2 is left unbound rather than repurposed: the weapon declares no ADS
+// profile, so there is nothing else for the button to mean here.
+
 // --- Pre-computed state durations ---
 const float WRENCH_DRAW_DURATION     = (WRENCH_DRAW_END - WRENCH_DRAW_START) * WRENCH_FRAME_INTERVAL;
 const float WRENCH_FIRE_DURATION     = (WRENCH_FIRE_END - WRENCH_FIRE_START) * WRENCH_FRAME_INTERVAL;
@@ -106,6 +123,8 @@ void() W_WrenchSwing =
 {
     vector src, end;
 
+    float dmg = WRENCH_DAMAGE;
+
     makevectors(self.v_angle);
     src = self.origin + self.view_ofs;
     end = src + v_forward * WRENCH_RANGE;
@@ -114,7 +133,7 @@ void() W_WrenchSwing =
 
     if (trace_fraction < 1.0)
     {
-        W_DebugImpact(trace_endpos, WRENCH_DAMAGE, W_BoneToHitgroup(trace_bone_id));
+        W_DebugImpact(trace_endpos, dmg, W_BoneToHitgroup(trace_bone_id));
 
         if (random() < 0.5)
             sound(self, CHAN_WEAPON, "sounds/weapons/wpn_wrench/wrenchclank1.wav", 1, ATTN_NORM);
@@ -128,11 +147,11 @@ void() W_WrenchSwing =
             float defer_player = (trace_ent.classname == "player")
                                  && W_ShouldDeferToClaim(self);
             if (!defer_player)
-                W_ApplyDamage(self, trace_ent, WRENCH_DAMAGE);
+                W_ApplyDamage(self, trace_ent, dmg);
         }
         else
         {
-            PhysProp_TryPushFromTrace(v_forward, WRENCH_DAMAGE);
+            PhysProp_TryPushFromTrace(v_forward, dmg);
             W_ImpactEffect(trace_endpos);
         }
     }
@@ -181,7 +200,7 @@ void() W_WrenchEquip =
     self.fire           = W_WrenchFire;
     self.reload         = __NULL__;
     self.wepframe       = W_WrenchFrame;
-    self.altfire         = __NULL__;
+    self.altfire         = __NULL__;   // no charged swing — see the note at the top
     self.altrelease      = __NULL__;
     self.shoot           = W_WrenchSwing;
     self.special         = __NULL__;
@@ -241,16 +260,22 @@ void() weapon_wrench =
 void() CSQC_PredictWrenchCommand =
 {
     // Skip fire during replay — no ammo to deplete, would cause infinite re-fires
-    if (!pm_suppress_sounds && (input_buttons & 1))
+    // Try-fire outside the replay gate, effects inside — see the fuller note in
+    // sh_wpn_oppipewrench.qc.
+    if (input_buttons & 1)
     {
         if (SH_WrenchTryFire(csqc_pred_time))
         {
             CSQC_MarkPendingWeaponAck();
-            CSQC_PredictedMeleeTrace(WRENCH_RANGE, WRENCH_DAMAGE,
-                "sounds/weapons/wpn_wrench/wrenchclank1.wav",
-                "sounds/weapons/wpn_wrench/wrenchclank2.wav",
-                "sounds/weapons/wpn_wrench/wrenchswing.wav");
-            CSQC_RecordPredictedWeaponSound();
+            if (!pm_suppress_sounds)
+            {
+                CSQC_PredictedMeleeTrace(WRENCH_RANGE, WRENCH_DAMAGE,
+                    "sounds/weapons/wpn_wrench/wrenchclank1.wav",
+                    "sounds/weapons/wpn_wrench/wrenchclank2.wav",
+                    "sounds/weapons/wpn_wrench/wrenchswing.wav");
+                // Melee form — see the note at the same call in sh_wpn_dod98k.qc.
+                CSQC_RecordPredictedMeleeSound();
+            }
         }
     }
 

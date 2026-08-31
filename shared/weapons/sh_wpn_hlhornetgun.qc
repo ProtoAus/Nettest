@@ -167,6 +167,23 @@ float(float now) SH_HGunTryAltFire =
 
 #ifdef SSQC
 
+// Trail handles.  These are now a PRECACHE ONLY — nothing reads them, because the
+// ribbon is drawn client-side (see the long note in W_HGunSpawnHornet).
+//
+// The calls are kept deliberately rather than deleted: on the server
+// particleeffectnum IS SV_ParticlePrecache_Add, so this is what puts the two names
+// into the precache list that ships to each client, and the client's own
+// particleeffectnum in cl_throwtrail.qc resolves the same names locally.  Delete
+// these and the names stop being reserved server-side.
+float pe_hornet_trail_red;
+float pe_hornet_trail_orange;
+
+void() Hornet_PrecacheTrails =
+{
+    pe_hornet_trail_red    = particleeffectnum("weapons.hornet_trail_red");
+    pe_hornet_trail_orange = particleeffectnum("weapons.hornet_trail_orange");
+};
+
 // hornetgun.cpp:53 — every hivehand is picked up full in multiplayer, and it
 // regrows its own ammo anyway, so the larger of the two is the right answer.
 void(entity player) W_HGunPickupCopy =
@@ -263,6 +280,17 @@ void() W_HornetTrackThink =
     if (time > self.hornet_stop_attack)
     { self.touch = __NULL__; remove(self); return; }
 
+    // The buzz.  hornet.cpp:295-297 and :352-354 re-emit it on CHAN_VOICE on
+    // EVERY TrackTarget tick — it is how a hornet is findable by ear rather
+    // than only by eye, and this tree played nothing after the single agrunt
+    // fire sample at spawn.  This think IS the analogue of TrackTarget (same
+    // 0.1 s cadence), so the cue belongs here.  CHAN_VOICE per HL, so it does
+    // not fight the weapon channel.
+    float rb = random();
+    if (rb < 0.333)      sound(self, CHAN_VOICE, "hornet/ag_buzz1.wav", 1, ATTN_NORM);
+    else if (rb < 0.666) sound(self, CHAN_VOICE, "hornet/ag_buzz2.wav", 1, ATTN_NORM);
+    else                 sound(self, CHAN_VOICE, "hornet/ag_buzz3.wav", 1, ATTN_NORM);
+
     if (!self.hornet_enemy || self.hornet_enemy.health <= 0)
     {
         entity best = world;
@@ -329,11 +357,54 @@ entity(entity shooter, vector org, vector dir, float tracking) W_HornetSpawn =
     h.takedamage = DAMAGE_YES;
     h.health     = 1;                       // hornet.cpp:57 — "weak!"
     h.on_killed  = W_HornetRemove;
-    h.effects    = h.effects | EF_DIMLIGHT;
 
+    // NO EF_DIMLIGHT.  In FTE that flag is not model shading — it attaches a
+    // 200-unit DYNAMIC LIGHT coloured by r_dimlight_colour, whose default is
+    // "2.0 1.0 0.5", i.e. a 2x-overbright orange.  One per hornet, and a held
+    // alt-fire sprays eight of them, so a burst floodlit the whole corridor.
+    // That is the reported "hornets are WAY too bright".
+    //
+    // CHornet::Spawn (hornet.cpp:60-110) sets no effects, no rendermode and no
+    // light at all — in Half-Life the glow comes ENTIRELY from the trail below,
+    // which this weapon was never drawing.
+    //
     // hornet.cpp:69 — two in five are the slow red kind.
     if (random() <= 0.4) h.hornet_flyspeed = HORNET_RED_SPEED;
     else                 h.hornet_flyspeed = HORNET_ORANGE_SPEED;
+
+    // The trail, in place of HL's TE_BEAMFOLLOW (which FTE does not implement).
+    // .traileffectnum genuinely works HERE, unlike on the mod's other projectiles:
+    // a hornet has no SendEntity, so it is a real delta-replicated packet entity
+    // and CL_LinkPacketEntities walks the trail for it (cl_ents.c:5601).
+    //
+    // The handles MUST come from Hornet_PrecacheTrails, resolved at map load, not
+    // from a particleeffectnum() call here.  On the server that builtin is
+    // SV_ParticlePrecache_Add, and the precache list is sent to a client when it
+    // CONNECTS -- registering a new entry at first-shot time means an
+    // already-connected client has no name for the index it is handed, and draws
+    // nothing.  Resolving both at precache time is what makes the trail appear
+    // for the player who is already in the map, which is every player.
+    // NO .traileffectnum.  The trail is drawn CLIENT-side now, by
+    // ThrowTrail_ScanHornets in client/cl_throwtrail.qc.
+    //
+    // This weapon really does satisfy every documented precondition for
+    // .traileffectnum — it is a genuine packet entity, and the handles really are
+    // resolved at precache time as the note above insists.  It still never drew,
+    // and the reason is a step neither side can reach: the client turns the
+    // server's particle NAME into a local index exactly once, at PRESPAWN, and
+    // P_FindParticleType returns P_INVALID for any name whose config is not
+    // loaded at that instant — it triggers the load as a side effect and then
+    // returns the failure without re-searching.  The connect-time particle flush
+    // is what makes that true, so the slot is poisoned for the whole session.
+    // That happens before CSQC_Init, so no QC hook exists to repair it.
+    //
+    // Assigning it anyway would be worse than useless once the CSQC path works:
+    // on any client where the name DID happen to resolve, both would draw and the
+    // hornet would carry a doubled ribbon.  One owner.
+    //
+    // .hornet_flyspeed above stays as it is: it still picks the flight speed, and
+    // that speed is precisely what the client measures to choose red vs orange,
+    // so the colour distinction survives without being networked.
 
     h.hornet_stop_attack = time + Hornet_Lifetime();
     h.hornet_born        = time;
@@ -375,7 +446,13 @@ void() W_HGunFire =
     if (!SH_HGunTryFire(time)) return;
 
     self.weaponframe   = HGUN_SEQ_SHOOT;
-    self.wep_nextframe = 0;
+    // MUST schedule, not clear -- sv_weapons.qc only calls wepframe while
+    // wep_nextframe > 0, so a 0 here retires the frame function permanently and
+    // weaponstate never leaves WS_FIRE (this weapon's try-fire accepts WS_FIRE, so
+    // it kept shooting and the freeze went unnoticed -- but the idle animation and
+    // every per-tick behaviour behind the frame function stopped).  Clear it only
+    // on the idle-retire, the way the *Frame functions below do.
+    self.wep_nextframe = time + HGUN_FRAME_INTERVAL;
 
     makevectors(self.v_angle);
     W_HornetSpawn(self, HGun_MuzzleOrigin(), v_forward, TRUE);
@@ -386,7 +463,13 @@ void() W_HGunAltFire =
     if (!SH_HGunTryAltFire(time)) return;
 
     self.weaponframe   = HGUN_SEQ_SHOOT;
-    self.wep_nextframe = 0;
+    // MUST schedule, not clear -- sv_weapons.qc only calls wepframe while
+    // wep_nextframe > 0, so a 0 here retires the frame function permanently and
+    // weaponstate never leaves WS_FIRE (this weapon's try-fire accepts WS_FIRE, so
+    // it kept shooting and the freeze went unnoticed -- but the idle animation and
+    // every per-tick behaviour behind the frame function stopped).  Clear it only
+    // on the idle-retire, the way the *Frame functions below do.
+    self.wep_nextframe = time + HGUN_FRAME_INTERVAL;
 
     makevectors(self.v_angle);
     vector src = HGun_MuzzleOrigin();
@@ -498,7 +581,10 @@ void() CSQC_PredictHGunCommand =
         if (SH_HGunTryFire(csqc_pred_time))
             CSQC_MarkPendingWeaponAck();
     }
-    else if (input_buttons & 2)
+    // Bit 4 is +attack2; bit 2 is PM_BTN_JUMP (sh_pmove.qc:42).  Same
+    // wrong-bit defect the satchel had - the alt fire predicted on jump and
+    // not on the key that actually fires it.
+    else if (input_buttons & 4)
     {
         if (SH_HGunTryAltFire(csqc_pred_time))
             CSQC_MarkPendingWeaponAck();

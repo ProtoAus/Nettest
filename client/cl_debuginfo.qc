@@ -1742,6 +1742,107 @@ void() CSQC_DrawContinuousHitboxes =
 };
 
 // ============================================================
+//  sv_debug_hitboxes on NPCs — the server's expanded cull box
+//
+//  A monster has no entry in the shared 20-box table: that table is the IQM
+//  PLAYER rig (sh_weapons.qc), and MOVE_HITMODEL against an HL .mdl uses the
+//  model's OWN studio hitboxes, which QC cannot enumerate — addmodelhitbox is
+//  the only hitbox builtin and it is write-only.  So this draws the one thing
+//  that IS knowable and IS what gates the shot: the box
+//  W_MonstersExpandHitboxes installs around the trace, summed server-side and
+//  sent verbatim.
+//
+//  Keyed by a SLOT SEARCH, not entnum-as-index like the player ring above —
+//  monster edicts run into the hundreds (pizza_ya_san1 has 897 entities), so an
+//  entnum-indexed array cannot hold them at any sane size.
+// ============================================================
+
+const float NPC_HITBOX_MAX      = 32;
+const float NPC_HITBOX_STALE    = 0.35;   // mode 2: hide after ~one missed tick
+const float NPC_HITBOX_SNAPSHOT = 10;     // mode 1: matches SV_HITBOX_LIFETIME
+
+float  npc_hb_entnum[NPC_HITBOX_MAX];
+vector npc_hb_org[NPC_HITBOX_MAX];
+vector npc_hb_min[NPC_HITBOX_MAX];
+vector npc_hb_max[NPC_HITBOX_MAX];
+float  npc_hb_time[NPC_HITBOX_MAX];
+float  npc_hb_life[NPC_HITBOX_MAX];
+
+void(float entnum, vector org, vector mn, vector mx, float mode) CSQC_UpdateNPCHitbox =
+{
+    if (entnum < 1)
+        return;
+
+    float i, slot = -1, oldest = 0;
+    for (i = 0; i < NPC_HITBOX_MAX; i++)
+    {
+        if (npc_hb_entnum[i] == entnum)
+        {
+            slot = i;
+            break;
+        }
+        if (npc_hb_time[i] < npc_hb_time[oldest])
+            oldest = i;
+    }
+    if (slot < 0)
+        slot = oldest;      // evict the least recently updated
+
+    npc_hb_entnum[slot] = entnum;
+    npc_hb_org[slot]    = org;
+    npc_hb_min[slot]    = mn;
+    npc_hb_max[slot]    = mx;
+    npc_hb_time[slot]   = time;
+    npc_hb_life[slot]   = (mode == 2) ? NPC_HITBOX_STALE : NPC_HITBOX_SNAPSHOT;
+};
+
+// Call BEFORE renderscene, alongside the other hitbox overlays.
+void() CSQC_DrawNPCHitboxes =
+{
+    float i;
+    // Yellow: orange is the player per-bone boxes, cyan is cl_debug_hbexpand's
+    // player padding box.  Three overlays can be on at once; keep them apart.
+    vector col   = '1 1 0';
+    float  alpha = 0.6;
+
+    for (i = 0; i < NPC_HITBOX_MAX; i++)
+    {
+        if (!npc_hb_entnum[i])
+            continue;
+        if (time - npc_hb_time[i] > npc_hb_life[i])
+            continue;
+
+        vector o  = npc_hb_org[i];
+        vector mn = npc_hb_min[i];
+        vector mx = npc_hb_max[i];
+
+        // World-axis-aligned, and that is not an approximation: setsize +
+        // SV_LinkEdict never rotate a bbox, so this IS the volume
+        // World_ClipToLinks tests before MOVE_HITMODEL runs.
+        vector c0 = o + [mn_x, mn_y, mn_z];
+        vector c1 = o + [mx_x, mn_y, mn_z];
+        vector c2 = o + [mx_x, mx_y, mn_z];
+        vector c3 = o + [mn_x, mx_y, mn_z];
+        vector c4 = o + [mn_x, mn_y, mx_z];
+        vector c5 = o + [mx_x, mn_y, mx_z];
+        vector c6 = o + [mx_x, mx_y, mx_z];
+        vector c7 = o + [mn_x, mx_y, mx_z];
+
+        dbg_hitbox_line(c0, c1, col, alpha);
+        dbg_hitbox_line(c1, c2, col, alpha);
+        dbg_hitbox_line(c2, c3, col, alpha);
+        dbg_hitbox_line(c3, c0, col, alpha);
+        dbg_hitbox_line(c4, c5, col, alpha);
+        dbg_hitbox_line(c5, c6, col, alpha);
+        dbg_hitbox_line(c6, c7, col, alpha);
+        dbg_hitbox_line(c7, c4, col, alpha);
+        dbg_hitbox_line(c0, c4, col, alpha);
+        dbg_hitbox_line(c1, c5, col, alpha);
+        dbg_hitbox_line(c2, c6, col, alpha);
+        dbg_hitbox_line(c3, c7, col, alpha);
+    }
+};
+
+// ============================================================
 //  cl_debug_bandwidth — Live inbound network breakdown
 // ============================================================
 

@@ -330,6 +330,7 @@ noref void(float apiver, string enginename, float enginever) CSQC_Init =
 	registercommand("sv_defaultmelee");
 	registercommand("sv_defaultutility");
 	registercommand("radio");
+	registercommand("mp3volume");            // GoldSrc's name for the music volume; front end on FTE's `musicvolume`
 	registercommand("vote");                 // trigger_vote answer: `vote yes` / `vote no`
 	                                         // (F1/F2 work without a bind; this is for
 	                                         // players who want their own keys)
@@ -337,6 +338,9 @@ noref void(float apiver, string enginename, float enginever) CSQC_Init =
 	registercommand("carvals");               // F3 car panel: server's carget reply (driven car's real values)
 	registercommand("impactdebris");
 	registercommand("surf_material");        // print the material under the crosshair (surfaceprops tuning)
+	registercommand("surf_info");            // name the SURFACE under the crosshair: texture, owning
+	                                         // entity, face direction, contents.  What you need before
+	                                         // you can hide something (see r_hidetextures).
 	registercommand("surf_reloadmaterials"); // reload scripts/surfaceprops.txt live
 	registercommand("prop_material");        // print the phys-prop material + weight under the crosshair
 	registercommand("propmat_reloadmaterials"); // reload scripts/propmaterials.txt live (client table)
@@ -377,6 +381,7 @@ noref void(float apiver, string enginename, float enginever) CSQC_Init =
 	// generated cfg/allcommands.cfg too.
 	CVar_Init();
 	CVar_RegisterMine();
+	CVar_CheckOverflow();   // loud if the table could not fit — see sh_cvar_table.qc
 };
 
 noref void() CSQC_WorldLoaded =
@@ -388,6 +393,45 @@ noref void() CSQC_WorldLoaded =
 	CSQC_EnsureWorldSolid();
 	CSQC_ResetPredictionState();
 	Smooth_Reset();
+	// Sven's globalmodellist, read out of the BSP's own entity lump exactly as
+	// MapLights_Load does below.  THIS is the per-map hook, not CSQC_Init: the
+	// lump is only readable once the worldmodel is up, and CSQC_Init fires once
+	// per CONNECTION rather than once per map.  Reset first — CSQC survives a
+	// map change (see the stale-list clears at the top of this function), so
+	// without it map two keeps map one's replacements.
+	//
+	// The lump is only ONE of the two places the key lives.  Sven takes it from
+	// maps/<name>.cfg as well, and the whole They Hunger campaign uses only that
+	// form — which is a server-side file CSQC cannot open, so worldspawn()
+	// republishes the resolved path as serverinfo (sv_main.qc,
+	// SV_ResolveGlobalList).  Try the lump first, because a map that spells it on
+	// worldspawn should not need a server round trip, then fall through to the
+	// serverinfo copy.  Modellist_Load latches on the first non-retry call, so
+	// this second call is a no-op whenever the lump already answered.
+	Modellist_Reset();
+	if (Modellist_LoadFromWorld())
+	{
+		Modellist_Load(serverkey("globalmodellist"));
+		Modellist_PrecacheTargets();
+	}
+	else
+		dprint("[modellist] entity lump not readable at CSQC_WorldLoaded\n");
+	Modellist_Report();
+
+	// ...and the sound half.  Same hook, same reasons: the lump is only
+	// readable once the worldmodel is up, and CSQC survives a map change so the
+	// reset is not optional.  PrecacheTargets matters more here than it does
+	// server-side — CSQC's precache_everything runs from CSQC_Init, once per
+	// CONNECTION, so on map two it does not run again at all.
+	// Same two-source rule as the model half above.
+	GSoundlist_Reset();
+	if (GSoundlist_LoadFromWorld())
+	{
+		GSoundlist_Load(serverkey("globalsoundlist"));
+		GSoundlist_PrecacheTargets();
+	}
+	GSoundlist_Report();
+
 	MapLights_Load();      // parse the BSP entity lump -> light table (light-aware shadows)
 	CSQC_ClearSprays();
 	CSQC_RegenerateSpraysShader();
@@ -611,7 +655,7 @@ void() CSQC_DrawTeamDebugServerPanels =
 	// Wrap the scoreboard draw inside this same sui_begin/end so
 	// only one bracket exists per frame (sui_begin is not re-entrant).
 	float mute_active = hud_voipmute_mode && HUD_ScoreboardVisible() && !TeamMenuIsOpen();
-	if (TeamMenuIsOpen() || Debug_PanelOpen() || Server_PanelOpen() || Tune_PanelOpen() || NPC_PanelOpen() || mute_active)
+	if (TeamMenuIsOpen() || Debug_PanelOpen() || Server_PanelOpen() || Tune_PanelOpen() || NPC_PanelOpen() || WPN_PanelOpen() || mute_active)
 	{
 		float prev_font = drawfont;
 		drawfont = hud_font;
@@ -627,6 +671,8 @@ void() CSQC_DrawTeamDebugServerPanels =
 		}
 		if (NPC_PanelOpen())
 			NPC_PanelDraw();
+		if (WPN_PanelOpen())
+			WPN_PanelDraw();
 		if (Debug_PanelOpen())
 		{
 			Debug_PanelDraw();
@@ -730,6 +776,7 @@ void(float in_menu_backdrop) CSQC_UpdateViewSpectator =
 	CSQC_DrawDebugPickupZones();
 	CSQC_DrawServerHitboxes();
 	CSQC_DrawContinuousHitboxes();
+	CSQC_DrawNPCHitboxes();		// sv_debug_hitboxes on NPCs — the expanded cull AABB
 	NavDebug_DrawScene();	// nettest: nav-graph + links + spectated-bot path (also while spectating)
 	BlobShadow_FrameSubmit();	// blob shadows: this branch's addentities ran the emits — submit here too,
 					// or every blob (incl. static prop blobs) vanishes while dead/spectating
@@ -817,6 +864,12 @@ float() CSQC_UpdateViewAliveCamera =
 		// view_angles, which is the lateral basis we want bob to use.
 		campos = CSQC_ApplyCameraBob(campos);
 		campos = CSQC_ApplyCameraWeight(campos);
+		// GoldSrc screen shake (env_shake, mortar impacts, the gargantua's
+		// stomp).  Calc advances the state and must run exactly once per
+		// frame; the two Apply helpers below are pure adds, mirroring the
+		// engine's V_CalcShake / V_ApplyShake split.
+		CSQC_ScreenShake_Calc();
+		campos = CSQC_ApplyScreenShake(campos);
 		// Sniper breathing sway — pure visual modifier.  view_angles is
 		// untouched so input_angles / server-side v_angle stay authoritative.
 		camang = CSQC_ApplySniperSway(camang);
@@ -825,6 +878,8 @@ float() CSQC_UpdateViewAliveCamera =
 		// at fire time; pmove integrates the spring decay each tick.
 		camang = CSQC_ApplyViewKick(camang);
 		camang = CSQC_ApplyDamageViewKick(camang);
+		// Roll only — see CSQC_ApplyScreenShakeAngles.
+		camang = CSQC_ApplyScreenShakeAngles(camang);
 		setproperty(VF_ORIGIN, campos);
 		setproperty(VF_ANGLES, camang);
 
@@ -970,14 +1025,18 @@ void(float in_team_select) CSQC_UpdateViewAliveSensitivity =
 		setsensitivityscaler(0);
 	}
 	else if (predicted_player && csqc_prediction_valid && predicted_player.zoomstage > 0
-	         && Weapon_HasScope(predicted_player.weapon))
+	         && Weapon_HasZoomView(predicted_player.weapon))
 	{
 		// Same client-side gate as HUD_DrawScope in cl_hud.qc: if the
-		// predicted weapon can't scope, ignore a lingering zoomstage
+		// predicted weapon can't zoom, ignore a lingering zoomstage
 		// (stale from the previous weapon under high ping) and fall
 		// through to the default sensitivity / unzoomed FOV branch.
 		float zoom_fov;
-		if (predicted_player.zoomstage == 1)
+		// The binoculars are field glasses, not a rifle scope: a much
+		// wider magnified view than a sniper's, and one fixed level.
+		if (predicted_player.weapon == WEP_DODBINOCS)
+			zoom_fov = DODBINOCS_ZOOM_FOV;
+		else if (predicted_player.zoomstage == 1)
 			zoom_fov = ZOOM_FOV_STAGE1;
 		else
 			zoom_fov = ZOOM_FOV_STAGE2;
@@ -1034,6 +1093,11 @@ void() CSQC_UpdateViewAliveScene =
 	CSQC_Rope_DrawRemotes();
 	CSQC_ThrowTrail_Tick();
 	CSQC_C4_DrawLights();
+	CSQC_Projectile_DrawLights();
+	// The sprite half of the RPG rocket's EF_LIGHT; the light half is the call
+	// above.  Separate functions only because spriteframe() lives in
+	// cl_env_beam.qc, which compiles after cl_projectiles.qc.
+	CSQC_DrawRocketFlares();
 	CSQC_C4_DrawPlanterFlash();
 	CSQC_DrawMuzzleDebug();
 	CSQC_DrawImpactLights();
@@ -1054,6 +1118,7 @@ void() CSQC_UpdateViewAliveScene =
 	CSQC_DrawDebugPickupZones();
 	CSQC_DrawServerHitboxes();
 	CSQC_DrawContinuousHitboxes();
+	CSQC_DrawNPCHitboxes();		// sv_debug_hitboxes on NPCs — the expanded cull AABB
 
 	// VOIP overhead icons — billboarded sprites floating above
 	// every remote speaker.  Submitted via R_BeginPolygon so they
@@ -1078,6 +1143,12 @@ void(float in_menu_backdrop) CSQC_UpdateViewAliveHud =
 		// inside HUD_DrawCrosshair every frame.
 		HUD_RefreshCrosshairCache();
 
+		// UNDERNEATH the pain flash and everything after it: this is a full-screen
+		// tint standing in for the engine's own underwater colour shift, so it
+		// belongs at the bottom of the 2D stack where that shift would sit — a
+		// damage flash reads THROUGH the water, not the other way round.
+		HUD_DrawSubmerged();
+
 		HUD_DrawPainFlash();
 		HUD_DrawHitIndicators();
 		CSQC_DrawFlashbangOverlay();
@@ -1089,6 +1160,8 @@ void(float in_menu_backdrop) CSQC_UpdateViewAliveHud =
 		Radio_Draw();
 		Buy_Draw();
 		HUD_DrawSpeedometer();
+		HUD_DrawTrainThrottle();   // func_tracktrain driver readout (GoldSrc CHudTrain)
+		HUD_DrawInventory();       // Sven item_inventory carried-item strip
 		HUD_DrawNetGraph();
 		HUD_DrawKillFeed();
 		HUD_DopamineFrame();
@@ -1163,6 +1236,16 @@ void(float width, float height, float menushown) CSQC_UpdateView =
 	// while a killcam replay reconstructs the rewound-alive scene.  The engine reads this cvar in
 	// CL_LinkPacketEntities and skips them; mirrors the CSQC ragdoll's own Killcam_Active() hide.
 	cvar_set("cl_killcam_hideragdolls", Killcam_Active() ? "1" : "0");
+
+	// The monster-trace / monster-tracer counters.  CSQC_MonsterTrace_Report has
+	// existed since the monster collision fix landed and NOTHING HAS EVER CALLED
+	// IT - so the one module whose entire output is a visual effect, and which
+	// therefore leaves no other trace in a log, has been reporting into a void.
+	// Self-rate-limited; see its own header for why it is also called from the
+	// event parser.
+	CSQC_MonsterTrace_Report();
+	CSQC_MonsterSolid_Report();
+	CSQC_AlienFX_Report();
 
 	spike_debug = cvar("cl_debug_spikes");
 	if (spike_debug)
@@ -1409,6 +1492,75 @@ float(string cmd) CSQC_ConsoleCommand =
 				MatSnd_SetIndex(Surf_SoundSet(mi))));
 			return TRUE;
 		}
+		case "surf_info":
+		{
+			// WHAT AM I ACTUALLY LOOKING AT.  `surf_material` above answers the
+			// surfaceprops question and nothing else; this answers the RENDERING
+			// one, which is the one you need in order to hide a surface: what is
+			// the texture called, does it belong to the world or to a func_ brush
+			// entity, which way does the face point, and is it lit.
+			//
+			// It exists because "the sides of the water are a bright nodraw
+			// texture" could not be acted on: a scan of every BSP in the corpus
+			// (Sven, HL, quakers/maps) found NO map that draws a texture named
+			// nodraw, NULL or skip, so the name had to come from the surface
+			// itself rather than from a guess.
+			vector iorg = getproperty(VF_ORIGIN);
+			makevectors(getproperty(VF_CL_VIEWANGLES));
+			traceline(iorg, iorg + v_forward * 8192, MOVE_NOMONSTERS, world);
+
+			entity he = trace_ent;
+			if (!he) he = world;
+
+			float si = getsurfacenearpoint(he, trace_endpos);
+			if (si < 0)
+			{
+				print("surf_info: no surface under the crosshair "
+				      "(sky, or a model rather than brushwork)\n");
+				return TRUE;
+			}
+
+			string  itex = getsurfacetexture(he, si);
+			vector  nr   = (vector)getsurfacenormal(he, si);
+
+			// Owner.  A GoldSrc brush entity keeps .origin '0 0 0' with its world
+			// position baked into the model, so the model NAME is what identifies
+			// it - "*14" is submodel 14 of the BSP, i.e. some func_.
+			string owner = "worldspawn";
+			if (he != world)
+			{
+				string imdl = he.model;
+				if (imdl == "" && he.modelindex)
+					imdl = modelnameforindex(he.modelindex);
+				owner = sprintf("%s model=\"%s\" ent=%g",
+				                (he.classname == "") ? "<no classname>" : he.classname,
+				                imdl, num_for_edict(he));
+			}
+
+			// Which face is this?  The report's whole point is telling the TOP of a
+			// water volume from its SIDES, so say so rather than making the reader
+			// do the trigonometry.
+			string facing = "side (near-vertical)";
+			if (nr_z >  0.7) facing = "UP   (a top face)";
+			if (nr_z < -0.7) facing = "DOWN (an underside)";
+
+			// Contents a unit either side of the surface: names the liquid without
+			// needing the texture to admit to being one.
+			float c_out = PM_ContentsAt(trace_endpos + nr * 2);
+			float c_in  = PM_ContentsAt(trace_endpos - nr * 2);
+
+			print(sprintf("surf_info: tex=\"%s\"  owner=%s\n", itex, owner));
+			print(sprintf("           surface=%g  normal=%v  %s\n", si, nr, facing));
+			print(sprintf("           contents in-front=%g behind=%g  (-3 water -4 slime -5 lava -2 solid)\n",
+			              c_out, c_in));
+			// No cvar_string("r_hidetextures") readout here on purpose: that is an
+			// ENGINE cvar, and cvar_audit.py counts a QC read with no CVar_Add row
+			// as a missing registration.  `r_hidetextures` typed bare prints its own
+			// value, so echoing it would only have cost a permanent audit finding.
+			print(sprintf("           material=%s   to hide it:  r_hidetextures \"%s\"\n",
+			              Surf_MatName(Surf_MaterialFor(itex)), itex));
+			return TRUE;
+		}
 		case "surf_reloadmaterials":
 			Surf_LoadMaterials();
 			print(sprintf("surfaceprops reloaded: %g materials, %g patterns\n",
@@ -1499,6 +1651,49 @@ float(string cmd) CSQC_ConsoleCommand =
 		case "buymenu":
 			Buy_Toggle();
 			return TRUE;
+		case "mp3volume":
+		{
+			// GoldSrc called this MP3Volume; FTE calls it `musicvolume` (legacy
+			// alias `bgmvolume`, registered engine-side at snd_dma.c:83 with
+			// default "0.3" and CVAR_ARCHIVE).  This is a thin front end under
+			// the name people actually reach for, plus the two things the bare
+			// cvar cannot tell you.
+			//
+			// The FIRST thing it cannot tell you is that 0 is not a fade, it is
+			// an OFF SWITCH: Media_NextTrack (m_mp3.c:181-182) returns NULL while
+			// bgmvolume.value <= 0, so a track started at 0 does not play quietly,
+			// it never starts at all and turning the volume back up does not
+			// recover it.  Worth a line rather than a silent surprise.
+			//
+			// The SECOND is that `volume` does NOT scale music in FTE - it is
+			// game sounds only (snd_dma.c:85) - which is why music can sit four
+			// times louder than gunfire and look like a bug in the music code.
+			// cfg/default.cfg now ships a proportionate musicvolume for that.
+			//
+			// KNOWN CONTENTION, and deliberately not designed around: a Sven
+			// ambient_music placement with a `volume` key below 10 holds this
+			// cvar down through a server override for as long as its track plays
+			// (sv_th_entities.qc:830, :940-948).  While that lock is held a value
+			// set here is what the player hears only after the entity releases it.
+			// 43 of the 44 placements in the whole Sven corpus are volume 10,
+			// which that code reads as "leave the player's own setting alone", so
+			// the overlap is one placement in forty-four and not worth plumbing a
+			// client-reported volume back to the server to avoid.
+			float mv;
+			if (argv(1) == "")
+			{
+				print(sprintf("mp3volume is %.2f  (engine cvar \"musicvolume\")\n",
+				              cvar("musicvolume")));
+				return TRUE;
+			}
+			mv = bound(0, stof(argv(1)), 1);
+			cvar_set("musicvolume", ftos(mv));
+			if (mv <= 0)
+				print("mp3volume 0: music is now OFF - tracks will not start at all, not merely play quietly.\n");
+			else
+				print(sprintf("mp3volume %.2f\n", mv));
+			return TRUE;
+		}
 		case "impactdebris":
 			// Swap the chunk colour.  No arg = flip stone<->dirt;
 			// `impactdebris 0|1` sets it explicitly (0 = stone, 1 = dirt).
@@ -1664,6 +1859,15 @@ float(float evtype, float scanx, float chary, float devid) CSQC_InputEvent =
 			return TRUE;
 	}
 
+	// Weapon debug panel on F5.  Like the four above, the OPEN-state handler
+	// must come before the F-key toggle further down, or F5 pressed while the
+	// panel is open reaches the toggle instead of the panel's own close path.
+	if (WPN_PanelOpen())
+	{
+		if (WPN_PanelInputEvent(evtype, scanx, chary, devid))
+			return TRUE;
+	}
+
 	// F1 opens the debug panel from gameplay.
 	if (evtype == IE_KEYDOWN && scanx == K_F1)
 	{
@@ -1690,6 +1894,13 @@ float(float evtype, float scanx, float chary, float devid) CSQC_InputEvent =
 	if (evtype == IE_KEYDOWN && scanx == K_F3)
 	{
 		Tune_PanelToggle();
+		return TRUE;
+	}
+
+	// F5 opens the weapon debug panel — the next free key in the family.
+	if (evtype == IE_KEYDOWN && scanx == K_F5)
+	{
+		WPN_PanelToggle();
 		return TRUE;
 	}
 
@@ -1821,10 +2032,11 @@ float(float ev) _net_event_bytes =
 	if (ev == CSQC_EVENT_POINTSOUND)      return 34;
 	if (ev == CSQC_EVENT_DEBUG_IMPACT)    return 28;
 	if (ev == CSQC_EVENT_ROUND_CLEANUP)   return 2;
-	if (ev == CSQC_EVENT_DAMAGE_FLASH)    return 15;  // svc+ev+dmg byte + 12 attacker origin coords
+	if (ev == CSQC_EVENT_DAMAGE_FLASH)    return 16;  // svc+ev+dmg byte+hudtype byte + 12 attacker origin coords
 	if (ev == CSQC_EVENT_HITMARKER)       return 2;
 	if (ev == CSQC_EVENT_BRUSH_DESTROY)   return 6;
 	if (ev == CSQC_EVENT_SERVER_HITBOXES) return 63;  // 2 svc hdr + 55 fixed payload + 8 (f1t+bf1t)
+	if (ev == CSQC_EVENT_SERVER_NPC_HITBOX) return 41;  // 2 svc hdr + 2 entnum + 12 origin + 12 mins + 12 maxs + 1 mode
 	if (ev == CSQC_EVENT_GLASS_GIBS)      return 35;  // +5 throw bytes vs prior
 	if (ev == CSQC_EVENT_PLAYER_GIBS)     return 32;  // 2 + 12 + 12 + 1 + 2 + 1 + 2 svc/event hdr
 	if (ev == CSQC_EVENT_MONSTER_GIBS)    return 32;  // same shape: gibset byte replaces the victim slot
@@ -1839,13 +2051,20 @@ float(float ev) _net_event_bytes =
 	if (ev == CSQC_EVENT_GRENADE_EXPLODE)        return 17;  // 2 svc hdr + 2 exclude (short) + 12 origin + 1 sample byte
 	if (ev == CSQC_EVENT_GRENADE_BOUNCE)         return 17;  // 2 svc hdr + 2 exclude (short) + 12 origin + 1 sample byte
 	if (ev == CSQC_EVENT_HL_BEAM)                return 29;  // 2 svc hdr + 2 exclude/owner (short) + 1 type + 24 start/end coords
+	if (ev == CSQC_EVENT_ALIEN_FX)               return 19;  // 2 svc hdr + 1 kind + 12 origin + 3 direction + 1 count magnitude
+	if (ev == CSQC_EVENT_ENV_BLOOD)              return 21;  // 2 svc hdr + 12 origin + 3 direction + 2 amount (short) + 1 colour + 1 flags
 	if (ev == CSQC_EVENT_SHOCKWAVE)              return 22;  // 2 svc hdr + 12 centre + 2 radius (short) + 1 life + 1 width + 3 colour + 1 kind
+	if (ev == CSQC_EVENT_ENV_FUNNEL)             return 15;  // 2 svc hdr + 12 origin + 1 reverse
+	if (ev == CSQC_EVENT_SCREENSHAKE)            return 14;  // 2 svc hdr + 3 floats (amplitude, duration, frequency)
 	if (ev == CSQC_EVENT_SNOWSPLAT)              return 21;  // 2 svc hdr + 1 exclude + 1 flags + 12 origin + 3 normal bytes + 2 entnum
 	if (ev == CSQC_EVENT_PAINTSPLAT)             return 23;  // 2 svc hdr + 1 exclude + 12 origin + 3 normal + 3 color + 2 target
 	if (ev == CSQC_EVENT_CSGRENADE_EXPLODE)      return 17;  // 2 svc hdr + 1 exclude + 1 type + 12 origin + 1 sample
 	if (ev == CSQC_EVENT_CSGRENADE_BOUNCE)       return 17;  // same layout as explode
 	if (ev == CSQC_EVENT_C4_EXPLODE)             return 14;  // 2 svc hdr + 12 origin
 	if (ev == CSQC_EVENT_DOOR_VIEWROT)           return 4;   // 2 svc hdr + 2 short delta
+	if (ev == CSQC_EVENT_TRAIN_HUD)              return 3;   // 2 svc hdr + 1 state byte
+	if (ev == CSQC_EVENT_LOOKAT_NPC)             return 9;   // 2 svc hdr + 2 entnum + 2 hp + 2 maxhp + 1 newtarget. The display-name STRING rides only the frame the target changes, so the steady-state cost is this; a target switch adds ~16.
+	if (ev == CSQC_EVENT_INVENTORY)              return 44;// 2 svc hdr + 1 count + 1 overflow + typically 1 item x (~24 icon path + ~16 label). Sent on change only, and no map on disk lets a player hold more than one at a time.
 	if (ev == CSQC_EVENT_BUTTON_SPARK)           return 17;  // 2 svc hdr + 12 origin + 3 normal bytes
 	if (ev == CSQC_EVENT_PHYSPROP_IMPACT)        return 18;  // 2 svc hdr + 12 pos + 3 normal bytes + 1 bucket
 	if (ev == CSQC_EVENT_ENV_EXPLOSION)          return 17;  // 2 svc hdr + 12 origin + 2 magnitude + 1 spawnflags
@@ -1878,6 +2097,15 @@ void() CSQC_Parse_Event =
 {
 	float first = readbyte();
 	CSQC_NetStat_RecordEvent(_net_event_bytes(first));
+
+	// The second call site.  CSQC_UpdateView above is the natural one and it does
+	// not exist under `vid_renderer headless`, which is the only way anything
+	// CSQC-side gets measured on this machine.  Self-rate-limited, so calling it
+	// from two places costs one float compare per inbound event.
+	CSQC_MonsterTrace_Report();
+	CSQC_MonsterSolid_Report();
+	CSQC_AlienFX_Report();
+
 	switch(first) {
 		case CSQC_EVENT_KILLFEED:
 			KillFeed_Parse();
@@ -1924,16 +2152,23 @@ void() CSQC_Parse_Event =
 			// reader that is one byte short desynchronises every event after it
 			// in the same packet, not just this one.
 			float rem_shooter = readshort();
-			// is_entry: 1 = entry/primary impact (draw the tracer), 0 = penetration
-			// EXIT (decal only — drawing it too gave the "two tracer lines" double).
-			float rem_entry = readbyte();
+			// bit 0 = is_entry: 1 = entry/primary impact (draw the tracer), 0 =
+			// penetration EXIT (decal only — drawing it too gave the "two tracer
+			// lines" double).
+			// bit 1 = multi-pellet BLAST: every pellet shares one action id, so
+			// without this they collapse into a single per-shot cap bucket and a
+			// remote viewer sees one decal for an 8-pellet spray.  Must stay in
+			// step with the pack in W_ImpactEffectSend.
+			float rem_flags = readbyte();
+			float rem_entry = rem_flags & 1;
+			float rem_blast = (rem_flags & 2) ? 1 : 0;
 			// Shooter's per-shot action id (byte, wrapped) — combined with the shooter entnum
 			// into a per-shot KEY so the bullet-hole cap (cl_bulletholes_per_shot) scopes a
 			// REMOTE penetrating shot's entry+exit decals just like a local one (else a bot's
 			// wallbang shows entry+exit).  >=0 so it's not the uncapped -1 sentinel.
 			float rem_action = readbyte();
 			float rem_key    = rem_shooter * 256 + rem_action;
-			CSQC_BulletImpactRemote(pos, normal, rem_mat, rem_target, rem_shooter, rem_entry, rem_key);
+			CSQC_BulletImpactRemote(pos, normal, rem_mat, rem_target, rem_shooter, rem_entry, rem_key, rem_blast);
 			break;
 		}
 		case CSQC_EVENT_SHELL:
@@ -2140,12 +2375,19 @@ void() CSQC_Parse_Event =
 		case CSQC_EVENT_DAMAGE_FLASH:
 		{
 			float dmg = readbyte();
+			// DMGHUD_* — the reason, read in the same order both writers send
+			// it (sv_weapons.qc and sv_player.qc).  Adding it here without
+			// adding it to BOTH of them, or without bumping the byte count in
+			// _net_event_bytes above, is the documented route to "Illegible
+			// server message".
+			float dmghud = readbyte();
 			vector atk_pos;
 			atk_pos_x = readcoord();
 			atk_pos_y = readcoord();
 			atk_pos_z = readcoord();
 			csqc_pain_flash_time = cltime;
 			csqc_pain_flash_alpha = bound(0.1, dmg * 0.01, 0.6);
+			csqc_pain_flash_type  = dmghud;
 			// Hit indicator: server packs the attacker's world origin
 			// after the damage byte.  Fall damage / world damage sends
 			// the victim's own origin so the spawn helper rejects it
@@ -2306,6 +2548,61 @@ void() CSQC_Parse_Event =
 			// and the engine's view state then catches up.
 			float dvr_delta = readshort() * 0.01;
 			csqc_door_yaw_offset = csqc_door_yaw_offset + dvr_delta;
+			break;
+		}
+		case CSQC_EVENT_TRAIN_HUD:
+		{
+			// func_tracktrain throttle readout, unicast to the driver only.
+			// One byte, HL's gmsgTrain low nibble.  Drawn by CSQC_DrawTrainHud
+			// (cl_hud.qc); TRAIN_HUD_OFF means "not driving", which is what
+			// hides it again on dismount.
+			csqc_train_hud_state = readbyte();
+			break;
+		}
+		case CSQC_EVENT_LOOKAT_NPC:
+		{
+			// The NPC under this player's crosshair, unicast on change.  Parsed in
+			// cl_lookatname.qc (cl_progs.src:18, before this file at :242) so the
+			// tag's state stays private to the module that draws it.
+			CSQC_LookatNPC_Parse();
+			break;
+		}
+		case CSQC_EVENT_INVENTORY:
+		{
+			// Sven item_inventory: what this player is carrying, unicast on
+			// change.  The strings MUST be strzone'd — readstring hands back a
+			// temp that the next parse recycles, and this state has to survive
+			// until the next inventory change, which may be minutes away.
+			float inv_i = 0;
+			while (inv_i < csqc_inv_count)
+			{
+				if (csqc_inv_icon[inv_i])  strunzone(csqc_inv_icon[inv_i]);
+				if (csqc_inv_label[inv_i]) strunzone(csqc_inv_label[inv_i]);
+				csqc_inv_icon[inv_i]  = __NULL__;
+				csqc_inv_label[inv_i] = __NULL__;
+				inv_i = inv_i + 1;
+			}
+
+			// Read every pair the server sent even if this build stores fewer,
+			// so the parser always drains its own message.  A short read here
+			// would not lose an icon — it would desync the whole event stream,
+			// because CSQC_Parse_Event shares one buffer with every other
+			// event behind it.
+			float inv_sent = readbyte();
+			csqc_inv_extra = readbyte();
+			inv_i = 0;
+			while (inv_i < inv_sent)
+			{
+				string inv_ic = readstring();
+				string inv_lb = readstring();
+				if (inv_i < CSQC_INV_MAX)
+				{
+					csqc_inv_icon[inv_i]  = strzone(inv_ic);
+					csqc_inv_label[inv_i] = strzone(inv_lb);
+				}
+				inv_i = inv_i + 1;
+			}
+			csqc_inv_count = min(inv_sent, CSQC_INV_MAX);
 			break;
 		}
 		case CSQC_EVENT_ENV_EXPLOSION:
@@ -2505,6 +2802,21 @@ void() CSQC_Parse_Event =
 		case CSQC_EVENT_SHOCKWAVE:
 		{
 			CSQC_Shockwave_Parse();
+			break;
+		}
+		case CSQC_EVENT_ALIEN_FX:
+		{
+			CSQC_AlienFX_Parse();
+			break;
+		}
+		case CSQC_EVENT_ENV_BLOOD:
+		{
+			CSQC_EnvBlood_Parse();
+			break;
+		}
+		case CSQC_EVENT_ENV_FUNNEL:
+		{
+			CSQC_EnvFunnel_Parse();
 			break;
 		}
 		case CSQC_EVENT_SNOWSPLAT:
@@ -2724,6 +3036,17 @@ void() CSQC_Parse_Event =
 			}
 			break;
 		}
+		case CSQC_EVENT_SCREENSHAKE:
+		{
+			// The server has already applied FL_ONGROUND, the radius test
+			// and HL's fixed-point quantisation, so this is a straight
+			// hand-off into the state machine.
+			float sh_amp  = readfloat();
+			float sh_dur  = readfloat();
+			float sh_freq = readfloat();
+			CSQC_ScreenShake_Start(sh_amp, sh_dur, sh_freq);
+			break;
+		}
 		case CSQC_EVENT_BREAKABLE_IMPACT_SOUND:
 		{
 			// Attacker-excluded breakable thump. The shooter already
@@ -2941,6 +3264,26 @@ void() CSQC_Parse_Event =
 				CSQC_UpdateContinuousHitbox(hb_entnum, sv_mdlidx, sv_org, sv_ang, sv_fr, sv_bfr, sv_bb, sv_f1t, sv_bf1t, sv_sbf, sv_sb2f, sv_bc1, sv_bc2, sv_bc3, sv_bc4);
 			else
 				CSQC_AddServerHitbox(sv_mdlidx, sv_org, sv_ang, sv_fr, sv_bfr, sv_bb, sv_f1t, sv_bf1t, sv_sbf, sv_sb2f, sv_bc1, sv_bc2, sv_bc3, sv_bc4);
+			break;
+		}
+		case CSQC_EVENT_SERVER_NPC_HITBOX:
+		{
+			// SHORT entnum, not a byte — see the const's comment in sh_weapons.qc.
+			float npc_entnum = readshort();
+			vector npc_org;
+			npc_org_x = readcoord();
+			npc_org_y = readcoord();
+			npc_org_z = readcoord();
+			vector npc_mn;
+			npc_mn_x = readcoord();
+			npc_mn_y = readcoord();
+			npc_mn_z = readcoord();
+			vector npc_mx;
+			npc_mx_x = readcoord();
+			npc_mx_y = readcoord();
+			npc_mx_z = readcoord();
+			float npc_mode = readbyte();   // 1 = per-shot snapshot, 2 = continuous
+			CSQC_UpdateNPCHitbox(npc_entnum, npc_org, npc_mn, npc_mx, npc_mode);
 			break;
 		}
 		default:

@@ -49,12 +49,28 @@ const float AG_LFO_RND = 3;
 // are one-shot (1 or 5); the other 22 are 2 (Loop) and were already correct.
 //   0 Default   1 Play Once   2 Loop   5 Linear Once   6 Linear Loop
 .float playmode;
-// Linear-mode falloff distances.  PARSED, NOT IMPLEMENTED — attenuation here
-// is the radius-flag model in AmbientGeneric_Attenuation(), which has no
-// distance-pair form.  Declared so the keys bind rather than vanish, and so
-// they show up in an entity dump when someone comes to implement it.
+// Linear-mode falloff distances, in Sven's 256-unit steps (sven-coop.fgd:1393 —
+// "0 - 0 units", "1 - 256 units", ... "10 - 2,560 units").  linearmax is the
+// distance the sound becomes inaudible; linearmin the distance inside which it
+// plays at full volume.
+//
+// APPROXIMATED, not implemented exactly, and the reason is the builtin: FTE's
+// sound() takes a scalar `atten` exponent and has no radius parameter and no
+// falloff-mode flag (sv_defs.qc:764, SOUNDFLAG_* at :602-607).  A true linear
+// curve would mean ATTN_NONE plus SOUNDFLAG_UNICAST and a per-player distance
+// computed in QC every push — which collides head-on with the fact that every
+// sound() on a channel restarts the sample from the top, the exact problem the
+// dedup latch in AmbientGeneric_Push exists to work around.  A per-listener
+// volume recomputed at 20Hz would restart the ambience 20 times a second.
+//
+// So: convert linearmax into the attenuation that makes the sound fade out at
+// about the right distance, and accept a curve of the wrong SHAPE at roughly the
+// right REACH.  17 of pizza_ya_san1's 18 ambients set 2/5 and were all playing at
+// ATTN_NORM, which is a much shorter reach than 1,280 units.
 .float linearmin;
 .float linearmax;
+
+const float AG_LINEAR_STEP = 256;   // fgd units per linearmin/linearmax step
 
 const float AG_PLAYMODE_ONCE        = 1;
 const float AG_PLAYMODE_LOOP        = 2;
@@ -67,8 +83,21 @@ float() AmbientGeneric_IsPlayOnce =
          || self.playmode == AG_PLAYMODE_LINEAR_ONCE);
 };
 
+// The other half of playmode, which was declared at the top of this file and
+// then read by nothing.  2 and 6 are the mapper stating outright that the
+// sample repeats -- which is the only way to say it for an .mp3, since mp3 has
+// no equivalent of a WAV cue point.
+float() AmbientGeneric_IsLoopMode =
+{
+    return (self.playmode == AG_PLAYMODE_LOOP
+         || self.playmode == AG_PLAYMODE_LINEAR_LOOP);
+};
+
 // Runtime state.
 .float ag_active;
+// Set at spawn: this ambient must be handed SOUNDFLAG_FORCELOOP, and its stop
+// must be a real sample rather than a volume-0 push.  See the spawn function.
+.float ag_forceloop;
 .float ag_attenuation;
 .float ag_target_volume;
 .float ag_target_pitch;
@@ -108,6 +137,24 @@ float(float v, float lo, float hi) AmbientGeneric_Clamp =
 float() AmbientGeneric_Attenuation =
 {
     if (self.spawnflags & AG_PLAY_EVERYWHERE) return ATTN_NONE;
+
+    // linearmax first, because it is the mapper being SPECIFIC.  The three
+    // radius spawnflags are three coarse presets; a linearmax is a distance in
+    // units, and a map that bothered to write one meant it.  Sven's own editor
+    // exposes both on the same entity, so this is a precedence decision rather
+    // than an exclusion — and 17 of this map's 18 ambients set only linearmax.
+    //
+    // The scale: ATTN_NORM (1.0) goes quiet at roughly 1000 units in Quake's
+    // model, so an attenuation of 1000/reach lands the fade-out at about the
+    // distance asked for.  Bounded at both ends — 0 would mean ATTN_NONE (heard
+    // across the whole map, which "0 units" emphatically does not mean) and
+    // anything above 4 is inaudible almost immediately.
+    if (self.linearmax > 0)
+    {
+        float reach = self.linearmax * AG_LINEAR_STEP;
+        return AmbientGeneric_Clamp(1000 / reach, 0.1, 4.0);
+    }
+
     if (self.spawnflags & AG_SMALL_RADIUS)    return 2.0;
     if (self.spawnflags & AG_MEDIUM_RADIUS)   return 1.25;
     if (self.spawnflags & AG_LARGE_RADIUS)    return 0.6;
@@ -283,12 +330,58 @@ void() AmbientGeneric_Push =
     self.ag_last_pushed_vol   = qv;
     self.ag_last_pushed_pitch = qp;
 
+    // FTE self-loops a sample ONLY when the file carries loop cue points:
+    // snd_mem.c parses the WAV "cue "/"LIST" chunks and otherwise sets
+    // loopstart -1, and snd_mix.c keys the EOF rewind off it.  An .mp3 has no
+    // such chunk and snd_minimp3.c hands ResampleSfx a hardcoded -1, so every
+    // mp3 ambient played exactly once no matter what playmode said.
+    // CF_FORCELOOP is the engine's own answer and reaches SSQC as
+    // SOUNDFLAG_FORCELOOP.  It is tested AFTER sfx->loopstart, so adding it to
+    // a cue-carrying WAV changes nothing at all.
+    float sndflags = SOUNDFLAG_FOLLOW;
+    if (self.ag_forceloop)
+        sndflags = sndflags | SOUNDFLAG_FORCELOOP;
+
     string sample = AmbientGeneric_NormaliseSample(self.message);
     sound(self, CHAN_VOICE, sample,
           self.ag_current_volume,
           self.ag_attenuation,
           self.ag_current_pitch,
-          SOUNDFLAG_FOLLOW);
+          sndflags);
+};
+
+// End a force-looped ambient for real.
+//
+// A volume-0 sound() does NOT end a CF_FORCELOOP channel -- the mixer rewinds
+// it at EOF regardless of volume, so the sample keeps mixing silently and holds
+// the channel forever.  Neither obvious cancel reaches a client: an empty
+// sample never leaves the server (sv_send.c `else if (!*sample) return;`) and
+// stopsound()'s index-0 packet is dropped by cl_parse.c before it reaches the
+// stop branch.  The only cancel that works is a real sample on the same
+// ent+channel, which is what sv_physprop.qc:899 and sv_momentary.qc:162 already
+// do.  SND_SILENCE is sv_doors.qc:309 ("common/null.wav") and sv_main.qc:3889
+// precaches it unconditionally at server init.  RELIABLE so the stop is not
+// PHS-filtered away from a listener who has walked out of range.
+//
+// This matters on pizza_ya_san1: every bgm_* is a toggle pair fired by two
+// different multi_managers, and mm_denwa fires "sound_denwa" at t=3 and
+// "sound_denwa#1" at t=10 to start and then stop the ringing phone.
+void() AmbientGeneric_Silence =
+{
+    self.ag_active = 0;
+    self.ag_current_volume = 0;
+
+    if (self.ag_forceloop)
+    {
+        sound(self, CHAN_VOICE, SND_SILENCE, 1, self.ag_attenuation,
+              100, SOUNDFLAG_RELIABLE);
+        // The dedup latch now describes a channel that no longer carries our
+        // sample, so a restart must be free to re-issue it.
+        self.ag_pushed_once = 0;
+        return;
+    }
+
+    AmbientGeneric_Push();
 };
 
 void(float base_volume, float base_pitch) AmbientGeneric_ModulateAndPush =
@@ -341,9 +434,7 @@ void() AmbientGeneric_Think =
         if (self.ag_stop_at_end)
         {
             self.ag_stop_at_end = 0;
-            self.ag_active = 0;
-            self.ag_current_volume = 0;
-            AmbientGeneric_Push();
+            AmbientGeneric_Silence();
             self.nextthink = 0;
             return;
         }
@@ -376,9 +467,7 @@ void(float to_volume, float to_pitch, float dur_volume, float dur_pitch, float s
         AmbientGeneric_ModulateAndPush(to_volume, to_pitch);
         if (stop_after)
         {
-            self.ag_active = 0;
-            self.ag_current_volume = 0;
-            AmbientGeneric_Push();
+            AmbientGeneric_Silence();
             self.nextthink = 0;
         }
         else if (AmbientGeneric_HasLFO())
@@ -544,6 +633,29 @@ void() ambient_generic =
         AmbientGeneric_ApplyPreset();
 
     self.ag_attenuation = AmbientGeneric_Attenuation();
+
+    // Sven's playmode 2 ("Loop") / 6 ("Linear / Loop") is the only way a mapper
+    // can ask for a repeating .mp3, because mp3 has no cue-point equivalent and
+    // FTE's loop decision is cue-driven (snd_mem.c, snd_mix.c).  pizza_ya_san1's
+    // music sources (bgm_main / bgm_title / bgm_hungary / bgm_mi1 / bgm_battle /
+    // sound_denwa) are all playmode 2 on an .mp3 with spawnflags 17.
+    //
+    // playmode 0 ("Default") is deliberately NOT force-looped: GoldSrc leaves a
+    // cue-less sample playing once there, and so do we.
+    //
+    // Spawnflag 32 wins over playmode, matching the resolution already argued
+    // for the autostart gate at the bottom of this file: sound.cpp:219-222 makes
+    // bit 32 mean m_fLooping = FALSE outright.  (Corpus-wide that collision
+    // happens exactly once -- bm_sts.bsp's `game_area`, playmode 6 with bit 32.)
+    //
+    // Sequential ifs rather than a && chain: logicops is off mod-wide.
+    self.ag_forceloop = FALSE;
+    if (AmbientGeneric_IsLoopMode())
+        self.ag_forceloop = TRUE;
+    if (self.spawnflags & AG_NOT_LOOPED)
+        self.ag_forceloop = FALSE;
+    if (self.message == "")
+        self.ag_forceloop = FALSE;
 
     float v = self.health;
     if (v <= 0) v = 10;

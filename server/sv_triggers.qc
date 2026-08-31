@@ -31,8 +31,14 @@ void(entity caller, entity triggerer) Trigger_UseTargets;   // sv_doors.qc
 .string master;
 .string killtarget;
 .float  triggerstate;       // 0 off, 1 on, 2 toggle (HL convention)
-.string globalname;         // accepted, ignored — env_global is OOS
-.string globalstate;        // accepted, ignored
+.string globalname;         // HL entity identity across a level transition —
+                            // accepted, ignored.  NOT the same key as below,
+                            // despite the names: 387 placements in the corpus
+                            // and not one of them shares a name with a
+                            // globalstate.  See sv_globalstate.qc.
+.string globalstate;        // names a row in HL's global state table.  Written
+                            // by env_global, read as a gate by multisource and
+                            // trigger_auto.  sv_globalstate.qc.
 .float  count;              // trigger_counter "Count before activation"
 .float  teamindex;          // game_team_master
 
@@ -46,20 +52,82 @@ void(entity caller, entity triggerer) Trigger_UseTargets;   // sv_doors.qc
 float  sub_use_type;
 entity sub_use_caller;
 
+// server/sv_monsters.qc compiles far below this file (sv_progs.src :211 against
+// :153), so the teardown SUB_KillTargets needs is forward-declared here.  It is
+// idempotent and safe on a non-monster: every one of its four steps early-returns
+// on an entity that never registered (Monster_ReleaseSquadSlot checks sq_counted,
+// Squad_Remove checks Squad_In, Nav_PathSlot_Release checks ai_pathslot, and
+// monster_chain_remove sees world on both links).
+void(entity m) Monster_Teardown;
+// sv_physprop.qc (compile pos 301, this file is 192 — QC forward-declares functions).
+// Operates on `self`, like the two call sites it already has in PhysProp_VoidWatchdog.
+void() PhysProp_TeardownForRemove;
+
 // ---------------------------------------------------------------------------
 // SUB_KillTargets — find-by-name + remove.  GoldSrc semantics.
 // ---------------------------------------------------------------------------
+// THE TEARDOWN IS LOAD-BEARING, and leaving it out was the cause of two
+// "runaway loop error" crashes that looked completely unrelated.
+//
+// This function predates the monster list and was never brought into line with
+// it.  A bare remove() on a monster leaves a FREED EDICT wired into
+// monster_chain (server/sv_monsters.qc:161-193): its neighbours keep pointing at
+// the slot.  FTE then makes that stick - ED_Free does NOT clear fields (the
+// clearing block at engine/qclib/pr_edict.c:198-209 is commented out) and
+// ED_Alloc re-issues the slot after only 0.5 s (:129-136), zeroed.  So the next
+// monster built on that slot looks pristine, monster_chain_add's guard passes,
+// it goes in at the head - and the stale neighbour link now points back at it.
+// The list is circular, and the next walk over it never terminates.
+//
+// It is reached from SUB_UseTargets below, BEFORE Trigger_UseTargets, which is
+// how a scripted_sequence carrying a killtarget corrupted the list one frame
+// before Script_FindMonster walked it (server/sv_scripted.qc:229-235).  The
+// other crash was AI_FindEnemy's sweep (server/sv_ai_core.qc:353-369) hitting
+// the same cycle minutes later, from a completely different stack.
+//
+// The milder version of the same bug is worth knowing because nothing reports
+// it: if the recycled slot becomes a NON-monster, the walk silently TRUNCATES
+// there and every monster past that point stops being visible to the AI.
+//
+// Monster_Chain_Verify (server/sv_monsters.qc) is the backstop for whatever
+// removal site is found next; this is the one that was actually firing.
+// PHYS TEARDOWN IS AS MANDATORY HERE AS THE MONSTER ONE, AND FOR A HARDER REASON.
+// killtarget matches on targetname, and every map-placed entity can carry one — so
+// this reaches prop_physics (sv_props.qc:363 sets po_fx_enabled), phys_barrel /
+// phys_can / phys_files, and any GoldSrc weapon_* that W_RegisterMapWeapon turned
+// into an ODE drop (sv_weapons.qc:610-625 keeps the same edict and its targetname).
+//
+// A bare remove() on one of those that is mid-slide strands its CHAN_PHYSPROP_SCRAPE
+// FORCELOOP *permanently*, and unlike every other leak this one is beyond reach of
+// the watchdog in sv_physprop.qc: PF_nextent skips freed edicts (pr_bgcmd.c:4179-4181),
+// so the sweep never walks the slot. ED_Alloc then re-issues it after 0.5 s
+// (qclib/pr_edict.c:120,:134) to an unrelated entity that will never emit on channel 6
+// — so nothing will ever replace the sample on that entnum either. The stop has to
+// happen HERE, while the edict is still ours.
+//
+// PhysProp_TeardownForRemove also releases a carrier still holding the entity, which
+// is the other half of the same hazard (see its comment: ED_Free does NOT clear
+// fields, so Carry_Tick goes on servoing a freed slot with pm_carrying stuck TRUE).
+// Both halves self-guard, so this costs a field read on the ordinary case.
 void(string name) SUB_KillTargets =
 {
     entity e;
     if (name == "" || name == __NULL__) return;
     e = find(world, targetname, name);
+    entity saved = self;
     while (e)
     {
         entity nxt = find(e, targetname, name);
+        Monster_Teardown(e);
+        self = e;
+        PhysProp_TeardownForRemove();
+        if (e.movetype == MOVETYPE_PHYSICS)
+            physics_enable(e, FALSE);   // detach the ODE body before the edict goes
+        self = saved;
         remove(e);
         e = nxt;
     }
+    self = saved;
 };
 
 // ---------------------------------------------------------------------------
@@ -128,6 +196,108 @@ void(entity caller, entity who, float useType) SUB_UseTargets =
 };
 
 // ---------------------------------------------------------------------------
+// SV_FireTargetsByName — fire every entity with this targetname, with no
+// caller entity involved.  Half-Life's FireTargets(), which is a DIFFERENT
+// thing from firing a caller's .target and is what the reserved names below
+// need: there is no entity holding "game_playerspawn" in a .target field, the
+// GAME fires the name directly (SDK dlls/player.cpp:4120,4124 and
+// dlls/multiplay_gamerules.cpp:436,587,599).
+//
+// Returns how many entities were fired, so a caller can report or assert.
+//
+// THE EMPTY-NAME GUARD IS LOAD-BEARING, for the same reason it is in
+// SUB_KillTargets above: find(world, targetname, "") matches every entity whose
+// targetname is unset (engine/common/pr_bgcmd.c:1700-1716), so an unguarded call
+// here would fire the entire map.
+//
+// This body was lifted out of AIDbg_FireTargetThink (sv_ai_debugcmds.qc), which
+// had it inline; that harness now calls this, so `sv_debug_firetarget` and the
+// shipped emitters exercise exactly the same path — which is what makes proving
+// a chain by hand with that cvar mean anything.
+// ---------------------------------------------------------------------------
+float(string name, entity who, float useType) SV_FireTargetsByName =
+{
+    if (name == "" || name == __NULL__)
+        return 0;
+
+    float n = 0;
+    entity e = find(world, targetname, name);
+    while (e)
+    {
+        entity nxt = find(e, targetname, name);   // latched: e.use() may remove e
+        if (e.use)
+        {
+            entity oldself = self;
+            entity oldact  = activator;
+            float  oldut   = sub_use_type;
+
+            self         = e;
+            activator    = who;
+            sub_use_type = useType;
+            e.use();
+
+            self         = oldself;
+            activator    = oldact;
+            sub_use_type = oldut;
+            n = n + 1;
+        }
+        e = nxt;
+    }
+    return n;
+};
+
+// ---------------------------------------------------------------------------
+// SV_FireReservedName — the Half-Life reserved targetnames.
+//
+// These are TARGETNAMES the game fires at gameplay moments, not classnames a
+// map spawns, and the mod never fired any of them.  On most maps that costs a
+// flourish; on Sven's hl_c00 it costs the entire map, because all four of its
+// `game_playerspawn` trigger_relays are the ONLY source for their targets and
+// one of them starts the tram:
+//
+//     game_playerspawn -> start_titles1 -> fade_in1(0s), title_manager1(6s),
+//                                          train(3s)          <-- the tram
+//
+// so the player spawned standing in a motionless tram in a dark bay and nothing
+// ever happened.  Measured before and after: 9 chain events and 0 multi_manager
+// activations before, 182 and 5 after, with the tram accelerating away through
+// its path_tracks (300 -> 200 -> 300 -> 350 -> 400) exactly as authored.
+//
+// 90 placements across the map corpus, 31 of them game_playerspawn across 14
+// maps.  USE_TOGGLE matches FireTargets()'s own useType argument.
+// ---------------------------------------------------------------------------
+// Latch for game_playerjoin, which HL fires on a player's FIRST spawn only
+// (dlls/player.cpp:4120, inside the m_fGameHUDInitialized branch) whereas
+// game_playerspawn fires on every spawn including respawns.
+.float gp_joined_fired;
+
+float(string name, entity who) SV_FireReservedName =
+{
+    float n = SV_FireTargetsByName(name, who, USE_TOGGLE);
+    // Reports n == 0 too, on purpose.  "The emitter ran and this map has no
+    // such entity" and "the emitter never ran" look identical from a silent
+    // log, and telling them apart is the whole diagnostic value here.
+    if (cvar("sv_debug_use"))
+        print(sprintf("[reserved] fired \"%s\" for %s -> %g entities\n",
+                      name, who.netname, n));
+    return n;
+};
+
+// Called at the very end of PlayerSpawn, which is as close as this gets to
+// UpdateClientData's position in HL — after both equip paths, the map script
+// hook and the weapon bind, so a map that equips or arms the player from
+// game_playerspawn sees a fully built player.
+void(entity plyr) SV_FireSpawnReservedNames =
+{
+    if (!plyr.gp_joined_fired)
+    {
+        plyr.gp_joined_fired = TRUE;
+        SV_FireReservedName("game_playerjoin", plyr);
+    }
+    SV_FireReservedName("game_playerspawn", plyr);
+};
+
+// ---------------------------------------------------------------------------
 // GoldSrc_TriggerStateToUseType — map a mapper-authored `triggerstate` key
 // onto our USE_* constants.  These are two DIFFERENT enums and 2/3 are
 // transposed between them:
@@ -189,8 +359,13 @@ float(string master_name, entity who) IsMasterTriggered =
     if (!m)
         return TRUE;       // mapper typo policy
 
+    // CMultiSource::IsTriggered is TWO tests ANDed (buttons.cpp:216-236): every
+    // input on, AND the named global ON.  ms_active caches the first; the second
+    // has to be live, because the global can be flipped by an env_global on a
+    // completely different entity — or on a completely different map — long
+    // after this gate last saw an input.
     if (m.classname == "multisource")
-        return m.ms_active;
+        return m.ms_active && GlobalState_GateOpen(m.globalstate);
 
     if (m.classname == "game_team_master")
     {
@@ -321,6 +496,13 @@ void() info_null =
 
 void() func_illusionary =
 {
+    // CFuncIllusionary::Spawn zeroes angles first (bmodels.cpp:232), for the same
+    // reason CFuncWall does - see the note in sv_brushsync.qc's func_wall.  A
+    // decorative brush never rotates, and a leftover angles key on a GoldSrc submodel
+    // with no origin brush relocates it (and its PVS box) about the world origin.
+    // 12 placements in the corpus.
+    self.angles = '0 0 0';
+
     // Only route through the replicated-brush (CSQC) pipeline when the mapper set
     // a GoldSrc rendermode that NEEDS translating (additive light rays etc., modes
     // 1-5).  A PLAIN func_illusionary — just `alpha` or pure defaults — renders

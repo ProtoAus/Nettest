@@ -113,24 +113,117 @@ float() Buy_IsOpen =
 
 // --- item / price / affordability helpers ---
 
-// Rows on the current item screen (grenades, + armor/kit for Equipment).
-float() Buy_ItemRowCount =
+// The item screen is now GROUPED BY SOURCE GAME, so a display row is no longer
+// the same thing as an item index: headers occupy rows but are not buyable and
+// carry no number.  Three parallel arrays hold the built layout.
+//
+// BUILT ONCE PER CATEGORY, not once per frame.  The naive version — deriving
+// each row on demand — is O(rows x games x items) and this menu redraws every
+// frame, which on the 20-weapon rifle screen is several thousand manifest
+// switch dispatches a frame for a layout that cannot change while the screen is
+// open.  Only the category is an input: money moves colours, never rows.
+const float BUY_MAX_ROWS = 48;      // rifle screen is the worst case at 20 + 9
+float buy_row_id[BUY_MAX_ROWS];      // weapon / buy-item id; NONE on a header row
+float buy_row_game[BUY_MAX_ROWS];    // WMF_GAME_* on a header row
+float buy_row_number[BUY_MAX_ROWS];  // the "N." shown; 0 on a header row
+float buy_row_count;
+float buy_rows_built_for;            // category the cache holds (0 = nothing yet)
+
+void(float cat) Buy_BuildRows =
 {
-    float n = BuyCat_Count(buymenu_category);
-    if (buymenu_category == BUYCAT_EQUIPMENT)
-        n = n + BUYITEM_COUNT;
-    return n;
+    float n = BuyCat_Count(cat);
+    float g, i, item_no = 0;
+
+    buy_row_count = 0;
+    buy_rows_built_for = cat;
+
+    for (g = 0; g <= WMF_GAME_LAST; g = g + 1)
+    {
+        // Skip a game outright rather than emitting an empty header: most
+        // categories draw from two or three games, not nine.
+        float any = FALSE;
+        for (i = 1; i <= n; i = i + 1)
+            if (WeaponManifest_Game(BuyCat_Weapon(cat, i)) == g) { any = TRUE; break; }
+        if (!any)
+            continue;
+
+        if (buy_row_count >= BUY_MAX_ROWS) return;
+        buy_row_id[buy_row_count]     = WMF_WEP_NONE;
+        buy_row_game[buy_row_count]   = g;
+        buy_row_number[buy_row_count] = 0;
+        buy_row_count = buy_row_count + 1;
+
+        // Within a game, keep buy_order — that is still the authored order.
+        for (i = 1; i <= n; i = i + 1)
+        {
+            float w = BuyCat_Weapon(cat, i);
+            if (WeaponManifest_Game(w) != g) continue;
+            if (buy_row_count >= BUY_MAX_ROWS) return;
+            item_no = item_no + 1;
+            buy_row_id[buy_row_count]     = w;
+            buy_row_game[buy_row_count]   = g;
+            buy_row_number[buy_row_count] = item_no;
+            buy_row_count = buy_row_count + 1;
+        }
+    }
+
+    // Armor and the defuse kit are not weapons and belong to no game, so they
+    // trail the equipment screen under their own heading.
+    if (cat == BUYCAT_EQUIPMENT)
+    {
+        if (buy_row_count >= BUY_MAX_ROWS) return;
+        buy_row_id[buy_row_count]     = WMF_WEP_NONE;
+        buy_row_game[buy_row_count]   = WMF_GAME_NONE;
+        buy_row_number[buy_row_count] = 0;
+        buy_row_count = buy_row_count + 1;
+
+        for (i = 1; i <= BUYITEM_COUNT; i = i + 1)
+        {
+            if (buy_row_count >= BUY_MAX_ROWS) return;
+            item_no = item_no + 1;
+            buy_row_id[buy_row_count]     = BuyItem_ByIndex(i);
+            buy_row_game[buy_row_count]   = WMF_GAME_NONE;
+            buy_row_number[buy_row_count] = item_no;
+            buy_row_count = buy_row_count + 1;
+        }
+    }
 };
 
-// Weapon id / buy-item id for item-screen row r (1-based), or NONE.
+// Everything that needs the layout funnels through the row count, so the
+// rebuild check lives here and nowhere else.
+float() Buy_ItemRowCount =
+{
+    if (buy_rows_built_for != buymenu_category)
+        Buy_BuildRows(buymenu_category);
+    return buy_row_count;
+};
+
+// Weapon id / buy-item id for item-screen row r (1-based), or NONE — which is
+// also what a header row returns, and Buy_Purchase already no-ops on NONE, so
+// clicking a heading does nothing without needing its own guard.
 float(float r) Buy_RowId =
 {
-    float gren = BuyCat_Count(buymenu_category);
-    if (r >= 1 && r <= gren)
-        return BuyCat_Weapon(buymenu_category, r);
-    if (buymenu_category == BUYCAT_EQUIPMENT && r > gren && r <= gren + BUYITEM_COUNT)
-        return BuyItem_ByIndex(r - gren);
-    return WMF_WEP_NONE;
+    if (r < 1 || r > Buy_ItemRowCount())
+        return WMF_WEP_NONE;
+    return buy_row_id[r - 1];
+};
+
+float(float r) Buy_RowIsHeader =
+{
+    if (r < 1 || r > Buy_ItemRowCount())
+        return FALSE;
+    return buy_row_number[r - 1] == 0;
+};
+
+// Display row carrying item number `num`, or 0.  The number keys address ITEMS,
+// not rows — "3" must buy the row labelled 3 however many headings sit above it.
+float(float num) Buy_RowForNumber =
+{
+    float r, n = Buy_ItemRowCount();
+    for (r = 1; r <= n; r = r + 1)
+        if (buy_row_number[r - 1] == num)
+            return r;
+    return 0;
 };
 
 string(float id) Buy_IdName =
@@ -291,8 +384,14 @@ float(float evtype, float scanx, float chary, float devid) Buy_InputEvent =
         pick = scanx - '0';
         if (buymenu_state == 0)
             Buy_EnterCategory(pick);
-        else if (pick <= Buy_ItemRowCount())
-            Buy_Purchase(Buy_RowId(pick));
+        else
+        {
+            // Address the ITEM numbered `pick`, not the display row — the game
+            // headings occupy rows and carry no number, so the two diverge.
+            row = Buy_RowForNumber(pick);
+            if (row > 0)
+                Buy_Purchase(Buy_RowId(row));
+        }
         return TRUE;
     }
 
@@ -338,15 +437,31 @@ void() Buy_Draw =
     rp = [BUY_PANEL_X + BUY_PAD_X, top + BUY_PAD_Y + BUY_TITLE_H, 0];
     for (i = 1; i <= rowcount; i = i + 1)
     {
+        // Seeded per row: the header branch below `continue`s before assigning
+        // it, and fteqcc's flow analysis does not follow the continue.
+        afford = FALSE;
+
         if (buymenu_state == 0)
         {
             label = sprintf("%g. %s", i, BuyCat_Label(i));
             afford = Buy_CategoryAffordable(i);
         }
+        else if (Buy_RowIsHeader(i))
+        {
+            // A source-game heading: no number, no price, not selectable, and
+            // never greyed — it is a label, not an offer.  BUYITEM rows (armor,
+            // defuse kit) belong to no game and take the generic heading.
+            float hg = buy_row_game[i - 1];
+            label = (hg == WMF_GAME_NONE) ? "-- Equipment --"
+                                          : sprintf("-- %s --", WeaponManifest_GameLabel(hg));
+            drawstring(rp, label, [fs, fs], '0.55 0.75 0.95', 0.9, 0);
+            rp_y = rp_y + BUY_LINE_H;
+            continue;
+        }
         else
         {
             id = Buy_RowId(i);
-            label = sprintf("%g. %s", i, Buy_IdName(id));
+            label = sprintf("%g. %s", buy_row_number[i - 1], Buy_IdName(id));
             price = Buy_IdPrice(id);
             afford = Buy_Affordable(id);
             // Right-aligned price column.

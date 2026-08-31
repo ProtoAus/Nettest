@@ -37,6 +37,34 @@ float(entity use_target) SV_UseTarget =
         && cvar("sv_door_use_only"))
         return FALSE;
 
+    // func_water is LINK_ENTITY_TO_CLASS'd straight onto CBaseDoor
+    // (doors.cpp:276), so the arm above applies to it verbatim — it just never
+    // matched, because sv_water.qc keeps the classname "func_water" while
+    // inheriting .use = door_use.  The press therefore fell through to door_use,
+    // which answered a named pool with the buttons/button2.wav locked click that
+    // Sven does not make.  CBaseDoor::Spawn also force-sets SF_DOOR_SILENT on any
+    // door with skin != 0 (doors.cpp:291-295), i.e. on every func_water, so a pool
+    // cannot emit ANY door sound in GoldSrc — locked click included.
+    //
+    // A SEPARATE `if` rather than a third || term, on purpose: sv_doors.qc:1411-1416
+    // records a three-term || silently evaluating to 0 in this codebase with
+    // logicops off.  Not worth re-testing that for one classname.
+    if (use_target.classname == "func_water"
+        && !use_target.door_player_usable
+        && cvar("sv_door_use_only"))
+        return FALSE;
+
+    // Entities Half-Life keeps out of the player's use search entirely, by
+    // withholding FCAP_IMPULSE_USE from ObjectCaps().  A press aimed past one
+    // must reach whatever is behind it, so report NOT-HANDLED without consuming
+    // it — the difference between "that door is locked" and "that button does
+    // nothing".  See the note on .use_passthrough in sv_customdefs.qc.
+    //
+    // This used to test `onlytrigger`, which is a func_breakable key and never
+    // meant this; see the same note for what that key actually is.
+    if (use_target.use_passthrough)
+        return FALSE;
+
     // Monsters carry a .use so that a trigger chain naming one by targetname
     // still passes THROUGH it - an entity with a spawn function loses the inert
     // relay that unimplemented classes get for free, and dropping the chain
@@ -159,6 +187,10 @@ float(entity weap) SV_TryWeaponSwap =
     return SV_TryWeaponPickup(weap);
 };
 
+// Sven item_inventory +use collection (sv_item_inventory.qc, compiled just
+// above).  Returns TRUE when the press was consumed by a pickup.
+float(entity it, entity plyr) Inv_TryPickup;
+
 // prop_car / func_car mount gate (defined in sv_prop_vehicle.qc, compiled later).
 entity(entity plyr) Car_FindMountable;
 float(entity plyr, entity car) Car_TryMount;
@@ -173,6 +205,16 @@ void() SV_PlayerTryUse =
     entity best, e;
     float  best_dot, dot;
     float  best_is_weapon;
+
+    // A player pressing +use carries no explicit use type — HL's PlayerUse
+    // calls Use(..., USE_SET) for trains and USE_TOGGLE for everything else,
+    // and the "everything else" default is what the entities below expect.
+    // sub_use_type is a GLOBAL holding whatever the last trigger chain left in
+    // it, so it must be re-seeded per press or a stale USE_ON/USE_OFF from an
+    // unrelated map event decides what this button does.  Entities that read it
+    // (func_tracktrain_use, func_train_use, momentary, multisource) see
+    // USE_UNSET and take their toggle path, which is correct for a hand press.
+    sub_use_type = USE_UNSET;
 
     // func_vehicle mount/dismount toggle (HL2-carry-style: consume the +use).
     // Dismount if already driving; else mount if standing on a vehicle's deck
@@ -300,6 +342,11 @@ void() SV_PlayerTryUse =
                 sv_use_is_player_direct = FALSE;
                 return;
             }
+            if (Inv_TryPickup(trace_ent, self))
+            {
+                sv_use_is_player_direct = FALSE;
+                return;
+            }
             if (SV_TryWeaponSwap(trace_ent))
             {
                 sv_use_is_player_direct = FALSE;
@@ -315,6 +362,11 @@ void() SV_PlayerTryUse =
     else
     {
         traceline(use_start, use_end, MOVE_NORMAL, self);
+        if (Inv_TryPickup(trace_ent, self))
+        {
+            sv_use_is_player_direct = FALSE;
+            return;
+        }
         if (SV_UseTarget(trace_ent))
         {
             sv_use_is_player_direct = FALSE;
@@ -367,6 +419,23 @@ void() SV_PlayerTryUse =
             }
         }
         e = e.chain;
+    }
+
+    // The cone fallback is the path that actually matters for item_inventory,
+    // and for exactly the reason the weapon comment above gives: an
+    // item_inventory is SOLID_TRIGGER (Sven's `solid` key defaults to "touch on
+    // edge, non-blocking"), and traceline MOVE_NORMAL does not collide with
+    // SOLID_TRIGGER at all — so the two traces above will essentially never
+    // return one.  findradius does see it.
+    //
+    // Tried BEFORE the use/weapon dispatch because item_inventory also carries
+    // a .use, for the trigger-driven remote collect Sven documents.  Letting
+    // SV_UseTarget reach that would collect the item while ignoring the
+    // TOUCH_ONLY spawnflag, which is precisely what that flag exists to forbid.
+    if (Inv_TryPickup(best, self))
+    {
+        sv_use_is_player_direct = FALSE;
+        return;
     }
 
     if (best_is_weapon)
@@ -461,5 +530,54 @@ void() SV_CheckTouchTriggers =
             }
         }
         e = e.chain;
+    }
+
+    // --- 3. func_breakable with the "Touch" spawnflag (HL SF_BREAK_TOUCH, bit 2) ---
+    //
+    // The handler has been installed on these brushes since the class was
+    // written (sv_breakable.qc, `self.touch = func_breakable_touch`) and has
+    // NEVER ONCE been called.  Players here are MOVETYPE_NONE with QC pmove
+    // (sv_player.qc, "engine physics off; we run our own"), so the engine
+    // generates no SV_Impact pairs for them; SV_LinkEdict's touch pass only
+    // fires SOLID_TRIGGER entities and a func_breakable is SOLID_BSP; and a
+    // MOVETYPE_PUSH brush that never moves never generates a touch from the
+    // push side either.  This function IS the touch dispatcher, as its own
+    // header says — and it only ever knew about SOLID_TRIGGER, FL_MONSTER and
+    // func_button.  A grep for func_breakable_touch found the definition, two
+    // `.touch =` assignments and zero call sites.
+    //
+    // A list rather than the findradius above, because that sweep ranks on the
+    // brush centre and the corpus has touch breakables with a half-diagonal of
+    // 163 units.  See breakable_touch_list in sv_breakable.qc.
+    //
+    // The +/-2 inflation is there for the same reason the func_button arm needs
+    // it: a solid brush stops the player just OUTSIDE its bbox, so a strict
+    // overlap test would barely ever fire (the engine only spreads submodel
+    // bounds by 1 unit).
+    // `e.touch == func_breakable_touch`, not merely `e.touch`.  func_pushable
+    // calls func_breakable() verbatim and then DELIBERATELY overwrites the
+    // handler with its own ("Touch has to win over func_breakable's TOUCH-flag
+    // handler", sv_func_pushable.qc), so a pushable authored with bit 2 would
+    // join this list and then get func_pushable_touch called once per player per
+    // frame on top of its own hull-sweep dispatcher — a double shove.  No corpus
+    // map does that today, so this is latent, but the identity test costs one
+    // token and also disposes of the freed-edict concern in the list's own note.
+    e = breakable_touch_list;
+    while (e)
+    {
+        entity nxt = e.breakable_touch_next;
+        if (e.touch == func_breakable_touch && !e.breakable_broken && e.solid != SOLID_NOT
+         && self.absmin_x - 2 <= e.absmax_x && self.absmax_x + 2 >= e.absmin_x
+         && self.absmin_y - 2 <= e.absmax_y && self.absmax_y + 2 >= e.absmin_y
+         && self.absmin_z - 2 <= e.absmax_z && self.absmax_z + 2 >= e.absmin_z)
+        {
+            oldself = self; oldother = other;
+            other   = self;
+            self    = e;
+            self.touch();
+            self  = oldself;
+            other = oldother;
+        }
+        e = nxt;
     }
 };

@@ -824,7 +824,7 @@ void() CSQC_PredictedPaintballImpact =
     if (is_player_hit)
     {
         CSQC_TryPlayPredictedHitmarker();
-        CSQC_SendHitclaim(trace_ent, damage, trace_bone_id);
+        CSQC_SendHitclaim(trace_ent, damage, trace_bone_id, HITGROUP_GENERIC);
     }
     else
     {

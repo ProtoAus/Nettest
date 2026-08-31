@@ -581,6 +581,7 @@ string client_config_cvars[] =
     // --- General ---
     "name",
     "volume",
+    "musicvolume",      // engine cvar (snd_dma.c:83); `volume` does not cover music
     "sensitivity",
     "fov",
 
@@ -656,6 +657,14 @@ string client_config_cvars[] =
 
     // --- Main-menu picks ---
     "cl_player_model_choice",
+
+    // Half-Life HD model pack.  MUST be persisted, or the "HD Models" switch is
+    // a lie: the engine reads fs_hdmodels only while searchpaths are being
+    // built, so a flip made in a game is explicitly promised to "take effect
+    // next launch" — and without this line there is no next launch, because the
+    // cvar goes back to its default 0 the moment the game closes.  Applying it
+    // on the launch after also needs Menu_ApplyHDModels below.
+    "fs_hdmodels",
 };
 
 // Server cvars formerly enumerated here — moved to the manifest in
@@ -810,10 +819,14 @@ void() Menu_RegisterCvars =
     // sees the intended defaults before cfg/*.cfg is exec'd.
     CVar_Init();
     CVar_RegisterMine();
+    CVar_CheckOverflow();   // loud if the table could not fit — see sh_cvar_table.qc
 
     // Menu-only cvars that don't belong in the manifest (purely
     // ephemeral or menu-internal).  registercvar is idempotent.
     registercvar("_quakers_menu_active", "0", 0);
+    // Anti-loop latch for Menu_ApplyHDModels — see the note there.  Registered
+    // so reading it at the main menu doesn't spawn a "Created QC Cvar" warning.
+    registercvar("_hdmodels_mounted", "0", 0);
 
     // Crosshair UI toggles registered on the CSQC side (CVAR_SIDE_CL).
     // The manifest's CVar_RegisterMine flagged them BOTH for menu so
@@ -841,6 +854,52 @@ void() Menu_RegisterCvars =
     }
 };
 
+// Re-mount the searchpaths once at boot if the persisted HD-models preference
+// disagrees with what was actually mounted.
+//
+// The value cannot be read from the cvar here: Menu_LoadConfig's
+// `exec cfg/settings.cfg` is QUEUED through localcmd and has not run yet, so
+// cvar("fs_hdmodels") would still report the pre-exec value.  The file is read
+// directly instead, which is synchronous and answers the only question that
+// matters — what is about to be set.
+//
+// `_hdmodels_mounted` is the anti-loop latch, and it is an ENGINE cvar rather
+// than a QC global on purpose: if fs_restart re-initialises the menu VM, a
+// global would come back zeroed and this function would restart forever.  Cvars
+// are untouched by a package reload, so the second pass sees the latch and
+// stops.  It is deliberately NOT in client_config_cvars — it must start clear on
+// every launch, because every launch mounts without HD until told otherwise.
+float() Menu_HDModelsPersisted =
+{
+    float f = fopen("cfg/settings.cfg", FILE_READ);
+    if (f < 0)
+        return FALSE;
+
+    float want = FALSE;
+    string line = fgets(f);
+    while (line)
+    {
+        if (tokenize(line) >= 3 && argv(0) == "set" && argv(1) == "fs_hdmodels")
+            want = (stof(argv(2)) > 0);
+        line = fgets(f);
+    }
+    fclose(f);
+    return want;
+};
+
+void() Menu_ApplyHDModels =
+{
+    if (!Menu_HDModelsPersisted())
+        return;
+    if (cvar("_hdmodels_mounted") > 0)
+        return;                     // already rebuilt for this launch
+
+    // Queued AFTER the settings exec above, so fs_hdmodels is set by the time
+    // the rebuild reads it.
+    localcmd("set _hdmodels_mounted 1\n");
+    localcmd("fs_restart\n");
+};
+
 void() Menu_LoadConfig =
 {
     // Register defaults first so cvar reads don't spawn "Created QC Cvar"
@@ -858,6 +917,14 @@ void() Menu_LoadConfig =
     // block, so every menu-VM init would reset the player's saved resolution and fullscreen
     // state back to 1024x768 windowed.
     localcmd("exec cfg/settings.cfg\n");
+
+    // The searchpaths were built before that exec could possibly run, so a
+    // persisted `fs_hdmodels 1` has arrived too late to have been honoured —
+    // measured: with the cvar set as a boot command and no rebuild,
+    // `flocate models/hgrunt.mdl` still resolves to valve (183132 bytes); with
+    // an fs_restart after it, valve_hd (308784).  One rebuild, here at the main
+    // menu with nothing loaded, is what makes the setting survive a restart.
+    Menu_ApplyHDModels();
 
     // Also load cfg/server.cfg at menu init so the Create Server menu
     // populates its text fields with persisted server settings instead of

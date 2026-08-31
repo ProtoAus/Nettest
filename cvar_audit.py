@@ -40,7 +40,14 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TABLE = os.path.join(HERE, "shared", "sh_cvar_table.qc")
-CFG = os.path.normpath(os.path.join(HERE, "..", "data", "default.cfg"))
+# The gamedir's config folder is "cfg/", not "data/".  It was data/ when this
+# script was written and the rename left this line behind, so every run since
+# has died on FileNotFoundError before reaching a single check -- which is why
+# the CFG-DIFF class of finding had gone quiet rather than clean.  Both names are
+# tried so the script still works against an older tree.
+CFG = os.path.normpath(os.path.join(HERE, "..", "cfg", "default.cfg"))
+if not os.path.exists(CFG):
+    CFG = os.path.normpath(os.path.join(HERE, "..", "data", "default.cfg"))
 
 VMS = ("CSQC", "SSQC", "MENU")
 PROGS = {"SSQC": "sv_progs.src", "CSQC": "cl_progs.src", "MENU": "m_progs.src"}
@@ -65,6 +72,13 @@ ENGINE_CVARS = {
     "cl_backspeed", "cl_forwardspeed", "cl_sidespeed", "cl_upspeed",
     "cl_launchintogame", "cl_netfps", "cl_servername",
     "developer", "fov", "name", "rate", "rcon_password", "sensitivity",
+    # engine/client/snd_dma.c:83 -- CVARAFD("musicvolume","0.3","bgmvolume",CVAR_ARCHIVE).
+    # Read by the mp3volume console command and driven by the Settings menu
+    # slider, but never registered here: registercvar is a no-op on it and a
+    # table row would let CVar_ForceDefaults stomp the player's archived choice.
+    # cfg/default.cfg is what sets the shipped value, per the ENGINE_OWNED_ROWS
+    # rule below.
+    "musicvolume",
     "net_qwmaster1", "net_qwmaster2", "net_qwmaster3",
     "r_decal_lightmap", "r_meshpitch", "r_meshroll", "r_part_maxparticles",
     "r_ragdoll_timescale", "r_shadow_realtime_dlight", "r_shadows",

@@ -39,9 +39,12 @@
 .string outcount;
 .float  zone_last_in;       // previous inside-count, for edge detection
 
-// env_global
+// env_global.  The NAME of the global is the `globalstate` key, declared in
+// sv_triggers.qc, and the live value lives in sv_globalstate.qc's table rather
+// than on this entity — one name can have several env_globals writing it, and
+// the value has to outlive the map.  There is deliberately no
+// .globalstate_value field any more.
 .float  initialstate;       // 0 off, 1 on, 2 dead
-.float  globalstate_value;  // live state for this global
 .float  triggermode;        // 0 off, 1 on, 2 dead, 3 toggle — Hammer spells
                             // this key WITHOUT an underscore; the field name
                             // must match the BSP key exactly or it never binds
@@ -120,7 +123,12 @@ void() GoldSrc_NoteUnhandled =
 // entity that the mapper gave a delay still contributes its timing.
 void() GoldSrc_UnknownRelay_Use =
 {
-    SUB_UseTargets(self, activator, sub_use_type ? sub_use_type : USE_TOGGLE);
+    // == USE_UNSET, not a truthiness test: USE_OFF is 0 and would be discarded
+    // by a ternary, which is the tree-wide bug USE_UNSET exists to close
+    // (sv_customdefs.qc).  An unimplemented entity relaying an explicit Off
+    // must pass the Off through.
+    SUB_UseTargets(self, activator,
+                   (sub_use_type == USE_UNSET) ? USE_TOGGLE : sub_use_type);
 };
 
 // Engine hook (engine/server/pr_cmds.c: looked up by name, called in place of
@@ -174,6 +182,19 @@ void() info_teleport_dest =
 void() light_spot        = {};
 void() light_environment = {};
 
+// Same family, and the FGD says so out loud: sven-coop.fgd:3373 declares
+// info_texlights as a @PointClass with an EMPTY key list.  Its real payload is
+// authored with SmartEdit off - one raw keyvalue per emissive texture, the KEY
+// being the texture name and the VALUE "R G B brightness" (desertcircle's single
+// instance carries "+0~light6a" "255 0 0 500").  VHLT's RAD reads those at
+// compile time and bakes them; at runtime there is nothing to do.
+//
+// Declaring it stops the inert-relay path logging it as unhandled.  The texture
+// keyvalues themselves still reach ED_ParseUnknownEpair and are reaped by
+// MM_ReapOrphanSlots like any other unowned capture - harmless, and not worth a
+// name-prefix skip when the key is an arbitrary texture name.
+void() info_texlights    = {};
+
 // ammo_357 MOVED to server/sv_goldsrc_ammo.qc, which now owns every ammo class
 // on one reserve mechanism.
 //
@@ -188,12 +209,10 @@ void() light_environment = {};
 // only way to name the entity.  FTE resolves "spawnfunc_<classname>" ahead of
 // "<classname>" (DP_SV_SPAWNFUNC_PREFIX).
 
-// Sven's name for the Desert Eagle.
-void() weapon_eagle =
-{
-    self.classname = "weapon_deagle";
-    weapon_deagle();
-};
+// weapon_eagle is now a REAL weapon - shared/weapons/sh_wpn_opeagle.qc, with
+// Opposing Force's own v_/p_/w_desert_eagle models and its five sounds.  This
+// alias onto Counter-Strike's Deagle was the closest of the eight by a
+// distance (same gun, same calibre, wrong game) and is retired with them.
 
 // Monster-only clip brush.  531 of these across 81 Sven maps, and every one is a
 // mapper saying "monsters may not go here" — the single richest navigation hint
@@ -267,14 +286,19 @@ void() env_xenmaker          = { GoldSrc_InertMonster(); };
 void() xen_plantlight_switch = { GoldSrc_InertMonster(); };
 void() env_beverage          = { GoldSrc_InertMonster(); };
 void() env_bubbles           = { self.solid = SOLID_NOT; self.movetype = MOVETYPE_NONE; };
-void() env_shooter           = { GoldSrc_InertMonster(); };
+// env_shooter WAS here, inert.  It is now real — server/sv_goldsrc_effects.qc,
+// sharing gibshooter's code exactly as HL's CEnvShooter derives from
+// CGibShooter (effects.cpp:1520).  55 placements across 15 of the 22 They
+// Hunger / pizza maps, and the reason it never appeared on the "unimplemented
+// classnames" list is that A STUB COUNTS AS IMPLEMENTED: only a census that
+// dumped per-class KEYS rather than per-class presence could find it.
 
-// env_shake — screen shake on trigger.  We have no shake channel; forward the
-// chain so anything downstream of it still fires.
-void() env_shake =
-{
-    self.use = GoldSrc_UnknownRelay_Use;
-};
+// env_shake WAS here, forwarding its trigger and doing nothing because this
+// tree had no shake channel.  It is now real — server/sv_screenshake.qc, with
+// the receiving half in client/cl_screenshake.qc.  Exactly the same lesson as
+// env_shooter directly above: 184 placements across 28 of the 36 Sven hl_ maps,
+// and it never once appeared on an "unimplemented classnames" list because a
+// stub reports as implemented to every presence-based audit.
 
 // ===========================================================================
 //  Tier 2 — progression logic.  These gate real map advancement, so they are
@@ -282,65 +306,85 @@ void() env_shake =
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
-// env_global — named global state, readable by multisource / trigger_condition
-// and settable by any trigger.  Half-Life stores these in the save-game
-// globalstate table and they survive level changes; we keep them per-map
-// (cross-map persistence would need the changelevel transition code to carry
-// them, which is out of scope) but the within-map behaviour is faithful.
+// env_global — the WRITER for Half-Life's global state table (buttons.cpp:68).
+// The table itself, and the reasoning behind it, is in sv_globalstate.qc.
+//
+// This used to keep the value on the entity and look it up by `.globalname`,
+// which is the wrong key: HL reads the state's name from `globalstate`
+// (buttons.cpp:73, commented "// State name" in the SDK), and `globalname` is an
+// unrelated HL key for entity identity across a level transition.  Every one of
+// the 36 env_global placements in the corpus sets `globalstate` and none sets
+// `globalname`, so the old lookup could never match — and nothing called it
+// anyway.  See sv_globalstate.qc's header for the measurement.
 //
 // Keys:
-//   globalname    the global's name
+//   globalstate   the global's NAME (required; HL removes the entity without it)
 //   initialstate  0 off, 1 on, 2 dead
 //   triggermode   what a trigger does to it: 0 off, 1 on, 2 dead, 3 toggle
-// Flag 1: "Set initial state" — otherwise the global keeps whatever value it
-//         already had (which for us, with no cross-map table, is off).
+// Flag 1: "Set initial state" — WITHOUT it the entity defines nothing at spawn
+//         and only writes when triggered, which is how a global set on an
+//         earlier map survives being walked back into.
 // ---------------------------------------------------------------------------
 const float SF_GLOBAL_SET_INITIAL = 1;
 
-// Look up the env_global entity that owns `name`.  Other entities read
-// .globalstate_value off it.
-entity(string name) EnvGlobal_Find =
-{
-    if (name == "" || name == __NULL__)
-        return world;
-    entity e = find(world, classname, "env_global");
-    while (e)
-    {
-        if (e.globalname == name)
-            return e;
-        e = find(e, classname, "env_global");
-    }
-    return world;
-};
-
-float(string name) EnvGlobal_IsOn =
-{
-    entity g = EnvGlobal_Find(name);
-    if (!g) return FALSE;
-    return (g.globalstate_value == 1);
-};
-
 void() env_global_use =
 {
+    float old = GlobalState_Get(self.globalstate);
     float mode = self.triggermode;
+    float newstate;
 
-    if      (mode == 0) self.globalstate_value = 0;   // off
-    else if (mode == 1) self.globalstate_value = 1;   // on
-    else if (mode == 2) self.globalstate_value = 2;   // dead
-    else                self.globalstate_value = self.globalstate_value ? 0 : 1;   // toggle
+    // buttons.cpp:99-121.  Note what case 3 does NOT do: a DEAD global stays
+    // dead under toggle.  Only OFF<->ON flip.
+    if      (mode == 0) newstate = GLOBAL_OFF;
+    else if (mode == 1) newstate = GLOBAL_ON;
+    else if (mode == 2) newstate = GLOBAL_DEAD;
+    else if (old == GLOBAL_ON)  newstate = GLOBAL_OFF;
+    else if (old == GLOBAL_OFF) newstate = GLOBAL_ON;
+    else                        newstate = old;
+
+    // buttons.cpp:127-130 — set if present, otherwise define it here.  A map
+    // whose env_global has no "Set initial state" flag reaches the table for the
+    // first time on this line.
+    if (GlobalState_InTable(self.globalstate))
+        GlobalState_SetState(self.globalstate, newstate);
+    else
+        GlobalState_Add(self.globalstate, newstate);
 
     if (cvar("sv_debug_use"))
-        print(sprintf("[env_global] \"%s\" -> %g\n", self.globalname, self.globalstate_value));
+        print(sprintf("[env_global] \"%s\" %g -> %g (mode %g)\n",
+                      self.globalstate, old, newstate, mode));
 
+    // NOT in Half-Life: CEnvGlobal::Use does not chain onward, it only writes
+    // the table.  Kept because this tree has shipped it since the entity was
+    // added and a map that targets through an env_global would break without it;
+    // harmless in the reference maps, which give env_global no `target` at all.
     SUB_UseTargets(self, activator, USE_TOGGLE);
 };
 
 void() env_global =
 {
+    // buttons.cpp:83-88 — an env_global with no state name is REMOVED.  Keeping
+    // it would leave a use-handler that writes to the empty name on every fire.
+    if (self.globalstate == "" || self.globalstate == __NULL__)
+    {
+        if (cvar("sv_debug_use"))
+            print(sprintf("[env_global] \"%s\" has no globalstate — removed\n",
+                          self.targetname));
+        remove(self);
+        return;
+    }
+
+    // buttons.cpp:89-93 — the flag means "define it", and the InTable guard is
+    // the whole point: re-entering a map must NOT reset a global the player
+    // already changed on a previous visit.  GlobalState_Add no-ops on a name
+    // that is present, so the guard is implicit, but it is stated here because
+    // the SDK states it.
     if (self.spawnflags & SF_GLOBAL_SET_INITIAL)
-        self.globalstate_value = self.initialstate;
-    else
-        self.globalstate_value = 0;
+    {
+        if (!GlobalState_InTable(self.globalstate))
+            GlobalState_Add(self.globalstate, self.initialstate);
+    }
+
     self.use = env_global_use;
 };
 
@@ -444,38 +488,211 @@ void() game_zone_player =
 };
 
 // ---------------------------------------------------------------------------
-// trigger_setorigin — teleports one entity onto another's origin.  Sven uses
-// this to reposition brush entities and markers mid-map (8 on the reference
-// map).
+// trigger_setorigin — moves one entity onto another's, per-axis, optionally
+// FOLLOWING it every frame.
 //
-// Keys:  target      entity to move
-//        copypointer entity whose origin is copied
-// Flag 1: keep the target's angles instead of copying them.
+// This was a one-shot .use handler that copied the whole origin and read flag 1
+// as "keep angles".  Flag 1 is not that, and the one-shot shape is not the one
+// the corpus mostly uses.  From sven-coop.fgd:6774-6801:
+//
+//      1 Constant           follow every frame, not once
+//      4 Set Once           remove this entity after firing
+//      8 Lock Offsets       keep the gap between target and pointer (needs 1)
+//     16 Copy X Angle    32 Copy Y Angle    64 Copy Z Angle
+//    128 Copy X Axis    256 Copy Y Axis    512 Copy Z Axis
+//   1024 Skip Initial Set   do not move it up front; follow from where it is
+//
+//   copypointer   entity whose position is copied
+//   offset        manual offset added to the copied position
+//   angleoffset   manual offset added to the copied angles
+//
+// desertcircle's four flag movers are 1545 = Constant | Lock Offsets |
+// Copy Z Axis | Skip Initial Set, which reads as "leave the flag sprite where I
+// put it on the pole, then follow this hidden brush's HEIGHT forever".  That is
+// the whole flag-raising mechanism: the momentary_rot_button drives a
+// momentary_door parked out of sight, and this carries the visible flag up with
+// it.  Under the old code none of those four bits meant anything, nothing ever
+// triggered the entity, and the flag could not move at all.
+//
+// The lock is stored on the TARGET, not on this entity, because one
+// trigger_setorigin may name several and each has its own gap to keep.
 // ---------------------------------------------------------------------------
-const float SF_SETORIGIN_KEEP_ANGLES = 1;
+const float SF_SETORIGIN_CONSTANT    = 1;
+const float SF_SETORIGIN_SETONCE     = 4;
+const float SF_SETORIGIN_LOCKOFFSET  = 8;
+const float SF_SETORIGIN_ANG_X       = 16;
+const float SF_SETORIGIN_ANG_Y       = 32;
+const float SF_SETORIGIN_ANG_Z       = 64;
+const float SF_SETORIGIN_AXIS_X      = 128;
+const float SF_SETORIGIN_AXIS_Y      = 256;
+const float SF_SETORIGIN_AXIS_Z      = 512;
+const float SF_SETORIGIN_SKIPINITIAL = 1024;
+const float SF_SETORIGIN_AXIS_ALL    = 896;    // 128|256|512
+
+.vector offset;              // manual position offset  ("x y z" map key)
+.vector angleoffset;         // manual angle offset     ("x y z" map key)
+.vector setorigin_lock;      // ON THE TARGET: gap to hold under Lock Offsets
+.float  setorigin_locked;    // ON THE TARGET: gap has been captured
+
+// Write one target from one source, honouring the axis and angle masks.
+void(entity trg, entity src, entity cfg) SetOrigin_ApplyOne =
+{
+    // No axis bits at all means "all three".  The FGD ticks 128/256/512 by
+    // default, so a map that never touched the flags still means every axis -
+    // and that is also what this entity did before it had masks, which is what
+    // keeps the maps already relying on it working.
+    float ax = cfg.spawnflags & SF_SETORIGIN_AXIS_ALL;
+    if (!ax)
+        ax = SF_SETORIGIN_AXIS_ALL;
+
+    vector base = src.origin + cfg.offset;
+    if (cfg.spawnflags & SF_SETORIGIN_LOCKOFFSET)
+        base = base + trg.setorigin_lock;
+
+    vector prev = trg.origin;
+    vector o    = trg.origin;
+    if (ax & SF_SETORIGIN_AXIS_X) o_x = base_x;
+    if (ax & SF_SETORIGIN_AXIS_Y) o_y = base_y;
+    if (ax & SF_SETORIGIN_AXIS_Z) o_z = base_z;
+    setorigin(trg, o);
+
+    vector a  = trg.angles;
+    vector sa = src.angles + cfg.angleoffset;
+    if (cfg.spawnflags & SF_SETORIGIN_ANG_X) a_x = sa_x;
+    if (cfg.spawnflags & SF_SETORIGIN_ANG_Y) a_y = sa_y;
+    if (cfg.spawnflags & SF_SETORIGIN_ANG_Z) a_z = sa_z;
+    trg.angles = a;
+
+    // Harmless on a plain networked entity (env_sprite), required for anything
+    // replicated through solid_brush_SendEntity.
+    trg.SendFlags = -1;
+
+    // Only when it actually MOVED.  A Constant follower re-writes the same
+    // position 40 times a second while its source sits still, and four of them
+    // (desertcircle has exactly four) drown every other line in the log -
+    // including the one that says the base was captured.
+    if (o != prev && cvar("sv_debug_use"))
+        dprint(sprintf("[setorigin] \"%s\" <- \"%s\" src=%v lock=%v -> %v\n",
+                       trg.targetname, src.targetname, src.origin,
+                       trg.setorigin_lock, trg.origin));
+};
+
+// One pass over every named target.  Captures the Lock Offsets gap the first
+// time it sees each one.
+void(entity cfg) SetOrigin_Pass =
+{
+    entity src = find(world, targetname, cfg.copypointer);
+    if (!src)
+        return;
+
+    // A path-following brush sits at its origin-brush position until its own
+    // deferred think snaps it onto the track, and that snap can land AFTER the
+    // trigger_auto that switches this follower on.  Measuring the Lock Offsets
+    // gap in that window bakes the editor-to-track distance into the offset
+    // permanently — on hl_c00 that is ~6000 units, and it put the tram spawn
+    // points (and therefore the player) outside the map.  Force the source
+    // into place first; idempotent, and a no-op for every other source class.
+    Mover_EnsureSpawnPlacement(src);
+
+    entity e = findchain(targetname, cfg.target);
+    while (e)
+    {
+        if (!e.setorigin_locked)
+        {
+            // The target can be an unplaced mover too (a follower gluing one
+            // train to another), and its gap is just as wrong if it is.
+            Mover_EnsureSpawnPlacement(e);
+            // Skip Initial Set is what makes the gap worth anything: without it
+            // the FGD says the entity is moved onto the pointer FIRST and the
+            // difference is computed after, which leaves a gap of zero.
+            if (!(cfg.spawnflags & SF_SETORIGIN_SKIPINITIAL))
+                SetOrigin_ApplyOne(e, src, cfg);
+            e.setorigin_lock   = e.origin - src.origin;
+            e.setorigin_locked = TRUE;
+        }
+        else
+            SetOrigin_ApplyOne(e, src, cfg);
+        e = e.chain;
+    }
+};
+
+// CONSTANT MODE IS A SWITCH, and that is the other half of desertcircle's flag.
+//
+// Sven's changelog lists both halves as bugs it fixed -- "trigger_setorigin not
+// accepting explicit off input in constant mode" and "trigger_setorigin in
+// constant mode forgetting the copy/source entity when activated more than
+// once" -- so a Constant one is started, stopped and restarted by triggering it,
+// and keeps its pairing across all of that.
+//
+// The map is built on exactly that.  `startmm` switches all four flag followers
+// ON at map start; when a base is captured its multi_manager fires the same
+// entity a SECOND time, which switches the follower OFF and leaves the flag
+// sprite standing at the masthead while the button's auto-return quietly winds
+// the hidden door back down underneath it.  That is the "it stops and stays
+// there" the mapper wrote, and without the off input the flag instead sailed
+// past the top of its pole to wherever the door's full travel put it.
+.float setorigin_on;
+
+void() trigger_setorigin_think =
+{
+    if (!self.setorigin_on)
+        return;                 // switched off - stop thinking, keep the lock
+    SetOrigin_Pass(self);
+    self.nextthink = time + Momentary_TickInterval();
+};
 
 void() trigger_setorigin_use =
 {
     if (self.target == "" || self.copypointer == "")
         return;
 
-    entity src = find(world, targetname, self.copypointer);
-    if (!src)
-        return;
-
-    entity e = findchain(targetname, self.target);
-    while (e)
+    if (self.spawnflags & SF_SETORIGIN_CONSTANT)
     {
-        setorigin(e, src.origin);
-        if (!(self.spawnflags & SF_SETORIGIN_KEEP_ANGLES))
-            e.angles = src.angles;
-        e = e.chain;
+        // USE_ON / USE_OFF are explicit; a plain trigger (USE_TOGGLE, what a
+        // multi_manager sends) flips it.  The lock captured on the way up is
+        // deliberately NOT cleared: it belongs to the target/pointer pairing,
+        // and re-arming with a fresh gap is what "forgetting the copy entity"
+        // was.
+        float want;
+        if      (sub_use_type == USE_ON)  want = TRUE;
+        else if (sub_use_type == USE_OFF) want = FALSE;
+        else                              want = !self.setorigin_on;
+
+        self.setorigin_on = want;
+        if (!want)
+        {
+            self.nextthink = 0;
+            return;
+        }
+
+        SetOrigin_Pass(self);
+        self.think     = trigger_setorigin_think;
+        self.nextthink = time + Momentary_TickInterval();
+        return;
     }
+
+    SetOrigin_Pass(self);
+
+    if (self.spawnflags & SF_SETORIGIN_SETONCE)
+        remove(self);
 };
 
 void() trigger_setorigin =
 {
     self.use = trigger_setorigin_use;
+
+    // An UNNAMED Constant one starts on its own, because nothing can ever
+    // trigger it and the FGD does describe the flag as a property of the entity
+    // ("will constantly update position if set").  A NAMED one waits to be
+    // switched on: it is the only reading under which firing it twice can mean
+    // anything, and every named one in this corpus is fired at map start by the
+    // same multi_manager that later fires it again to stop it.
+    if ((self.spawnflags & SF_SETORIGIN_CONSTANT) && self.targetname == "")
+    {
+        self.setorigin_on = TRUE;
+        self.think        = trigger_setorigin_think;
+        self.nextthink    = time + 0.1;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -631,10 +848,21 @@ void() PlayerSpawn;
 void(entity p) PlayerRefreshScoreboardInfo;
 void(entity p) PM_SyncPredictionProxy;
 
+// sven-coop.fgd:6660-6669, the trigger_respawn spawnflag block.
+const float SF_RESPAWN_TARGETONLY  = 1;   // "Respawn Target" — NOT implemented, see below
+const float SF_RESPAWN_DEADPLAYERS = 2;   // "Respawn dead players"
+const float SF_RESPAWN_KEEPLIVING  = 4;   // "Don't move living players"
+
 void() trigger_respawn_use =
 {
     if (!IsMasterTriggered(self.master, activator))
         return;
+
+    // CACHED BEFORE THE LOOP, and that is load-bearing rather than tidy: `self` is
+    // reassigned to each PLAYER inside the loop below (PlayerSpawn and
+    // PlayerPlaceAtSpawnPoint are both self-driven), so a `self.spawnflags` read in
+    // there would be asking the player about its spawnflags, not the trigger.
+    float sf = self.spawnflags;
 
     float moved = 0;
     entity oldself = self;
@@ -652,14 +880,41 @@ void() trigger_respawn_use =
                 e.pending_round_join = FALSE;
                 PlayerRefreshScoreboardInfo(e);
                 PlayerSpawn();
+                moved = moved + 1;
             }
-            else
+            // "DON'T MOVE LIVING PLAYERS" IS A REAL FLAG AND WAS BEING DISCARDED.
+            //
+            // This function never read spawnflags at all, so it yanked everyone
+            // alive to a spawn point regardless of what the mapper asked for.
+            // th_ep1_01's `churchrespawn` is spawnflags 6 = 2|4, i.e. "revive the
+            // dead, do NOT move the living" — so walking into the radio trigger
+            // teleported you across the church for no reason.
+            //
+            // Gated on bit 4 ONLY, deliberately, not on 2|4.  The corpus settles
+            // it: flag 4 never appears alone anywhere, six maps set it on top of
+            // 2, and hl_c08_a2 / th_ep3_00 / th_ep3_03 each ship BOTH a plain
+            // "respawn" and a separate flag-6 "respawn_dead" — which only makes
+            // sense if 2 by itself still relocates the living.  Widening the mask
+            // would silently stop th_ep1_05, th_ep2_04, th_ep3_00, th_ep3_03,
+            // hl_c05_a2, hl_c08_a2, mustard and snd from working.
+            //
+            // th_ep1_00's `they2_forcespawn` is spawnflags 0, so the post-intro
+            // cutscene handoff this function was originally written for keeps
+            // moving living players exactly as before.
+            //
+            // STILL NOT IMPLEMENTED, left in place knowingly: bit 2 clear should
+            // mean "do not revive corpses" (20 corpus maps use spawnflags 0), and
+            // bit 1 "Respawn Target" should restrict the whole thing to one named
+            // player (th_escape's respawn_winnars / respawn_ghosts /
+            // respawn_lastlive). Both are separate patches; bit 1 in particular
+            // needs the player-.targetname machinery.
+            else if (!(sf & SF_RESPAWN_KEEPLIVING))
             {
                 PlayerPlaceAtSpawnPoint();
                 e.fixangle = TRUE;
                 PM_SyncPredictionProxy(e);     // or CSQC keeps the old origin
+                moved = moved + 1;
             }
-            moved = moved + 1;
             self = oldself;
         }
         e = nxt;
@@ -679,24 +934,10 @@ void() trigger_respawn =
 
 // trigger_vote now has a real implementation in server/sv_trigger_vote.qc.
 
-// ---------------------------------------------------------------------------
-// trigger_script — Sven's AngelScript hook.  There is no script VM here and
-// there never will be, so this can only ever forward its chain.  Logged so
-// the console makes clear which map behaviour is missing rather than leaving
-// the mapper guessing.
-// ---------------------------------------------------------------------------
-void() trigger_script_use =
-{
-    if (cvar("sv_debug_use"))
-        print(sprintf("[trigger_script] \"%s\" fired — AngelScript is not supported, forwarding chain\n",
-                      self.targetname));
-    GoldSrc_UnknownRelay_Use();
-};
-
-void() trigger_script =
-{
-    self.use = trigger_script_use;
-};
+// trigger_script moved to server/sv_mapscript.qc, which compiles just after this
+// file.  It still forwards its chain through GoldSrc_UnknownRelay_Use below, but
+// it now also reads m_iszScriptFunctionName and looks for a native stand-in, so
+// a campaign whose AngelScript does something simple can get that something.
 
 // ---------------------------------------------------------------------------
 // game_text — HUD text on trigger.
@@ -1073,8 +1314,14 @@ void() GoldSrc_Healthkit_Touch =
     other.health = min(100, other.health + HEALTHKIT_AMOUNT);
     sound(other, CHAN_ITEM, "items/smallmedkit1.wav", 1, ATTN_NORM);
 
+    // This inlines GoldSrc_PickupTaken's body rather than calling it, and has
+    // since it was written.  Kept inline, but the respawn hook has to be here
+    // too or item_healthkit would be the one pickup in the set that ignores
+    // mp_item_respawndelay - which is the sort of gap nobody finds by reading.
     if (self.target != "")
         SUB_UseTargets(self, other, USE_TOGGLE);
+    if (Pickup_Taken(self, PICKUP_KIND_ITEM))
+        return;
     remove(self);
 };
 
@@ -1100,11 +1347,10 @@ void() item_healthkit =
     }
 };
 
-void() weapon_medkit =
-{
-    self.classname = "item_healthkit";
-    item_healthkit();
-};
+// weapon_medkit is now a REAL weapon - shared/weapons/sh_wpn_svmedkit.qc, a
+// carryable healing tool with its own charge pool, exactly as the note above
+// said it should be.  item_healthkit stays: it is a different entity
+// (sven-coop.fgd:3414) wearing a different world model, and maps place both.
 
 // ---------------------------------------------------------------------------
 // func_plat — Half-Life's two-state lift.  Sits at the top, drops by `height`
@@ -1117,9 +1363,82 @@ void() weapon_medkit =
 // (-210, i.e. downward), so that is the path exercised.
 // ---------------------------------------------------------------------------
 const float PLAT_SF_TOGGLE = 1;
+// CFuncPlatRot's axis bits.  Same numbering and the same FGD-name-vs-world-axis
+// inversion as func_door_rotating; the decode below is copied from
+// sv_doors_rotating.qc:1082-1095 rather than re-derived.
+const float PLATROT_X_AXIS = 64;
+const float PLATROT_Y_AXIS = 128;
 
-.float plat_state;          // 0 = at top, 1 = at bottom
-.float plat_moving;
+.float  plat_state;          // 0 = at top, 1 = at bottom
+.float  plat_moving;
+.float  plat_isrot;          // this is a func_platrot
+// THE ROTATED END IS THE TOP, and this pair used to hold it the other way round.
+// CFuncPlatRot::SetupRotation (plats.cpp:543-560):
+//
+//     m_start = pev->angles;                                  // zero: Setup cleared it
+//     m_end   = pev->angles + pev->movedir * m_vecFinalAngle.x;
+//     if ( !FStringNull(pev->targetname) )   // Start at top
+//         pev->angles = m_end;
+//
+// and GoUp rotates toward m_end while GoDown rotates toward m_start
+// (plats.cpp:569-576).  So TOP carries the `rotation` key and BOTTOM is zero.
+// Holding it inverted left every named platrot - which is all 9 in the corpus -
+// resting 90 degrees off Half-Life and spinning the wrong way round.
+.vector plat_ang1;           // angles at the TOP position    (= HL's m_end)
+.vector plat_ang2;           // angles at the BOTTOM position (= HL's m_start, zero)
+
+// Sven's OpenClosable back-compat aliases, per sven-coop.fgd:844 and :853:
+//   `fireonopen` == fireonopened  (Fire On Open End)   -> we are at the BOTTOM
+//   `netname`    == fireonclosed  (Fire On Close End)  -> we are at the TOP
+// Only two entities in the corpus set them (hl_c01_a1 and hl_c02_a1, both `ele_2`),
+// and on both they drive the trigger_changetargets that re-aim the call button, so
+// the elevator is unusable without them.  Declaring the field is enough for the
+// engine to bind it: sv_multi_manager.qc's blanket "fireon" discard sits BELOW the
+// declared-field lookup, so it only ever sees keys nothing claimed.
+// `.string fireonopen;` moved to sv_doors.qc, which compiles first and needs it
+// for func_door's own copy of this chain pair — a field can only be declared
+// once, and the earlier declaration is the one both readers can see.
+.float  fireonopen_triggerstate;
+.float  netname_triggerstate;   // not a real key; keeps the two paths symmetrical
+
+// The volume-aware sound pair.  The door helpers hardcode volume 1 on CHAN_VOICE;
+// HL's CBasePlatTrain emits movement on CHAN_STATIC and arrival on CHAN_WEAPON, both
+// at m_volume (plats.cpp:433-437, :455-465).  Every plat and platrot in the corpus
+// sets `volume` explicitly, so honouring it is not cosmetic.
+void() Plat_PlayMoveSound =
+{
+    if (!Door_IsSilentSound(self.noise2))
+        sound(self, CHAN_VOICE, self.noise2, self.volume, ATTN_NORM);
+};
+
+void() Plat_PlayStopSound =
+{
+    Door_StopMoveSound();
+    if (!Door_IsSilentSound(self.noise1))
+        sound(self, CHAN_WEAPON, self.noise1, self.volume, ATTN_NORM);
+};
+
+// Fire one of the two Sven end-of-travel chains.  GoldSrc_TriggerStateToUseType
+// already maps this enum (0 Off / 1 On / 2 Toggle, sven-coop.fgd:810-815); the
+// corpus value is 2 on all twelve keys, which comes out as USE_TOGGLE.
+void(string targ, float state) Plat_FireChain =
+{
+    if (targ == "" || targ == __NULL__)
+        return;
+    // Throwaway relay, the same shape sv_monsters.qc:1655-1660 uses for
+    // squadmaker's trigger_target: SUB_UseTargets walks the CALLER's .target, and
+    // the plat's own .target is a different chain we must not disturb.
+    entity relay = spawn();
+    relay.classname = "plat_fire";
+    relay.target    = targ;
+    SUB_UseTargets(relay, self, GoldSrc_TriggerStateToUseType(state));
+    remove(relay);
+};
+
+// Forward decls: plat_hit_top re-arms the descent and plat_blocked reverses, so
+// both halves of the travel pair are referenced before either is defined.
+void() plat_go_down;
+void() plat_go_up;
 
 void() plat_hit_top =
 {
@@ -1127,7 +1446,29 @@ void() plat_hit_top =
     self.plat_moving = 0;
     self.mover_state = MOVER_STATE_TOP;
     self.SendFlags   = 1;
-    Door_PlayStopSound();
+    if (self.plat_isrot)
+    {
+        // Snap and stop, exactly as CFuncPlatRot::HitTop does (plats.cpp:599-602).
+        // Leaving avelocity running would let the cage drift past its end angle by
+        // however much of a tick was left over.
+        //
+        // No RotatingBrush_RemoveFromList: Plat_RotStart no longer adds us to that
+        // list.  Kept as a paired comment rather than a defensive call, because a
+        // remove on a brush that was never added is a walk of the whole list to
+        // find nothing - and because the pairing is what a reader checks first.
+        self.avelocity = '0 0 0';
+        self.angles    = self.plat_ang1;
+    }
+    Plat_PlayStopSound();
+    // "Closed" is the TOP for a plat.  See the .fireonopen note above.
+    Plat_FireChain(self.netname, self.netname_triggerstate);
+
+    // Non-toggle plats re-arm a descent 3 seconds after arriving (plats.cpp:467-483).
+    if (!(self.spawnflags & PLAT_SF_TOGGLE))
+    {
+        self.think     = plat_go_down;
+        self.nextthink = self.ltime + 3;
+    }
 };
 
 void() plat_hit_bottom =
@@ -1136,7 +1477,66 @@ void() plat_hit_bottom =
     self.plat_moving = 0;
     self.mover_state = MOVER_STATE_BOTTOM;
     self.SendFlags   = 1;
-    Door_PlayStopSound();
+    if (self.plat_isrot)
+    {
+        self.avelocity = '0 0 0';
+        self.angles    = self.plat_ang2;   // see plat_hit_top on the absent remove
+    }
+    Plat_PlayStopSound();
+    // ...and "open" is the BOTTOM.
+    Plat_FireChain(self.fireonopen, self.fireonopen_triggerstate);
+};
+
+// Start the rotation half in lockstep with the translation, which is all
+// CFuncPlatRot::RotMove is (plats.cpp:608-620): a constant avelocity sized so the
+// spin finishes exactly when the lift arrives.  Mover_Start owns the think, so this
+// must NOT go through Mover_RotateStart - that installs its own think and the two
+// would fight over .nextthink.
+void(vector dest_ang, vector dest_org) Plat_RotStart =
+{
+    if (!self.plat_isrot)
+        return;
+
+    float dist = vlen(dest_org - self.origin);
+    float tt   = 0;
+    if (self.speed > 0)
+        tt = dist / self.speed;
+    if (tt <= 0)
+    {
+        self.angles    = dest_ang;
+        self.avelocity = '0 0 0';
+        return;
+    }
+    // HL's own short-travel guard (plats.cpp:614-620): under a tenth of a second it
+    // stops dividing and just takes the delta as the rate, which spreads the spin
+    // over a second instead of producing a colossal one-tick avelocity.  The lift
+    // arrives long before that and HitTop/HitBottom snap the angle, so the visible
+    // result is the same as the reference - it is the spike that is avoided.
+    if (tt < 0.1)
+        self.avelocity = dest_ang - self.angles;
+    else
+        self.avelocity = (dest_ang - self.angles) * (1 / tt);
+    // NOT PUBLISHED TO rotating_brush_list, and the line that used to do that is
+    // the reported "player rotates twice as far as the lift does".
+    //
+    // The comment on it claimed it was needed "so PM_CheckMovingPushers mirrors
+    // the yaw carry on the client", but those are two different lists:
+    // RotatingBrush_AddToList feeds PM_CheckRotatingCarry, while
+    // PM_CheckMovingPushers walks moving_brush_list - which Mover_Start's
+    // MovingBrush_AddToList has already handled, and whose TRAIN branch carries
+    // the yaw itself (sh_pmove.qc:3952-4015, `yaw_delta` into
+    // PM_RotateAroundPivot).  A plat is BRUSH_TYPE_TRAIN, so it took that branch
+    // AND the rotating one, and each orbited pm_origin by the full step.
+    //
+    // PM_CheckRotatingCarry is also CSQC-only by design ("the server's separate
+    // physics-tick carry is the authoritative one, running both would
+    // double-apply"), so this only doubled on the client - the predicted body
+    // swung twice as far as the server said and fought reconcile the whole ride.
+    //
+    // Visual rotation is unaffected: brushsync ships .avelocity independently of
+    // either carry list.  PM_InheritRotatorTangent also still works - it reads
+    // trace_ent.avelocity directly rather than walking the list - so stepping off
+    // a spinning cage still throws you tangentially.
 };
 
 void() plat_go_down =
@@ -1145,7 +1545,8 @@ void() plat_go_down =
         return;
     self.plat_moving = 1;
     self.mover_state = MOVER_STATE_DOWN;
-    Door_PlayMoveSound();
+    Plat_PlayMoveSound();
+    Plat_RotStart(self.plat_ang2, self.pos2);
     Mover_Start(self.pos2, self.speed, plat_hit_bottom);
 };
 
@@ -1155,52 +1556,258 @@ void() plat_go_up =
         return;
     self.plat_moving = 1;
     self.mover_state = MOVER_STATE_UP;
-    Door_PlayMoveSound();
+    Plat_PlayMoveSound();
+    Plat_RotStart(self.plat_ang1, self.pos1);
     Mover_Start(self.pos1, self.speed, plat_hit_top);
+};
+
+// CFuncPlat::Blocked, plats.cpp:497-512: one point of DMG_CRUSH, kill the movement
+// sound, and REVERSE.  The 1 is hardcoded in the SDK and `dmg` is never read on a
+// plat, which is the same call sv_th_entities.qc:5103-5107 already documents making
+// for the other movers here - so the key stays parsed-and-unused on purpose.
+//
+// The stop/resume half is already handled: Mover_TravelTick zeroes velocity for the
+// tick whenever it is wedged (sv_doors.qc:420-444) and resumes when clear. What was
+// missing is only the crush and the reversal.
+void() plat_blocked =
+{
+    if (other.cutscene_immune)
+        return;
+    W_ApplyDamage(self, other, 1);
+
+    if (self.mover_state == MOVER_STATE_DOWN)
+    {
+        self.plat_moving = 0;
+        self.plat_state  = 1;     // let go_up's state gate pass
+        plat_go_up();
+    }
+    else if (self.mover_state == MOVER_STATE_UP)
+    {
+        self.plat_moving = 0;
+        self.plat_state  = 0;
+        plat_go_down();
+    }
 };
 
 void() plat_use =
 {
     if (cvar("mp_disabledoors")) return;
+
+    // HL's PlatUse, plats.cpp:402-427.  TOGGLE plats honour the use type through
+    // ShouldToggle with "top is off, bottom is on"; non-toggle plats are ONE-SHOT -
+    // the first use clears .use and sends the lift down, and it comes back only on
+    // the 3-second re-arm in plat_hit_top.
+    //
+    // USE_UNSET, not a truthy ternary: an explicit Off is 0 and the ternary would
+    // discard it (sv_customdefs.qc).  hl_c01_a1 depends on this - its `ele_x_btm`
+    // multi_manager fires `ele_2 "1#0"`, and that Off is what sends the cage home.
+    float ut = (sub_use_type == USE_UNSET) ? USE_TOGGLE : sub_use_type;
+
+    if (self.spawnflags & PLAT_SF_TOGGLE)
+    {
+        float on = (self.plat_state == 1);      // "top is off, bottom is on"
+        if (ut == USE_ON  && on)  return;
+        if (ut == USE_OFF && !on) return;
+
+        if (self.plat_state == 0)
+            plat_go_down();
+        else
+            plat_go_up();
+        return;
+    }
+
+    self.use = sub_noop;
     if (self.plat_state == 0)
         plat_go_down();
-    else
-        plat_go_up();
 };
 
-/*QUAKED func_plat (0 .5 .8) ? TOGGLE
-Half-Life lift.  Starts at the top; moves `height` units (negative = down)
-when triggered, and returns on the next trigger.
-
-"speed"    movement speed (default 100)
-"height"   travel distance along Z; negative moves down
-"movesnd"  GoldSrc move-sound index
-"volume"   parsed, not honoured (sound() uses full volume)
-*/
-void() func_plat =
+// The auto-call field.  CPlatTrigger::SpawnInsideTrigger (plats.cpp:339-395) wraps a
+// non-toggle plat in a trigger volume 25 units wider on each horizontal axis, 8 units
+// tall above the top position and extending down over the whole travel; stepping into
+// it calls the lift up, and standing on the plat at the top re-arms the descent.
+// 29 of the corpus's 37 plats are non-toggle and had none of this.
+void() plat_trigger_touch =
 {
-    if (self.movesnd > 0) self.noise2 = Door_LookupMoveSound(self.movesnd);
-    if (self.stopsnd > 0) self.noise1 = Door_LookupStopSound(self.stopsnd);
+    entity p = self.owner;
+    if (other.classname != "player")  return;
+    if (other.health <= 0)            return;
+    if (!p || p == world)             { remove(self); return; }
+
+    entity oldself = self;
+    self = p;
+    if (self.plat_state == 1)
+        plat_go_up();
+    else if (self.plat_state == 0 && !self.plat_moving)
+    {
+        // Standing on it at the top - push the auto-descend out, HL's 1 second.
+        self.think     = plat_go_down;
+        self.nextthink = self.ltime + 1;
+    }
+    self = oldself;
+};
+
+void() Plat_SpawnInsideTrigger =
+{
+    entity t = spawn();
+    t.classname = "plat_trigger";
+    t.owner     = self;
+    t.solid     = SOLID_TRIGGER;
+    t.movetype  = MOVETYPE_NONE;
+    t.touch     = plat_trigger_touch;
+
+    vector mn = self.absmin, mx = self.absmax;
+    mn_x = mn_x - 25;  mn_y = mn_y - 25;
+    mx_x = mx_x + 25;  mx_y = mx_y + 25;
+    // Down over the whole travel, up 8 above the resting top - plats.cpp:352-360.
+    mn_z = mn_z - fabs(self.pos1_z - self.pos2_z);
+    mx_z = self.absmax_z + 8;
+    setorigin(t, '0 0 0');
+    setsize(t, mn, mx);
+};
+
+// Shared spawn body for func_plat and func_platrot.  `isrot` adds the rotation
+// half; everything else — travel, sounds, use semantics, the auto-call field — is
+// identical, exactly as CFuncPlatRot derives from CFuncPlat (plats.cpp:515).
+void(float isrot) Plat_SpawnCommon =
+{
+    // THE PLAT SOUND TABLES, NOT THE DOOR ONES.  CBasePlatTrain::Precache uses
+    // plats/*.wav over 13 move and 8 stop indices (plats.cpp:96-260); the door table
+    // is doors/doormoveN and only reaches 10, so movesnd 11/12/13 fell off the end
+    // into silence — and hl_c01_a1's and hl_c02_a1's elevators are both movesnd 12.
+    // FuncTrain_MoveSound/StopSound already implement HL's table and compile at
+    // sv_progs.src:187, well ahead of this file at :273.
+    if (self.movesnd > 0) self.noise2 = FuncTrain_MoveSound(self.movesnd);
+    if (self.stopsnd > 0) self.noise1 = FuncTrain_StopSound(self.stopsnd);
+    // Explicit overrides win, per the PlatSounds FGD block (sven-coop.fgd:1224-1225).
+    if (self.noise  != "" && self.noise  != __NULL__) self.noise2 = self.noise;
+    if (self.noise1 != "" && self.noise1 != __NULL__) self.noise1 = self.noise1;
     Door_PrecacheIfReal(self.noise1);
     Door_PrecacheIfReal(self.noise2);
 
-    if (!self.speed) self.speed = 100;
+    if (!self.speed)  self.speed  = 150;   // plats.cpp:300
+    if (!self.volume) self.volume = 0.85;  // plats.cpp:305
+
+    // A plat never rotates its brushwork off the mapper's angles key - HL clears it
+    // in Setup (plats.cpp:285) BEFORE SetupRotation runs, which is also why a
+    // func_platrot always spins from zero.  Must happen before the brush is linked.
+    self.angles     = '0 0 0';
+    self.plat_ang2  = '0 0 0';        // BOTTOM = HL's m_start, which Setup just zeroed
+    self.plat_isrot = isrot;
 
     SV_InitReplicatedSolidBrush();
     self.brush_type = BRUSH_TYPE_TRAIN;   // rides the platform-carry branch so
                                           // players standing on it move with it
-    self.use  = plat_use;
-    self.pos1 = self.origin;
+    self.use     = plat_use;
+    self.blocked = plat_blocked;
+    // Same ObjectCaps reasoning as func_train (sv_func_train.qc): CFuncPlat and
+    // CFuncPlatRot both derive from CBasePlatTrain, whose caps come out ZERO
+    // (plats.cpp:35), so neither is in the player's +use search.  A plat is
+    // ridden or triggered; the thing you press is its call button.
+    self.use_passthrough = TRUE;
+    self.pos1    = self.origin;
 
-    // `height` is signed travel along Z.  Fall back to the brush's own height
-    // when the mapper left it unset, which is HL's default derivation.
-    float travel = self.height;
-    if (travel == 0)
-        travel = -(self.maxs_z - self.mins_z);
+    // TRAVEL DIRECTION.  HL: m_vecPosition2.z = pev->origin.z - m_flHeight
+    // (plats.cpp:296-299), so a NEGATIVE height moves the plat UP.  This used to add
+    // the key instead of subtracting it, which drove 33 of the corpus's 37 plats
+    // backwards - pizza_ya_san1's two shop shutters are 220-tall brushes with
+    // height -210 that are supposed to roll up out of the doorway, and they sank into
+    // the floor instead.
+    float travel = -self.height;
+    if (self.height == 0)
+        travel = -((self.maxs_z - self.mins_z) - 8);   // plats.cpp:298, incl. HL's +8
     self.pos2 = self.pos1 + [0, 0, travel];
 
-    self.plat_state  = 0;
-    self.mover_state = MOVER_STATE_TOP;
+    if (isrot)
+    {
+        // CBaseToggle::AxisDir's bit map, copied from sv_doors_rotating.qc:1082-1095
+        // rather than re-derived: the FGD flag NAMES refer to which movedir slot HL
+        // sets, not to the world axis.  None of the 7 corpus platrots uses either
+        // bit, so this is for completeness.
+        float rot = self.rotation;
+        if (self.spawnflags & PLATROT_X_AXIS)
+            self.plat_ang1 = [0, 0, rot];        // roll,  around world X
+        else if (self.spawnflags & PLATROT_Y_AXIS)
+            self.plat_ang1 = [rot, 0, 0];        // pitch, around world Y
+        else
+            self.plat_ang1 = [0, rot, 0];        // yaw
+    }
+
+    // A NAMED plat starts at the TOP and is brought down by whatever names it; an
+    // UNNAMED one starts at the BOTTOM and is called up by the trigger field
+    // (plats.cpp:318-336).  All 37 corpus plats are named, so the second case is
+    // dormant today - it is here because the first one is meaningless without it.
+    if (self.targetname != "" && self.targetname != __NULL__)
+    {
+        // "Start at top" - and the top is the ROTATED end, so a named platrot has
+        // to be placed at that angle, not at zero (plats.cpp:557-560).  This is the
+        // line that made hl_c01_a1's elevator cage sit square to the shaft instead
+        // of turned 90 degrees the way Half-Life leaves it.
+        if (isrot)
+        {
+            self.angles = self.plat_ang1;
+            // SV_InitReplicatedSolidBrush linked this brush at the old angle, so the
+            // PVS box would be built from geometry rotated about (0,0,0) until its
+            // first move.  Same relink func_door_rotating and momentary_door do.
+            BrushSync_RelinkAngles();
+        }
+        self.plat_state  = 0;
+        self.mover_state = MOVER_STATE_TOP;
+    }
+    else
+    {
+        setorigin(self, self.pos2);
+        // The bottom IS m_start, which is zero, and .angles is already zero.
+        self.plat_state  = 1;
+        self.mover_state = MOVER_STATE_BOTTOM;
+    }
+
+    // Non-toggle plats get HL's auto-call volume.  After the origin is settled, so
+    // the box is sized around where the brush actually rests.
+    if (!(self.spawnflags & PLAT_SF_TOGGLE))
+        Plat_SpawnInsideTrigger();
+
+    // The plat family had no debug print of its own, which is why the inverted
+    // rotation endpoints survived: `sv_debug_doors` reaches Mover_TravelTick (which
+    // a plat does use) but nothing ever said what the two ends WERE.
+    if (cvar("sv_debug_doors"))
+        dprint(sprintf("[plat] \"%s\" rot=%g top=%v bottom=%v pos1=%v pos2=%v ang=%v\n",
+                       self.targetname, self.rotation, self.plat_ang1, self.plat_ang2,
+                       self.pos1, self.pos2, self.angles));
+};
+
+/*QUAKED func_plat (0 .5 .8) ? TOGGLE
+Half-Life lift.  A named plat starts at the top and is brought down by its
+trigger; an unnamed one starts at the bottom and is called up by stepping into
+the volume around it.
+
+"speed"    movement speed (default 150)
+"height"   travel along Z.  HL subtracts it, so NEGATIVE moves the plat UP.
+"movesnd"  GoldSrc plat move-sound index (1..13, the plats sound table)
+"stopsnd"  GoldSrc plat stop-sound index (1..8)
+"volume"   0..1, honoured on both
+*/
+void() func_plat =
+{
+    Plat_SpawnCommon(FALSE);
+};
+
+/*QUAKED func_platrot (0 .5 .8) ? TOGGLE x x x x x X_AXIS Y_AXIS
+func_plat that also spins while it travels.  Needs an ORIGIN brush - the origin
+key is the axis it turns about.  CFuncPlatRot, plats.cpp:515-620.
+
+"rotation" total degrees turned between the top and bottom positions
+"height"   travel along Z (negative moves UP, as func_plat)
+"speed"    movement speed
+64/128     spin about world X / Y instead of Z
+
+`netname` and `fireonopen` are Sven's back-compat aliases for fireonclosed and
+fireonopened (sven-coop.fgd:844, :853) and fire on arrival at the top and the
+bottom respectively.  hl_c01_a1's elevator drives its own call button through
+them, so they are not decoration.
+*/
+void() func_platrot =
+{
+    Plat_SpawnCommon(TRUE);
 };
 
 // ---------------------------------------------------------------------------
@@ -1220,6 +1827,13 @@ const float TANK_SF_CANCONTROL = 32;
 .float  firerate;
 .float  barrel;
 .float  yawrange;
+// How often tank_think runs.  Named because the slew rate is expressed in
+// degrees per SECOND and has to be converted to degrees per step, and because
+// the avelocity handed to CSQC is that step divided by the same number.
+const float TANK_THINK_IV = 0.05;
+// Angle still to travel after the current step, for the tolerance gate.
+.float  tank_err_yaw;
+.float  tank_err_pitch;
 .float  yawrate;
 .float  yawtolerance;
 .float  pitchrange;
@@ -1239,12 +1853,27 @@ void() tank_fire =
     if (time < self.tank_next_fire)
         return;
 
+    // Sven/HL's yawtolerance / pitchtolerance: the gun will not fire until the
+    // barrel has caught up with where the operator is looking.  Without a slew
+    // rate these were meaningless (the barrel was always already there); with
+    // one they are what stops a slow turret shooting sideways while it swings.
+    if (self.yawtolerance > 0 && fabs(self.tank_err_yaw) > self.yawtolerance)
+        return;
+    if (self.pitchtolerance > 0 && fabs(self.tank_err_pitch) > self.pitchtolerance)
+        return;
+
     float rate = self.firerate;
     if (rate <= 0) rate = 4;
     self.tank_next_fire = time + 1.0 / rate;
 
     entity p = self.tank_controller;
-    makevectors(p.v_angle);
+    // THE BARREL'S ANGLE, NOT THE OPERATOR'S VIEW.  This read p.v_angle, which
+    // was wrong before the slew rate existed and is glaring now: tank_think
+    // clamps the barrel to yawrange/pitchrange, so on any tank with an arc limit
+    // the shots already left the visible arc — you could stand behind the gun,
+    // look backwards, and shoot through it.  Aiming down the barrel is also what
+    // makes the tolerance gate above mean anything.
+    makevectors(self.angles);
 
     vector muzzle = self.origin + v_forward * self.barrel;
     traceline(muzzle, muzzle + v_forward * 8192, MOVE_NORMAL, self);
@@ -1259,7 +1888,7 @@ void() tank_fire =
 
 void() tank_think =
 {
-    self.nextthink = time + 0.05;
+    self.nextthink = time + TANK_THINK_IV;
 
     entity p = self.tank_controller;
     if (p == world)
@@ -1280,8 +1909,40 @@ void() tank_think =
     if (self.yawrange   > 0) yaw_off   = bound(-self.yawrange,   yaw_off,   self.yawrange);
     if (self.pitchrange > 0) pitch_off = bound(-self.pitchrange, pitch_off, self.pitchrange);
 
-    self.angles_y  = self.tank_base_angles_y + yaw_off;
-    self.angles_x  = self.tank_base_angles_x + pitch_off;
+    float want_yaw   = self.tank_base_angles_y + yaw_off;
+    float want_pitch = self.tank_base_angles_x + pitch_off;
+
+    // SLEW, rather than snap.  yawrate / pitchrate are degrees per second and
+    // were declared and never read, so every mounted gun in the corpus tracked
+    // the operator's crosshair perfectly and instantly — which is not what a
+    // heavy weapon on a mount is.  Rate 0 keeps the old snap, so a map that
+    // never set the key behaves exactly as it did.
+    float dy = anglemod(want_yaw   - self.angles_y + 180) - 180;
+    float dp = anglemod(want_pitch - self.angles_x + 180) - 180;
+
+    float maxy = (self.yawrate   > 0) ? self.yawrate   * TANK_THINK_IV : 360;
+    float maxp = (self.pitchrate > 0) ? self.pitchrate * TANK_THINK_IV : 360;
+
+    float sy = bound(-maxy, dy, maxy);
+    float sp = bound(-maxp, dp, maxp);
+
+    self.angles_y = self.angles_y + sy;
+    self.angles_x = self.angles_x + sp;
+
+    // What is LEFT after this step — read by tank_fire's tolerance gate.
+    self.tank_err_yaw   = dy - sy;
+    self.tank_err_pitch = dp - sp;
+
+    // Hand the motion to CSQC as angular velocity.  cl_brushsync.qc extrapolates
+    // any brush shipping a non-zero avelocity between snapshots, so the barrel
+    // moves smoothly instead of stepping at this think's 20Hz — and ZEROING it
+    // on arrival is not optional: the client integrates blindly, so a stale
+    // avelocity sails the barrel past the stop and then snaps it back.
+    if (self.tank_err_yaw == 0 && self.tank_err_pitch == 0)
+        self.avelocity = '0 0 0';
+    else
+        self.avelocity = [sp / TANK_THINK_IV, sy / TANK_THINK_IV, 0];
+
     self.SendFlags = 1;
 
     if (p.button0)
@@ -1318,6 +1979,8 @@ Player-operated mounted gun.  Mount it by +using a linked func_tankcontrols.
 "bullet_damage" damage per shot
 "firerate"      shots per second
 "yawrange" "pitchrange"  arc limits in degrees
+"yawrate" "pitchrate"    slew speed in degrees/second (0 = snap instantly)
+"yawtolerance" "pitchtolerance"  don't fire until the barrel is this close
 "target"        fired when a player mounts
 */
 void() func_tank =

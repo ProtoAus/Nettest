@@ -439,8 +439,23 @@ void() Car_Think =
 		if (!self.car_asleep)
 			Car_PhysStep(self);
 	}
-	else if (self.pp_scrape_active)
-		PhysFiles_StopScrape(self);   // grabbed mid-grind: PhysStep (which owns the scrape) no longer runs
+	// CARRIED.  This used to unconditionally do
+	//     else if (self.pp_scrape_active) PhysFiles_StopScrape(self);
+	// on the reasoning that PhysStep owns the scrape and no longer runs.  While
+	// the car is merely GRABBED and still that is correct, but the generic
+	// Carry_Tick (sv_physprop.qc) calls PhysFiles_StartScrape on this same car
+	// every tick it is dragged along a surface — and StartScrape only issues the
+	// sound() when !pp_scrape_active, which the stop above had just cleared.
+	// The two therefore alternated once per tick: stop, start, stop, start,
+	// re-issuing a SOUNDFLAG_FORCELOOP sample from scratch every single tick.
+	// That is exactly the machine-gunning StartScrape's own comment warns about,
+	// and it is what a car dragged along the GROUND sounded like.
+	//
+	// So: only cut the loop when the carry is NOT itself driving it.  Carry_Tick
+	// refreshes .pp_slide_active_until on every StartScrape and cuts the loop
+	// itself 0.2 s after the drag stops, so nothing is stranded by deferring.
+	else if (self.pp_scrape_active && time > self.pp_slide_active_until)
+		PhysFiles_StopScrape(self);
 
 
 	// bolt the (hidden, non-solid) driver to the seat

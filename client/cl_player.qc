@@ -38,6 +38,11 @@ float  sv_confirmed_duck_msec;
 float  sv_confirmed_oldbuttons;
 float  sv_confirmed_timecarry;
 float  sv_confirmed_teleport_time;
+// Travels with pm_teleport_time and for the same reason: the arrival latch is
+// pmove state, so a rollback that restored the timer but not the latch would let
+// the client re-fire a teleport the server has already refused.  See the block
+// above PM_CheckTeleportTriggers' latch test in sh_pmove.qc.
+vector sv_confirmed_teleport_org;
 float  sv_confirmed_ladder_detach_time;
 float  sv_confirmed_fuser2;
 float  sv_confirmed_spread_penalty;
@@ -61,6 +66,16 @@ float  sv_confirmed_ph_hull_halfxy;     // Prop Hunt disguise hull (mirrors pm_c
 float  sv_confirmed_ph_hull_minz;       //  height > 0 == disguised — prediction MUST use the
 float  sv_confirmed_ph_hull_height;     //  same dequantized hull as the server or the owner
 float  sv_confirmed_ph_yaw_locked;      //  rubber-bands while disguised)
+float  sv_confirmed_pm_longjump;        // HL long jump module — PM_CheckJump reads it, so it must survive reconcile
+// Sven item_inventory holder effects.  Same flow as pm_carrying directly
+// above, and needed for the same reason: PM_LoadMovevars READS these every
+// pmove tick and never writes them, so a reconcile-replay that starts from a
+// zeroed predicted_player would replay the whole rewind at full speed and then
+// snap back to half speed on the next confirmed frame.
+float  sv_confirmed_pm_inv_speed_pct;
+float  sv_confirmed_pm_inv_gravity_pct;
+float  sv_confirmed_pm_inv_friction_pct;
+float  sv_confirmed_pm_inv_blockfire;
 float  sv_confirmed_pm_driving;         // func_vehicle driving flag (drives the pmove driver-lock)
 float  sv_confirmed_pm_incar;           // prop_car in-car flag (pmove input-zero + camera + fire-block)
 vector cl_car_cam_org, cl_car_cam_vel;  // driven car origin/velocity (from the proxy) for the chase-cam anchor
@@ -86,6 +101,11 @@ float  sv_confirmed_fire_suppress_until;
 float  sv_confirmed_cmdframe;    // last acknowledged command for baseline
 
 // Weapon prediction state (extended proxy)
+// Carry lists, captured and restored alongside the cursors below.  Without these
+// a reconcile would restore the cursor but leave the predicted carry lists
+// untouched, so a mispredicted pickup could never be corrected.
+float  sv_confirmed_carry_primary[4];
+float  sv_confirmed_carry_secondary[4];
 float  sv_confirmed_slot_primary;
 float  sv_confirmed_slot_secondary;
 float  sv_confirmed_slot_melee;
@@ -151,6 +171,52 @@ float  sv_confirmed_ammo_cssmokegrenade;
 float  sv_confirmed_ammo_cfc4;
 float  sv_confirmed_snowball_has_slingshot;
 float  sv_confirmed_snowball_use_slingshot;
+float  sv_confirmed_ammo_satchel;
+// Tripmine and snark are client-PREDICTED (SH_TripmineTryPlace /
+// SH_SnarkTryThrow decrement locally before the server acks), so like the
+// satchel they reconcile only under the trust_server_ammo gate — writing them
+// back unconditionally would erase a predicted place/throw every frame.
+float  sv_confirmed_ammo_tripmine;
+float  sv_confirmed_ammo_snark;
+// The three SLOT_UTILITY counts that arrived on the wire but stopped there.
+// predicted_player is a SEPARATE entity from the proxy the server updates
+// (cl_player.qc:1280 spawns it), so a byte that is not copied into an
+// sv_confirmed_* global and written back in the reconcile below never reaches
+// the entity the HUD and the shared fire gates actually read.  The medkit and
+// the SOFLAM were networked in proxy v23 and the plumbing has looked complete
+// ever since — the byte is written, the byte is read — while the HUD sat on 0
+// for the whole map and SH_MedkitTryFire's own `ammo_medkit < MEDKIT_COST`
+// check, which is compiled into BOTH VMs, refused every heal client-side while
+// the server happily performed it.  The penguin never had a byte at all (v27).
+//
+// None of the three is client-predicted: the medkit's and the SOFLAM's spends
+// live in their SSQC use functions, and the penguin's `ammo_penguin -= 1` is
+// inside sh_wpn_oppenguin.qc's #ifdef SSQC.  So all three reconcile
+// UNCONDITIONALLY, outside the trust_server_ammo gate, for the same reason
+// ammo_cfc4 does — there is no predicted decrement for a late snapshot to
+// erase, and gating them would strand the HUD at 0 whenever some other
+// weapon's predicted action happened to be in flight.
+float  sv_confirmed_ammo_medkit;
+float  sv_confirmed_ammo_soflam;
+float  sv_confirmed_ammo_penguin;
+// The two DoD grenades.  Stored and reconciled UNCONDITIONALLY beside the four
+// above, for the same stated reason: neither has a client-side decrement to
+// protect, so there is nothing a snapshot could stamp on.
+float  sv_confirmed_ammo_dodmills;
+float  sv_confirmed_ammo_dodstick;
+// The binoculars' carry count.  Same group, same reason: no client-side
+// decrement, so it is reconciled unconditionally.  See sh_wpn_dodbinocs.qc for
+// why a tool with no rounds needs a count at all.
+float  sv_confirmed_ammo_dodbinocs;
+float  sv_confirmed_satchel_state;
+// The DoD mortar's emplaced stance.  Reconciled UNCONDITIONALLY, outside
+// trust_server_ammo: it is a stance, not a count, so there is no predicted
+// decrement to erase — and a stance that could latch shut would leave the player
+// unable to move with no way out.
+float  sv_confirmed_wep_deployed;
+// The FAMAS fire selector.  Same group and the same reason: it is a mode, not a
+// count, so there is no predicted decrement for an unconditional write to erase.
+float  sv_confirmed_famas_burst_mode;
 float  sv_confirmed_mag_hlglock;
 float  sv_confirmed_ammo_hlglock;
 float  sv_confirmed_ammo_hlegon;
@@ -556,6 +622,7 @@ void(entity src, entity dst) CSQC_CopyMoveState =
 	dst.pm_fuser2        = src.pm_fuser2;
 	dst.spread_penalty   = src.spread_penalty;
 	dst.pm_teleport_time      = src.pm_teleport_time;
+	dst.pm_teleport_org       = src.pm_teleport_org;
 	dst.pm_ladder_detach_time = src.pm_ladder_detach_time;
 	dst.pm_step_time          = src.pm_step_time;
 };
@@ -575,6 +642,7 @@ void(entity src) CSQC_StoreConfirmedStateFromEntity =
 	sv_confirmed_oldbuttons    = src.pm_oldbuttons;
 	sv_confirmed_timecarry     = src.pm_timecarry;
 	sv_confirmed_teleport_time        = src.pm_teleport_time;
+	sv_confirmed_teleport_org         = src.pm_teleport_org;
 	sv_confirmed_ladder_detach_time   = src.pm_ladder_detach_time;
 	sv_confirmed_fuser2               = src.pm_fuser2;
 	sv_confirmed_spread_penalty       = src.spread_penalty;
@@ -591,6 +659,11 @@ void(entity src) CSQC_StoreConfirmedStateFromEntity =
 	sv_confirmed_ph_hull_minz         = src.ph_hull_minz;
 	sv_confirmed_ph_hull_height       = src.ph_hull_height;
 	sv_confirmed_ph_yaw_locked        = src.ph_yaw_locked;
+	sv_confirmed_pm_longjump          = src.pm_longjump;
+	sv_confirmed_pm_inv_speed_pct     = src.pm_inv_speed_pct;
+	sv_confirmed_pm_inv_gravity_pct   = src.pm_inv_gravity_pct;
+	sv_confirmed_pm_inv_friction_pct  = src.pm_inv_friction_pct;
+	sv_confirmed_pm_inv_blockfire     = src.pm_inv_blockfire;
 	sv_confirmed_grapple_anchor       = src.grapple_anchor;
 	sv_confirmed_grapple_attached     = src.grapple_attached;
 	sv_confirmed_grapple_held_last    = src.pm_grapple_held_last;
@@ -598,6 +671,12 @@ void(entity src) CSQC_StoreConfirmedStateFromEntity =
 	sv_confirmed_codstamina_punished  = src.codstamina_punished;
 	sv_confirmed_fire_suppress_until  = src.pm_fire_suppress_until;
 
+	float cvi;
+	for (cvi = 0; cvi < CARRY_MAX; cvi = cvi + 1)
+	{
+		sv_confirmed_carry_primary[cvi]   = src.carry_primary[cvi];
+		sv_confirmed_carry_secondary[cvi] = src.carry_secondary[cvi];
+	}
 	sv_confirmed_slot_primary      = src.slot_primary;
 	sv_confirmed_slot_secondary    = src.slot_secondary;
 	sv_confirmed_slot_melee        = src.slot_melee;
@@ -663,6 +742,18 @@ void(entity src) CSQC_StoreConfirmedStateFromEntity =
 	sv_confirmed_ammo_cfc4 = src.ammo_cfc4;
 	sv_confirmed_snowball_has_slingshot = src.snowball_has_slingshot;
 	sv_confirmed_snowball_use_slingshot = src.snowball_use_slingshot;
+	sv_confirmed_ammo_satchel     = src.ammo_satchel;
+	sv_confirmed_ammo_tripmine    = src.ammo_tripmine;
+	sv_confirmed_ammo_snark       = src.ammo_snark;
+	sv_confirmed_ammo_medkit      = src.ammo_medkit;
+	sv_confirmed_ammo_soflam      = src.ammo_soflam;
+	sv_confirmed_ammo_penguin     = src.ammo_penguin;
+	sv_confirmed_ammo_dodmills    = src.ammo_dodmills;
+	sv_confirmed_ammo_dodstick    = src.ammo_dodstick;
+	sv_confirmed_ammo_dodbinocs   = src.ammo_dodbinocs;
+	sv_confirmed_satchel_state    = src.satchel_state;
+	sv_confirmed_wep_deployed = src.wep_deployed;
+	sv_confirmed_famas_burst_mode = src.famas_burst_mode;
 	sv_confirmed_mag_hlglock      = src.mag_hlglock;
 	sv_confirmed_ammo_hlglock     = src.ammo_hlglock;
 	sv_confirmed_ammo_hlegon      = src.ammo_hlegon;
@@ -676,8 +767,51 @@ void(entity src) CSQC_StoreConfirmedStateFromEntity =
 	sv_confirmed_ammo_cfmac10     = src.ammo_cfmac10;
 };
 
+// Tactical shield state, from STAT_SHIELD.  DELIBERATELY NOT PREDICTED: the
+// deploy is a defensive stance rather than a shot, so a round-trip of latency on
+// raising it costs nothing anyone can feel, while predicting it would put the
+// movement penalty, the fire gate and the animation family all on a state the
+// client can guess wrong about.  Everything downstream —
+// Weapon_SpeedFactor_Smooth, SH_ShieldBlocksFire, the view model swap, the
+// +attack2 mask in CSQC_PredictWeaponCommand — reads these two fields off
+// predicted_player, so setting them is what makes the client agree with the
+// server rather than merely look like it does.
+//
+// IT LIVES IN THE *MOVE* RESET, NOT THE FULL ONE, DELIBERATELY.
+// CSQC_ReconcilePrediction only calls CSQC_ResetToConfirmedState when
+// `weapon_ack_ok`; with a shot or reload still unacknowledged it calls
+// CSQC_ResetToConfirmedMoveState instead.  While this read sat in the full
+// reset, the refresh rate of an UNPREDICTED, server-authoritative flag was tied
+// to whether the player happened to have an outstanding weapon ack — i.e. it
+// went stale exactly while they were shooting.  Nothing about a stance justifies
+// that coupling; the move reset runs on every reconcile unconditionally, which
+// is the only rate at which a flag the client never predicts can be right.
+//
+// This is a robustness fix rather than the cure for any one reported symptom
+// (that was the miscompiled `&~=` in CSQC_PredictWeaponCommand), so it is worth
+// saying plainly: it was not observed to be the cause of a bug, it was observed
+// to be a way one could hide.
+void() CSQC_ReadConfirmedShieldState =
+{
+	float shield_state   = getstatf(STAT_SHIELD);
+	self.has_shield      = (shield_state & SHIELD_CARRIED)  ? TRUE : FALSE;
+	self.shield_deployed = (shield_state & SHIELD_DEPLOYED) ? TRUE : FALSE;
+	// Stamp the raise / lower edge for CSQC_ShieldDisplayFrame, which plays
+	// shield_up and shield_down for their own length before settling.  This is
+	// the ONLY writer of .shield_deployed in the client, so detecting the edge
+	// here cannot miss one; detecting it in the render path could, because that
+	// path is skipped in chase cam, in a cutscene and while scoped, and a missed
+	// edge would leave the slab frozen mid-raise.
+	if (self.shield_deployed != csqc_shield_was_deployed)
+	{
+		csqc_shield_was_deployed = self.shield_deployed;
+		csqc_shield_phase_start  = cltime;
+	}
+};
+
 void() CSQC_ResetToConfirmedMoveState =
 {
+	CSQC_ReadConfirmedShieldState();
 	setorigin(self, sv_confirmed_origin);
 	self.velocity         = sv_confirmed_velocity;
 	self.view_ofs         = sv_confirmed_view_ofs;
@@ -691,6 +825,7 @@ void() CSQC_ResetToConfirmedMoveState =
 	self.pm_oldbuttons     = sv_confirmed_oldbuttons;
 	self.pm_timecarry      = sv_confirmed_timecarry;
 	self.pm_teleport_time        = sv_confirmed_teleport_time;
+	self.pm_teleport_org         = sv_confirmed_teleport_org;
 	self.pm_ladder_detach_time   = sv_confirmed_ladder_detach_time;
 	self.pm_fuser2               = sv_confirmed_fuser2;
 	self.spread_penalty          = sv_confirmed_spread_penalty;
@@ -707,6 +842,11 @@ void() CSQC_ResetToConfirmedMoveState =
 	self.ph_hull_minz            = sv_confirmed_ph_hull_minz;
 	self.ph_hull_height          = sv_confirmed_ph_hull_height;
 	self.ph_yaw_locked           = sv_confirmed_ph_yaw_locked;
+	self.pm_longjump             = sv_confirmed_pm_longjump;
+	self.pm_inv_speed_pct        = sv_confirmed_pm_inv_speed_pct;
+	self.pm_inv_gravity_pct      = sv_confirmed_pm_inv_gravity_pct;
+	self.pm_inv_friction_pct     = sv_confirmed_pm_inv_friction_pct;
+	self.pm_inv_blockfire        = sv_confirmed_pm_inv_blockfire;
 	self.grapple_anchor          = sv_confirmed_grapple_anchor;
 	self.grapple_attached        = sv_confirmed_grapple_attached;
 	self.pm_grapple_held_last    = sv_confirmed_grapple_held_last;
@@ -831,6 +971,12 @@ void() CSQC_ResetToConfirmedState =
 
 	CSQC_ResetToConfirmedMoveState();
 
+	float cri2;
+	for (cri2 = 0; cri2 < CARRY_MAX; cri2 = cri2 + 1)
+	{
+		self.carry_primary[cri2]   = sv_confirmed_carry_primary[cri2];
+		self.carry_secondary[cri2] = sv_confirmed_carry_secondary[cri2];
+	}
 	self.slot_primary     = sv_confirmed_slot_primary;
 	self.slot_secondary   = sv_confirmed_slot_secondary;
 	self.slot_melee       = sv_confirmed_slot_melee;
@@ -861,7 +1007,17 @@ void() CSQC_ResetToConfirmedState =
 	// predicted apply math (off-by-one).  You can't fire mid-reload, so there is no predicted fire
 	// decrement to protect here.  (Other shell-by-shell loaders that don't predict reload ammo can be
 	// added to this condition if they show the same symptom.)
-	float trust_server_ammo = ammo_sync_ok || (self.weaponstate == WS_RELOAD && self.weapon == WEP_CSM3);
+	//
+	// ...and the HL shotgun was exactly such a loader.  Rather than bolt a
+	// second weapon id onto this test, the property it is really asking about
+	// now has a name: W_ReloadIsServerDriven(wep) is TRUE for the shell-by-shell
+	// loaders whose per-shell credit lives only in their server frame function.
+	// Anything with a standard reload keeps predicting its own mag, so the
+	// scoping the comment above insists on is preserved — it is just no longer
+	// spelled as a single hard-coded weapon.
+	float trust_server_ammo = ammo_sync_ok
+	                       || (self.weaponstate == WS_RELOAD
+	                           && W_ReloadIsServerDriven(self.weapon));
 	if (trust_server_ammo)
 	{
 		self.slot_primary_mag    = sv_confirmed_slot_primary_mag;
@@ -873,6 +1029,11 @@ void() CSQC_ResetToConfirmedState =
 	}
 	self.weapon          = sv_confirmed_weapon;
 	self.previous_weapon = sv_confirmed_previous_weapon;
+
+	// (The tactical shield used to be read here.  It is now in
+	//  CSQC_ReadConfirmedShieldState, called from the MOVE reset — see the note
+	//  there; being in this function meant it stopped updating while firing.)
+
 	// FIRE-DECISION STATE NO LONGER RECONCILED FROM SERVER.
 	//
 	// Under the client-authoritative fire architecture (see the plan
@@ -1010,6 +1171,17 @@ void() CSQC_ResetToConfirmedState =
 		self.ammo_cshegrenade = sv_confirmed_ammo_cshegrenade;
 		self.ammo_csflashbang = sv_confirmed_ammo_csflashbang;
 		self.ammo_cssmokegrenade = sv_confirmed_ammo_cssmokegrenade;
+		// Both ride the trust_server_ammo gate rather than being reconciled
+		// unconditionally, because both are client-predicted: a throw
+		// decrements ammo_satchel and sets satchel_state ARMED locally before
+		// the server acks.  Writing them back mid-flight would erase the
+		// predicted throw exactly as it would erase a predicted mag decrement.
+		// They must move together — +attack picks throw-vs-detonate from the
+		// pair, so reconciling one without the other is worse than neither.
+		self.ammo_satchel    = sv_confirmed_ammo_satchel;
+		self.satchel_state   = sv_confirmed_satchel_state;
+		self.ammo_tripmine   = sv_confirmed_ammo_tripmine;
+		self.ammo_snark      = sv_confirmed_ammo_snark;
 		self.mag_hlglock     = sv_confirmed_mag_hlglock;
 		self.ammo_hlglock    = sv_confirmed_ammo_hlglock;
 		self.ammo_hlegon     = sv_confirmed_ammo_hlegon;
@@ -1031,6 +1203,24 @@ void() CSQC_ResetToConfirmedState =
 	// and gating it could strand the HUD C4 slot + plant animation at 0 whenever a
 	// predicted weapon action was in flight just after a (re)spawn.
 	self.ammo_cfc4 = sv_confirmed_ammo_cfc4;
+	// The medkit, the SOFLAM and the penguin ride here with it, and for exactly
+	// the reason spelled out beside their sv_confirmed_* declarations: none of
+	// the three has a client-side decrement, so there is nothing for an
+	// unconditional write to erase, and putting them behind trust_server_ammo
+	// would leave the HUD showing 0 whenever any other weapon had a predicted
+	// action in flight.
+	self.ammo_medkit  = sv_confirmed_ammo_medkit;
+	self.ammo_soflam  = sv_confirmed_ammo_soflam;
+	self.ammo_penguin = sv_confirmed_ammo_penguin;
+	self.ammo_dodmills = sv_confirmed_ammo_dodmills;
+	self.ammo_dodstick = sv_confirmed_ammo_dodstick;
+	self.ammo_dodbinocs = sv_confirmed_ammo_dodbinocs;
+	// The mortar's stance rides here too, and for a stronger version of the same
+	// reason: it is not a count at all, so nothing can be erased by writing it —
+	// while a stance left behind trust_server_ammo could latch and strand the
+	// player emplaced with the movement lock on and no way to lift it.
+	self.wep_deployed = sv_confirmed_wep_deployed;
+	self.famas_burst_mode = sv_confirmed_famas_burst_mode;
 
 	W_SlotAmmo_LoadCurrent(self);
 
@@ -1199,6 +1389,7 @@ void() CSQC_EnsurePredictedPlayer =
 	predicted_player.pm_oldbuttons = 0;
 	predicted_player.pm_timecarry = 0;
 	predicted_player.pm_teleport_time = 0;
+	predicted_player.pm_teleport_org = '0 0 0';
 	predicted_player.pm_ladder_detach_time = 0;
 	predicted_player.pm_fuser2 = 0;
 	predicted_player.spread_penalty = 0;
@@ -1318,6 +1509,7 @@ float() CSQC_SeedPredictedPlayerFromEngine =
 	predicted_player.pm_oldbuttons = input_buttons;
 	predicted_player.pm_timecarry = 0;
 	predicted_player.pm_teleport_time = 0;
+	predicted_player.pm_teleport_org = '0 0 0';
 	predicted_player.pm_ladder_detach_time = 0;
 	predicted_player.pm_fuser2 = 0;
 	predicted_player.spread_penalty = 0;
@@ -1984,6 +2176,10 @@ void() CSQC_PredictCurrentCommand =
 	// predict, so CSQC bullet traces keep using the render pose — changing hitscan-vs-prop behaviour
 	// is a separate decision and should not ride along on a movement fix.
 	PhysProp_RelinkHullsForPrediction();
+	// Same slot, same reason, for monsters — which had no client-side hull at all,
+	// so the predicted move walked straight through them and the next snapshot
+	// pushed the player back out.  See cl_monstersolid.qc.
+	MonSolid_RelinkHullsForPrediction();
 	PM_PlayerMove();
 	// sv_gunkick: decay tick runs AFTER fire so the bullet trace
 	// (inside CSQC_PredictWeaponCommand) used pre-decay pitch.
@@ -2066,6 +2262,7 @@ void() CSQC_BuildPresentationView =
 	float saved_oldbuttons;
 	float saved_timecarry;
 	float saved_teleport_time;
+	vector saved_teleport_org;
 	float saved_ladder_detach_time;
 	float saved_fuser2;
 	float saved_spread_penalty;
@@ -2181,6 +2378,7 @@ void() CSQC_BuildPresentationView =
 	saved_oldbuttons = self.pm_oldbuttons;
 	saved_timecarry = self.pm_timecarry;
 	saved_teleport_time = self.pm_teleport_time;
+	saved_teleport_org = self.pm_teleport_org;
 	saved_ladder_detach_time = self.pm_ladder_detach_time;
 	saved_fuser2 = self.pm_fuser2;
 	saved_spread_penalty = self.spread_penalty;
@@ -2231,6 +2429,17 @@ void() CSQC_BuildPresentationView =
 	         && predicted_player.weapon == WEP_CFC4
 	         && (predicted_player.weaponstate == WS_FIRE
 	             || predicted_player.weaponstate == WS_SPECIAL))
+	{
+		input_movevalues_x = 0;
+		input_movevalues_y = 0;
+		input_movevalues_z = 0;
+		input_buttons = input_buttons & ~PM_BTN_JUMP;
+	}
+	// Emplaced weapon (mortar / BAR / MG34 / MG42 / .30 cal) — the render-rate
+	// preview's half.  Same body as the C4 arm above, and button0 stays live for
+	// the same reason it does there: an emplaced gun still fires.  Unlike C4 this
+	// one also has a SERVER half (sv_player.qc), so it is not client-trusted.
+	else if (SH_DeployLocksPlayer(predicted_player))
 	{
 		input_movevalues_x = 0;
 		input_movevalues_y = 0;
@@ -2342,6 +2551,7 @@ void() CSQC_BuildPresentationView =
 	self.pm_oldbuttons = saved_oldbuttons;
 	self.pm_timecarry = saved_timecarry;
 	self.pm_teleport_time = saved_teleport_time;
+	self.pm_teleport_org = saved_teleport_org;
 	self.pm_ladder_detach_time = saved_ladder_detach_time;
 	self.pm_fuser2 = saved_fuser2;
 	self.spread_penalty = saved_spread_penalty;
@@ -3075,6 +3285,16 @@ void() CSQC_Input_Frame =
 		input_movevalues_z = 0;
 		input_buttons = input_buttons & ~PM_BTN_JUMP;
 	}
+	// Emplaced weapon — the buffered outgoing command's half, so the usercmd the
+	// server receives already carries no walk and no jump.  Mirrored by
+	// SH_DeployLocksPlayer arms in sv_player.qc's synth and real command paths.
+	else if (SH_DeployLocksPlayer(predicted_player))
+	{
+		input_movevalues_x = 0;
+		input_movevalues_y = 0;
+		input_movevalues_z = 0;
+		input_buttons = input_buttons & ~PM_BTN_JUMP;
+	}
 
 	// Dead: build freecam input from live directional state, then block server-bound movement
 	if (getstatf(STAT_IS_DEAD))
@@ -3363,6 +3583,10 @@ vector(entity e, vector fallback) PlayerVis_PoseAngles =
 .float vis_aim_yaw;          // server-sent aim direction (never modified by predraw)
 .float vis_anim_top_gen;     // fire/reload generation counter — detects re-fires
 .float vis_last_anim_top_gen;
+// Torso playback speed, 1 = the sequence's own rate.  Replicated (VP_SF_ANIM_CL)
+// rather than recomputed, because the client cannot know how long the weapon's
+// action is meant to last — see SH_PlayerAnim_PlayTop for what it is for.
+.float vis_anim_top_rate;
 
 // --- Inter-sequence anim blending (lerpfrac transitions) ---
 //
@@ -4121,8 +4345,13 @@ float() CSQC_PlayerVisual_Predraw =
 		self.baseframe1time  = self.vis_anim_top_time;
 		self.baseframe2      = 0;
 		self.baselerpfrac    = 0;
+		// CS skeletons spell the thigh "Bip01 L Thigh", Sven/HL ones
+		// "Bip01 L Leg".  Probe both, or a Sven-shaped model (sini, the
+		// They Hunger cast) gets basebone 0 and no upper/lower body split
+		// at all.  Matches sh_player_anims.qc's server-side probe.
 		float kbb = cvar("sv_player_basebone");
 		if (kbb <= 0) kbb = gettagindex(self, "Bip01 L Thigh");
+		if (kbb <= 0) kbb = gettagindex(self, "Bip01 L Leg");
 		self.basebone        = kbb;
 		self.subblend2frac   = self.vis_pitch / 90;
 		self.vis_prev_origin = self.origin;
@@ -4304,7 +4533,16 @@ float() CSQC_PlayerVisual_Predraw =
 	self.frame          = self.vis_anim_bottom;       // legs (NEW)
 	self.frame1time     = self.vis_anim_bottom_time;
 	self.baseframe      = effective_anim_top;         // torso (NEW, flinch-overridden)
-	self.baseframe1time = self.vis_anim_top_time;
+	// Scaled by the replicated rate so a body animation longer than the weapon
+	// action it stands for is compressed to fit instead of being cut off
+	// part-way (see SH_PlayerAnim_PlayTop).  The server applies the identical
+	// factor to its own baseframe1time, so hitbox and visual stay in step.
+	// A flinch override plays at its own natural speed — it is not a weapon
+	// action and has no action length to be fitted to.
+	float top_rate = (self.vis_anim_top_rate > 0) ? self.vis_anim_top_rate : 1;
+	if (effective_anim_top != self.vis_anim_top)
+		top_rate = 1;
+	self.baseframe1time = self.vis_anim_top_time * top_rate;
 
 	// Inter-sequence blend — write the OLD anim + a 1→0 lerpfrac
 	// across `cl_player_anim_lerp_time` so legs/torso transitions
@@ -4339,8 +4577,13 @@ float() CSQC_PlayerVisual_Predraw =
 		self.baselerpfrac = 0;
 	}
 
+	// Same two-name probe as the server (sh_player_anims.qc) and as the
+	// snapshot path above: "Bip01 L Thigh" on CS skeletons, "Bip01 L Leg"
+	// on Sven/Half-Life ones.  Both sides must agree or the hitboxes lean
+	// differently from the drawn model.
 	float bb = cvar("sv_player_basebone");
 	if (bb <= 0) bb = gettagindex(self, "Bip01 L Thigh");
+	if (bb <= 0) bb = gettagindex(self, "Bip01 L Leg");
 	self.basebone = bb;
 
 	// Torso aim blending via subblend fracs (.frame side).
@@ -4880,6 +5123,14 @@ float() CSQC_PlayerVisual_Predraw =
 	// once — two guns, one floating at the proxy's hand.  The shadow-only body keeps its
 	// p_model, because that gun genuinely should cast a shadow.
 	string pmdl = W_GetPModelPath(self.vis_weapon_id);
+	// Tactical shield (bodygroup bit 1, see sv_player.qc): Counter-Strike's
+	// third-person models are combined too — p_shield_usp.mdl is the pistol AND
+	// the slab in one file — so this is the same substitution the view model
+	// makes, not an extra attachment.  Raised, the pistol is stowed and only
+	// p_shield.mdl is held up.
+	if (self.vis_bodygroup & 2)
+		pmdl = (self.vis_bodygroup & 4) ? SHIELD_PMODEL
+		                                : SH_ShieldPlayerModel(self.vis_weapon_id);
 	if (vis_fp_visible)
 		pmdl = "";
 	if (pmdl != "")
@@ -5113,6 +5364,10 @@ void() CSQC_PlayerVisual_Update =
 		float new_anim_top_gen = readbyte();
 		float new_weaponstate  = readbyte();	// nettest killcam/spectate
 		float new_wep_action   = readbyte();
+		// Torso playback rate x32 — matched write in sv_player.qc's VP_SF_ANIM
+		// block, and MUST be read even when the death latch discards the rest,
+		// or every later section in this update deserialises off by one byte.
+		float new_anim_top_rate = readbyte();
 
 		if (!self.vis_pred_dead_latch)
 		{
@@ -5121,6 +5376,8 @@ void() CSQC_PlayerVisual_Update =
 			self.vis_pitch        = new_pitch;
 			self.flags            = new_flags;
 			self.vis_anim_top_gen = new_anim_top_gen;
+			self.vis_anim_top_rate = (new_anim_top_rate > 0)
+			                       ? (new_anim_top_rate / 32) : 1;
 		}
 
 		// Remote viewmodel anim state — applies regardless of the death-pred
@@ -5710,6 +5967,9 @@ noref void(float isnew) CSQC_Ent_Update =
 		self.pm_oldbuttons    = readbyte();
 		self.pm_timecarry     = readfloat();
 		self.pm_teleport_time        = readfloat();
+		self.pm_teleport_org_x       = readcoord();
+		self.pm_teleport_org_y       = readcoord();
+		self.pm_teleport_org_z       = readcoord();
 		self.pm_ladder_detach_time   = readfloat();
 		self.pm_fuser2               = readfloat();
 		self.spread_penalty          = readfloat();
@@ -5764,6 +6024,20 @@ noref void(float isnew) CSQC_Ent_Update =
 		self.ph_hull_minz            = readbyte() - 64;
 		self.ph_hull_height          = readbyte();
 		self.ph_yaw_locked           = readbyte();
+		// HL long jump module — mirrors the fixed byte the server writes right
+		// after ph_yaw_locked.  Must stay BEFORE the conditional car block: if
+		// this read moved after it, every byte from here on would decode as
+		// garbage on any client not in a car.
+		self.pm_longjump             = readbyte();
+		// Sven item_inventory holder effects — mirrors the four fixed bytes the
+		// server writes right after pm_longjump, and for the same reason they
+		// must stay BEFORE the conditional car block.  PM_LoadMovevars scales
+		// the movement caps by the first three; Weapon_LowerBlocksFire reads
+		// the fourth.
+		self.pm_inv_speed_pct        = readbyte();
+		self.pm_inv_gravity_pct      = readbyte();
+		self.pm_inv_friction_pct     = readbyte();
+		self.pm_inv_blockfire        = readbyte();
 		// prop_car chase-cam anchor: the driven car's origin+velocity, ONLY present when pm_incar
 		// (matches the conditional SSQC writer).  cl_main.qc velocity-extrapolates it for a smooth cam.
 		if (self.pm_incar)
@@ -5780,6 +6054,15 @@ noref void(float isnew) CSQC_Ent_Update =
 		self.slot_secondary    = readbyte();
 		self.slot_melee        = readbyte();
 		self.slot_utility      = readbyte();
+		// Carry lists, fixed 4+4 — must match the writer's order exactly
+		// (sv_player.qc, PM_SF_WEAPON_STATE).  Read unconditionally: every byte
+		// the sender wrote has to come off the wire whatever this build does
+		// with it, or everything after this point in the section mis-parses.
+		float cri;
+		for (cri = 0; cri < CARRY_MAX; cri = cri + 1)
+			self.carry_primary[cri]   = readbyte();
+		for (cri = 0; cri < CARRY_MAX; cri = cri + 1)
+			self.carry_secondary[cri] = readbyte();
 		self.weapon          = readbyte();
 		self.previous_weapon = readbyte();
 		self.weaponstate     = readbyte();
@@ -5852,6 +6135,12 @@ noref void(float isnew) CSQC_Ent_Update =
 		self.zoomstage       = readbyte();
 		self.snowball_has_slingshot = readbyte();
 		self.snowball_use_slingshot = readbyte();
+		// Paired with the WriteByte in PM_PredictionProxy_SendEntity.  The
+		// satchel's +attack picks throw-vs-detonate off this, so the client
+		// predicting a stale value predicts the wrong action entirely.
+		self.satchel_state          = readbyte();
+		self.wep_deployed     = readbyte();
+		self.famas_burst_mode = readbyte();
 		// Speed-factor blend state — paired with WriteFloat in
 		// PM_PredictionProxy_SendEntity.  Preserves in-flight transition
 		// across reconcile so client replay and server pmove stay
@@ -5879,7 +6168,7 @@ noref void(float isnew) CSQC_Ent_Update =
 		// unrecoverable, because the server-side mask was consumed by
 		// the first attempt while the engine's PM_SF_AMMO retry carried
 		// an empty section (the "first join = 0/0 handgun" bug).  The
-		// whole thing is 12 bytes and only rides a real ammo change.
+		// whole thing is 17 bytes and only rides a real ammo change.
 		self.slot_primary_mag    = readbyte();
 		self.slot_primary_ammo   = readbyte();
 		self.slot_primary_aux    = readbyte();
@@ -5892,6 +6181,15 @@ noref void(float isnew) CSQC_Ent_Update =
 		self.ammo_csflashbang    = readbyte();
 		self.ammo_cssmokegrenade = readbyte();
 		self.ammo_cfc4           = readbyte();
+		self.ammo_satchel        = readbyte();
+		self.ammo_tripmine       = readbyte();
+		self.ammo_snark          = readbyte();
+		self.ammo_medkit         = readbyte();
+		self.ammo_soflam         = readbyte();
+		self.ammo_penguin        = readbyte();
+		self.ammo_dodmills       = readbyte();
+		self.ammo_dodstick       = readbyte();
+		self.ammo_dodbinocs      = readbyte();
 
 		W_SlotAmmo_LoadCurrent(self);
 	}

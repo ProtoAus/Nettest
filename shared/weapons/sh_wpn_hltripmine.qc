@@ -16,6 +16,11 @@
 const float TRIPMINE_SEQ_IDLE1   = 0;   // idle1,   3.000 s, looping
 const float TRIPMINE_SEQ_IDLE2   = 1;   // idle2,   2.000 s, looping
 const float TRIPMINE_SEQ_ARM1    = 2;   // arm1,    1.000 s
+// DELIBERATELY UNREFERENCED.  `place` is Valve's TRIPMINE_ARM2 and Half-Life plays
+// it nowhere; its mine bone is not animated, so it leaves the mine hanging in the
+// air while the hands drop away.  Kept named so nobody rediscovers index 3 and
+// wires it back in.  The placement plays TRIPMINE_SEQ_DRAW, as HL's own client
+// event handler does.
 const float TRIPMINE_SEQ_PLACE   = 3;   // place,   0.333 s  (tripmine.cpp calls it ARM2)
 const float TRIPMINE_SEQ_FIDGET  = 4;   // fidget,  3.333 s
 const float TRIPMINE_SEQ_HOLSTER = 5;   // holster, 0.500 s
@@ -25,7 +30,15 @@ const float TRIPMINE_SEQ_GROUND  = 8;   // ground,  2.500 s, looping
 
 const float TRIPMINE_FRAME_INTERVAL = 0.05;
 const float TRIPMINE_DRAW_DURATION  = 0.5;
-const float TRIPMINE_PLACE_DURATION = 0.333;
+// 0.500, the length of the `draw` take the placement now plays (it is 0.500 s in
+// valve, valve_hd and svencoop alike).  It was 0.333, which is Half-Life's REFIRE
+// interval, not an animation length — and because SH_TripmineTryPlace gates on
+// weaponstate as well as on attack_finished, that number is doing both jobs here.
+// Leaving it at 0.333 would cut the take two thirds of the way through and snap
+// the mine back to idle mid-motion, which is the same defect the DoD knives had.
+// The cost is an honest one: placing repeatedly is now 0.5 s per mine rather than
+// 0.333 s, on a weapon that carries five.
+const float TRIPMINE_PLACE_DURATION = 0.500;
 
 const float MAX_AMMO_TRIPMINE       = 5;    // TRIPMINE_MAX_CARRY, weapons.h:118
 
@@ -45,20 +58,87 @@ const float TRIPMINE_BEAM_RANGE     = 2048;  // tripmine.cpp:135
 const float TRIPMINE_ATTACK_DELAY   = 0.3;   // tripmine.cpp:452
 const float TRIPMINE_DEATH_DELAY    = 0.2;   // tripmine.cpp:337, RANDOM_FLOAT(0.1,0.3)
 
-// The deployed mine and the ground pickup both use p_tripmine.mdl.
+// The deployed mine is v_tripmine.mdl at body 3, sequence "world" - exactly what
+// tripmine.cpp:102-105 does.
 //
-// This resolves what was flagged as an unavoidable compromise.  w_tripmine.mdl
-// genuinely is absent from this install, and HL's own answer is to draw the
-// deployed mine with v_tripmine.mdl at body 3 - a bodygroup that hides the
-// hands and swaps in the world mesh.  FTE cannot do that here: gl_hlmdl.c:1767
-// hardcodes entity_body to 0 and bodygroups are only reachable through a .skin
-// file, which cl_ents.c:5109 clears for every server-replicated entity.  But
-// p_tripmine.mdl has ONE bodypart, "reference_tripmine" - it is already the
-// bare mine with no hands, which is exactly what body 3 was selecting.  So the
-// missing asset costs nothing.
+// THE PREVIOUS COMMENT HERE WAS WRONG ON ALL THREE OF ITS CLAIMS, and the mine
+// floating off the wall was the result.  For the record, since each was checked:
+//
+//  1. "p_tripmine.mdl is already the bare mine with no hands."  It is not.  It has
+//     12 Bip01 bones and its single bodypart is named "studio", not
+//     "reference_tripmine"; the mine mesh hangs off bone Box01, parented to
+//     Bip01 R Hand in a grip pose.  Its sequence-0 bbox is (2.7,-12.1,30.7) to
+//     (6.7,-3.9,35.3) - the mesh draws roughly 33 units ABOVE and to the side of
+//     the entity origin.  That is the "floating off the wall" report; the
+//     placement arithmetic (endpos + normal*8) was a correct port all along.
+//     It also explains the tilt: the mine's local axes are a hand pose, not the
+//     model's forward.
+//  2. "FTE cannot select a bodygroup - gl_hlmdl.c hardcodes entity_body to 0."
+//     It does not.  gl_hlmdl.c:1797 reads rent->body and :1889 selects with
+//     (entity_body / bodypart->base) % bodypart->nummodels.  .body is a QC field
+//     (server/progdefs.h:368) and Patch 131 replicates it (sv_ents.c:3660,
+//     cl_ents.c:5406), so body 3 is reachable now.
+//  3. "w_tripmine.mdl is absent from this install."  It is present, in the
+//     MOUNTED svencoop (also bmc, enriched_v96, hl_extended).  Not used here
+//     because body 3 is what Half-Life itself draws, but it is an option.
 const string TRIPMINE_VIEWMODEL     = "models/v_tripmine.mdl";
-const string TRIPMINE_WORLDMODEL    = "models/p_tripmine.mdl";
-const string TRIPMINE_MINE_MODEL    = "models/p_tripmine.mdl";
+// THIRD-PERSON HELD model -- what other players see in your hands.  p_ is
+// correct for that and only for that.
+const string TRIPMINE_PLAYERMODEL   = "models/p_tripmine.mdl";
+// GROUND PICKUP model.  This used to be p_tripmine.mdl as well, and that is the
+// "gordens hands" report: p_ models are rigged to a hand attachment, so the mesh
+// renders as a mine plus a pair of arms, offset from the entity origin by the
+// grip pose (~33 units, which is why it floats ABOVE the pickup).  It also had a
+// v_tripmine sequence index applied to it, which is a different model entirely.
+//
+// Half-Life uses v_tripmine.mdl + pev->body = 3 here (tripmine.cpp:357-364), and
+// the deployed mine below already does exactly that.  w_tripmine.mdl is the
+// simpler answer for the PICKUP though: it needs no bodygroup, so it cannot be
+// affected by whether PEXT2_BODYGROUP reached the client, and it is present in
+// the mounted svencoop tree (also bmc, enriched_v96, hl_extended).
+const string TRIPMINE_WORLDMODEL    = "models/w_tripmine.mdl";
+
+// DEPLOYED mine — the one stuck to the wall.
+//
+// This was v_tripmine.mdl + body 3, which is what Half-Life itself draws
+// (tripmine.cpp:104) and which point 2 above argues is reachable.  In practice it
+// is NOT arriving: the hands are still on the deployed mine in game.  The
+// bodygroup byte only rides the UF_BONEDATA section of a replacement-delta
+// update (sv_ents.c:1390) and is gated on the client having negotiated
+// PEXT2_BODYGROUP, so whether it shows up depends on protocol negotiation this
+// code cannot see or assert.
+//
+// w_tripmine.mdl has ONE bodypart with ONE submodel — verified by reading the
+// header: bodyparts=1, submodels=1.  There is no bodygroup to get wrong and no
+// hand mesh in the file to leak, so this cannot regress the same way regardless
+// of what the protocol does.  Trading exact HL parity for a mine that is always
+// a mine is the right trade for a thing you stick on a wall and look at.
+const string TRIPMINE_MINE_MODEL    = "models/w_tripmine.mdl";
+// Kept and still applied: harmless on a single-bodypart model, and correct again
+// the moment TRIPMINE_MINE_MODEL goes back to v_tripmine.mdl.
+const float  TRIPMINE_MINE_BODY     = 3;     // tripmine.cpp:104
+// Sequence index within TRIPMINE_MINE_MODEL.  Must track that model: w_tripmine
+// has 2 sequences, v_tripmine has 9 (its world pose is TRIPMINE_SEQ_WORLD = 7).
+//
+// RESOLVED BY NAME, and it is the "world" pose, not index 0.  w_tripmine.mdl (the
+// svencoop copy — it is the only mount that ships one) carries [0] "ground" and
+// [1] "world", and Half-Life uses them for exactly the two different things their
+// names say: TRIPMINE_WORLD for a mine stuck on a wall (tripmine.cpp:105) and
+// TRIPMINE_GROUND for the floor pickup (:364).  This asked for 0, the FLOOR pose.
+//
+// The two are the same mesh translated by (-3.77, 0, -3.63) in model space, and on
+// a wall the mine is yaw-only, so local +X is the wall normal and local +Z is
+// world up: the ground pose drew the mine 3.63 units too HIGH and 3.77 units too
+// far off the wall.  The laser starts at the entity origin — which is what HL does
+// too, and is correct: neither model declares a single attachment, and HL's
+// PointEntInit falls back to the origin for the same reason — but the origin sits
+// at the mesh BOTTOM in the ground pose and through the LENS in the world pose.
+// That is the whole of "the laser is slightly below the tripmine model", and the
+// 8-unit wall standoff was tuned for the world pose too (back face lands 0.01 off
+// the wall with it, 3.78 off the wall without).
+//
+// Do NOT compensate with a Z offset on the beam start; the pose is the bug.
+const float  TRIPMINE_MINE_SEQ_FB   = 1;
 const string TRIPMINE_DEPLOY_SOUND  = "";
 const string TRIPMINE_DISPLAY_NAME  = "TRIPMINE";
 
@@ -94,10 +174,45 @@ float(float now) SH_TripmineTickState =
     return 0;
 };
 
+// IS THERE ACTUALLY A WALL IN REACH?  This used to be answered only AFTER the
+// place animation had been stamped, so pressing +attack facing open air played
+// the full placement take and left nothing behind — "don't do the place
+// animation if nothing will be placed".
+//
+// Shared, because a server-only gate would change nothing the player sees: the
+// tripmine is server-autonomous, CSQC runs this same SH_TripmineTryPlace and
+// stamps its own WS_FIRE, and reconcile never writes weaponstate back
+// (client/cl_player.qc:1022).  Both sides have the BSP, so a world traceline
+// predicts identically on both.
+//
+// THE ANGLE SOURCE HAS TO DIFFER BY VM and that is not cosmetic: .v_angle is
+// written only on the server and is never assigned anywhere under client/, so
+// using it in CSQC would leave v_forward at world +X regardless of where the
+// player is looking, and the gate would allow and refuse at random.  input_angles
+// is the client's equivalent — the same split CSQC_PredictedMeleeTraceEx uses
+// (shared/sh_weapon_logic.qc:1825).
+float() SH_TripmineCanPlace =
+{
+#ifdef CSQC
+    makevectors(input_angles);
+#else
+    makevectors(self.v_angle);
+#endif
+    vector src = self.origin + self.view_ofs;
+    traceline(src, src + v_forward * TRIPMINE_PLACE_RANGE, FALSE, self);
+    return (trace_fraction < 1.0);
+};
+
 // The shared half only decides whether a placement may START.  Whether it
 // SUCCEEDS depends on a traceline, and tripmine.cpp:452 charges the 0.3 s
 // cooldown either way but only spends a mine on a hit — so the ammo decrement
 // lives on the server/predict side next to the trace, not here.
+//
+// Returns 1 to place, 0 to do nothing, -1 to refuse VISIBLY (cooldown charged,
+// no animation).  The three-valued shape is the satchel's (sh_wpn_hlsatchel.qc:442)
+// and the callers must test `r == 1` / `r == -1`, never truthiness: -1 is truthy
+// and `!(-1)` is 0, so a bare `if (!Try...)` would sail straight past a refusal
+// and stamp the very animation this exists to suppress.
 float(float now) SH_TripmineTryPlace =
 {
     if (Weapon_SprintBlocksFire()) return 0;
@@ -105,6 +220,16 @@ float(float now) SH_TripmineTryPlace =
     if (self.weaponstate != WS_IDLE) return 0;
     if (now < self.attack_finished) return 0;
     if (self.ammo_tripmine <= 0) return 0;   // tripmine.cpp:417 - silent, no dry-fire
+
+    if (!SH_TripmineCanPlace())
+    {
+        // Charge the delay but play nothing.  Half-Life is SILENT here — both
+        // dlls/tripmine.cpp:431 and ev_hldm.cpp:1611 simply skip the animation
+        // with no sound — and tripmine.cpp:484 charges the 0.3 s outside the hit
+        // branch, so this matches the SDK on both counts.
+        self.attack_finished = now + TRIPMINE_ATTACK_DELAY;
+        return -1;
+    }
 
     self.weaponstate     = WS_FIRE;
     self.wep_action_id  += 1;
@@ -118,6 +243,12 @@ float(float now) SH_TripmineTryPlace =
 // ============================================================
 
 #ifdef SSQC
+
+// The player who placed the mine.  .owner is reassigned to the wall once the
+// mine arms (see W_TripminePowerupThink), so this is where the kill credit
+// lives -- HL calls it m_pRealOwner, tripmine.cpp:130.
+.entity tripmine_real_owner;
+
 
 // Additive and capped — see W_SatchelPickupCopy for why.
 void(entity player) W_TripminePickupCopy =
@@ -212,9 +343,15 @@ void() W_TripmineExplode =
     WriteByte(MSG_MULTICAST, snd_idx);
     multicast(self.origin, MULTICAST_PVS);
 
+    // Credit the player who placed it, not the wall it was hanging on.
+    // tripmine.cpp:300-305 restores pev->owner from m_pRealOwner at exactly this
+    // point and for exactly this reason.
+    entity blame = (self.tripmine_real_owner != world)
+                 ? self.tripmine_real_owner : self.owner;
+
     W_RadiusExplode(self.origin, TRIPMINE_RADIUS,
                     TRIPMINE_DAMAGE, TRIPMINE_MIN_DAMAGE,
-                    TRIPMINE_KNOCK_PUSH, TRIPMINE_KNOCK_UPLIFT, self.owner);
+                    TRIPMINE_KNOCK_PUSH, TRIPMINE_KNOCK_UPLIFT, blame);
     remove(self);
 };
 
@@ -268,6 +405,38 @@ void() W_TripminePowerupThink =
     if (time < self.tripmine_powerup_end)
         return;
 
+    // HAND THE MINE OVER TO THE WALL.
+    //
+    // Until this happens the mine's .owner is the player who placed it, and
+    // FTE's trace clipper SKIPS the passedict's owner (world.c: "don't clip
+    // against owner").  So W_TripmineBeamThink's traceline -- which passes the
+    // mine as its ignore entity -- could not see the placer AT ALL.  The person
+    // who set the trap could walk through their own beam forever and nothing
+    // happened, which in solo testing is every case.  That is the "they don't
+    // seem to explode when passing it" report, and it is total: no timing, no
+    // tuning, the placer was simply invisible to the beam.
+    //
+    // Half-Life hits precisely this and solves it by reassigning pev->owner to
+    // the SURFACE the mine is stuck to during PowerupThink (tripmine.cpp:167-193),
+    // keeping the player in m_pRealOwner and restoring it at detonation so the
+    // kill still gets credited.  The comment at tripmine.cpp:300-305 spells the
+    // whole thing out.  The port took the `owner = placer` half from Spawn and
+    // left this half behind.
+    if (self.tripmine_real_owner == world)
+    {
+        self.tripmine_real_owner = self.owner;
+
+        // Trace back into the surface behind the mine to find what it is stuck
+        // to.  Ignore-entity is the mine itself; the placer is deliberately no
+        // longer relevant here.
+        traceline(self.origin + self.tripmine_dir * 8,
+                  self.origin - self.tripmine_dir * 32, FALSE, self);
+        // world is the normal answer (a brush wall) and is also the right value
+        // for "nothing found" -- either way the placer stops being the owner,
+        // which is the whole point.
+        self.owner = (trace_fraction < 1.0) ? trace_ent : world;
+    }
+
     // Arming: go solid so it can be shot off the wall, measure the beam once,
     // and hand over to the break test.  tripmine.cpp:203.
     self.solid = SOLID_BBOX;
@@ -299,14 +468,45 @@ entity(entity placer, vector org, vector dir) W_TripmineSpawn =
 {
     entity m = spawn();
     m.owner     = placer;
+    m.tripmine_real_owner = world;   // set when the mine arms
     m.classname = "monster_tripmine";       // tripmine.cpp:46
     m.movetype  = MOVETYPE_FLY;             // tripmine.cpp:86 — it hangs on the wall
     m.solid     = SOLID_NOT;                // goes BBOX when it arms
     setmodel(m, TRIPMINE_MINE_MODEL);
     setsize(m, '-8 -8 -8', '8 8 8');        // tripmine.cpp:94
     setorigin(m, org);
+    m.body      = TRIPMINE_MINE_BODY;       // tripmine.cpp:104 — hides the hands
+    // .frame IS the sequence index for an HL model (tripmine.cpp:105 uses the
+    // "world" sequence).  Resolved by NAME so it survives a change of
+    // TRIPMINE_MINE_MODEL — TRIPMINE_SEQ_WORLD is an index into v_tripmine's NINE
+    // sequences and would be out of range on w_tripmine's two.  See the long note
+    // on TRIPMINE_MINE_SEQ_FB for why "world" and not "ground".
+    m.frame     = SH_SeqForName(TRIPMINE_MINE_MODEL, "world", TRIPMINE_MINE_SEQ_FB);
+
+    // PITCH MUST BE NEGATED for a GoldSrc model under FTE.
+    //
+    // vectoangles() returns the MESH convention, +pitch = UP (pr_bgcmd.c:6847
+    // passes meshpitch=true, mathlib.c:336 then scales by r_meshpitch = -1), and
+    // that is the convention Half-Life's own VectorAngles emits.  But FTE only
+    // builds render axes with AngleVectorsMesh for mod_alias — cl_ents.c:5497 —
+    // and an HL model is mod_halflife (gl_hlmdl.c:779), so it gets plain
+    // AngleVectors, where +pitch = DOWN.  GoldSrc compensates explicitly
+    // (StudioModelRenderer.cpp:513, angles[PITCH] = -angles[PITCH]); FTE does not.
+    //
+    // Untouched, a mine on a floor (normal '0 0 1' -> pitch 90) renders pointing
+    // straight INTO the floor.  Only shows up where pitch is non-zero, which is
+    // why nothing else in the mod tripped over it — monsters are yaw-only.
+    //
+    // Fixed here rather than in the engine on purpose: widening cl_ents.c:5497 to
+    // mod_halflife would be more principled (cl_ents.c:4128, :6980 and
+    // pr_csqc.c:749 all already test both) but would flip EVERY HL model that has
+    // been authored against the current behaviour. Not worth it for one weapon.
     m.angles    = vectoangles(dir);
-    m.frame     = 0;
+    m.angles_x  = -m.angles_x;
+
+    // tripmine.cpp:139 derives the beam direction from the mine's own angles.  We
+    // keep the caller's `dir` for that (see tripmine_dir below) precisely because
+    // the angles have now been bent to suit the renderer and no longer round-trip.
     m.takedamage = DAMAGE_YES;              // tripmine.cpp:125
     m.health    = 1;                        // "don't let die normally"
     m.on_killed = W_TripmineDie;
@@ -317,17 +517,91 @@ entity(entity placer, vector org, vector dir) W_TripmineSpawn =
     m.think     = W_TripminePowerupThink;
     m.nextthink = time + 0.2;               // tripmine.cpp:122
 
-    sound(m, CHAN_VOICE, "weapons/mine_deploy.wav", 1.0, ATTN_NORM);
-    sound(m, CHAN_BODY,  "weapons/mine_charge.wav", 0.2, ATTN_NORM);
+    // ONLY A MINE SOMEBODY PLACED MAKES A NOISE.  tripmine.cpp:130-137 wraps both
+    // of these in `if (pev->owner != NULL)`, and the reason is the map-placed
+    // variant: a level that opens with eight armed mines on the walls (hl_c04) must
+    // not greet the player with eight deploy beeps from across the map, and in
+    // Half-Life it does not, because a `monster_tripmine` placed by the BSP has no
+    // owner.  The player's own thrown mine still beeps exactly as before.
+    if (placer && placer != world)
+    {
+        sound(m, CHAN_VOICE, "weapons/mine_deploy.wav", 1.0, ATTN_NORM);
+        sound(m, CHAN_BODY,  "weapons/mine_charge.wav", 0.2, ATTN_NORM);
+    }
     return m;
 };
 
+#ifdef SSQC
+// ---------------------------------------------------------------------------
+//  monster_tripmine  —  the ARMED WALL MINE a map places
+// ---------------------------------------------------------------------------
+// The armed mine and the pickup are two different entities in Half-Life, declared
+// in the same file: LINK_ENTITY_TO_CLASS(monster_tripmine, CTripmineGrenade) at
+// tripmine.cpp:77, and weapon_tripmine -> CTripmine at :355.  This tree had only
+// the weapon, so every map-placed mine fell through to SV_OnEntityNoSpawnFunction
+// and became an invisible inert relay — which is the "tripmines on the wall that
+// are not being placed" report.  It is not one map: monster_tripmine appears on ten
+// of the thirty-five Sven hl_c* maps (c04 x8, c07_a2 x11, c11_a3 x16, ...) plus six
+// vanilla ones.
+//
+// Everything the entity needs already existed in W_TripmineSpawn above; what was
+// missing was a door from the map into it, plus the three things a BSP placement
+// supplies differently from a player throw:
+//
+//   1. DIRECTION COMES FROM `angles`.  tripmine.cpp:139-141 does
+//      UTIL_MakeAimVectors(pev->angles); m_vecDir = gpGlobals->v_forward;
+//      i.e. the mapper's angle IS the outward wall normal.  All eight of c04's
+//      mines are yaw-only (0 180 0, 0 90 0, 0 270 0, 0 0 0), so the pitch
+//      negation W_TripmineSpawn applies for the renderer round-trips cleanly.
+//   2. NO OWNER, therefore no deploy beeps — handled in W_TripmineSpawn above.
+//   3. SPAWNFLAG 1 IS THE FAST ARM.  tripmine.cpp:112-121 uses 1.0 s instead of
+//      the normal 2.5 s.  None of c04's mines set it, but c07_a2 and c11_a3 do.
+//
+// W_TripminePowerupThink already re-seats .owner onto whatever surface it traces
+// to and arms the beam, so nothing else is needed here.
+void() monster_tripmine =
+{
+    makevectors(self.angles);
+    vector dir = v_forward;
+
+    entity m = W_TripmineSpawn(world, self.origin, dir);
+
+    if (self.spawnflags & 1)
+        m.tripmine_powerup_end = time + 1.0;    // tripmine.cpp:114
+
+    // The map entity itself is only a placement record; the live mine is the new
+    // entity.  Carry the name across so a killtarget or a trigger chain naming this
+    // mine still reaches something.
+    m.targetname = self.targetname;
+    remove(self);
+};
+#endif
+
 void() W_TripmineFire =
 {
-    if (!SH_TripmineTryPlace(time)) return;
+    // `r == 1`, not truthiness — see the note on SH_TripmineTryPlace's return
+    // values.  A -1 refusal has already charged the cooldown and wants no
+    // animation at all.
+    if (SH_TripmineTryPlace(time) != 1) return;
 
-    self.weaponframe   = TRIPMINE_SEQ_PLACE;
-    self.wep_nextframe = 0;
+    // DRAW, NOT PLACE.  `place` is Valve's TRIPMINE_ARM2 and Half-Life never plays
+    // it — CTripmine::PrimaryAttack sends no animation at all, and the client event
+    // handler plays TRIPMINE_DRAW on a successful placement (ev_hldm.cpp:1583).
+    // The reason it is dead is visible in the data: across `place` the mine's bone
+    // does not move AT ALL while the hands shove forward and drop out of frame, so
+    // the mine hangs in mid-air exactly where the idle left it — the reported "the
+    // tripmine stays in front of the placing hands".  `draw` animates both
+    // together, which reads as "that one is on the wall now, here is the next".
+    //
+    // (The masking the report guesses at is impossible on this asset anyway: the
+    // blank submodel is on the HANDS bodypart, not the mine, so there is no
+    // hands-without-mine combination to select.)
+    self.weaponframe   = TRIPMINE_SEQ_DRAW;
+    // MUST schedule, not clear -- same defect the satchel had.  sv_weapons.qc:3820
+    // only calls wepframe while wep_nextframe > 0, and W_TripmineFrame is the only
+    // route to SH_WeaponEnterIdle, so a 0 here left weaponstate at WS_FIRE and
+    // SH_TripmineTryPlace refused every later placement.  One mine per equip.
+    self.wep_nextframe = time + TRIPMINE_FRAME_INTERVAL;
 
     makevectors(self.v_angle);
     vector src = self.origin + self.view_ofs;
@@ -335,8 +609,9 @@ void() W_TripmineFire =
 
     if (trace_fraction >= 1.0)
     {
-        // Nothing in reach.  The swing still cost its 0.3 s (tripmine.cpp:452
-        // charges the delay outside the hit test) and no mine is spent.
+        // Unreachable in practice now — SH_TripmineCanPlace ran the same trace
+        // before the animation was stamped and returned -1.  Kept as a backstop
+        // because the two traces are a tick apart and the player can turn.
         if (cvar("sv_hlequip_test"))
             dprint("[tripmine] no surface within 128 units - nothing placed\n");
         return;
@@ -345,6 +620,17 @@ void() W_TripmineFire =
     // tripmine.cpp:429 refuses conveyors specifically, because a mine stuck to
     // a moving surface would blow the instant the surface moved.  The general
     // form of that is "anything that moves", which is what this tests.
+    //
+    // THIS ONE STAYS SERVER-ONLY and therefore still animates before refusing:
+    // CSQC holds no reliable .movetype for a server brush entity, so
+    // SH_TripmineCanPlace cannot evaluate it and the shared gate above lets it
+    // through.  Worth knowing that it is also much broader than the SDK line it
+    // cites — tripmine.cpp:487 tests FL_CONVEYOR only, while `movetype !=
+    // MOVETYPE_NONE` rejects every MOVETYPE_PUSH brush, i.e. every door, train,
+    // plat and button on the map.  Half-Life lets you mine a door; this does
+    // not.  Narrowing it toward the conveyor test would shrink the residual
+    // phantom-animation case to almost nothing, but that is a behaviour change
+    // in its own right and is left for a decision rather than smuggled in here.
     if (trace_ent && trace_ent.movetype != MOVETYPE_NONE && trace_ent != world)
         return;
 
@@ -445,7 +731,9 @@ void() CSQC_PredictTripmineCommand =
 {
     if (input_buttons & 1)
     {
-        if (SH_TripmineTryPlace(csqc_pred_time))
+        // `== 1`, not truthiness: -1 is TRUE in QC, so the old form claimed an
+        // ack for a placement that was refused and never happened.
+        if (SH_TripmineTryPlace(csqc_pred_time) == 1)
             CSQC_MarkPendingWeaponAck();
         // The mine itself is NOT predicted.  Its placement depends on a
         // traceline against a world the client only approximates, and a mine
@@ -470,7 +758,10 @@ float(float elapsed) CSQC_TripmineDisplayFrame =
     if (predicted_player.weaponstate == WS_DRAW)
         return TRIPMINE_SEQ_DRAW;
     if (predicted_player.weaponstate == WS_FIRE)
-        return TRIPMINE_SEQ_PLACE;
+        // DRAW, not PLACE — this is the arm that actually drives the local
+        // viewmodel, and `place` leaves the mine frozen in mid-air.  See the long
+        // note at the same change in W_TripmineFire.
+        return TRIPMINE_SEQ_DRAW;
     return TRIPMINE_SEQ_IDLE1;
 };
 
@@ -481,7 +772,7 @@ void() CSQC_TripmineEquip =
 {
     self.weapon_name         = TRIPMINE_DISPLAY_NAME;
     self.weapon_viewmodel    = TRIPMINE_VIEWMODEL;
-    self.weapon_worldmodel   = TRIPMINE_WORLDMODEL;
+    self.weapon_worldmodel   = TRIPMINE_PLAYERMODEL;
     self.weapon_deploy_sound = TRIPMINE_DEPLOY_SOUND;
     self.csqc_predict_cmd    = CSQC_PredictTripmineCommand;
     self.csqc_predict_reload = __NULL__;

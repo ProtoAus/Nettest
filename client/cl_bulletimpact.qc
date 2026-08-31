@@ -1354,13 +1354,39 @@ float  pend_play_ric[PEND_MAX];
 float  pend_arrival[PEND_MAX];
 float  pend_active[PEND_MAX];
 vector pend_exit_dir[PEND_MAX];  // non-zero = penetration exit; also the shot dir the smoke sprays along
+// Whether this impact belongs to a shotgun BLAST, captured at enqueue time.
+//
+// bh_shotgun_blast is a latch that CSQC_PredictedShotgunImpact raises around its
+// pellet loop and lowers immediately after (sh_weapon_logic.qc), so the per-shot
+// decal/effect caps don't clip a spray down to one pellet.  That worked when
+// impacts drew immediately.  They no longer do — they park here for the tracer's
+// flight time and draw from CSQC_ProcessPendingImpacts, by which point the latch
+// is long since back to 0.  Every pellet of a blast also shares one
+// wep_action_id, so all of them land in the same per-shot cap bucket and 7 of 8
+// were being thrown away.  That is the "shotgun leaves 1 bullet impact" bug, and
+// it affected every multi-pellet weapon in the mod.
+//
+// So the decision has to travel with the impact, exactly as play_ric already
+// does (decided while the latch is live, carried, replayed at draw time).
+float  pend_blast[PEND_MAX];
 
 // Fire the VISIBLE impact cosmetics at `pos`.  Extracted verbatim from the old
 // inline CSQC_BulletImpact body so the look is identical — only the call timing
 // changes.  `ent` is re-validated (wasfreed) before a breakable decal attaches.
-void(vector pos, vector normal, float mat, float metalphys, float action, entity ent, float play_ric, vector exit_dir) CSQC_FireImpactCosmetics =
+void(vector pos, vector normal, float mat, float metalphys, float action, entity ent, float play_ric, vector exit_dir, float blast) CSQC_FireImpactCosmetics =
 {
     float r;
+
+    // Re-assert the blast bypass for the duration of this impact's cosmetics.
+    // The caps live downstream in Impact_SpawnParticles and
+    // CSQC_BulletHole_CapAllows, which read bh_shotgun_blast live — and by the
+    // time a parked impact drains, the firing code that raised it has long
+    // since lowered it.  Saved/restored rather than assigned so an inline
+    // (point-blank) impact fired from inside a live pellet loop doesn't clear
+    // the latch out from under the pellets that follow it.
+    float saved_blast = bh_shotgun_blast;
+    bh_shotgun_blast = blast;
+
     vector offset_pos = pos + normal * Impact_ParticleOffset();
 
     Impact_SpawnParticles(offset_pos, normal, mat);
@@ -1429,35 +1455,60 @@ void(vector pos, vector normal, float mat, float metalphys, float action, entity
         // resolve through PropMat_For and ping as what they actually are, which is exactly
         // what the old blanket "every phys prop pings metal" branch is being replaced by.
         string ricsnd = "";
-        if (mat != IMPACT_MAT_FLESH && mat != IMPACT_MAT_FLESH_LETHAL)
+        if (mat == IMPACT_MAT_FLESH || mat == IMPACT_MAT_FLESH_LETHAL)
+        {
+            // FLESH DOES NOT RICOCHET, and until now it did.
+            //
+            // MatSnd_SetForImpact is skipped for flesh (a body has no material
+            // entry), so `ricsnd` stayed empty and every flesh impact fell into
+            // the ric1-5 fallback below — a bullet PING off a person.  Under
+            // gunfire that is masked by the shot itself, which is why it survived
+            // this long; the case that exposed it has no gunshot at all.  Standing
+            // on a cockroach fires one IMPACT_MAT_FLESH event (mon_cockroach.qc's
+            // squash splat) into a silent room, and it pinged like a wall hit.
+            //
+            // The HL flesh impact set is what belongs here and was already on disk
+            // and already precached (sh_customdefs.qc:1551) for the func_breakable
+            // FLESH style — the same six samples GoldSrc uses for a bullet into
+            // meat.  Quieter than a ric on purpose: it is a texture under the blood
+            // and the hit marker, not an event of its own.
+            r = floor(random() * 6) + 1;
+            r = bound(1, r, 6);
+            ricsnd = sprintf("sounds/debris/impact_fleshhl%g.wav", r);
+            pointsound(offset_pos, ricsnd, 0.7, ATTN_NORM);
+        }
+        else
         {
             float ricset = MatSnd_SetForImpact(ent, pos, mat);
             if (ricset >= 0)
                 ricsnd = MatSnd_Pick(ricset, MSND_BULLET);
-        }
-        if (ricsnd != "")
-            pointsound(offset_pos, ricsnd, 1, ATTN_NORM);
-        else
-        {
-            // Fallback ONLY: flesh (unchanged behaviour) and anything that didn't resolve
-            // (e.g. a client with no scripts/materialsounds.txt).  Kept as a FALLBACK, not
-            // a layer — layering ric under every material would muddy 8 distinct timbres
-            // and double the pointsound count on a spray.
-            r = floor(random() * 5) + 1;
-            r = bound(1, r, 5);
-            pointsound(offset_pos, sprintf("sounds/weapons/ric%g.wav", r), 1, ATTN_NORM);
+
+            if (ricsnd != "")
+                pointsound(offset_pos, ricsnd, 1, ATTN_NORM);
+            else
+            {
+                // Fallback ONLY: anything that didn't resolve (e.g. a client with no
+                // scripts/materialsounds.txt).  Kept as a FALLBACK, not a layer —
+                // layering ric under every material would muddy 8 distinct timbres
+                // and double the pointsound count on a spray.
+                r = floor(random() * 5) + 1;
+                r = bound(1, r, 5);
+                pointsound(offset_pos, sprintf("sounds/weapons/ric%g.wav", r), 1, ATTN_NORM);
+            }
         }
     }
+
+    bh_shotgun_blast = saved_blast;
 };
 
 // Park an impact to fire at `arrival` — or fire it NOW if there's no meaningful
 // delay (tracers/delay off, or point-blank).
-void(vector pos, vector normal, float mat, float metalphys, float action, entity ent, float water, float play_ric, float arrival, vector exit_dir) CSQC_EnqueueImpact =
+void(vector pos, vector normal, float mat, float metalphys, float action, entity ent, float water, float play_ric, float arrival, vector exit_dir, float blast) CSQC_EnqueueImpact =
 {
     if (arrival <= cltime + 0.002)
     {
         if (water) CSQC_Rain_SpawnBulletWaterSplash(pos);
-        else       CSQC_FireImpactCosmetics(pos, normal, mat, metalphys, action, ent, play_ric, exit_dir);
+        else       CSQC_FireImpactCosmetics(pos, normal, mat, metalphys, action, ent, play_ric, exit_dir, blast);
         return;
     }
     float i; float slot = -1;
@@ -1471,7 +1522,7 @@ void(vector pos, vector normal, float mat, float metalphys, float action, entity
             if (pend_arrival[i] < pend_arrival[slot]) slot = i;
         if (pend_water[slot]) CSQC_Rain_SpawnBulletWaterSplash(pend_pos[slot]);
         else CSQC_FireImpactCosmetics(pend_pos[slot], pend_normal[slot], pend_mat[slot],
-                                      pend_metalphys[slot], pend_action[slot], pend_ent[slot], pend_play_ric[slot], pend_exit_dir[slot]);
+                                      pend_metalphys[slot], pend_action[slot], pend_ent[slot], pend_play_ric[slot], pend_exit_dir[slot], pend_blast[slot]);
     }
     pend_active[slot]    = 1;
     pend_pos[slot]       = pos;
@@ -1484,6 +1535,7 @@ void(vector pos, vector normal, float mat, float metalphys, float action, entity
     pend_play_ric[slot]  = play_ric;
     pend_arrival[slot]   = arrival;
     pend_exit_dir[slot]  = exit_dir;
+    pend_blast[slot]     = blast;
 };
 
 // Per-frame drain — called next to CSQC_DrawImpactLights.  Fires any parked
@@ -1500,7 +1552,7 @@ void() CSQC_ProcessPendingImpacts =
             CSQC_Rain_SpawnBulletWaterSplash(pend_pos[i]);
         else
             CSQC_FireImpactCosmetics(pend_pos[i], pend_normal[i], pend_mat[i],
-                                     pend_metalphys[i], pend_action[i], pend_ent[i], pend_play_ric[i], pend_exit_dir[i]);
+                                     pend_metalphys[i], pend_action[i], pend_ent[i], pend_play_ric[i], pend_exit_dir[i], pend_blast[i]);
     }
 };
 
@@ -1533,7 +1585,7 @@ void(vector pos, vector normal, float damage, float is_exit) CSQC_BulletImpact =
     if (pointcontents(pos) == CONTENT_WATER)
     {
         vector surf = Impact_FindWaterSurface(eye, pos);
-        CSQC_EnqueueImpact(surf, normal, 0, 0, self.wep_action_id, world, 1, 0, arrival, '0 0 0');
+        CSQC_EnqueueImpact(surf, normal, 0, 0, self.wep_action_id, world, 1, 0, arrival, '0 0 0', bh_shotgun_blast);
         impact_was_water = 1;
     }
 
@@ -1580,8 +1632,11 @@ void(vector pos, vector normal, float damage, float is_exit) CSQC_BulletImpact =
     // Exit smoke sprays along the shot line out the far face (pos == exit_pos here); '0 0 0'
     // on entries so the cosmetics sink never emits exit smoke on an entry impact.
     vector exit_dir = is_exit ? normalize(pos - eye) : '0 0 0';
+    // bh_shotgun_blast is sampled HERE, inside the pellet loop while the latch
+    // is still raised — the same reason play_ric is decided here rather than at
+    // draw time.  See the pend_blast declaration.
     CSQC_EnqueueImpact(pos, normal, mat, is_metalphys, self.wep_action_id,
-                       trace_ent, 0, play_ric, arrival, exit_dir);
+                       trace_ent, 0, play_ric, arrival, exit_dir, bh_shotgun_blast);
 
     // Predicted breakable material thump. Gate on brush_health > 0 so we
     // identify live breakables regardless of their material style — style
@@ -1667,7 +1722,7 @@ float() Killcam_Active;	// cl_killcam.qc (compiled later) — mask remote FX dur
 vector(float weapon_id) CSQC_WeaponMuzzleOffsetVec;	// cl_weapons.qc (compiled later)
 float csqc_remote_muz_seq;	// decrementing unique action-id for remote muzzle-flash dedup
 
-void(vector pos, vector normal, float mat, entity target, float shooter_entnum, float is_entry, float action) CSQC_BulletImpactRemote =
+void(vector pos, vector normal, float mat, entity target, float shooter_entnum, float is_entry, float action, float blast) CSQC_BulletImpactRemote =
 {
     if (Killcam_Active())	// don't bleed live-player impact/tracer FX into the killcam
         return;
@@ -1745,10 +1800,30 @@ void(vector pos, vector normal, float mat, entity target, float shooter_entnum, 
                 shooter_eye = shooter.origin + shooter.view_ofs - '0 0 10' + v_forward * 14 + v_right * 5;
             }
         }
-        if (shooter && shooter != world && is_entry)	// penetration EXIT (is_entry=0): decal
-        {						// only, NO tracer (entry drew it) + no
-            has_shooter = 1;				// travel delay so the exit decal is instant
-            CSQC_SpawnTracer(shooter_eye, pos);
+        // MONSTERS.  Neither lookup above can reach one - both search CSQC
+        // entities, and a monster is a plain engine-networked entity with no
+        // CSQC counterpart - so `shooter` is world here for every round any NPC
+        // in this game has ever fired, and the tracer below was skipped.  See
+        // Montrace_ResolveMuzzle (cl_monstertrace.qc), which reaches the engine
+        // entity set through getentity() and gates on the same per-map monster
+        // modelindex registry the local bullet sweep already uses.
+        float mon_anchor = FALSE;
+        if ((!shooter || shooter == world) && is_entry)
+        {
+            mon_anchor = Montrace_ResolveMuzzle(shooter_entnum);
+            if (mon_anchor)
+            {
+                shooter_eye = montrace_muzzle;
+                montrace_dbg_tracers = montrace_dbg_tracers + 1;
+            }
+            else
+                montrace_dbg_tracefail = montrace_dbg_tracefail + 1;
+        }
+
+        if (((shooter && shooter != world) || mon_anchor) && is_entry)
+        {						// penetration EXIT (is_entry=0): decal
+            has_shooter = 1;				// only, NO tracer (entry drew it) + no
+            CSQC_SpawnTracer(shooter_eye, pos);		// travel delay so the exit decal is instant
         }
     }
 
@@ -1770,5 +1845,28 @@ void(vector pos, vector normal, float mat, entity target, float shooter_entnum, 
     // entries.  Fall back to the surface normal if the shooter entity wasn't resolved this frame.
     vector exit_dir = is_entry ? '0 0 0'
                     : ((shooter_eye != pos) ? normalize(pos - shooter_eye) : normal);
-    CSQC_EnqueueImpact(pos, normal, mat, 0, action, target, 0, is_entry, arrival, exit_dir);
+    // A server impact with NO shooter (entnum 0) is not part of anybody's shot, so it must not
+    // be billed to one.  The cockroach squash is the case that exists today: mon_cockroach.qc
+    // deliberately sends W_ImpactEffectSend(..., world, world, 1) because nothing client-side
+    // predicts a squash.
+    //
+    // impact_per_shot_effect_count (:174) is a free-running global that EVERY impact effect
+    // increments, but that ONLY the local player's own fire resets — CSQC_Impact_ResetShot has
+    // five call sites and all five are trigger pulls.  So once cl_impact_effects_per_shot
+    // (default 3, sh_cvar_table.qc:855) is spent, Impact_SpawnParticles returns at the cap
+    // (:201-206) and takes CSQC_SpawnBloodDecals (:223-224) down with it — the decal call sits
+    // BELOW the early return.
+    //
+    // That is why a squashed roach marks the floor only sometimes: the mark survives exactly as
+    // long as the budget left over from your last shot, and one shotgun blast spends it all.
+    // The squash still SOUNDS right either way, which is what made it look random — rch_smash
+    // is played server-side unconditionally and the flesh ping is fired from
+    // CSQC_FireImpactCosmetics, outside the capped function.
+    //
+    // Note this also un-caps monster gunfire and other players' impacts, which were silently
+    // limited to "3 since you last fired" by the same global.
+    if (shooter_entnum <= 0)
+        CSQC_Impact_ResetShot();
+
+    CSQC_EnqueueImpact(pos, normal, mat, 0, action, target, 0, is_entry, arrival, exit_dir, blast);
 };

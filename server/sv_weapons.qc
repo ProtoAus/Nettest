@@ -5,6 +5,18 @@
 
 // Forward declarations
 void(entity player) PM_SyncPredictionProxy;  // defined in sv_player.qc
+// Defined in sv_physprop.qc (sv_progs.src:301, after this file at :45 — QC
+// forward-declares functions, which is all this needs).  It self-guards on
+// .pp_scrape_active, so calling it on a prop that is not scraping is free.
+//
+// THE SCRAPE LOOP IS ISSUED WITH SOUNDFLAG_FORCELOOP|SOUNDFLAG_FOLLOW
+// (sv_physprop.qc), and snd_mix.c rewinds a CF_FORCELOOP channel forever.  The
+// only thing that ever cancels it is an explicit stop on the same entity and
+// channel — so any code path that makes a scraping entity stop being ticked, by
+// removing it OR by hiding it, strands that sample playing for the rest of the
+// map.  This file had zero calls to it.
+void(entity prop) PhysFiles_StopScrape;
+void(float slot) W_RebindSlot;               // defined in sv_player.qc
 void(entity player) Player_VisualProxy_DetachAsCorpse;  // defined in sv_player.qc
 void() W_DeagleEquip;         // defined in wpn_deagle.qc
 void() W_DeagleDrop;          // defined in wpn_deagle.qc
@@ -46,6 +58,31 @@ void() W_AWPEquip;
 void() W_AWPDrop;
 void() W_98KEquip;
 void() W_98KDrop;
+// Day of Defeat, the twelve added beside the K98 above.
+void() W_DodColtEquip;    void() W_DodColtDrop;
+void() W_DodLugerEquip;   void() W_DodLugerDrop;
+void() W_DodWebleyEquip;  void() W_DodWebleyDrop;
+void() W_DodGarandEquip;  void() W_DodGarandDrop;
+void() W_DodCarbineEquip; void() W_DodCarbineDrop;
+void() W_DodK43Equip;     void() W_DodK43Drop;
+void() W_DodTommyEquip;   void() W_DodTommyDrop;
+void() W_DodMP40Equip;    void() W_DodMP40Drop;
+void() W_DodStenEquip;    void() W_DodStenDrop;
+void() W_DodGreaseEquip;  void() W_DodGreaseDrop;
+void() W_DodMP44Equip;    void() W_DodMP44Drop;
+void() W_DodBarEquip;     void() W_DodBarDrop;
+// Day of Defeat, third batch.  The binoculars have NO Drop — no world model
+// exists for them (see sh_wpn_dodbinocs.qc), so they cannot be dropped at all.
+void() W_DodAutoEquip;    void() W_DodAutoDrop;
+void() W_DodFCarbEquip;   void() W_DodFCarbDrop;
+void() W_DodEnfEquip;     void() W_DodEnfDrop;
+void() W_DodMortarEquip;  void() W_DodMortarDrop;
+void() W_DodBinocsEquip;
+// The two DoD grenades live in sh_wpn_csgrenades.qc, which compiles well after
+// this file (sv_progs.src:50 vs :88), so both utility tables below need them
+// declared here — same reason every other pair above is declared.
+void() W_DodMillsEquip;   void() W_DodMillsDrop;
+void() W_DodStickEquip;   void() W_DodStickDrop;
 void() W_CrowbarEquip;
 void() W_CrowbarDrop;
 void() W_ShotgunEquip;
@@ -78,7 +115,57 @@ void() W_TripmineEquip;
 void() W_TripmineDrop;
 void() W_SnarkEquip;
 void() W_SnarkDrop;
+void() W_PenguinEquip;
+void() W_PenguinDrop;
 void() W_HGunEquip;
+void() W_ShockEquip;
+void() W_DispEquip;
+void() W_JetEquip;
+void() W_BGrapEquip;
+// Drop halves of the four weapons W_RefreshPrimarySlot/SecondarySlot were
+// missing — the equip halves were already declared above.
+void() W_ShockDrop;
+void() W_DispDrop;
+void() W_JetDrop;
+void() W_BGrapDrop;
+// They Hunger's eight.  Declared here for the same reason as everything above:
+// this file compiles at sv_progs.src:29, long before shared/weapons/sh_wpn_th*.qc
+// at the bottom of the weapon block, and QC forward-declares functions but not
+// fields — so the equip/drop pairs need a line each and the ammo fields stay
+// with their own files.
+void() W_TH1911Equip;
+void() W_TH1911Drop;
+void() W_THTommyEquip;
+void() W_THTommyDrop;
+void() W_THGreaseEquip;
+void() W_THGreaseDrop;
+void() W_THM14Equip;
+void() W_THM14Drop;
+void() W_THM16Equip;
+void() W_THM16Drop;
+void() W_THSawoffEquip;
+void() W_THSawoffDrop;
+void() W_THSpannerEquip;
+void() W_THSpannerDrop;
+void() W_THTeslaEquip;
+void() W_THTeslaDrop;
+// Sven Co-op and Opposing Force, defined in shared/weapons/sh_wpn_{sv,op,as}*.qc
+// which compile AFTER this file.
+void() W_MedkitEquip;      void() W_MedkitDrop;
+void() W_UziEquip;         void() W_UziDrop;
+void() W_UziAkEquip;       void() W_UziAkDrop;
+void() W_MinigunEquip;     void() W_MinigunDrop;
+void() W_SVM16Equip;       void() W_SVM16Drop;
+void() W_PWrenchEquip;     void() W_PWrenchDrop;
+void() W_SniperEquip;      void() W_SniperDrop;
+void() W_SporeEquip;       void() W_SporeDrop;
+void() W_EagleEquip;       void() W_EagleDrop;
+void() W_ASShotgunEquip;   void() W_ASShotgunDrop;
+void() W_SoflamEquip;      void() W_SoflamDrop;
+void() weapon_medkit;      void() weapon_uzi;           void() weapon_uziakimbo;
+void() weapon_minigun;     void() weapon_m16;           void() weapon_pipewrench;
+void() weapon_sniperrifle; void() weapon_sporelauncher; void() weapon_eagle;
+void() weapon_as_shotgun;  void() weapon_as_soflam;
 void() W_HGunDrop;
 void() W_SnowballEquip;
 void() W_SnowballDrop;
@@ -177,6 +264,30 @@ void() weapon_wrench;
 void() weapon_m249;
 void() weapon_csawp;
 void() weapon_dod98k;
+// Day of Defeat's own classnames, out of dod.fgd, except the three noted in
+// sh_weapons.qc: weapon_dodgreasegun (They Hunger owns weapon_greasegun), and
+// weapon_sten / weapon_webley, which DoD delivers from a class menu rather than
+// a map entity and so never named.
+void() weapon_colt;
+void() weapon_luger;
+void() weapon_webley;
+void() weapon_garand;
+void() weapon_m1carbine;
+void() weapon_gewehr;
+void() weapon_thompson;
+void() weapon_mp40;
+void() weapon_sten;
+void() weapon_dodgreasegun;
+void() weapon_mp44;
+void() weapon_bar;
+void() weapon_bren;
+void() weapon_fg42;
+void() weapon_scopedfg42;
+void() weapon_fcarb;
+void() weapon_enfield;
+void() weapon_mortar;
+// No weapon_binoculars: dod ships no w_binoculars.mdl, so there is nothing to
+// place on a map.  See sh_wpn_dodbinocs.qc.
 void() weapon_hlcrowbar;
 void() weapon_hlshotgun;
 void() weapon_csm3;
@@ -205,6 +316,22 @@ void() weapon_cfaug;
 void() weapon_cffamas;
 void() weapon_cfmac10;
 void() weapon_cfc4;
+// The thirteen Counter-Strike 1.6 guns.  These carry the REAL CS classnames -
+// all thirteen were unused in this tree before they were added, so a GoldSrc CS
+// map placing weapon_aug gets the AUG rather than "no spawn function".
+void() weapon_p228;
+void() weapon_fiveseven;
+void() weapon_elite;
+void() weapon_tmp;
+void() weapon_mac10;
+void() weapon_ump45;
+void() weapon_p90;
+void() weapon_galil;
+void() weapon_famas;
+void() weapon_aug;
+void() weapon_sg552;
+void() weapon_sg550;
+void() weapon_xm1014;
 void() PlayerSpawn;           // defined in sv_player.qc
 void(float) W_SelectWeapon;   // defined later in this file
 void() weapon_become_solid;   // defined later in this file
@@ -216,8 +343,12 @@ float(float) W_UtilityWeaponPickup;
 // server/sv_goldsrc_ammo.qc, which compiles much later (it needs every weapon's
 // MAX_AMMO_* constant), so it is reached through a forward declaration.
 void(entity p, float wep) Ammo_DrainForWeapon;
+void(entity p) Ammo_TickDrain;
 float(entity, float) W_UtilityEntityHasWeapon;
 float(float) W_UtilityPlayerHasWeapon;
+// sh_wpn_hlsatchel.qc is sv_progs.src:59, this file is :29 — forward-declared
+// so PlayerKilled can clear a dead player's live charges.
+void(entity who) W_SatchelDeactivateAll;
 float(float) W_UtilityNextCarried;
 float(float, float) W_UtilityCycleCarried;
 void() W_PhysDropThink;       // defined later in this file
@@ -226,12 +357,19 @@ void(entity, float) W_PhysDropStart; // defined later in this file
 float() RoundToss_NextThinkInterval; // defined later in this file
 float(entity, float) dropped_weapon_SendEntity;  // defined later in this file
 void() W_DropAllWeaponsOnDeath;  // defined later in this file
+void(entity p) CS_Shield_DropFrom;  // server/sv_cs_entities.qc, compiled after this
 void(entity player, float wep) W_SlotAmmo_LoadLegacy;
 void(entity player, float wep) W_SlotAmmo_SaveLegacy;
+float(float wep) W_SlotAmmo_UsesSlot;
 void(entity player) W_SlotAmmo_SaveCurrent;
 void(entity drop, entity player, float wep) W_SlotAmmo_CopyPlayerToDrop;
 void(entity player, entity drop) W_SlotAmmo_CopyDropToPlayer;
 void(entity player, float wep) W_SlotAmmo_ClearForWeapon;
+// The multi-carry primitives (sh_weapon_slotammo.qc, sv_progs.src:155 — this
+// file is :40, so every slot-ammo call in here needs declaring first).
+void(entity p, float slot, float wep) W_SlotAmmo_PointAt;
+void(entity player, float wep) W_SlotAmmo_ReadWeapon;
+void(entity player, float wep, float m, float a, float x) W_SlotAmmo_WriteWeapon;
 
 // Global set by W_DropCurrentWeapon before calling the slot drop function.
 // The drop function reads this to know which entity to populate.
@@ -440,6 +578,12 @@ void(void() spawn_func) W_RegisterMapWeapon =
     // the "mp_nomapweapons feels inconsistent" reports.
     if (cvar("mp_nomapweapons") > 0)
     {
+        // WORSE THAN A REMOVE: this path hides the entity and clears its think,
+        // so the prop contact detector never runs on it again.  A weapon that was
+        // mid-slide when mp_nomapweapons hid it would keep its FORCELOOP scrape
+        // sample playing forever, on an invisible entity, with nothing left alive
+        // to cancel it.  No edict recycling required — it just never stops.
+        PhysFiles_StopScrape(self);
         if (self.movetype == MOVETYPE_PHYSICS || self.weapon_physdrop_sleeping)
             physics_enable(self, FALSE);
         self.weapon_physdrop_sleeping = FALSE;
@@ -568,6 +712,9 @@ void() W_RespawnMapWeapons =
                     // the empty-model payload broadcast (otherwise CSQC
                     // holds the last-known visible state and the panel
                     // looks like it's still there).
+                    // Same stranded-loop trap as the W_RegisterMapWeapon hide
+                    // path — see the note there.
+                    PhysFiles_StopScrape(self);
                     if (self.movetype == MOVETYPE_PHYSICS || self.weapon_physdrop_sleeping)
                         physics_enable(self, FALSE);
                     self.weapon_physdrop_sleeping = FALSE;
@@ -592,6 +739,15 @@ void() W_RespawnMapWeapons =
                     // W_RegisterMapWeapon call inside map_weapon_spawn
                     // sees the cvar is off and re-wires model/SendEntity/
                     // think exactly like first-time spawn.
+                    //
+                    // Same stranded-loop trap as the strip branch above, and it was
+                    // only fixed there.  A map weapon that was mid-slide when the
+                    // round ended is teleported by the setorigin() below and then
+                    // re-spawned through W_RegisterMapWeapon -> W_PhysDropStart, and
+                    // nothing in that chain clears .pp_scrape_active — so the loop
+                    // keeps playing, now anchored to the weapon's ORIGINAL spawn
+                    // point, at the start of every round.
+                    PhysFiles_StopScrape(self);
                     setorigin(self, self.map_weapon_origin);
                     self.angles = self.map_weapon_angles;
                     self.map_weapon_spawn();     // re-runs weapon_ak47() etc.
@@ -609,7 +765,11 @@ void() W_RespawnMapWeapons =
             }
             else
             {
-                // Remove dropped weapons
+                // Remove dropped weapons.  A round can restart while a dropped
+                // gun is still sliding, and a bare remove() strands its scrape
+                // loop — the sample keeps playing on a freed edict until
+                // something else claims the slot.
+                PhysFiles_StopScrape(e);
                 if (e.movetype == MOVETYPE_PHYSICS)
                     physics_enable(e, FALSE);
                 remove(e);
@@ -691,8 +851,26 @@ string(float hitgroup) W_HitgroupName =
 //
 // Expand/restore use delta math (read current mins/maxs, shift, write back)
 // so we don't need to know the normal vs ducking hull values here.
+// Monsters get the same treatment through the same bookends, so there is exactly
+// one pair of them in the mod.  Bodies live in sv_monsters.qc, which compiles
+// after this file — QC forward-declares functions, which is all this needs.
+// See Monster_ClassRenderBox there for what these do and why (short version:
+// Half-Life's SetObjectCollisionBox, the shot-cull volume that is separate from
+// the movement hull, which this build had never ported).
+void() W_MonstersExpandHitboxes;
+void() W_MonstersRestoreHitboxes;
+// Broadphase hint for the walk above — publish the trace's segment + swept hull and
+// it skips monsters the trace cannot reach.  Valid only until the matching restore.
+void(vector a, vector b, vector hmin, vector hmax) Monster_CullSegment;
+// The NPC half of sv_debug_hitboxes.  Body is in sv_monsters.qc, not here, because it
+// reads monster_render_min/max — QC forward-declares FUNCTIONS but not GLOBALS, and
+// this file compiles ahead of that one.
+void(entity target, float mode) W_SendServerNPCHitbox;
+
 void() W_PlayersExpandHitboxes =
 {
+    W_MonstersExpandHitboxes();
+
     // NOTE: no early-out on expand<=0.  A disguised hider needs its rotation-safe
     // trace volume regardless of the limb-padding cvar — the two are unrelated.
     float expand = cvar("sv_hitbox_expand");
@@ -725,6 +903,8 @@ void() W_PlayersExpandHitboxes =
 
 void() W_PlayersRestoreHitboxes =
 {
+    W_MonstersRestoreHitboxes();
+
     float expand = cvar("sv_hitbox_expand");
 
     entity p = player_chain_head;
@@ -761,9 +941,13 @@ void() W_PlayersRestoreHitboxes =
 // ODE never observes the inflated size.
 void() W_PhysDropsExpandTraceBboxes =
 {
-    float tx = cvar("sv_physprop_weapon_trace_bbox_x");
-    float ty = cvar("sv_physprop_weapon_trace_bbox_y");
-    float tz = cvar("sv_physprop_weapon_trace_bbox_z");
+    // Per-frame cache, not three cvar() hashes per traceline: a penetrating shot
+    // calls this FIVE times (once per trace) and its restore partner five more,
+    // so this cost 30 string-hash lookups per shot and 600 a second on an MG.
+    // Refreshed in StartFrame beside the other pp_cached_* values.
+    float tx = pp_cached_wep_trace_bbox_x;
+    float ty = pp_cached_wep_trace_bbox_y;
+    float tz = pp_cached_wep_trace_bbox_z;
     if (tx <= 0 || ty <= 0 || tz <= 0) return;
 
     entity e = nextent(world);
@@ -808,8 +992,18 @@ void(entity target) W_SendServerHitboxes =
 {
     if (cvar("sv_debug_hitboxes") != 1)
         return;
-    if (!target || target.classname != "player")
+    if (!target)
         return;
+    // NPCs are not excluded from hitbox EXPANSION — W_MonstersExpandHitboxes
+    // (sv_monsters.qc) runs inside the same bookend players use.  They were
+    // only excluded from the OVERLAY, and they cannot use the player wire format:
+    // the entnum below is a WriteByte and a monster edict passes 255.  Different
+    // event, different payload, single cull box instead of 20 player bone boxes.
+    if (target.classname != "player")
+    {
+        W_SendServerNPCHitbox(target, 1);
+        return;
+    }
 
     msg_entity = self;
     WriteByte(MSG_ONE, SVC_CGAMEPACKET);
@@ -858,10 +1052,126 @@ void(vector src, vector end) W_WeaponTraceLine =
     // enforces that split by damage type.
     int saved_mask = W_CorpseMaskBegin(self);
 
+    // THE MONSTER CULL BOX HAS TO BE INFLATED HERE TOO, and for years it was not.
+    // sv_monsters.qc:932-936 asserted that W_PlayersExpandHitboxes "is already
+    // bracketed correctly around every weapon trace in the mod".  It is bracketed
+    // around three: W_StandardHitscanShoot, W_PenetratingHitscanShoot and paintball.
+    // This function is the OTHER funnel — every melee weapon reaches it through
+    // W_MeleeTrace, and the shotguns, gauss, egon, crossbow, tesla, rebar, wrench and
+    // medkit call it directly: 27 sites in all, every one of them tracing against a
+    // monster's raw MOVEMENT hull.  A gargantua drawn 214 units tall was shootable up
+    // to z=64 with a crowbar or a shotgun but to z=214 with a rifle, and nothing said
+    // so.  World_ClipToLinks rejects on absmin/absmax before MOVE_HITMODEL ever runs.
+    //
+    // Bracketing the funnel rather than the 27 leaves is the whole point — the comment
+    // above was right that 27 hand-written pairs is how one ends up unpaired — and the
+    // pair is now nest-safe (mon_cull_depth) so wrapping a bracketed caller is fine.
+    Monster_CullSegment(src, end, '0 0 0', '0 0 0');
+    W_PlayersExpandHitboxes();
     Lagcomp_TraceLine(src, end, MOVE_NORMAL | MOVE_HITMODEL, self);
+    W_PlayersRestoreHitboxes();
 
     W_CorpseMaskEnd(self, saved_mask);
     self.dimension_hit = saved_dim_hit;
+};
+
+// ============================================================
+//  W_MeleeTrace — the line trace, then Half-Life's HULL fallback.
+// ============================================================
+// EVERY Half-Life melee weapon does this and none of ours did:
+//
+//     UTIL_TraceLine( vecSrc, vecEnd, dont_ignore_monsters, ..., &tr );
+//     if ( tr.flFraction >= 1.0 )
+//     {
+//         UTIL_TraceHull( vecSrc, vecEnd, dont_ignore_monsters, head_hull, ..., &tr );
+//         ...
+//     }
+//                                       -- dlls/crowbar.cpp, CCrowbar::Swing
+//
+// `head_hull` is hull 3, (-16,-16,-18)..(16,16,18).  So a swing that a
+// hair-thin ray misses is retried with a 32x32x36 box, and THAT is why melee in
+// Half-Life connects when it looks like it should.  Without it a crowbar had to
+// be aimed at a single pixel of a hitbox, which on something small and low - a
+// headcrab is 24 wide and 24 tall, and its model is smaller than its bbox -
+// meant swinging repeatedly through it for no damage.  That is the reported
+// "melee hits, but no damage" and "melee on NPCs is just inaccurate and bad".
+//
+// The hull result is used AS the hit: HL only re-derives a nicer impact POINT
+// from it (FindHullIntersection), and the entity it names is the entity that
+// takes the damage either way.  trace_endpos after a box trace is the box's
+// centre at contact, which for a 32-wide box can sit slightly inside the target;
+// that is only ever read for the impact effect, so it is left alone rather than
+// approximated.
+//
+// Only ever widens a MISS.  A line trace that already hit something is returned
+// untouched, so a swing that connects with the wall in front of you still
+// connects with the wall and not with whatever the box happens to clip.
+const vector MELEE_HULL_MIN = '-16 -16 -18';
+const vector MELEE_HULL_MAX = '16 16 18';
+
+void(vector src, vector end) W_WeaponTraceLine;
+
+float(vector src, vector end) W_MeleeTrace =
+{
+    W_WeaponTraceLine(src, end);
+    if (trace_fraction < 1.0)
+        return FALSE;                       // the ray found it; nothing to widen
+
+    float saved_dim_hit = self.dimension_hit;
+    self.dimension_hit = saved_dim_hit | PHYSDROP_DIM;
+    int saved_mask = W_CorpseMaskBegin(self);
+
+    // The hull retry needs the same inflation the ray above just got — see the note
+    // in W_WeaponTraceLine.  Without it the widened swing is widened against the
+    // movement hull only, which is exactly the case (something big, or a limb out to
+    // the side) the retry exists to catch.
+    // Segment padded by the swing HULL, not the bare ray — this is a tracebox, so the
+    // swept volume is 32x32x36 wider than the line and the broadphase must say so or
+    // it can cull exactly the off-axis target the hull retry exists to catch.
+    Monster_CullSegment(src, end, MELEE_HULL_MIN, MELEE_HULL_MAX);
+    W_PlayersExpandHitboxes();
+    Lagcomp_TraceBox(src, MELEE_HULL_MIN, MELEE_HULL_MAX, end,
+                     MOVE_NORMAL | MOVE_HITMODEL, self);
+    W_PlayersRestoreHitboxes();
+
+    W_CorpseMaskEnd(self, saved_mask);
+    self.dimension_hit = saved_dim_hit;
+
+    return trace_fraction < 1.0;            // TRUE only when the hull saved it
+};
+
+// ============================================================
+//  W_MeleeHitIsBody — "thwack" or "dong"?
+// ============================================================
+// Half-Life picks the melee impact sound from the target's CLASSIFICATION, not
+// from whether it is damageable:
+//
+//     if ( pEntity->Classify() != CLASS_NONE && pEntity->Classify() != CLASS_MACHINE )
+//         ... cbar_hitbod1/2/3 ...
+//     if (fHitWorld)
+//         ... TEXTURETYPE_PlaySound + cbar_hit1/2 ...
+//
+// CLASS_NONE is what every non-monster returns - the world, a func_breakable, a
+// crate - so a wooden box gets the metal-on-material sound and a zombie gets
+// flesh.  CLASS_MACHINE is the opt-out for robots and gun turrets, which is
+// exactly the "unless the NPC is a robot" the report asks for.
+//
+// Players are not a Classify() case in HL (they are CLASS_PLAYER, non-zero,
+// non-machine) and are included here for the same reason.
+//
+// This is NOT W_CanDamageTarget: that answers "may I hurt this", which is TRUE
+// for breakable brushes and would give a crate a wet thump.
+float(entity hit) W_MeleeHitIsBody =
+{
+    if (!hit || hit == world)
+        return FALSE;
+    if (hit.classname == "player")
+        return TRUE;
+    if (!(hit.flags & FL_MONSTER) && !hit.ai_class)
+        return FALSE;                       // brushwork, props, the world
+    if (hit.ai_class == CLASS_MACHINE)
+        return FALSE;                       // robots and turrets ring, not squelch
+    return TRUE;
 };
 
 // ============================================================
@@ -929,6 +1239,20 @@ float(entity hit) W_ClassifyImpactMaterial =
 //
 // `shooter` is an explicit parameter rather than `self` because monsters fire
 // through this path too, and the tracer has to anchor on whoever actually shot.
+// Raised around a multi-pellet fire loop so every pellet's impact event goes out
+// tagged as part of one blast; see the pack in W_ImpactEffectSend below and
+// pend_blast in client/cl_bulletimpact.qc for why the receiver needs it.
+//
+// Loop-scoped rather than wrapped around each send because a pellet loop emits
+// through THREE senders depending on what it hit (W_ImpactEffect for world,
+// W_ImpactEffectAllMat twice for flesh and breakables) — 17 call sites across
+// the seven multi-pellet weapons. Scoping it to the loop covers all of them,
+// including any added later.
+//
+// Unlike the client's bh_shotgun_blast this cannot go stale: these sends are
+// synchronous, so the flag is down again before the fire function returns.
+float sv_impact_is_blast;
+
 void(vector pos, vector normal, float mat, entity target, entity shooter, float is_entry) W_ImpactEffectSend =
 {
     entity p = player_chain_head;
@@ -938,7 +1262,18 @@ void(vector pos, vector normal, float mat, entity target, entity shooter, float 
         // need the ric/decal/tracer.  Skipping the shooter avoids echoing their
         // own predicted impact back at them; for a monster nobody is skipped,
         // which is correct - no client predicted that shot.
-        if (p != shooter && SV_PlayerHasNetchan(p) && checkpvs(pos, p))
+        //
+        // ...EXCEPT WHEN THE TARGET IS A MONSTER, which is now the one case where
+        // the shooter is NOT predicting their own impact.  CSQC used to draw the
+        // flesh burst itself off a ray-vs-AABB test that is a strict superset of
+        // the server's per-bone HLMDL_Trace, so it painted blood on shots that
+        // landed no damage at all - "hit splashes but the HP doesn't change".  That
+        // prediction is gone (sh_weapon_logic.qc, the csqc_monster_proxy branches),
+        // and this is what replaces it: the authoritative effect, at the
+        // hitbox-precise position, delivered to the shooter as well.  One ping of
+        // latency buys the invariant that blood means damage.
+        float to_shooter = (target.flags & FL_MONSTER) != 0;
+        if ((p != shooter || to_shooter) && SV_PlayerHasNetchan(p) && checkpvs(pos, p))
         {
             msg_entity = p;
             WriteByte(MSG_ONE, SVC_CGAMEPACKET);
@@ -966,7 +1301,16 @@ void(vector pos, vector normal, float mat, entity target, entity shooter, float 
             // safely: it resolves to whatever entity occupies slot (n & 255) and
             // the tracer flies in from there.
             WriteShort(MSG_ONE, num_for_edict(shooter));
-            WriteByte(MSG_ONE, is_entry);
+            // bit 0 = is_entry, bit 1 = multi-pellet BLAST.
+            //
+            // Packed into the existing byte rather than sent as a new one: a
+            // blast is 8-16 of these events, so a whole extra byte each would
+            // cost more than the flag is worth, and is_entry only ever uses one
+            // bit.  The receiver needs it because every pellet of a blast
+            // carries the SAME wep_action_id below, so without it they all fall
+            // into one per-shot cap bucket and a remote viewer sees a single
+            // decal for the whole spray.
+            WriteByte(MSG_ONE, (is_entry ? 1 : 0) | (sv_impact_is_blast ? 2 : 0));
             WriteByte(MSG_ONE, shooter.wep_action_id);   // per-shot action id -> remote per-shot decal cap
         }
         p = p.player_chain_next;
@@ -1026,6 +1370,31 @@ void(vector pos, vector normal, float mat, entity shooter) W_ImpactEffectFrom =
         return;
 
     W_ImpactEffectSend(pos, normal, mat, trace_ent, shooter, 1);
+};
+
+// Same, for an impact that was NOT made by a bullet.
+//
+// is_entry = 0 is not a hack here, it is the flag's existing meaning: the client
+// reads it as "decal only, no tracer, no travel delay" (see the comment beside
+// CSQC_SpawnTracer, client/cl_bulletimpact.qc:1800-1803, where it is already used
+// for a penetration exit wound). Everything else is unchanged - the decal, the
+// material, the ric, and the shooter's own .wep_action_id, which is what buckets
+// the remote per-shot decal cap and is the reason the OWNER still has to be passed
+// rather than the projectile.
+//
+// The bug this exists for: a monster's spit/hornet/spike landed and a bullet
+// streak was drawn from the creature's muzzle to the impact point, because
+// AI_ProjTouch reused W_ImpactEffectFrom above and that hard-codes is_entry = 1.
+// A projectile did not travel that line as a bullet - it flew there as an entity
+// the player could already see - so there is nothing to draw. Half-Life's
+// CSquidSpit::Touch (bullsquid.cpp:127-175) emits a decal, two sounds and a
+// sprite spray, and no tracer of any kind.
+void(vector pos, vector normal, float mat, entity shooter) W_ImpactEffectFromNoTracer =
+{
+    if (pointcontents(pos + normal * -2) == CONTENT_SKY)
+        return;
+
+    W_ImpactEffectSend(pos, normal, mat, trace_ent, shooter, 0);
 };
 
 // Send a positioned sound via multicast. Respects dimension_send,
@@ -1195,10 +1564,42 @@ void(float attacker_slot, float victim_slot, float cause, float weapon, float he
     multicast('0 0 0', MULTICAST_ALL);
 };
 
+// Sven item_inventory drop-on-death.  Defined in sv_item_inventory.qc
+// (position 265), which compiles after this file; the INV_LEAVE_* modes it
+// takes are in sv_customdefs.qc for the reason QC always forces — a function
+// forward-declares, a constant does not.
+void(entity plyr, float leave) Inv_DropAll;
+
+// Map-script death hook — server/sv_mapscript.qc, position 377.  Same forward
+// declaration story as Inv_DropAll above.
+void() MapScript_PlayerDiedOrLeft;
+
 void(entity attacker, entity victim) PlayerKilled =
 {
     Carry_Drop(victim);        // drop any carried prop on death so it falls free
     Ragdoll_CarryDrop(victim);  // and release any gravity-gunned corpse
+    // Sven item_inventory: drop the carried items unless the mapper ticked
+    // holder_keep_on_death, whose stated purpose is "so they can keep it while
+    // being revived".  Dropping is the default, and it is what puts a quest
+    // item back in play when its carrier dies halfway to the objective.
+    Inv_DropAll(victim, INV_LEAVE_DEATH);
+    // HL's DeactivateSatchels on PlayerKilled.  Removes, never detonates - a
+    // death-triggered blast would be a free posthumous frag.  Without this the
+    // spawn-time satchel_state reset would strand the previous life's charges
+    // on the map with nothing able to set them off.
+    W_SatchelDeactivateAll(victim);
+
+    // ...and the GRAPPLE, which this never tore down.  PlayerPreThink returns
+    // early for a dead player, so W_GrapplePullTick stops running the moment the
+    // player dies: nothing clears the hook entity, nothing clears the CSQC rope
+    // flag, and nothing stops the CHAN_BODY pull loop — that state simply sits
+    // there until PlayerSpawn's defensive W_GrappleRelease at respawn.  The
+    // audio tail is only the audible half; the state leak is the bug.
+    // W_GrappleRelease already removes the hook, clears
+    // grapple_attached / grapple_rope_active / grapple_next_loop and calls
+    // SV_StopChannel(player, CHAN_BODY).
+    if (victim.grapple_hook || victim.grapple_rope_active)
+        W_GrappleRelease(victim);
 
     victim.deaths = victim.deaths + 1;
     victim.prog_deaths = victim.prog_deaths + 1;   // nettest progression: lifetime deaths
@@ -1347,6 +1748,12 @@ void(entity attacker, entity victim) PlayerKilled =
     // Now safe to wipe the live player's velocity — corpse already has
     // its copy.  The dead player entity stays at rest until respawn.
     victim.velocity = '0 0 0';
+
+    // Map-script PlayerKilled hook.  LAST, after victim.health is already 0 and
+    // the body is settled, because th_escape's stand-in counts the living and
+    // ends the map when the count reaches zero — running it earlier would count
+    // the corpse.
+    MapScript_PlayerDiedOrLeft();
 };
 
 // ============================================================
@@ -1525,6 +1932,15 @@ void(entity veh, entity attacker) Vehicle_ShotNudge;
 // set needs the monster's CLASS_* classification).
 void(entity body, entity attacker) Monster_Gib;
 float(entity m, float dmgbits, float lastdmg) Gib_ShouldGibOnDeath;
+// Defined in sv_ai_core.qc, same arrangement and same reason as the two above:
+// the pre-damage veto a monster class is allowed to have.  See .ai_damagefilter.
+float(entity m, float damage, float dmgbits) AI_DamageFilter;
+
+// Declared authoritatively in sv_monsters.qc, which compiles at position 308 —
+// far behind this file.  QC cannot forward-declare a field, and an IDENTICAL
+// re-declaration resolves to the same offset, so this is the same arrangement
+// sub_use_type already uses across sv_doors/sv_triggers/sv_th_entities.
+.float  bloodcolor;
 
 float ai_dbg_corpse_hit;	// shots that landed on a body
 float ai_dbg_corpse_chip;	// gib-type hits that took a bite out of one
@@ -1537,9 +1953,64 @@ float ai_dbg_corpse_gib;	// bodies torn apart
 // ALREADY spawned the blood.  "This hit did no damage" and "this hit did not
 // land" are different answers, and only the second one should suppress an
 // impact effect.  So this returns the damage either way.
+// How much env_blood "damage to simulate" one point of real damage buys.  The
+// CSQC end turns this into a particle count (amount * 0.1, capped at 48), so a
+// 10-damage crowbar swing at x10 is a ten-particle puff and a shotgun blast is
+// the cap.  The floor keeps a 1-damage graze from producing a single speck.
+const float CORPSE_BLOOD_SCALE = 10;
+const float CORPSE_BLOOD_MIN   = 60;
+
 float(entity attacker, entity target, float damage, float bits) W_DeadTakeDamage =
 {
     ai_dbg_corpse_hit = ai_dbg_corpse_hit + 1;
+
+    // BLEED IT.  Half-Life sprays before this function is ever reached, and the
+    // note above about the return value is the same fact seen from the other
+    // side: CBaseMonster::TraceAttack (combat.cpp:1113) calls SpawnBlood +
+    // TraceBleed on ANY target whose pev->takedamage is set, live or dead, and
+    // only then hands off to DeadTakeDamage.  A body on the floor bleeds when
+    // you hit it in Half-Life for exactly that reason.
+    //
+    // Nothing in this tree reproduced that half.  The crowbar's own body branch
+    // plays cbar_hitbod and stops — W_ImpactEffect is in its ELSE — and the
+    // hitscan paths pick IMPACT_MAT_FLESH off W_ClassifyImpactMaterial, which
+    // never runs for a corpse because the corpse return above short-circuits
+    // W_ApplyDamage first.  So hitting a body was audible and completely
+    // invisible.
+    //
+    // env_blood's wire is reused rather than a new event added: it already
+    // carries origin, direction, amount, colour and a decal flag, and its client
+    // half already resolves the flesh recipes.  SF_BLOOD_DECAL is what leaves the
+    // pool on the floor afterwards.
+    //
+    // Sprayed from the body's CENTRE rather than from trace_endpos.  The trace
+    // globals do still hold the melee hit here, but W_ApplyDamage is reached from
+    // radius blasts and script damage too, where they hold something unrelated or
+    // nothing at all — and a blood puff that appears across the room is worse
+    // than one a few units off.
+    if (target.bloodcolor != 0 || (target.flags & FL_MONSTER))
+    {
+        vector bpos = target.origin + (target.mins + target.maxs) * 0.5;
+        vector bdir = '0 0 -1';
+        if (attacker && attacker != target)
+        {
+            bdir = bpos - (attacker.origin + attacker.view_ofs);
+            bdir_z = 0;
+            if (bdir == '0 0 0')
+                bdir = '1 0 0';
+            bdir = normalize(bdir);
+            // Biased downward so the decal lands on the floor the body is lying
+            // on rather than on whatever wall happens to be behind it.
+            bdir_z = -1;
+            bdir = normalize(bdir);
+        }
+        // BloodColor(): HL's BLOOD_COLOR_YELLOW is 195 and BLOOD_COLOR_RED 247.
+        // Every AI class sets .bloodcolor, so this is the class's own answer.
+        float bcol = (target.bloodcolor == 195) ? BLOODCOL_YELLOW : BLOODCOL_RED;
+        EnvBlood_Multicast(bpos, bdir,
+                           max(CORPSE_BLOOD_MIN, damage * CORPSE_BLOOD_SCALE),
+                           bcol, SF_BLOOD_DECAL);
+    }
 
     // Bullets bleed a corpse and nothing more — DMG_BULLET is deliberately
     // absent from DMG_GIB_CORPSE.  Everything heavier chips away at the pool
@@ -1574,6 +2045,11 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
     sv_dmg_bits = 0;
     if (!dmgbits)
         dmgbits = DMG_BULLET;
+    // Same read-and-clear discipline for the HUD's reason byte, and for exactly
+    // the same reason — leave it set and the next bullet wound would flash green
+    // because the last thing to run was a nerve-gas trigger.
+    float dmghud = sv_dmg_hudtype;
+    sv_dmg_hudtype = 0;
     if (sv_in_radius_explosion)
         dmgbits = dmgbits | DMG_BLAST;
 
@@ -1632,6 +2108,27 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
         && !cvar("mp_friendlyfire"))
         return 0;
 
+    // The tactical shield gets first refusal, BEFORE kevlar — a round stopped by
+    // a slab of polycarbonate never reaches the vest, so spending armour on it
+    // would be charging the player twice for one bullet.  Returns the surviving
+    // fraction (0 stops it outright), and is a no-op for anyone not carrying
+    // one.  Explosions deliberately go through: sv_in_radius_explosion damage
+    // arrives from a point, but it arrives as pressure from every direction, and
+    // a shield you can hide a whole grenade behind is not the CS shield.
+    if (target.classname == "player" && target.has_shield
+        && !sv_in_radius_explosion && attacker && attacker != target)
+    {
+        damage = damage * SH_ShieldDamageFraction(target, attacker.origin);
+        if (damage <= 0)
+        {
+            // Tell the shooter their round went nowhere — otherwise a blocked
+            // burst is indistinguishable from a miss, which is the single most
+            // confusing thing a shield can do to the person shooting at it.
+            sound(target, CHAN_BODY, "weapons/ric2.wav", 1, ATTN_NORM);
+            return 0;
+        }
+    }
+
     // Kevlar absorbs part of the incoming damage before it reaches health
     // (a helmet halves a headshot first — the 4x head multiplier is already
     // baked into `damage`).  No-op when the player has no armor and no
@@ -1640,6 +2137,14 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
     // die to one hit regardless of any kevlar bought pre-shuffle.
     if (target.classname == "player" && !target.ph_disguise_modelindex)
         damage = Armor_Absorb(target, damage, target.death_hitgroup == HITGROUP_HEAD);
+
+    // The class's own last word on this hit, BEFORE it lands.  Monsters only:
+    // this is the AI layer's veto (.ai_damagefilter), and the null case costs one
+    // field test.  It has to sit above the clamp below rather than below it,
+    // because a filter that survives a killing blow works by returning LESS than
+    // the target's health — clamping first would already have decided the kill.
+    if (target.flags & FL_MONSTER)
+        damage = AI_DamageFilter(target, damage, dmgbits);
 
     if (damage > target.health)
         damage = target.health;
@@ -1706,6 +2211,10 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
         WriteByte(MSG_ONE, SVC_CGAMEPACKET);
         WriteByte(MSG_ONE, CSQC_EVENT_DAMAGE_FLASH);
         WriteByte(MSG_ONE, bound(1, damage, 255));
+        // DMGHUD_* — why the player is losing health.  Every writer of this
+        // event must send it and _net_event_bytes must count it; see the note on
+        // the matching write in sv_player.qc.
+        WriteByte(MSG_ONE, dmghud);
         WriteCoord(MSG_ONE, atk_pos_x);
         WriteCoord(MSG_ONE, atk_pos_y);
         WriteCoord(MSG_ONE, atk_pos_z);
@@ -1879,6 +2388,13 @@ float(entity attacker, entity target, float damage) W_ApplyDamage =
             target.modelindex = 0;
             if (target.player_visual_proxy)
                 target.player_visual_proxy.modelindex = 0;
+
+            // Latched for the medkit's revive (sh_wpn_svmedkit.qc).  Sven's rule
+            // is "you can only revive players and NPCs that haven't been gibed",
+            // and there is no other way to ask afterwards: the corpse's zeroed
+            // modelindex above is also what a decloaked prop-hunt hider and an
+            // ordinary model-less state look like.  Cleared in PlayerSpawn.
+            target.death_was_gib = TRUE;
         }
 
         PlayerKilled(attacker, target);
@@ -2180,6 +2696,14 @@ void(entity drop_ent) W_PhysDropEnable =
 
 void(entity drop_ent) W_PhysDropSleep =
 {
+    // The sleeping branch of W_PhysDropThink never calls PhysObj_DetectContactFX, so
+    // this is the last tick on which anything would cut the loop.  In practice the
+    // thresholds already exclude it (sleep needs speed <= 8 for 0.2 s, sliding needs
+    // >= 35) but that is an accident of two independently-tunable cvars, not a
+    // guarantee — set sv_physprop_sleep_speed above sv_physprop_slide_min_speed and a
+    // drop could fall asleep mid-scrape.  Free when not scraping.
+    PhysFiles_StopScrape(drop_ent);
+
     drop_ent.weapon_physdrop_sleeping = TRUE;
     drop_ent.weapon_physdrop_rest_start = 0;
     drop_ent.velocity = '0 0 0';
@@ -2285,6 +2809,11 @@ void() W_PhysDropFallbackToToss =
         dprint(sprintf("[physdrop] fallback to TOSS for %s ent=%g origin=%v vel=%v\n",
             self.classname, num_for_edict(self), self.origin, self.velocity));
 
+    // This repoints .think at weapon_become_solid, so PhysObj_DetectContactFX — the
+    // ONLY thing that ever cuts the loop on the free-slide path — never runs on this
+    // entity again.  A latch still set here would survive until the watchdog swept it.
+    PhysFiles_StopScrape(self);
+
     physics_enable(self, FALSE);
     self.weapon_physdrop_sleeping = FALSE;
     self.weapon_physdrop_rest_start = 0;
@@ -2373,6 +2902,10 @@ void() W_PhysDropThink =
         {
             if (cvar("sv_debug_physprops"))
                 dprint(sprintf("[physdrop] removing escaped sleeping %s at %v\n", self.classname, self.origin));
+            // A removed edict has its fields cleared, so nothing downstream — not the
+            // watchdog, not a later think — can ever cancel a loop still latched here.
+            // Every remove() on a prop must stop first.  Free when not scraping.
+            PhysFiles_StopScrape(self);
             remove(self);
             return;
         }
@@ -2395,6 +2928,7 @@ void() W_PhysDropThink =
     {
         if (cvar("sv_debug_physprops"))
             dprint(sprintf("[physdrop] removing escaped %s at %v\n", self.classname, self.origin));
+        PhysFiles_StopScrape(self);
         physics_enable(self, FALSE);
         remove(self);
         return;
@@ -2412,6 +2946,7 @@ void() W_PhysDropThink =
         if (cvar("sv_debug_physprops"))
             dprint(sprintf("[physdrop] removing %s at %v (stuck in BSP > 2s)\n",
                 self.classname, self.origin));
+        PhysFiles_StopScrape(self);
         physics_enable(self, FALSE);
         remove(self);
         return;
@@ -2470,6 +3005,13 @@ void() W_PhysDropThink =
 
 void() W_PhysDropDeferredRemove =
 {
+    // THE ONE GENUINELY LIVE LEAK for weapon drops.  The other despawn paths
+    // (escaped-world, stuck-in-BSP, sleep, fallback-to-toss) all need seconds of
+    // awake ticks first, and PhysObj_DetectContactFX cuts the loop 0.2 s after a
+    // slide stops — so a scrape cannot survive them.  This one is reached from
+    // W_PhysDropBeginRemove the instant a player PICKS UP a gun that is still
+    // sliding, with the loop still playing.
+    PhysFiles_StopScrape(self);
     physics_enable(self, FALSE);
     remove(self);
 };
@@ -2720,6 +3262,274 @@ void() weapon_settle_think =
 
 
 // ============================================================
+//  Pickup respawn  -  Sven Co-op's mp_weaponstay and the three delay cvars
+// ============================================================
+//
+// THE CVAR EVERYONE ASKS FOR BY NAME IS mp_respawnweapons AND IT DOES NOT
+// EXIST.  See the block in shared/sh_cvar_table.qc for the evidence; the real
+// one is mp_weaponstay.
+//
+// HALF-LIFE DOES NOT IMPLEMENT "WEAPONS STAY" BY NEVER REMOVING THE ENTITY.
+// CHalfLifeMultiplay::FlWeaponRespawnTime (multiplay_gamerules.cpp:858) returns
+// `gpGlobals->time + 0` when weaponstay is on - an INSTANT respawn - and
+// CanHavePlayerItem (:922) refuses a player who already carries that weapon.
+// Copying that shape means "stays" and "respawns after N seconds" are one code
+// path with a different number in it, rather than two mechanisms that disagree
+// at the edges.
+//
+// What this mod already had: a map weapon is HIDDEN rather than removed
+// (see the tail of weapon_touch), keeping map_weapon_origin / _angles /
+// _spawn intact so W_RespawnMapWeapons can revive it.  Everything below is the
+// missing half - a caller other than RoundRestart.
+
+// Sven's Pickup base class spawnflags (sven-coop.fgd:291-298).  None of these
+// were read before.
+const float PICKUP_SF_TOUCH_ONLY = 128;
+const float PICKUP_SF_USE_ONLY   = 256;
+const float PICKUP_SF_USE_NO_LOS = 512;
+const float PICKUP_SF_NO_RESPAWN = 1024;
+
+// ITEM IS ZERO ON PURPOSE.  .pickup_kind is set at spawn only by the classes
+// that are not items, so an entity nobody thought about defaults to the item
+// rules - which is the safe direction, and means GoldSrc_PickupTaken (reached
+// by eight different spawn functions) can read the field without every one of
+// them having to set it.
+const float PICKUP_KIND_ITEM   = 0;
+const float PICKUP_KIND_AMMO   = 1;
+const float PICKUP_KIND_WEAPON = 2;
+
+// Per-entity override, sven-coop.fgd:348-351 (CustomRespawnDelay base class,
+// carried by Weapon, Ammo, Item, item_inventory and weaponbox).
+//
+// DECLARED LOWERCASE ON PURPOSE.  The FGD spells it m_flCustomRespawnTime and
+// ED_FindField is a plain strcmp, so a CamelCase declaration binds only for the
+// compilers that emit CamelCase.  ED_ParseUnknownEpair case-folds a miss onto a
+// lowercase field (sv_multi_manager.qc:412), so declaring it lowercase is what
+// makes ONE field serve both spellings - the same reasoning sv_scripted.qc
+// records for the m_isz* keys.  The FGD types it `string`; the engine converts
+// by FIELD type, not by FGD type, so .float is correct and saves a stof.
+.float m_flcustomrespawntime;
+
+// Absolute time this pickup comes back.  0 = nothing scheduled.
+.float pickup_respawn_at;
+// Which delay cvar governs it - set at spawn, because by the time it is taken
+// the classname may have been rewritten (weapon_crowbar -> weapon_hlcrowbar).
+.float pickup_kind;
+// What to put back for a NON-weapon pickup.  A map weapon is revived by
+// re-running map_weapon_spawn, which rebuilds everything; ammo and items have no
+// such stored function (GoldSrc_SpawnPickup is called with a model and a touch
+// and nothing records which spawn function called it), and adding one would mean
+// threading a third argument through every one of its callers.  Saving the two
+// values that actually change is smaller and does not touch those call sites.
+.string pickup_model;
+.void() pickup_touch;
+
+// Counter-Strike armoury_entity stock — CArmoury::m_iCount.  One armoury_entity
+// with count 5 is FIVE guns stacked on one spot, not five entities: the CS wiki
+// puts it as "it will look like there is only one in game, but there will be the
+// number you have used and the weapon model won't disappear until they are all
+// used up".  Set by server/sv_cs_entities.qc and read in Pickup_Taken below;
+// zero on every other pickup in the game, which is why the check there is a
+// single compare rather than a branch on classname.
+.float armoury_left;
+
+// How long until this pickup returns, or -1 for "never".
+//
+// Precedence is Sven's, and the spawnflag is FIRST: a mapper who ticked
+// "Disable Respawn" on one crate means that crate, whatever the server is set
+// to.  A cvar has no business overruling a key written into the BSP - the same
+// call made for `onlytrigger` in sv_doors_rotating.qc.
+float(entity e, float kind) Pickup_RespawnDelay =
+{
+    if (e.spawnflags & PICKUP_SF_NO_RESPAWN)
+        return -1;
+
+    // Weaponstay: instant, exactly as HL does it.  Checked before the custom
+    // time because weaponstay is a statement about the whole server's rules,
+    // and a map that also set a custom delay was describing the non-stay case.
+    if (kind == PICKUP_KIND_WEAPON && cvar("mp_weaponstay") > 0)
+        return 0;
+
+    if (e.m_flcustomrespawntime > 0)
+        return e.m_flcustomrespawntime;
+
+    float d;
+    if (kind == PICKUP_KIND_AMMO)      d = cvar("mp_ammo_respawndelay");
+    else if (kind == PICKUP_KIND_ITEM) d = cvar("mp_item_respawndelay");
+    else                               d = cvar("mp_weapon_respawndelay");
+
+    // Sven's encoding, IN FULL (manual/mapping-config.html, and the shipped
+    // default_map_settings.cfg):
+    //   -2  use the GAME DEFAULT delay - it respawns
+    //   -1  never respawn, unless the entity carries m_flCustomRespawnTime
+    //       (that override was already taken above)
+    //    0  instant
+    //   >0  after this many seconds
+    //
+    // -2 USED TO BE FOLDED INTO "never" RIGHT HERE, so the campaign corpus
+    // would not start respawning the moment this code landed.  That protection
+    // now lives on the DEFAULT instead - sh_cvar_table.qc registers all three
+    // delays at -1 - which keeps a server that never touches them on the
+    // single-player "a pickup you take is gone" behaviour, and leaves -2 free
+    // to mean what Sven says it means.  With the fold in place there was no
+    // value AT ALL that asked for the game's own schedule: -1 meant never, -2
+    // meant never, and a server.cfg copied from a Sven server (where these sit
+    // at -2 and pickups do come back) read as "never".  That is the reported
+    // crowbar/healthkit bug.
+    if (d <= -2)
+    {
+        // Half-Life's own constants, multiplay_gamerules.cpp:45-47 -
+        // ITEM_RESPAWN_TIME 30, WEAPON_RESPAWN_TIME 20, AMMO_RESPAWN_TIME 20.
+        // FlWeaponRespawnTime's weaponstay shortcut is not repeated here
+        // because it was already taken at the top of this function.
+        if (kind == PICKUP_KIND_ITEM)
+            return 30;
+        return 20;                  // weapon and ammo
+    }
+
+    if (d < 0)
+        return -1;                  // -1: never
+    return d;                       // 0 = instant, >0 = seconds
+};
+
+// The revive.  Deliberately the same two lines W_RespawnMapWeapons uses
+// (sv_weapons.qc, the map_weapon arm): re-running the stored spawn function
+// re-wires model, SendEntity, touch and think from scratch, so it does not
+// matter whether the entity was hidden or merely stale.
+void() Pickup_RespawnThink =
+{
+    self.pickup_respawn_at = 0;
+
+    if (self.map_weapon && self.map_weapon_spawn)
+    {
+        setorigin(self, self.map_weapon_origin);
+        self.angles = self.map_weapon_angles;
+        self.map_weapon_spawn();
+
+        if (self.movetype != MOVETYPE_PHYSICS)
+        {
+            self.velocity = '0 0 -100';
+            if (!droptofloor())
+                self.velocity = '0 0 -200';
+        }
+        self.SendFlags |= 1;
+        return;
+    }
+
+    // Non-weapon pickup: put back exactly what Pickup_Taken took away.  Size,
+    // solidity and movetype are GoldSrc_SpawnPickup's own constants
+    // (sv_goldsrc_pickups.qc) - repeated rather than shared because that
+    // function is reached through eight different spawn functions and none of
+    // them records which one it was.
+    if (self.pickup_model == "" || !self.pickup_touch)
+    {
+        // Nothing to restore.  Only reachable if the model or touch was cleared
+        // while a respawn was pending; a crate drop clears its spawn bookkeeping
+        // for exactly this reason (sv_goldsrc_ammo.qc), so drop the entity
+        // rather than leave an invisible solid standing in the world.
+        remove(self);
+        return;
+    }
+
+    setorigin(self, self.map_weapon_origin);
+    setmodel(self, self.pickup_model);
+    setsize(self, '-16 -16 0', '16 16 16');
+    self.solid     = SOLID_TRIGGER;
+    self.movetype  = MOVETYPE_TOSS;
+    self.touch     = self.pickup_touch;
+    self.SendFlags |= 1;
+};
+
+// Called from every pickup's taken-path.  Returns TRUE when the entity has been
+// dealt with (hidden, scheduled, or deliberately left standing) and the caller
+// must NOT remove it; FALSE means "no respawn is owed, remove it as before".
+float(entity e, float kind) Pickup_Taken =
+{
+    float delay = Pickup_RespawnDelay(e, kind);
+
+    // CS armoury stock, taken BEFORE the delay is acted on so it overrides every
+    // rule above: a mapper who stacked five rifles on one armoury_entity means
+    // five rifles regardless of what mp_weapon_respawndelay says, and the stack
+    // must not start obeying the server's respawn schedule until it is empty.
+    //
+    // Folding it into `delay = 0` rather than returning early is deliberate - it
+    // reuses the two instant-respawn paths that already exist just below, so the
+    // stack behaves EXACTLY like mp_weaponstay for a gun (left standing, solid,
+    // still .touch-wired, with weapon_touch's slot-occupancy guard refusing the
+    // same player a second copy) and like an instant item respawn for kevlar
+    // (hidden, back on the next think).  That second distinction is load-bearing:
+    // an item left standing would re-grant on every touch frame, which is the
+    // infinite-ammo trap the comment below this one already records.
+    if (e.armoury_left > 0)
+    {
+        e.armoury_left = e.armoury_left - 1;
+        delay = 0;
+    }
+
+    // Never coming back.  Map weapons still get hidden rather than removed,
+    // because RoundRestart revives them and always did.
+    if (delay < 0)
+        return FALSE;
+
+    // Instant, and A WEAPON: this is mp_weaponstay's whole point.  Leave it
+    // exactly as it is - solid, visible, and STILL .touch-wired.
+    //
+    // .touch matters beyond the obvious: sv_use.qc identifies a weapon pickup by
+    // `e.touch == weapon_touch`, so nulling it (as the hide path does) would
+    // also shut off the +use route and the gun would become un-takeable by the
+    // one input most likely to be aimed at it.
+    //
+    // DELIBERATELY WEAPONS ONLY.  A weapon left standing is safe because the
+    // slot-occupancy checks at the top of weapon_touch refuse the second take;
+    // an ammo crate has no such guard, so leaving one solid would hand out its
+    // contents on every touch frame - infinite ammo, not an instant respawn.
+    // Ammo and items with a 0 delay hide and come back on the next think
+    // instead, which is the same behaviour one frame later and cannot run away.
+    if (delay == 0 && kind == PICKUP_KIND_WEAPON)
+        return TRUE;
+
+    // Delayed: hide, and come back later.  Same hidden state the round-reset
+    // path uses, so the two cannot drift.
+    //
+    // Remember where it was and what it looked like BEFORE clearing any of it -
+    // map_weapon_origin is already the weapon path's own record, and reusing it
+    // means one revive knows where to put either kind back.
+    if (!e.map_weapon)
+    {
+        e.map_weapon_origin = e.origin;
+        e.map_weapon_angles = e.angles;
+        if (e.model != "")
+            e.pickup_model = e.model;
+        if (e.touch)
+            e.pickup_touch = e.touch;
+    }
+
+    // THE SAME HIDE TRAP AS mp_nomapweapons, and this one was missed when that
+    // was fixed.  A map weapon that an explosion has sent sliding is a live ODE
+    // body with a scrape latched on it; hiding it here clears .touch and repoints
+    // .think at the respawn timer, so the contact detector that owns the scrape
+    // never runs on this entity again and nothing is left to cancel it.  Both the
+    // sound and the physics body have to be torn down BEFORE the entity is parked.
+    // Mirrors sv_weapons.qc:536-541 exactly.
+    PhysFiles_StopScrape(e);
+    if (e.movetype == MOVETYPE_PHYSICS || e.weapon_physdrop_sleeping)
+        physics_enable(e, FALSE);
+    e.weapon_physdrop_sleeping   = FALSE;
+    e.weapon_physdrop_rest_start = 0;
+
+    e.solid     = SOLID_NOT;
+    e.movetype  = MOVETYPE_NONE;
+    setmodel(e, "");
+    e.touch     = __NULL__;
+    e.SendFlags |= 1;               // see the ghost-pickup note in weapon_touch
+
+    e.pickup_respawn_at = time + delay;
+    e.think     = Pickup_RespawnThink;
+    e.nextthink = e.pickup_respawn_at;
+    return TRUE;
+};
+
+// ============================================================
 //  Weapon touch  -  called when a player walks over a pickup
 // ============================================================
 
@@ -2747,7 +3557,32 @@ void() weapon_touch =
     if (PropHunt_HiderNoWeapons(player))
         return;
 
+    // Sven's Pickup routing flags (sven-coop.fgd:291-298), neither of which was
+    // read before.  Both routes land in this one function - walking over a gun
+    // arrives via .touch, and +use arrives via SV_TryWeaponPickup calling
+    // .touch() directly - and sv_use_is_player_direct is TRUE across that whole
+    // call (sv_use.qc:281), so it is what tells the two apart.
+    //
+    // Returning rather than consuming: a "USE Only" weapon someone walks over
+    // must stay takeable by the input that IS allowed, and a "TOUCH Only" one
+    // must let the press fall through to whatever is behind it.
+    if ((pickup.spawnflags & PICKUP_SF_USE_ONLY) && !sv_use_is_player_direct)
+        return;
+    if ((pickup.spawnflags & PICKUP_SF_TOUCH_ONLY) && sv_use_is_player_direct)
+        return;
+
     slot = pickup.weapon_slot;
+
+    // Tactical shield, rule 2: it is one hand, so the other hand may hold a
+    // pistol, the knife or a grenade and nothing else.  Refuse rather than drop
+    // the shield automatically — losing equipment you paid for by brushing past
+    // a rifle is exactly the accident +use exists to avoid, and Counter-Strike
+    // refuses here too.
+    if (SH_ShieldBlocksPickup(player, pickup.weapon))
+    {
+        centerprint(player, "Drop the shield first\n");
+        return;
+    }
 
     // Reject if player already has a weapon in this slot — utility is a
     // small inventory, so only duplicate utility pickups are blocked.
@@ -2757,8 +3592,16 @@ void() weapon_touch =
     // fists overwrites the slot with the real weapon.  Without this
     // exception the player would be stuck with fists forever since
     // the drop key can't drop them.
-    if (slot == SLOT_PRIMARY   && player.slot_primary)   return;
-    if (slot == SLOT_SECONDARY && player.slot_secondary) return;
+    // PRIMARY / SECONDARY are now bounded by mp_maxprimary / mp_maxsecondary
+    // rather than by "is the slot occupied".  At a limit of 1 this is exactly the
+    // old test.  At the limit, walking over a gun still REFUSES it — +use remains
+    // the deliberate swap route (SV_TryWeaponSwap), so you cannot lose a weapon by
+    // brushing past another one.
+    if (slot == SLOT_PRIMARY || slot == SLOT_SECONDARY)
+    {
+        if (W_CarryIndexOf(player, slot, pickup.weapon) >= 0)          return;
+        if (W_CarryCount(player, slot) >= W_CarryLimit(slot))          return;
+    }
     if (slot == SLOT_MELEE
         && player.slot_melee
         && player.slot_melee != WEP_MELEE)               return;
@@ -2777,22 +3620,17 @@ void() weapon_touch =
     self = saved;
     W_SlotAmmo_CopyDropToPlayer(player, pickup);
 
-    // The reserve pays out HERE, and only here.  Ammo pickups for a gun the
-    // player does not carry bank their rounds by calibre (sv_goldsrc_ammo.qc);
-    // finding the gun is what releases them.  Placed after the pickupcopy above
-    // so the weapon's own starting ammo is already in place and the drain tops up
-    // from there rather than being overwritten by it.
-    Ammo_DrainForWeapon(player, pickup.weapon);
-
     // Register weapon in the correct player slot
     if (slot == SLOT_PRIMARY)
     {
+        W_CarryAdd(player, SLOT_PRIMARY, pickup.weapon);
         player.slot_primary       = pickup.weapon;
         player.slot_primary_equip = pickup.weap_draw;
         player.slot_primary_drop  = pickup.weap_drop_func;
     }
     else if (slot == SLOT_SECONDARY)
     {
+        W_CarryAdd(player, SLOT_SECONDARY, pickup.weapon);
         player.slot_secondary       = pickup.weapon;
         player.slot_secondary_equip = pickup.weap_draw;
         player.slot_secondary_drop  = pickup.weap_drop_func;
@@ -2815,6 +3653,19 @@ void() weapon_touch =
             self = saved;
         }
     }
+
+    // The reserve pays out HERE, and only here.  Ammo pickups for a gun the
+    // player does not carry bank their rounds by calibre (sv_goldsrc_ammo.qc);
+    // finding the gun is what releases them.
+    //
+    // ORDER IS LOAD-BEARING, and it moved: this used to sit above the slot
+    // registration, next to the pickupcopy.  Ammo_GiveToCarried now refuses to
+    // fill a weapon the player does not carry — which is the whole point of a
+    // reserve — and "carries" is decided by the slot fields assigned just above.
+    // Draining before them meant the player provably did not own the gun yet, so
+    // the drain silently did nothing.  It must also stay BEFORE the auto-equip
+    // below, so the equip's W_SlotAmmo_LoadLegacy reads the topped-up value.
+    Ammo_DrainForWeapon(player, pickup.weapon);
 
     // Auto-equip if this is a better weapon than what we're holding.
     // Primary > Secondary > Melee.  Holding WEP_MELEE (fists) counts
@@ -2858,16 +3709,87 @@ void() weapon_touch =
     // Map weapons are hidden instead of removed so they can respawn on round reset
     if (pickup.map_weapon)
     {
-        pickup.solid = SOLID_NOT;
-        pickup.movetype = MOVETYPE_NONE;
-        setmodel(pickup, "");
-        pickup.touch = __NULL__;
-        // Force a SendEntity re-fire so the CSQC copy receives the
-        // empty model and hides locally. Without this, FTE's delta
-        // compression sometimes skips the resend after setmodel(""),
-        // leaving a ghost pickup on the client (visible, can be
-        // walked over again, but slot-occupied so no re-pickup).
-        pickup.SendFlags |= 1;
+        // ...or not hidden at all, under mp_weaponstay / a 0 delay.  Pickup_Taken
+        // owns that decision and returns TRUE once it has acted.
+        if (Pickup_Taken(pickup, PICKUP_KIND_WEAPON))
+        {
+            // AMMO RE-FARMING IS THE REAL EXPLOIT HERE, not double pickup.
+            // Walking over a stayed weapon twice is already refused by the
+            // slot-occupancy checks at the top of this function - but pick up,
+            // DROP (mp_dropweapons), and touch it again and the slot is free,
+            // so W_SlotAmmo_CopyDropToPlayer and Ammo_DrainForWeapon above run
+            // a second time and pay out the world entity's stored ammo again.
+            // Repeat for unlimited ammo.
+            //
+            // Half-Life closes this by disabling dropping entirely under
+            // weaponstay (player.cpp:4679).  NOT PORTED: this mod has a whole
+            // physics-drop system and silently disabling it would be a worse
+            // surprise than the exploit.  Draining the entity instead means the
+            // first taker gets weapon + ammo and everyone after gets the
+            // weapon - which is the honest reading of "the weapon stays".
+            // RoundRestart re-runs the spawn function and restores it.
+            if (pickup.solid != SOLID_NOT)
+            {
+                // CLEAR THE DROP FIELDS, NOT THE SLOT FIELDS, and the first
+                // version of this line got it wrong in a way nothing visible
+                // would ever have shown.  W_SlotAmmo_ClearForWeapon routes
+                // through W_SlotAmmo_SetForWeapon, which writes
+                // .slot_primary_*/.slot_secondary_* (sh_weapon_slotammo.qc:19)
+                // - PLAYER fields.  What the next taker actually reads off this
+                // world entity is .weapon_drop_mag/_ammo/_aux, in
+                // W_SlotAmmo_CopyDropToPlayer (:309).  So the old call zeroed
+                // three fields nobody consults and left the payout untouched,
+                // and it was worse than nothing: the guard READ as present.
+                // It also silently covered no melee or utility weapon at all,
+                // because SetForWeapon only has branches for PRIMARY and
+                // SECONDARY - which is most of the grenade-shaped things a
+                // player would want to farm.  Caught by sv_pickup_test.
+                pickup.weapon_drop_mag  = 0;
+                pickup.weapon_drop_ammo = 0;
+                pickup.weapon_drop_aux  = 0;
+                W_SlotAmmo_ClearForWeapon(pickup, pickup.weapon);
+
+                // THE CLIENT HAS ALREADY HIDDEN THIS WEAPON.
+                // CSQC_PredictPickupWeapon sets drawmask = 0 the moment the
+                // player overlaps it (cl_weapons.qc), and nothing on the entity
+                // changed here, so without a forced resend the client would sit
+                // on a hidden-but-still-solid weapon until PICKUP_PREDICT_TIMEOUT
+                // expired and restored it - a visible flicker on every take.
+                //
+                // Bumping SendFlags sends the entity again WITH its real model,
+                // which lands in CSQC_DroppedWeapon_Update's existing rollback
+                // branch and restores drawmask on the spot.  No new client code
+                // and no cvar replication: the machinery written for "the server
+                // denied your prediction" is exactly the machinery for "the
+                // weapon stayed", because from the client's side those are the
+                // same event.  (The sv_debug_pickups line will say "server
+                // denied prediction" for a take that succeeded - harmless, and
+                // noted here so it does not read as a bug in a log.)
+                pickup.SendFlags |= 1;
+            }
+        }
+        else
+        {
+            // Same tear-down as Pickup_Taken above, and for the same reason: this
+            // hides a possibly-sliding ODE body and clears its touch, so anything
+            // still latched on it would have nothing left to cancel it.
+            PhysFiles_StopScrape(pickup);
+            if (pickup.movetype == MOVETYPE_PHYSICS || pickup.weapon_physdrop_sleeping)
+                physics_enable(pickup, FALSE);
+            pickup.weapon_physdrop_sleeping   = FALSE;
+            pickup.weapon_physdrop_rest_start = 0;
+
+            pickup.solid = SOLID_NOT;
+            pickup.movetype = MOVETYPE_NONE;
+            setmodel(pickup, "");
+            pickup.touch = __NULL__;
+            // Force a SendEntity re-fire so the CSQC copy receives the
+            // empty model and hides locally. Without this, FTE's delta
+            // compression sometimes skips the resend after setmodel(""),
+            // leaving a ghost pickup on the client (visible, can be
+            // walked over again, but slot-occupied so no re-pickup).
+            pickup.SendFlags |= 1;
+        }
     }
     else
     {
@@ -2899,6 +3821,13 @@ void() W_ClearWeaponBindings =
     self.weapon_ads_prefix   = "";
     self.weapon_scope_class  = SCOPE_CLASS_NONE;
     self.weapon_muzzle_bone  = "";
+    // The emplaced stance, same default-off rule as the ADS profile above: only
+    // the five deployable DoD weapons re-assert it in their own Equip.  Leaving
+    // it set would carry a mortar's movement lock onto the next weapon.
+    self.weapon_deployable   = 0;
+    self.wep_deployed        = 0;
+    // The held crouch is narrower still — the mortar alone re-asserts it.
+    self.weapon_deploy_crouched = 0;
     W_ClearZoom();
 };
 
@@ -2938,6 +3867,11 @@ void() W_UtilityRefreshSlotBinding =
         self.slot_utility_equip = W_SnarkEquip;
         self.slot_utility_drop = W_SnarkDrop;
     }
+    else if (self.slot_utility == WEP_PENGUIN)
+    {
+        self.slot_utility_equip = W_PenguinEquip;
+        self.slot_utility_drop = W_PenguinDrop;
+    }
     else if (self.slot_utility == WEP_SNOWBALL)
     {
         self.slot_utility_equip = W_SnowballEquip;
@@ -2957,6 +3891,41 @@ void() W_UtilityRefreshSlotBinding =
     {
         self.slot_utility_equip = W_CSSmokeGrenadeEquip;
         self.slot_utility_drop = W_CSSmokeGrenadeDrop;
+    }
+    else if (self.slot_utility == WEP_MEDKIT)
+    {
+        self.slot_utility_equip = W_MedkitEquip;
+        self.slot_utility_drop = W_MedkitDrop;
+    }
+    else if (self.slot_utility == WEP_ASSOFLAM)
+    {
+        self.slot_utility_equip = W_SoflamEquip;
+        self.slot_utility_drop = W_SoflamDrop;
+    }
+    // THE THREE DoD UTILITIES WERE MISSING FROM THIS TABLE, and because the
+    // function opens by NULLing both pointers, it did not merely fail to bind
+    // them — it wiped the binding W_RefreshUtilitySlot (sv_player.qc:3910-3923)
+    // had already set correctly.  That is the reported "the binoculars despawn
+    // as soon as you spawn one and try to swap to it": selecting them left the
+    // server holding weaponmodel "", fire __NULL__ and wepframe __NULL__.
+    //
+    // The binoculars have no drop by design (sh_wpn_dodbinocs.qc:16) — they are
+    // a spotting tool with no world pickup — so their drop pointer stays null
+    // and the dispatcher's own null test handles it.
+    else if (self.slot_utility == WEP_DODMILLS)
+    {
+        self.slot_utility_equip = W_DodMillsEquip;
+        self.slot_utility_drop = W_DodMillsDrop;
+    }
+    else if (self.slot_utility == WEP_DODSTICK)
+    {
+        self.slot_utility_equip = W_DodStickEquip;
+        self.slot_utility_drop = W_DodStickDrop;
+    }
+    else if (self.slot_utility == WEP_DODBINOCS)
+    {
+        self.slot_utility_equip = W_DodBinocsEquip;
+        self.slot_utility_drop = __NULL__;
     }
 };
 
@@ -3006,8 +3975,18 @@ void() W_TryEquipUtility =
         W_TripmineEquip();
     else if (self.weapon == WEP_SNARK)
         W_SnarkEquip();
+    else if (self.weapon == WEP_PENGUIN)
+        W_PenguinEquip();
     else if (self.weapon == WEP_HORNETGUN)
         W_HGunEquip();
+    else if (self.weapon == WEP_SHOCKRIFLE)
+        W_ShockEquip();
+    else if (self.weapon == WEP_DISPLACER)
+        W_DispEquip();
+    else if (self.weapon == WEP_JETPACK)
+        W_JetEquip();
+    else if (self.weapon == WEP_BGRAPPLE)
+        W_BGrapEquip();
     else if (self.weapon == WEP_SNOWBALL)
         W_SnowballEquip();
     else if (self.weapon == WEP_CSHEGRENADE)
@@ -3016,6 +3995,31 @@ void() W_TryEquipUtility =
         W_CSFlashbangEquip();
     else if (self.weapon == WEP_CSSMOKEGRENADE)
         W_CSSmokeGrenadeEquip();
+    else if (self.weapon == WEP_MEDKIT)
+        W_MedkitEquip();
+    else if (self.weapon == WEP_ASSOFLAM)
+        W_SoflamEquip();
+    // THE THREE DoD UTILITIES HAD NO ARM HERE, and W_ClearWeaponBindings() ran
+    // unconditionally above — so selecting one left the SERVER holding
+    // weaponmodel "", fire __NULL__ and wepframe __NULL__.  All three are
+    // server-autonomous (sh_weapons.qc:907, :914), which means W_WeaponFrame's
+    // `if (self.fire) self.fire();` is their ONLY entry point, and it was null.
+    // The binoculars' own header predicted this failure in advance
+    // (sh_wpn_dodbinocs.qc:37): "the server would never call self.fire() —
+    // +attack would do nothing, silently".  That is the reported despawn.
+    //
+    // NOT dispatched through self.slot_utility_equip, tempting as it looks:
+    // W_UtilityRefreshSlotBinding re-derives slot_utility from
+    // W_UtilityNextCarried(WEP_NONE), which is the first CARRIED utility in ring
+    // order and not necessarily self.weapon — so the pointer can name a
+    // different weapon than the one being equipped.  Keyed on self.weapon like
+    // every other arm.
+    else if (self.weapon == WEP_DODMILLS)
+        W_DodMillsEquip();
+    else if (self.weapon == WEP_DODSTICK)
+        W_DodStickEquip();
+    else if (self.weapon == WEP_DODBINOCS)
+        W_DodBinocsEquip();
 };
 
 void() W_ChangeWeapon =
@@ -3033,9 +4037,11 @@ void(float new_weapon) W_SelectWeapon =
     if (new_weapon == WEP_NONE || new_weapon == cur)
         return;
 
-    if (self.slot_primary   != new_weapon &&
-        self.slot_secondary != new_weapon &&
-        self.slot_melee     != new_weapon &&
+    // OWNERSHIP, not "is it the cursor".  W_CarryHas covers melee and both carry
+    // lists; under multi-carry the cursor is only one of what may be several
+    // primaries, so the old four-way cursor comparison would refuse to select a
+    // weapon the player demonstrably owns.
+    if (!W_CarryHas(self, new_weapon) &&
         !(W_UtilityWeaponSelectable(new_weapon) && W_UtilityPlayerHasWeapon(new_weapon)))
         return;
 
@@ -3056,6 +4062,32 @@ void(float new_weapon) W_SelectWeapon =
     self.pm_weapon_blend_progress = 0;
 
     self.weapon = new_weapon;
+
+    // ONE call does the whole cursor move now: persist the outgoing weapon into
+    // its OWN legacy store, move the cursor, hydrate the incoming weapon from
+    // ITS store.  See the data-model block at the top of sh_weapon_slotammo.qc.
+    //
+    // What used to be here was `W_SlotAmmo_SaveLegacy(self, cur)` — a HYDRATE of
+    // the outgoing weapon, which leaves the shared registers describing the gun
+    // you just put away, right before W_RebindSlot snapshotted them and stamped
+    // them onto the gun you just drew.  That is how the F5 bench handed out
+    // empty weapons and how cycling two primaries swapped their magazines.
+    //
+    // The previous comment here argued at length that it must be the OUTGOING
+    // weapon and cited sv_ammo_selftest stage 2 going want=60 got=10.  The
+    // observation was real; the conclusion was wrong.  Stage 2 was failing
+    // because Ammo_TopUpWeapon wrote the SLOT cache for a holstered gun, so the
+    // only way to see those rounds again was to read the cache back — a second
+    // bug propping up the first.  Ammo_TopUp* now writes the weapon's own store
+    // (sv_goldsrc_ammo.qc), so stage 2 passes by construction and this can be
+    // what it should always have been.
+    float ns = WeaponManifest_Slot(new_weapon);
+    if (ns == SLOT_PRIMARY || ns == SLOT_SECONDARY)
+    {
+        W_SlotAmmo_PointAt(self, ns, new_weapon);
+        W_RebindSlot(ns);
+    }
+
     if (W_UtilityWeaponSelectable(new_weapon))
         W_UtilitySetCurrentSlot(new_weapon);
     W_ChangeWeapon();
@@ -3165,9 +4197,7 @@ void() W_SelectLastWeapon =
     // if it's still in our inventory.
     if (self.previous_weapon != WEP_NONE
         && self.previous_weapon != self.weapon
-        && (self.slot_primary   == self.previous_weapon
-         || self.slot_secondary == self.previous_weapon
-         || self.slot_melee     == self.previous_weapon
+        && (W_CarryHas(self, self.previous_weapon)
          || (W_UtilityWeaponSelectable(self.previous_weapon)
              && W_UtilityPlayerHasWeapon(self.previous_weapon))))
     {
@@ -3201,6 +4231,17 @@ void() W_DropCurrentWeapon =
     float  cur;
     float  phys_drop;
 
+    // The tactical shield goes FIRST, and takes the press on its own.  It has no
+    // slot for the dispatcher below to find, and the drop key is the only way to
+    // be rid of it — which is exactly what a player who wants a rifle has to do,
+    // since weapon_touch refuses one while it is carried.  Dropping the pistol
+    // out from under the shield instead would leave them stuck with no way out.
+    if (self.has_shield)
+    {
+        CS_Shield_DropFrom(self);
+        return;
+    }
+
     cur = self.weapon;
     if (cur == WEP_NONE)
         return;
@@ -3218,9 +4259,45 @@ void() W_DropCurrentWeapon =
     if (cur == WEP_CSFLASHBANG && self.ammo_csflashbang > 0)    drop_func = W_CSFlashbangDrop;
     if (cur == WEP_CSSMOKEGRENADE && self.ammo_cssmokegrenade > 0) drop_func = W_CSSmokeGrenadeDrop;
     if (cur == WEP_CFC4 && self.ammo_cfc4 > 0)                  drop_func = W_CFC4Drop;
+    // The medkit is a SLOT_UTILITY tool and its drop binding lives in
+    // slot_utility_drop (W_UtilityRefreshSlotBinding, :3742) — a field this
+    // dispatcher has never read, so impulse 8 fell through to the early-out below
+    // and did nothing at all.  The client had already predicted the drop, and the
+    // correcting snapshot re-deploying the medkit is what replayed the draw
+    // animation the reporter saw on every press.
+    //
+    // Ammo is deliberately NOT the gate the way it is for the ordnance above:
+    // ownership of the medkit is "the utility slot holds it"
+    // (W_UtilityPlayerHasWeapon, shared/weapons/sh_wpn_snowball.qc:257-258), and an
+    // empty medkit is still a medkit you may put down.
+    //
+    // GENERALISED, because the medkit was never the only one.  That fix was made
+    // for the medkit alone and left every other slot-bound utility falling
+    // through — the DoD grenades, the SOFLAM and the penguin all had a perfectly
+    // good W_*Drop that this dispatcher could not reach, so impulse 8 on any of
+    // them did nothing while the CLIENT had already predicted the drop.  That
+    // mismatch is the reported "some of the DoD utility cannot be dropped,
+    // causing a draw animation to occur when nothing is happening": CSQC drops
+    // it, stamps WS_DRAW on the next weapon, and the correcting snapshot then
+    // stamps WS_DRAW again on the weapon that never left. Two draws, no drop.
+    //
+    // W_UtilityPlayerHasWeapon is the right gate because it already encodes BOTH
+    // ownership conventions — ammo > 0 for the counted ordnance, slot ownership
+    // for the tools — so this cannot hand out an empty grenade.  The binoculars
+    // resolve to a null drop pointer and are refused below, which is intended
+    // (sh_wpn_dodbinocs.qc:16: no world pickup exists for them).
+    if (!drop_func && self.slot_utility_drop
+        && cur == self.slot_utility && W_UtilityPlayerHasWeapon(cur))
+        drop_func = self.slot_utility_drop;
 
     if (!drop_func)
+    {
+        // AND SAY SO.  The refusal used to be completely silent — no sprint, no
+        // sound, no dprint — so a player pressing drop on something undroppable
+        // got a phantom draw animation and no explanation for it.
+        sprint(self, PRINT_HIGH, "you can't drop that\n");
         return;
+    }
 
     // Compute spawn position + velocity, with a wall-close check so a
     // player facing geometry doesn't get a "throw" that just slams the
@@ -3357,20 +4434,38 @@ void() W_DropCurrentWeapon =
         drop_ent.nextthink = time + 0.05;
     }
 
-    // Clear the vacated slot
+    // Clear the vacated slot.  Under multi-carry the cursor does not simply go
+    // to WEP_NONE — it falls back to whatever else is still held in that slot,
+    // and only empties when the list does.
+    // THE ClearForWeapon THAT USED TO CLOSE EACH ARM IS GONE, and it was a bug:
+    // it clears the SLOT's registers, and by the time it ran the cursor had
+    // already fallen back to the surviving weapon — so dropping primary #1 while
+    // carrying #2 zeroed #2's magazine and reserve on the HUD.  W_SlotAmmo_PointAt
+    // owns those registers now and leaves them describing whoever survived (or
+    // zeroes them when the list empties, which is the case that call was for).
     if (cur == self.slot_primary)
     {
-        self.slot_primary       = WEP_NONE;
-        self.slot_primary_equip = __NULL__;
-        self.slot_primary_drop  = __NULL__;
-        W_SlotAmmo_ClearForWeapon(self, cur);
+        W_CarryRemove(self, SLOT_PRIMARY, cur);
+        W_SlotAmmo_PointAt(self, SLOT_PRIMARY, W_CarryAt(self, SLOT_PRIMARY, 0));
+        if (self.slot_primary == WEP_NONE)
+        {
+            self.slot_primary_equip = __NULL__;
+            self.slot_primary_drop  = __NULL__;
+        }
+        else
+            W_RebindSlot(SLOT_PRIMARY);
     }
     else if (cur == self.slot_secondary)
     {
-        self.slot_secondary       = WEP_NONE;
-        self.slot_secondary_equip = __NULL__;
-        self.slot_secondary_drop  = __NULL__;
-        W_SlotAmmo_ClearForWeapon(self, cur);
+        W_CarryRemove(self, SLOT_SECONDARY, cur);
+        W_SlotAmmo_PointAt(self, SLOT_SECONDARY, W_CarryAt(self, SLOT_SECONDARY, 0));
+        if (self.slot_secondary == WEP_NONE)
+        {
+            self.slot_secondary_equip = __NULL__;
+            self.slot_secondary_drop  = __NULL__;
+        }
+        else
+            W_RebindSlot(SLOT_SECONDARY);
     }
     else if (cur == self.slot_melee)
     {
@@ -3384,6 +4479,18 @@ void() W_DropCurrentWeapon =
     }
     else if (W_UtilityWeaponSelectable(cur))
     {
+        // ORDER IS LOAD-BEARING for the medkit.  Its OWNERSHIP is "the utility slot
+        // holds it", not an ammo pool (W_UtilityPlayerHasWeapon,
+        // shared/weapons/sh_wpn_snowball.qc:257-258), and W_UtilityNextCarried walks
+        // the ring inclusive of from_wep on its final step (:308-312).  Asking it
+        // what is left while the cursor still names the medkit therefore wraps all
+        // the way round and hands the medkit straight back — the player would throw
+        // one on the floor and W_SelectStrongest below would immediately re-deploy
+        // the one still in the slot.  Vacate first, then ask.  The ordnance above
+        // needs no such step: their drop functions zero the ammo pool that IS their
+        // ownership test.
+        if (cur == WEP_MEDKIT)
+            self.slot_utility = WEP_NONE;
         self.slot_utility = W_UtilityNextCarried(cur);
         W_UtilityRefreshSlotBinding();
     }
@@ -3418,14 +4525,54 @@ void() W_DropAllWeaponsOnDeath =
     float drop_mode = cvar("mp_dropweapons");
     if (drop_mode <= 0)
         return;
+
+    // The tactical shield rides the same gate: it is equipment rather than a
+    // weapon so it has no slot to appear in the loop below, but a player who
+    // dies holding one should leave it on the floor like everything else.
+    CS_Shield_DropFrom(self);
     float slot_max = (drop_mode == 1) ? 2 : 12;
 
     for (slot_idx = 0; slot_idx < slot_max; slot_idx++)
     {
         drop_func = __NULL__;
         slot_wep = 0;
-        if (slot_idx == 0)      { slot_wep = self.slot_primary;   drop_func = self.slot_primary_drop; }
-        else if (slot_idx == 1) { slot_wep = self.slot_secondary; drop_func = self.slot_secondary_drop; }
+        // MULTI-CARRY: slots 0 and 1 drain their whole carry list rather than
+        // dropping only the cursor.  Without this, dying with two primaries
+        // dropped one and DELETED the other - indistinguishable in play from the
+        // drop physics having eaten it.
+        //
+        // The `slot_idx--` keeps the loop on this slot for another pass; it is
+        // safe because each pass removes one entry, and once the list is empty
+        // slot_wep stays 0 and the loop advances normally.  Rebinding is what
+        // makes drop_func point at the weapon actually being dropped.
+        if (slot_idx == 0)
+        {
+            slot_wep = W_CarryAt(self, SLOT_PRIMARY, 0);
+            if (slot_wep != WEP_NONE)
+            {
+                // PointAt, not a bare cursor write: each corpse-drop must carry
+                // ITS OWN magazine.  A raw assignment left the slot registers
+                // describing whichever gun was in hand, so dying with two
+                // primaries produced two pickups with identical ammo.
+                W_SlotAmmo_PointAt(self, SLOT_PRIMARY, slot_wep);
+                W_RebindSlot(SLOT_PRIMARY);
+                drop_func = self.slot_primary_drop;
+                W_CarryRemove(self, SLOT_PRIMARY, slot_wep);
+                slot_idx--;
+            }
+        }
+        else if (slot_idx == 1)
+        {
+            slot_wep = W_CarryAt(self, SLOT_SECONDARY, 0);
+            if (slot_wep != WEP_NONE)
+            {
+                W_SlotAmmo_PointAt(self, SLOT_SECONDARY, slot_wep);
+                W_RebindSlot(SLOT_SECONDARY);
+                drop_func = self.slot_secondary_drop;
+                W_CarryRemove(self, SLOT_SECONDARY, slot_wep);
+                slot_idx--;
+            }
+        }
         else if (slot_idx == 2) { slot_wep = self.slot_melee;     drop_func = self.slot_melee_drop; }
         else if (slot_idx == 3)
         {
@@ -3438,6 +4585,17 @@ void() W_DropAllWeaponsOnDeath =
             else if (slot_wep == WEP_SATCHEL && self.ammo_satchel > 0) drop_func = W_SatchelDrop;
             else if (slot_wep == WEP_TRIPMINE && self.ammo_tripmine > 0) drop_func = W_TripmineDrop;
             else if (slot_wep == WEP_SNARK && self.ammo_snark > 0) drop_func = W_SnarkDrop;
+            // A FOURTH COPY OF THE SAME ALLOWLIST, and this one DESTROYED the
+            // item rather than merely refusing to drop it: dying while carrying
+            // a medkit, a penguin, a SOFLAM or either DoD grenade left no pickup
+            // at all, because the corpse-drop found no drop_func and moved on.
+            // W_UtilityRefreshSlotBinding now binds every one of them, and
+            // W_UtilityPlayerHasWeapon carries both ownership conventions, so the
+            // fallback covers the whole set instead of naming five more ids.
+            // (The binoculars stay destroyed — they have no world pickup, so
+            // slot_utility_drop is null for them and this leaves drop_func null.)
+            else if (self.slot_utility_drop && W_UtilityPlayerHasWeapon(slot_wep))
+                drop_func = self.slot_utility_drop;
         }
         else if (slot_idx == 4)
         {
@@ -3632,11 +4790,15 @@ void() W_CheckImpulses =
 
     switch (self.impulse)
     {
-    case WEAPON_IMPULSE_PRIMARY:   // Select primary slot
-        if (self.slot_primary) W_SelectWeapon(self.slot_primary);
+    // Pressing a slot key while already holding something from that slot CYCLES
+    // to the next weapon in it — the same shape case 4 (utility) has always had.
+    // W_SelectWeapon no-ops on WEP_NONE, so the old `if (self.slot_*)` guards are
+    // folded into W_SlotPressTarget.
+    case WEAPON_IMPULSE_PRIMARY:   // Select / cycle primary slot
+        W_SelectWeapon(W_SlotPressTarget(self, SLOT_PRIMARY));
         break;
-    case WEAPON_IMPULSE_SECONDARY:   // Select secondary slot
-        if (self.slot_secondary) W_SelectWeapon(self.slot_secondary);
+    case WEAPON_IMPULSE_SECONDARY:   // Select / cycle secondary slot
+        W_SelectWeapon(W_SlotPressTarget(self, SLOT_SECONDARY));
         break;
     case WEAPON_IMPULSE_MELEE:   // Select melee slot
         if (self.slot_melee) W_SelectWeapon(self.slot_melee);
@@ -3671,6 +4833,14 @@ void() W_CheckImpulses =
         if (self.reload) self.reload();
         break;
     case WEAPON_IMPULSE_SPECIAL:  // Weapon-specific action (menu "Weapon Special")
+        // Tactical shield: refused outright while one is carried.  Not a balance
+        // call — none of the nine combined view models has a pose for it, and
+        // the USP's silencer toggle asked for sequences 7 and 15 against their
+        // 9-entry table, so it played `shield_up` and then nothing.  Mirrored in
+        // CSQC_PredictWeaponImpulse; both must agree or the client animates a
+        // toggle the server never performed.
+        if (self.has_shield)
+            break;
         // Prop Hunt: a disguised hider has no weapon, so Weapon Special is repurposed as
         // DECLOAK (drop the disguise with a smoke poof).  Self-gates; consumes only when it
         // acted, so a seeker's real Weapon Special is untouched.
@@ -3750,36 +4920,84 @@ void() W_WeaponFrame =
     // only runs in client prediction and the hitclaim path damages players but never pushes
     // props.  W_MeleeStrike already masks its hit sound off the predicting attacker and defers
     // player damage to the hitclaim, so running it server-side adds no double FX/damage.
+    //
+    // The per-weapon half of this test used to be a hand-written id list right
+    // here, and it drifted twice: ten weapons that never emit `cmd cs` were
+    // missing from it, so their +attack reached the server through NEITHER route
+    // and did nothing at all — no damage to monsters or breakables, no gunfire
+    // for the AI to hear, no third-person shoot pose.  It now lives beside the
+    // weapon ids it names (shared/sh_weapons.qc), where the full rationale is,
+    // and check_serverfire.py derives the correct membership from the
+    // weapon sources so a new bespoke try-fire can't go missing silently again.
     float wep_bypasses_cs_notify = (self.is_bot
-                                 || self.weapon == WEP_MELEE
-                                 || self.weapon == WEP_KNIFE
-                                 || self.weapon == WEP_HLCROWBAR
-                                 || self.weapon == WEP_WRENCH
-                                 || self.weapon == WEP_KATANA
-                                 || self.weapon == WEP_BUTTERFLY
-                                 || self.weapon == WEP_HLGRENADE
-                                 || self.weapon == WEP_SATCHEL
-                                 || self.weapon == WEP_TRIPMINE
-                                 || self.weapon == WEP_SNARK
-                                 || self.weapon == WEP_HORNETGUN
-                                 || self.weapon == WEP_CSHEGRENADE
-                                 || self.weapon == WEP_CSFLASHBANG
-                                 || self.weapon == WEP_CSSMOKEGRENADE
-                                 || self.weapon == WEP_CFC4
-                                 || self.weapon == WEP_GRAVITYGUN);
+                                 || W_FireIsServerAutonomous(self.weapon));
     // Prop Hunt: a weaponless hider never fires, whatever they are somehow holding
     // (mid-round team switch, admin give).  Backstop — the pickup block in weapon_touch
     // is what actually keeps a gun out of their hands.
     float ph_nofire = PropHunt_HiderNoWeapons(self);
+    // Rule 3, applied centrally.  SH_ShieldBlocksFire is consulted inside
+    // SH_StandardTryFire, which the knife and the three grenades — four of the
+    // eleven shield-legal weapons — do not go through: they have bespoke
+    // try-fires, so a raised shield never stopped a slash or a throw.  Gating
+    // the dispatch instead of the try-fire covers every route at once, and
+    // matches the mask CSQC_PredictWeaponCommand puts on input_buttons.
+    float shield_nofire = (self.has_shield && self.shield_deployed);
     if ((cvar("sv_trust_clienthits") < 1 || wep_bypasses_cs_notify)
-        && self.button0 && time >= self.attack_finished && !ph_nofire)
+        && self.button0 && time >= self.attack_finished
+        && !ph_nofire && !shield_nofire)
     {
         if (self.fire)
             self.fire();
     }
 
+    // Backstop for rule 2.  weapon_touch and the buy menu both refuse a
+    // two-handed weapon while the shield is carried, but `give`, a map script
+    // and an admin command all reach past them — and a player holding an AK47
+    // behind a shield would render as PANIM_SHIELDGUN with a rifle in it.  One
+    // field test per frame buys immunity to every route that has not been
+    // thought of yet.
+    if (self.has_shield && !SH_ShieldAllowsWeapon(self.weapon))
+        CS_Shield_DropFrom(self);
+
+    // Tactical shield: +attack2 raises and lowers it.  Taken BEFORE the weapon's
+    // own alt-fire, because in Counter-Strike the shield owns that button
+    // outright — a silenced USP does not toggle its silencer while you are
+    // carrying one, it raises the shield.  SH_ShieldToggle answers FALSE when
+    // there is no shield, so nothing changes for anyone not carrying it.
+    // RISING EDGE, not "while held": the shield is a toggle, and a held button
+    // against SH_ShieldToggle's 0.4 s debounce would flap it up and down twice a
+    // second for as long as the player leant on the key.
+    float shield_took_alt = self.has_shield;   // consumed for as long as carried
+    if (self.has_shield && self.button1 && !self.shield_alt_held)
+        SH_ShieldToggle(time);
+    self.shield_alt_held = self.button1;
+
+    // sv_debug_shield — the server half of the shield trace.  Prints on any EDGE
+    // of the four inputs that decide the shield's behaviour, so a run produces a
+    // handful of lines rather than 64 a second.  Its client counterpart is
+    // cl_debug_shield (client/cl_weapons.qc) and the two are meant to be read
+    // side by side: every symptom this feature has produced so far has been the
+    // two sides disagreeing about has_shield / shield_deployed, and there was no
+    // way to see that from either log alone.
+    if (cvar("sv_debug_shield"))
+    {
+        float sdbg = (self.has_shield ? 1 : 0) | (self.shield_deployed ? 2 : 0)
+                   | (self.button0 ? 4 : 0)     | (self.button1 ? 8 : 0);
+        if (sdbg != self.shield_dbg_last)
+        {
+            self.shield_dbg_last = sdbg;
+            // Split in two: fteqcc warns past 8 varargs, and the tree builds clean.
+            print(sprintf("[shield-sv] t=%.2f has=%g dep=%g b0=%g b1=%g wep=%g wstate=%g\n",
+                          time, self.has_shield, self.shield_deployed,
+                          self.button0, self.button1, self.weapon, self.weaponstate));
+            print(sprintf("[shield-sv]   nofire=%g tookalt=%g nexttog=%.2f atkfin=%.2f\n",
+                          shield_nofire, shield_took_alt,
+                          self.shield_next_toggle, self.attack_finished));
+        }
+    }
+
     // Check alt-fire button
-    if (self.button1 && time >= self.attack_finished && !ph_nofire)
+    if (self.button1 && !shield_took_alt && time >= self.attack_finished && !ph_nofire)
     {
         if (self.altfire)
             self.altfire();
@@ -3805,13 +5023,23 @@ void() W_WeaponFrame =
         float crouching = (self.flags & FL_DUCKING) != 0;
         float mdlidx = self.player_visual_proxy ? self.player_visual_proxy.modelindex : 0;
 
+        // The 0.3 is now only a MINIMUM hold — the pose itself is held for as
+        // long as the weapon stays in the state (see SH_PlayerAnim_Update), and
+        // wep_state_dur tells PlayTop how long the action actually runs so a
+        // body animation longer than it can be compressed to fit instead of
+        // being cut off part-way through.  Weapons on bespoke gates leave
+        // wep_state_dur at 0, which PlayTop reads as "unknown" and plays at 1x
+        // exactly as before.
         if (self.weaponstate == WS_FIRE)
-            SH_PlayerAnim_PlayTop(SH_GetShootAnim(mdlidx, family, crouching), 0.3);
+            SH_PlayerAnim_PlayTop(mdlidx, SH_GetShootAnim(mdlidx, family, crouching),
+                                  0.3, 0);
         else if (self.weaponstate == WS_RELOAD)
-            SH_PlayerAnim_PlayTop(SH_GetReloadAnim(mdlidx, family, crouching), 3.0);
+            SH_PlayerAnim_PlayTop(mdlidx, SH_GetReloadAnim(mdlidx, family, crouching),
+                                  0.3, self.wep_state_dur);
 
         self.prev_weaponstate_anim = self.wep_action_id;
     }
 
     W_SlotAmmo_SaveCurrent(self);
+    Ammo_TickDrain(self);	// banked rounds into a gun that has made room since pickup
 };

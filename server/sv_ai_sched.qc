@@ -71,7 +71,84 @@ const float TASK_GET_PATH_SCRIPT   = 31;	// path to ai_script's origin
 const float TASK_FACE_SCRIPT       = 32;	// turn to ai_script's yaw
 const float TASK_WAIT_FOR_SCRIPT   = 33;	// hold m_iszIdle until the script is triggered
 const float TASK_PLAY_SCRIPT       = 34;	// play m_iszPlay, then release the monster
-const float TASK_OP_COUNT          = 35;	// bound for the validator
+// Death and flinch, which are the two activities a schedule CANNOT name up front:
+// both are chosen at the moment the task starts, from where the hit landed and
+// which way it was travelling.  Half-Life has the same pair for the same reason -
+// TASK_DIE and TASK_SMALL_FLINCH (schedule.cpp) assign m_IdealActivity from
+// GetDeathActivity / GetSmallFlinchActivity rather than from a table constant.
+// Both then behave exactly like TASK_PLAY_SEQUENCE: they block until the sequence
+// ends.  `a` is unused on both.
+const float TASK_PLAY_DEATH        = 35;
+const float TASK_PLAY_FLINCH       = 36;
+// The gargantua's flame sweep, a = seconds.  The only SUSTAINED attack in the
+// game: every other one lands its damage on an animation event and is over, and
+// this one burns for `a` seconds while tracking the enemy, doing damage and
+// re-emitting its beams on every decision tick.  HL calls it TASK_FLAME_SWEEP
+// (gargantua.cpp:394-403) and drives it the same way, from RunTask.
+const float TASK_FLAME_SWEEP       = 37;
+// Find somewhere the enemy cannot see and go there.  `a` is unused; the search
+// radius is a constant in sv_ai_cover.qc rather than a task argument because HL
+// varies it per SCHEDULE, not per class, and the mod has one cover schedule.
+//
+// This task has TWO successful outcomes and they finish differently: a sidestep
+// is a local move that is ready immediately, a nav-node relocation has a path
+// request in flight and has to be waited on.  AI_TaskRun tells them apart from
+// .ai_coverwait rather than from the task id.
+const float TASK_FIND_COVER_ENEMY  = 38;
+// Sven's two "what do I do when nothing is shooting at me" keys.  Both path, and
+// both are deliberately separate ops rather than one parameterised op: the goal
+// for GUARD is an entity that can be killtargeted out from under the monster
+// mid-leg, and the goal for ROAM is a node index that only means anything while
+// the graph is READY.  See AI_WantsToGuard / AI_WantsToRoam.
+const float TASK_GET_PATH_GUARD    = 39;	// path to .ai_guard (Sven "guard_ent")
+const float TASK_GET_PATH_ROAM     = 40;	// path to a random reachable nav node
+const float TASK_GET_PATH_SOUND    = 41;
+// Half-Life's TASK_PLANT_ON_SCRIPT (schedule.cpp:1279-1288), and it is one line
+// of SDK that turns out to carry an entire class of scripted scene:
+//
+//     pev->origin = m_hTargetEnt->pev->origin;   // Plant on target
+//
+// It sits between the move and the facing in tlScriptedWalk / tlScriptedRun
+// (defaultai.cpp:798-833), and it is why Half-Life does not care how sloppily
+// its actors arrive: HL's TASK_WALK_TO_TARGET calls MoveToTarget(act, 2) and
+// then TaskComplete()s unconditionally, so "arrived" there means only "the
+// routing finished".  The plant supplies the precision afterwards.
+//
+// We had no equivalent, so a walked actor stopped wherever AI_ReachedGoal
+// first returned TRUE - which is anywhere inside AI_GOAL_REACH, 40 units.
+// Measured on hl_c01_a1's airlock guard, whose whole scene is two 72-unit
+// walks: he stopped 33.86 units short of the retina scanner and 33.94 short
+// of his lean spot, i.e. barely past halfway on each leg, and played the
+// `retina` animation into thin air a body-width from the panel.
+const float TASK_PLANT_ON_SCRIPT   = 42;	// ...to ai_soundpos, the last noise heard
+// The gonarch's patrol, bigmomma.cpp:814-821.  Eight opcodes for one monster is
+// a lot, and the alternative was worse: her whole boss fight IS the node walk -
+// where she goes, when she stops, which wall she breaks, when the map is allowed
+// to advance, and how much health she has at each stage are all keys on
+// info_bigmomma, so none of it can be expressed with the generic tasks.
+//
+// Only the MOVE is folded together rather than transcribed.  HL's single
+// TASK_MOVE_TO_NODE_RANGE both starts the walk and polls the distance, because
+// CBaseMonster::MoveToTarget is one call; here path-getting and walking are
+// separate tasks by design, so TASK_BM_PATH_NODE does the start half (including
+// picking walk or run from the node's own spawnflag, which is why it cannot be
+// TASK_GET_PATH_* plus a constant TASK_WALK_PATH) and the ordinary
+// TASK_WAIT_FOR_MOVE does the walking with a node-radius arrival test.
+const float TASK_BM_FIND_NODE      = 43;	// resolve ai_bm_next -> ai_bm_node
+const float TASK_BM_PRESEQUENCE    = 44;	// play the node's `presequence`, if any
+const float TASK_BM_PATH_NODE      = 45;	// goal := the node; walk or run per its flag
+const float TASK_BM_NODE_YAW       = 46;	// face the yaw the node was placed at
+const float TASK_BM_WAIT_NODE      = 47;	// hold for `reachdelay` (or forever)
+const float TASK_BM_SEQUENCE       = 48;	// play the node's `reachsequence`, if any
+const float TASK_BM_PROCESS_NODE   = 49;	// fire `reachtarget`, take `health`, advance
+const float TASK_BM_NODE_DELAY     = 50;	// a = seconds to stop retrying after a fail
+const float TASK_GET_PATH_AWAY     = 51;	// a = units to retreat from ai_yaw_ideal
+const float TASK_GET_PATH_SWIM     = 52;	// a point to swim to, inside the water
+// scientist.cpp:1088 CScientist::Heal - the needle actually going in.  Completes
+// in the tick it starts (it is one TakeHealth), so it is absent from both
+// Sched_HasMovement and Sched_TaskBlocks, exactly like TASK_PLANT_ON_SCRIPT.
+const float TASK_HEAL              = 53;
+const float TASK_OP_COUNT          = 54;	// bound for the validator
 
 // ---------------------------------------------------------------------------
 // named sequence slots
@@ -131,7 +208,20 @@ const float SCHED_SCRIPT_WALK        = 24;	// walking to a scripted_sequence's m
 const float SCHED_SCRIPT_RUN         = 25;
 const float SCHED_SCRIPT_WAIT        = 26;	// at the mark, holding the idle pose
 const float SCHED_SCRIPT_PLAY        = 27;	// playing the scripted action
-const float SCHED_COUNT              = 28;
+const float SCHED_GARG_FLAME         = 28;	// the gargantua's 4.5-second flame sweep
+const float SCHED_TAKE_COVER         = 29;	// break line of sight with the enemy
+const float SCHED_COVER_FAILED       = 30;	// ...and there was nowhere to go
+const float SCHED_COWER              = 31;	// pinned and cannot move: duck
+const float SCHED_GUARD              = 32;	// walk to the thing this monster guards
+const float SCHED_ROAM               = 33;	// wander the node graph (Sven freeroam)
+const float SCHED_INVESTIGATE_SOUND  = 34;	// go and look at whatever made that noise
+const float SCHED_BIGMOMMA_NODE      = 35;	// the gonarch walking her info_bigmomma chain
+const float SCHED_BIGMOMMA_NODEFAIL  = 36;	// ...and the leg could not be walked
+const float SCHED_MOVE_AWAY          = 37;	// the player bumped me: step aside
+const float SCHED_STARTLE            = 38;	// that was a GUN: duck and yelp
+const float SCHED_SWIM_IDLE          = 39;	// a swimmer with nothing to do keeps swimming
+const float SCHED_HEAL               = 40;	// a scientist walking over to patch someone up
+const float SCHED_COUNT              = 41;
 
 // ---------------------------------------------------------------------------
 // storage
@@ -308,7 +398,11 @@ float(float sched) Sched_HasMovement =
 		if (op == TASK_GET_PATH_ENEMY || op == TASK_GET_PATH_LKP
 		 || op == TASK_GET_PATH_FLEE  || op == TASK_WALK_PATH
 		 || op == TASK_RUN_PATH       || op == TASK_WAIT_FOR_MOVE
-		 || op == TASK_GET_PATH_FOLLOW || op == TASK_GET_PATH_SCRIPT)
+		 || op == TASK_GET_PATH_FOLLOW || op == TASK_GET_PATH_SCRIPT
+		 || op == TASK_FIND_COVER_ENEMY
+		 || op == TASK_GET_PATH_GUARD || op == TASK_GET_PATH_ROAM
+		 || op == TASK_GET_PATH_SWIM
+		 || op == TASK_BM_PATH_NODE)
 			return TRUE;
 	}
 	return FALSE;
@@ -323,11 +417,19 @@ float(float op) Sched_TaskBlocks =
 	if (op == TASK_WAIT_RANDOM)		return TRUE;
 	if (op == TASK_WAIT_INDEFINITE)		return TRUE;
 	if (op == TASK_PLAY_SEQUENCE)		return TRUE;
+	if (op == TASK_PLAY_DEATH)		return TRUE;
+	if (op == TASK_PLAY_FLINCH)		return TRUE;
+	if (op == TASK_FLAME_SWEEP)		return TRUE;
 	if (op == TASK_FACE_ENEMY)		return TRUE;
 	if (op == TASK_FACE_IDEAL)		return TRUE;
 	if (op == TASK_GET_PATH_ENEMY)		return TRUE;
 	if (op == TASK_GET_PATH_LKP)		return TRUE;
 	if (op == TASK_GET_PATH_FLEE)		return TRUE;
+	// Blocks only in its ROUTED form - a sidestep is ready the moment it is found.
+	// Listed here anyway: this answers "can this task block", and a task that
+	// sometimes blocks must be treated as one that does, or the self-test would
+	// call a legitimate wait a hang.
+	if (op == TASK_FIND_COVER_ENEMY)	return TRUE;
 	// TASK_GET_PATH_FOLLOW is deliberately absent: it completes instantly and never
 	// waits on the nav queue.  See its case in AI_TaskStart.
 	if (op == TASK_WAIT_FOR_MOVE)		return TRUE;
@@ -337,9 +439,19 @@ float(float op) Sched_TaskBlocks =
 	if (op == TASK_PLAY_SEQ_NAMED)		return TRUE;
 	// TASK_GET_PATH_SCRIPT is absent for the same reason TASK_GET_PATH_FOLLOW is:
 	// it completes inside AI_TaskStart and never waits on the nav queue.
+	// TASK_PLANT_ON_SCRIPT is absent too, and must stay absent: it is a single
+	// setorigin and completes in the same tick it starts, exactly as HL's is.
 	if (op == TASK_FACE_SCRIPT)		return TRUE;
 	if (op == TASK_WAIT_FOR_SCRIPT)		return TRUE;
 	if (op == TASK_PLAY_SCRIPT)		return TRUE;
+	// The three gonarch tasks that can hold.  The other five complete inside
+	// AI_TaskStart.  Both sequence tasks "sometimes block" - a node with no
+	// presequence completes instantly - and are listed for the reason
+	// TASK_FIND_COVER_ENEMY is: a task that sometimes blocks must be declared as
+	// one that does, or the self-test reads a legitimate wait as a hang.
+	if (op == TASK_BM_PRESEQUENCE)		return TRUE;
+	if (op == TASK_BM_SEQUENCE)		return TRUE;
+	if (op == TASK_BM_WAIT_NODE)		return TRUE;
 	return FALSE;
 };
 
@@ -536,16 +648,20 @@ void() AI_SchedBuildAll =
 	// --- reactions --------------------------------------------------------
 	// Zero interrupts, both of them: a flinch or a death animation that can be
 	// cut short is a monster that visibly teleports between poses.
+	// The activity is NOT named here, and that is the whole of item G: it used to
+	// be, and a constant in a table is a monster that dies the same way from every
+	// angle and flinches the same way wherever it was hit.  Both tasks resolve at
+	// the moment they start, from .ai_lasthitgroup and .ai_attackdir.
 	Sched_Begin(SCHED_SMALL_FLINCH, "small_flinch", 0);
 		Sched_Task(TASK_STOP_MOVING,    0, 0);
 		Sched_Task(TASK_CLEAR_COND,     COND_DAMAGE, 0);
-		Sched_Task(TASK_PLAY_SEQUENCE,  ACT_SMALL_FLINCH, 0);
+		Sched_Task(TASK_PLAY_FLINCH,    0, 0);
 	Sched_End();
 
 	Sched_Begin(SCHED_DIE, "die", 0);
 		Sched_Task(TASK_STOP_MOVING,    0, 0);
 		Sched_Task(TASK_SET_STATE,      MS_DEAD, 0);
-		Sched_Task(TASK_PLAY_SEQUENCE,  ACT_DIESIMPLE, 0);
+		Sched_Task(TASK_PLAY_DEATH,     0, 0);
 		Sched_Task(TASK_DIE,            0, 0);
 	Sched_End();
 
@@ -563,9 +679,88 @@ void() AI_SchedBuildAll =
 		Sched_Task(TASK_STOP_MOVING,     0, 0);
 		Sched_Task(TASK_SET_STATE,       MS_ALERT, 0);
 		Sched_Task(TASK_GET_PATH_FLEE,   400, 0);
-		Sched_Task(TASK_RUN_PATH,        ACT_RUN, 0);
+		// ACT_RUN_SCARED, not ACT_RUN.  Half-Life's flee task is literally
+		// TASK_RUN_PATH_SCARED and sets exactly this (scientist.cpp:509), and
+		// scientist.mdl carries it twice - run1 and run2, both tagged activity 64,
+		// and both noticeably faster and more frantic than the ordinary run cycle.
+		// Anything without the cycle (the cockroach, which shares this schedule)
+		// degrades to ACT_RUN through the activity fallback chain, so this costs
+		// those classes nothing.
+		Sched_Task(TASK_RUN_PATH,        ACT_RUN_SCARED, 0);
 		Sched_Task(TASK_WAIT_FOR_MOVE,   0, 0);
 		Sched_Task(TASK_FORGET_ENEMY,    0, 0);
+	Sched_End();
+
+	// --- cover -------------------------------------------------------------
+	// defaultai.cpp:953-980 (tlTakeCoverFromEnemy), task for task.
+	//
+	// THE INTERRUPT MASK IS THE WHOLE DESIGN AND IT IS DELIBERATELY TINY.  HL's
+	// is a single bit (bits_COND_NEW_ENEMY) and the temptation to widen it has to
+	// be resisted, because the obvious additions are exactly the ones that break
+	// it: COND_DAMAGE would abort the run to cover every time a round landed,
+	// which is the one moment cover is FOR, and COND_CAN_RANGE1 would stop the
+	// monster halfway to turn and shoot from the open.  Either produces a monster
+	// that visibly sets off for somewhere and then does not go, which reads worse
+	// than never having moved.
+	//
+	// The 0.2 s wait before the search is HL's and is not a rounding error: it is
+	// the beat that makes the break for cover look like a decision rather than a
+	// reflex.
+	//
+	// SCHED_FLEE_ENEMY is a different thing and stays.  Fleeing is for a monster
+	// with no attack at all and it ends in TASK_FORGET_ENEMY - the cockroach runs
+	// away and stops caring.  Cover ends in TASK_FACE_ENEMY: this monster is still
+	// in the fight and is repositioning inside it.
+	Sched_Begin(SCHED_TAKE_COVER, "take_cover",
+	            COND_ENEMY_DEAD | COND_TASK_FAILED);
+		Sched_Task(TASK_SET_FAIL_SCHED,   SCHED_COVER_FAILED, 0);
+		Sched_Task(TASK_STOP_MOVING,      0, 0);
+		Sched_Task(TASK_WAIT,             0.2, 0);
+		Sched_Task(TASK_FIND_COVER_ENEMY, 0, 0);
+		Sched_Task(TASK_RUN_PATH,         ACT_RUN, 0);
+		Sched_Task(TASK_WAIT_FOR_MOVE,    0, 0);
+		Sched_Task(TASK_FACE_ENEMY,       0, 0);
+		Sched_Task(TASK_WAIT,             1, 0);
+	Sched_End();
+
+	// hgrunt.cpp:2261-2270, SCHED_GRUNT_TAKECOVER_FAILED - "forces analysis of
+	// conditions and picks the best possible schedule to recover from this type
+	// of failure".  HL writes that analysis as a GetScheduleOfType branch (shoot
+	// if a slot is free, else SCHED_FAIL); here the analysis is simply the ladder,
+	// so this schedule's job is to be SHORT and to clear the three conditions that
+	// caused it - a monster that found no cover must be back in front of the
+	// selector quickly, with COND_TASK_FAILED gone, or it re-selects cover, fails
+	// again, and stands in the open failing for as long as the fight lasts.
+	//
+	// Same clear-first ordering as SCHED_CHASE_ENEMY_FAILED and for the same
+	// reason: TASK_FACE_ENEMY blocks until the turn completes, so a clear placed
+	// behind it would often not run at all.
+	Sched_Begin(SCHED_COVER_FAILED, "cover_failed",
+	            COND_ATTACK_READY | COND_ENEMY_DEAD | COND_HEAVY_DAMAGE);
+		Sched_Task(TASK_CLEAR_COND,     COND_TASK_FAILED | COND_NO_PATH | COND_BLOCKED, 0);
+		Sched_Task(TASK_STOP_MOVING,    0, 0);
+		Sched_Task(TASK_SET_ACTIVITY,   ACT_IDLE, 0);
+		Sched_Task(TASK_FACE_ENEMY,     0, 0);
+		Sched_Task(TASK_WAIT,           0.5, 0);
+	Sched_End();
+
+	// defaultai.cpp:884-903 (slCower), zero interrupts, both tasks.
+	//
+	// Half-Life reaches SCHED_COWER from exactly ONE place in the whole SDK -
+	// hgrunt.cpp:1571, the fail schedule of take-cover-from-best-sound, with the
+	// comment "duck and cover if cannot move from explosion" - and ACT_COWER is
+	// carried by exactly five rigs in the corpus: hgrunt, hgrunt_medic,
+	// hgrunt_opfor, hgrunt_torch and massn.  The two facts agree, which is why
+	// this is a real schedule rather than decoration: Valve only ever cowers a
+	// grunt, and only grunts were ever animated for it.
+	//
+	// The mod has no danger-sound system, so HL's one trigger does not exist here.
+	// What survives is its intent - pinned, hurt, and unable to move - which is
+	// also where COND_BLOCKED finally gets a reader.  See Grunt_SelectSched.
+	Sched_Begin(SCHED_COWER, "cower", 0);
+		Sched_Task(TASK_STOP_MOVING,    0, 0);
+		Sched_Task(TASK_CLEAR_COND,     COND_BLOCKED | COND_TASK_FAILED | COND_NO_PATH, 0);
+		Sched_Task(TASK_PLAY_SEQUENCE,  ACT_COWER, 0);
 	Sched_End();
 
 	// --- turrets -----------------------------------------------------------
@@ -664,6 +859,59 @@ void() AI_SchedBuildAll =
 		Sched_Task(TASK_PLAY_SEQUENCE,    ACT_MELEE_ATTACK2, 0);
 	Sched_End();
 
+	// tlBigNode, bigmomma.cpp:825-839, task for task and in HL's order.  The two
+	// insertions are TASK_WAIT_FOR_MOVE after the path task (this tree separates
+	// getting a route from walking it) and nothing else.
+	//
+	// ZERO INTERRUPT MASK, and unlike the laycrab schedule above this is not
+	// about protecting an anim event - it is what makes hl_c15 a chase.  Every
+	// beat of that map is keyed on the gonarch reaching a node: the wall she
+	// breaks at goose4, the collapse at goose5c, the two falltodeath managers at
+	// the end.  A mask containing COND_SEE_ENEMY would let the player stop the
+	// map advancing simply by standing where she can see them, which is the
+	// whole of the level.  Half-Life's slBigNode has no interrupt mask either,
+	// and its GetSchedule tests ShouldGoToNode ABOVE the entire combat ladder
+	// (bigmomma.cpp:910-917) for the same reason - she fights on the move.
+	//
+	// She is still stoppable in the way that matters, and it does not need an
+	// interrupt mask to do it: a node carrying a `health` key does NOT set the
+	// advance bit when she reaches it, so this schedule ends and she drops back
+	// into the ordinary combat ladder until the player has shot that stage's
+	// health off her.  The gate lives between schedules, not inside one.
+	Sched_Begin(SCHED_BIGMOMMA_NODE, "bigmomma_node", 0);
+		Sched_Task(TASK_SET_FAIL_SCHED,   SCHED_BIGMOMMA_NODEFAIL, 0);
+		Sched_Task(TASK_STOP_MOVING,      0, 0);
+		Sched_Task(TASK_BM_FIND_NODE,     0, 0);
+		Sched_Task(TASK_BM_PRESEQUENCE,   0, 0);
+		Sched_Task(TASK_BM_PATH_NODE,     0, 0);
+		Sched_Task(TASK_WAIT_FOR_MOVE,    0, 0);
+		Sched_Task(TASK_STOP_MOVING,      0, 0);
+		Sched_Task(TASK_BM_NODE_YAW,      0, 0);
+		Sched_Task(TASK_FACE_IDEAL,       0, 0);
+		Sched_Task(TASK_BM_WAIT_NODE,     0, 0);
+		Sched_Task(TASK_BM_SEQUENCE,      0, 0);
+		Sched_Task(TASK_BM_PROCESS_NODE,  0, 0);
+		Sched_Task(TASK_SET_ACTIVITY,     ACT_IDLE, 0);
+	Sched_End();
+
+	// tlNodeFail, bigmomma.cpp:851-856.  Ten seconds of being an ordinary monster
+	// after a leg she could not walk, so a node placed somewhere her 190-unit hull
+	// cannot reach does not become a per-tick retry loop that locks her out of
+	// fighting entirely.
+	// THE CLEAR LEADS, and Half-Life's tlNodeFail does not have one - it is the
+	// general rule of this table rather than a transcription.  A fail schedule
+	// that does not drop COND_TASK_FAILED is re-selected on its very next tick,
+	// because the condition outranks the class virtual in AI_SelectSchedule; the
+	// gonarch would spend the rest of the map cycling through this two-task
+	// schedule and never fight, never walk and never re-try the leg.  That is the
+	// exact failure SCHED_FAIL's note above records, and it took a schedule
+	// histogram to find the first time.
+	Sched_Begin(SCHED_BIGMOMMA_NODEFAIL, "bigmomma_nodefail", 0);
+		Sched_Task(TASK_CLEAR_COND,       COND_TASK_FAILED | COND_NO_PATH | COND_BLOCKED, 0);
+		Sched_Task(TASK_BM_NODE_DELAY,    10, 0);
+		Sched_Task(TASK_SET_ACTIVITY,     ACT_IDLE, 0);
+	Sched_End();
+
 	// --- the grenade throw --------------------------------------------------
 	// ZERO INTERRUPT MASK, and this one is not a style choice.  The grenade
 	// leaves the hand on an anim event roughly half a second in; a throw cut
@@ -677,6 +925,28 @@ void() AI_SchedBuildAll =
 		Sched_Task(TASK_STOP_MOVING,      0, 0);
 		Sched_Task(TASK_FACE_ENEMY,       0, 0);
 		Sched_Task(TASK_RANGE_ATTACK2,    0, 0);
+	Sched_End();
+
+	// The gargantua's flame, gargantua.cpp:394-403 task for task.  Two things
+	// about it are unlike every other attack schedule here:
+	//
+	//   TASK_SET_ACTIVITY, not TASK_PLAY_SEQUENCE.  ACT_MELEE_ATTACK2 on garg.mdl
+	//   is a LOOPING flame pose, so waiting for it to end would wait forever;
+	//   TASK_FLAME_SWEEP owns the duration instead and the pose just plays under
+	//   it.  HL commented out its own TASK_PLAY_SEQUENCE line for the same reason.
+	//
+	//   ZERO interrupts, deliberately, and this one is a real gameplay decision
+	//   rather than an animation one: a gargantua that stops flaming because it
+	//   took a bullet can be interrupted indefinitely by anyone with an automatic
+	//   weapon, which turns the boss of the corridor into scenery.  Half-Life's
+	//   slGargFlame has no interrupt mask either.
+	Sched_Begin(SCHED_GARG_FLAME, "garg_flame", 0);
+		Sched_Task(TASK_STOP_MOVING,      0, 0);
+		Sched_Task(TASK_FACE_ENEMY,       0, 0);
+		Sched_Task(TASK_ALERT_SOUND,      0, 0);	// HL's TASK_SOUND_ATTACK
+		Sched_Task(TASK_SET_ACTIVITY,     ACT_MELEE_ATTACK2, 0);
+		Sched_Task(TASK_FLAME_SWEEP,      GARG_FLAME_SECONDS, 0);
+		Sched_Task(TASK_SET_ACTIVITY,     ACT_IDLE, 0);
 	Sched_End();
 
 	// --- following ----------------------------------------------------------
@@ -697,6 +967,167 @@ void() AI_SchedBuildAll =
 		Sched_Task(TASK_WAIT_FOR_MOVE,    0, 0);
 	Sched_End();
 
+	// --- heal ---------------------------------------------------------------
+	// scientist.cpp:210-229, tlHeal/slHeal.  A scientist walks over to a hurt
+	// player, gets the needle out, uses it, puts it away.
+	//
+	// INTERRUPT MASK 0, and that is HL's, verbatim, with HL's own reason attached
+	// to it in the source: "Don't interrupt or he'll end up running around with a
+	// needle all the time".  ACT_ARM and ACT_DISARM are a matched pair; letting
+	// anything cut between them strands the model holding a syringe forever.
+	// This is the only schedule here besides the script ones with an empty mask,
+	// and it is short enough (a walk of at most 128 units, two sequences and an
+	// instant task) that nothing important waits long behind it.
+	//
+	// TASK_GET_PATH_FOLLOW supplies the route because ai_healtarget is seated on
+	// ai_follow before the schedule is chosen - see Scientist_CanHeal.  The walk
+	// is RUN for the same reason SCHED_FOLLOW's is: a mover that is slower than
+	// its target never arrives.
+	Sched_Begin(SCHED_HEAL, "heal", 0);
+		Sched_Task(TASK_GET_PATH_FOLLOW,  0, 0);
+		Sched_Task(TASK_RUN_PATH,         ACT_RUN, 0);
+		Sched_Task(TASK_WAIT_FOR_MOVE,    0, 0);
+		Sched_Task(TASK_FACE_IDEAL,       0, 0);
+		Sched_Task(TASK_PLAY_SEQUENCE,    ACT_ARM, 0);
+		Sched_Task(TASK_HEAL,             0, 0);
+		Sched_Task(TASK_PLAY_SEQUENCE,    ACT_DISARM, 0);
+	Sched_End();
+
+	// --- guard / roam -------------------------------------------------------
+	// Sven's `guard_ent` and `freeroam`, which between them are what stop a
+	// spawned monster standing on its spawn point forever.  Both interrupt on
+	// SEE_ENEMY and HEAVY_DAMAGE for the same reason SCHED_FOLLOW does: a long
+	// walk does not end quickly, and a monster that keeps walking while being
+	// shot at reads as broken.
+	//
+	// WALK, not run.  A guard heading for its post and a wanderer crossing a map
+	// are both doing something unhurried, and running everywhere is what makes a
+	// map look like it is permanently in an alarm state.  TASK_STOP_MOVING leads
+	// because a stale path from the previous schedule is worse than none - the
+	// same reasoning documented on the chase schedules.
+	Sched_Begin(SCHED_GUARD, "guard",
+	            COND_SEE_ENEMY | COND_HEAVY_DAMAGE | COND_HEAR_SOUND);
+		Sched_Task(TASK_STOP_MOVING,     0, 0);
+		Sched_Task(TASK_GET_PATH_GUARD,  0, 0);
+		Sched_Task(TASK_WALK_PATH,       ACT_WALK, 0);
+		Sched_Task(TASK_WAIT_FOR_MOVE,   0, 0);
+	Sched_End();
+
+	// The wait at the end is what makes roaming look like wandering rather than
+	// pacing: without it the monster arrives, re-selects, and immediately picks
+	// another node, so it never stands anywhere.  AI_WantsToRoam also throttles
+	// re-selection, but the pause belongs in the schedule so the monster is
+	// interruptible while it stands.
+	// A SWIMMER WITH NOTHING TO DO KEEPS SWIMMING.  Half-Life's CLeech does not
+	// use the schedule system at all: CLeech::SwimThink runs every 0.1 s and
+	// always writes pev->velocity = v_forward * pev->speed, wandering with no
+	// enemy in the map (leech.cpp:557-687).  The ichthyosaur has the same idea
+	// inside the schedule system, as slSwimAround (ichthyosaur.cpp:234-244).
+	//
+	// Without this, every AIMODE_SWIM monster fell through to SCHED_IDLE_STAND,
+	// whose FIRST TASK IS TASK_STOP_MOVING — so an idle leech never issued a
+	// single movement call for the life of the map.  Measured before the fix on
+	// hl_c08_a2 (13 leeches, no player): 176 thinks per window, volstep 0,
+	// moving 0, arrived 0.
+	//
+	// No trailing TASK_WAIT, unlike roam: a leech that pauses between legs is a
+	// leech standing still in water, which is the thing being fixed.  It
+	// re-selects the moment a leg finishes and picks another heading.
+	Sched_Begin(SCHED_SWIM_IDLE, "swim idle",
+	            COND_SEE_ENEMY | COND_HEAVY_DAMAGE | COND_LIGHT_DAMAGE);
+		Sched_Task(TASK_GET_PATH_SWIM,   0, 0);
+		Sched_Task(TASK_WALK_PATH,       ACT_WALK, 0);
+		Sched_Task(TASK_WAIT_FOR_MOVE,   0, 0);
+	Sched_End();
+
+	Sched_Begin(SCHED_ROAM, "roam",
+	            COND_SEE_ENEMY | COND_HEAVY_DAMAGE | COND_HEAR_SOUND);
+		Sched_Task(TASK_STOP_MOVING,     0, 0);
+		Sched_Task(TASK_GET_PATH_ROAM,   0, 0);
+		Sched_Task(TASK_WALK_PATH,       ACT_WALK, 0);
+		Sched_Task(TASK_WAIT_FOR_MOVE,   0, 0);
+		Sched_Task(TASK_SET_ACTIVITY,    ACT_IDLE, 0);
+		Sched_Task(TASK_WAIT,            2, 0);
+	Sched_End();
+
+	// GO AND LOOK, which is what "hearing" was missing.  A heard noise used to
+	// produce SCHED_ALERT_FACE and nothing else - the monster turned its head and
+	// then stood there, however interesting the noise was.  HL's equivalent walks
+	// the monster to the sound and has it look around, which is the behaviour that
+	// makes a base feel occupied rather than staffed by statues.
+	//
+	// Interrupts on SEE_ENEMY and DAMAGE, obviously, but ALSO on HEAR_DANGER: a
+	// grunt strolling over to investigate a noise must still dive away from the
+	// grenade that arrives while he is doing it.
+	//
+	// NOT interrupted by COND_HEAR_SOUND, unlike roam and guard.  It IS the
+	// response to that condition, and leaving it interruptible would make every
+	// further noise restart the schedule from the top - a monster that hears a
+	// firefight would jitter on the spot instead of walking towards it.
+	Sched_Begin(SCHED_INVESTIGATE_SOUND, "investigate",
+	            COND_SEE_ENEMY | COND_LIGHT_DAMAGE | COND_HEAVY_DAMAGE
+	          | COND_HEAR_DANGER | COND_TASK_FAILED);
+		Sched_Task(TASK_STOP_MOVING,     0, 0);
+		Sched_Task(TASK_GET_PATH_SOUND,  0, 0);
+		Sched_Task(TASK_WALK_PATH,       ACT_WALK, 0);
+		Sched_Task(TASK_WAIT_FOR_MOVE,   0, 0);
+		Sched_Task(TASK_SET_ACTIVITY,    ACT_IDLE, 0);
+		Sched_Task(TASK_TURN_RANDOM,     0, 0);
+		Sched_Task(TASK_FACE_IDEAL,      0, 0);
+		Sched_Task(TASK_WAIT,            2, 0);
+	Sched_End();
+
+	// STEP ASIDE.  CTalkMonster's tlMoveAway (talkmonster.cpp:192-200): store where
+	// I was, path 100 units away from the player, WALK it, stop, then turn back and
+	// face them.  Half-Life walks this - `MoveToLocation( ACT_WALK, ... )` - and the
+	// walk is the point: an ally that sprints two metres and spins round reads as
+	// startled, an ally that shuffles aside reads as making room.
+	//
+	// HL ends the list with TASK_FACE_PLAYER so a scientist shoved out of a doorway
+	// does not finish staring at the wall he retreated into.  That is done here by
+	// the AI_LookAt call in AI_TalkerTouch instead of by a task: the talk layer
+	// already owns "keep looking at that person for N seconds", it survives the
+	// walk (which repeatedly overwrites .ai_yaw_ideal with the direction of travel,
+	// so a trailing TASK_FACE_IDEAL would face exactly the wrong way), and it costs
+	// no new task opcode.
+	//
+	// Interruptible on the things that outrank being jostled - a new enemy, damage,
+	// a grenade - and NOT on COND_CLIENT_PUSH itself, or a player who keeps walking
+	// into him restarts the schedule every frame and he never actually goes
+	// anywhere.  That is the same reasoning as SCHED_INVESTIGATE_SOUND above.
+	Sched_Begin(SCHED_MOVE_AWAY, "move_away",
+	            COND_SEE_ENEMY | COND_LIGHT_DAMAGE | COND_HEAVY_DAMAGE
+	          | COND_HEAR_DANGER);
+		Sched_Task(TASK_STOP_MOVING,     0, 0);
+		Sched_Task(TASK_GET_PATH_AWAY,   100, 0);
+		Sched_Task(TASK_WALK_PATH,       ACT_WALK, 0);
+		Sched_Task(TASK_WAIT_FOR_MOVE,   0, 0);
+		Sched_Task(TASK_STOP_MOVING,     0, 0);
+		Sched_Task(TASK_SET_ACTIVITY,    ACT_IDLE, 0);
+	Sched_End();
+
+	// THAT WAS A GUN.  tlScientistStartle (scientist.cpp:361-370): scream, stop,
+	// crouch, hold the crouch, wait up to a second.  HL's version plays the two
+	// crouch poses through TASK_PLAY_SEQUENCE_FACE_ENEMY; there is no enemy in the
+	// case this fires for, so the activities are simply set and held.
+	//
+	// The duck is deliberately NOT a flee.  Half-Life reserves running away for
+	// SND_DANGER (a live grenade) and for seeing something it fears; a gunshot
+	// nearby gets a flinch, because in a co-op mod an escort that bolts every time
+	// the player pulls a trigger is unusable.  Both halves are now reachable and
+	// they are different schedules, which is the distinction the untyped sound
+	// system could not express at all.
+	Sched_Begin(SCHED_STARTLE, "startle",
+	            COND_SEE_ENEMY | COND_HEAVY_DAMAGE | COND_HEAR_DANGER);
+		Sched_Task(TASK_STOP_MOVING,     0, 0);
+		Sched_Task(TASK_ALERT_SOUND,     0, 0);
+		Sched_Task(TASK_SET_ACTIVITY,    ACT_CROUCH, 0);
+		Sched_Task(TASK_WAIT,            0.4, 0);
+		Sched_Task(TASK_SET_ACTIVITY,    ACT_CROUCHIDLE, 0);
+		Sched_Task(TASK_WAIT,            0.8, 0);
+		Sched_Task(TASK_SET_ACTIVITY,    ACT_IDLE, 0);
+	Sched_End();
+
 	// --- scripted sequences -------------------------------------------------
 	// The four states a possessed monster can be in.  ALL FOUR HAVE A ZERO
 	// INTERRUPT MASK, and that is the defining property of a scripted scene: a
@@ -713,12 +1144,19 @@ void() AI_SchedBuildAll =
 	// the world with a fixed facing, and arriving at roughly the right place while
 	// looking the wrong way is exactly the failure that makes a posed scene read
 	// as broken.
+	//
+	// TASK_PLANT_ON_SCRIPT sits between the move and the facing, which is where
+	// Half-Life puts it (tlScriptedWalk, defaultai.cpp:798-807) and the only
+	// place it can go: after it, so the walk has finished and cannot drag the
+	// actor back off the mark; before the facing, so the turn happens at the
+	// spot the pose was authored for rather than 34 units away from it.
 	Sched_Begin(SCHED_SCRIPT_WALK, "script_walk", 0);
 		Sched_Task(TASK_SET_STATE,        MS_SCRIPT, 0);
 		Sched_Task(TASK_STOP_MOVING,      0, 0);
 		Sched_Task(TASK_GET_PATH_SCRIPT,  0, 0);
 		Sched_Task(TASK_WALK_PATH,        ACT_WALK, 0);
 		Sched_Task(TASK_WAIT_FOR_MOVE,    0, 0);
+		Sched_Task(TASK_PLANT_ON_SCRIPT,  0, 0);
 		Sched_Task(TASK_FACE_SCRIPT,      0, 0);
 	Sched_End();
 
@@ -728,6 +1166,7 @@ void() AI_SchedBuildAll =
 		Sched_Task(TASK_GET_PATH_SCRIPT,  0, 0);
 		Sched_Task(TASK_RUN_PATH,         ACT_RUN, 0);
 		Sched_Task(TASK_WAIT_FOR_MOVE,    0, 0);
+		Sched_Task(TASK_PLANT_ON_SCRIPT,  0, 0);
 		Sched_Task(TASK_FACE_SCRIPT,      0, 0);
 	Sched_End();
 

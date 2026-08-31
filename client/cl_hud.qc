@@ -10,6 +10,10 @@ float(float bit) Cutscene_HidesHud;
 // --- Pain flash ---
 float csqc_pain_flash_time;
 float csqc_pain_flash_alpha;
+// DMGHUD_* from the last CSQC_EVENT_DAMAGE_FLASH — what tints the flash.  Not
+// cleared when the flash expires: it is only ever read while a flash is live, and
+// every event overwrites it.
+float csqc_pain_flash_type;
 const float PAIN_FLASH_DURATION = 0.4;
 
 // --- Death-screen damage report (cl_playerdamage panel) ---
@@ -190,6 +194,27 @@ void() HUD_DrawHitmarker =
 // reads as a gradient instead of a hard stripe.  Independent of any
 // GLSL / shader-script pipeline (the earlier post-process path was
 // unreliable on this engine build).
+// The pain flash's colour, from the DMGHUD_* byte the server sends alongside the
+// damage.  Half-Life draws a sprite icon per type (DMG_SHOWNHUD, cbase.h:641) and
+// the Sven mount ships none of that art, so the flash carries the information
+// instead — which is arguably better placed anyway, since it is already the thing
+// the eye goes to.
+//
+// The point is that "you are being shot" and "you are standing in nerve gas" stop
+// looking identical.  23 of pizza_ya_san1's 27 trigger_hurts are gas.
+vector(float t) HUD_PainFlashColour =
+{
+    if (t == DMGHUD_BURN)      return '0.95 0.45 0.05';   // fire orange
+    if (t == DMGHUD_FREEZE)    return '0.45 0.75 1.00';   // ice blue
+    if (t == DMGHUD_GAS)       return '0.35 0.85 0.20';   // nerve gas green
+    if (t == DMGHUD_POISON)    return '0.55 0.80 0.25';   // poison, a sicklier green
+    if (t == DMGHUD_ACID)      return '0.80 0.95 0.10';   // acid yellow-green
+    if (t == DMGHUD_SHOCK)     return '0.60 0.75 1.00';   // electric white-blue
+    if (t == DMGHUD_RADIATION) return '0.85 0.90 0.20';   // radiation yellow
+    if (t == DMGHUD_DROWN)     return '0.15 0.35 0.75';   // deep water blue
+    return '0.85 0.05 0.05';                              // DMGHUD_NONE - the original red
+};
+
 void() HUD_DrawPainFlash =
 {
     float age, intensity;
@@ -197,7 +222,7 @@ void() HUD_DrawPainFlash =
     float band_size;
     float i;
     float band_alpha;
-    vector red = '0.85 0.05 0.05';
+    vector red = HUD_PainFlashColour(csqc_pain_flash_type);
 
     if (csqc_pain_flash_time <= 0)
         return;
@@ -227,6 +252,140 @@ void() HUD_DrawPainFlash =
         drawfill([ofs,               ofs + band_size],            [band_size, g_height - (ofs + band_size) * 2], red, band_alpha, 0);
         drawfill([g_width - ofs - band_size, ofs + band_size],   [band_size, g_height - (ofs + band_size) * 2], red, band_alpha, 0);
     }
+};
+
+// ============================================================
+//  HUD_DrawSubmerged — the underwater tint the ENGINE cannot draw
+// ============================================================
+//
+//  "func_water doesn't provide the normal underwater effect that normal
+//  worldspawn water content does."  It is not that func_water is half-
+//  implemented: the swim, the drowning and the movement are all correct
+//  (PM_CategorizePosition reads PM_ContentsAt, which sees brush entities, and
+//  writes self.waterlevel for the drown timer at sh_pmove.qc:5869).  What is
+//  missing is the SCREEN, and the reason is structural.
+//
+//  The engine picks the underwater tint and the warp from r_viewcontents, and
+//  r_viewcontents is built from exactly two sources (client/r_surf.c:2255-2300):
+//
+//      cl.worldmodel->funcs.InfoForPoint(...)   // the WORLD model only
+//      viewcontents |= PM_ExtraBoxContents(pvsorg);
+//
+//  ...and PM_ExtraBoxContents walks pmove.physents, which on the client is
+//  filled ONLY from network packet entity states — CL_SetSolidEntities reads
+//  state->skinnum and turns Q1CONTENTS_WATER into a forcecontentsmask
+//  (cl_ents.c:7111-7135).  This mod replicates func_water through the CSQC
+//  brushsync channel instead, so its brush is never in a packet entity state and
+//  never lands in pmove.physents.  The engine therefore has no way to know the
+//  camera is underwater, no matter what the brush's .skin says.
+//
+//  So CSQC draws it.  The gate is precise rather than a blanket override: if the
+//  WORLD model already says water at the eye, the engine is drawing its own tint
+//  and warp and this must stay out of the way or the two composite and the screen
+//  goes opaque.  pointcontents() in this VM is worldmodel-only — which is the
+//  whole reason PM_ContentsAt exists — so it is exactly the right question to
+//  ask.
+//
+//  The warp itself is not reproduced.  That is a post-process the engine gates on
+//  the same r_viewcontents, and there is no CSQC property for it; forcing
+//  r_waterwarp from here would leave the whole map warped the moment you climbed
+//  out.  The tint is the part that reads as "I am underwater".
+//
+//  THE COLOUR COMES FROM THE CVAR, NOT FROM A CONSTANT, AND THAT IS THE FIX FOR
+//  "func_water appears orange".
+//
+//  These used to be hardcoded copies of Quake's v_cshift table with a comment
+//  saying Half-Life inherits it verbatim.  Two things were wrong with that.  The
+//  Half-Life SDK has no cshift table at all — grep the whole of it for cshift or
+//  SetContentsColor and there is nothing, because in GoldSrc the tint is engine
+//  side.  And much more to the point, THIS MOD OVERRIDES THE WATER ROW:
+//  cfg/default.cfg:225 sets v_cshift_water "20 40 60 100", a blue.
+//
+//  So world water — drawn by the engine from the cvar — was blue, and func_water
+//  — drawn here from the stale default — was Quake's 130/80/50 amber.  That is
+//  the orange in the report.  It was never a contents bug: all three func_water
+//  on th_ep1_01 carry "skin" "-3", the value survives the brushsync wire intact
+//  (sv_brushsync.qc:387 / cl_brushsync.qc:566), and pm_watertype really is
+//  CONTENT_WATER.
+//
+//  Reading the cvar means this stand-in tracks whatever the engine would have
+//  drawn, including the player's own v_cshift_* edits, and cannot drift out of
+//  sync with default.cfg again.  The constants stay as the fallback for a
+//  malformed or empty cvar string.
+const float SUBMERGED_ALPHA_WATER = 0.30;   // 128/255, eased back a little for a
+                                            // modern screen — the raw 0.5 Quake
+                                            // used is near-opaque on a bright panel
+const float SUBMERGED_ALPHA_SLIME = 0.42;
+const float SUBMERGED_ALPHA_LAVA  = 0.50;
+
+// Parse "R G B A" (0..255 each) into HUD_CShift_Col / HUD_CShift_Alpha.  Returns
+// FALSE and touches nothing when the string is missing or short.
+vector hud_cshift_col;
+float  hud_cshift_alpha;
+float(string cs) HUD_ParseCShift =
+{
+    if (cs == "")
+        return FALSE;
+    float n = tokenize(cs);
+    if (n < 4)
+        return FALSE;
+    hud_cshift_col   = [stof(argv(0)) / 255, stof(argv(1)) / 255, stof(argv(2)) / 255];
+    hud_cshift_alpha = stof(argv(3)) / 255;
+    // v_contentblend is the engine's own master scale on the contents shift
+    // (view.c:743); honouring it means turning the blend down turns THIS down too.
+    float cb = cvar("v_contentblend");
+    if (cb <= 0) cb = 1;
+    hud_cshift_alpha = bound(0, hud_cshift_alpha * cb, 1);
+    return TRUE;
+};
+
+void() HUD_DrawSubmerged =
+{
+    if (!predicted_player || !csqc_prediction_valid)
+        return;
+    // Eyes under, not merely waist-deep — waterlevel 3 is the same threshold the
+    // drown timer uses (sv_player.qc:1225) and the same one the engine's own
+    // contents test effectively applies, since it samples the view origin.
+    if (pm_waterlevel < 3)
+        return;
+
+    vector eye = predicted_player.origin + predicted_player.view_ofs;
+    // World water already handled by the engine — leave it alone.
+    float world_cont = pointcontents(eye);
+    if (world_cont == CONTENT_WATER || world_cont == CONTENT_SLIME
+        || world_cont == CONTENT_LAVA)
+        return;
+
+    vector col;
+    float  a;
+    string cvname;
+    if (pm_watertype == CONTENT_LAVA)
+    {
+        col    = '1.00 0.31 0.00';
+        a      = SUBMERGED_ALPHA_LAVA;
+        cvname = "v_cshift_lava";
+    }
+    else if (pm_watertype == CONTENT_SLIME)
+    {
+        col    = '0.00 0.10 0.02';
+        a      = SUBMERGED_ALPHA_SLIME;
+        cvname = "v_cshift_slime";
+    }
+    else
+    {
+        col    = '0.51 0.31 0.20';
+        a      = SUBMERGED_ALPHA_WATER;
+        cvname = "v_cshift_water";
+    }
+
+    // The cvar wins when it parses; the constants above are the fallback.
+    if (HUD_ParseCShift(cvar_string(cvname)))
+    {
+        col = hud_cshift_col;
+        a   = hud_cshift_alpha;
+    }
+
+    drawfill('0 0 0', [g_width, g_height], col, a, 0);
 };
 
 // ============================================================
@@ -413,6 +572,18 @@ float  hud_slot_cache_snowball_ammo;
 float  hud_slot_cache_cshegrenade_ammo;
 float  hud_slot_cache_csflashbang_ammo;
 float  hud_slot_cache_cssmokegrenade_ammo;
+// The other three SLOT_UTILITY counts.  Without them the cached slot LABEL
+// ("SATCHEL", "TRIPMINE", "SNARK") went stale the moment one of them ran
+// out, because nothing in the key changed when the count did.
+float  hud_slot_cache_satchel_ammo;
+float  hud_slot_cache_tripmine_ammo;
+float  hud_slot_cache_snark_ammo;
+// The last three utility counts, so a change in one of them still invalidates
+// the slot-4 label.  Without them the label's own ring walk (above) could not
+// be re-run when, say, a medkit drained to empty.
+float  hud_slot_cache_penguin_ammo;
+float  hud_slot_cache_medkit_ammo;
+float  hud_slot_cache_soflam_ammo;
 float  hud_slot_cache_slingshot;
 string hud_slot_cache_text1;
 string hud_slot_cache_text2;
@@ -466,13 +637,24 @@ string(float slot_num, float weapon_id) HUD_BuildWeaponSlotText =
     {
         if (weapon_id != WEP_NONE)
             name = HUD_WeaponName(weapon_id);
-        else if (predicted_player.ammo_hlgrenade > 0)        name = HUD_WeaponName(WEP_HLGRENADE);
-        else if (predicted_player.ammo_snowball > 0)         name = HUD_WeaponName(WEP_SNOWBALL);
-        else if (predicted_player.ammo_cshegrenade > 0)      name = HUD_WeaponName(WEP_CSHEGRENADE);
-        else if (predicted_player.ammo_csflashbang > 0)      name = HUD_WeaponName(WEP_CSFLASHBANG);
-        else if (predicted_player.ammo_cssmokegrenade > 0)   name = HUD_WeaponName(WEP_CSSMOKEGRENADE);
         else
+        {
+            // Walk the SAME ring the dropdown and impulse 4 use, rather than the
+            // five-weapon copy that used to sit here.  Carrying only a satchel
+            // during that pickup-to-binding window left the slot label blank
+            // (and then, once it latched, correct) — which reads as a HUD that
+            // "doesn't always display" what you have.
             name = "";
+            for (float uf = 0; uf < UTILRING_COUNT; uf++)
+            {
+                float uw = W_UtilityRingAt(uf);
+                if (W_UtilityEntityOwns(predicted_player, uw))
+                {
+                    name = HUD_WeaponName(uw);
+                    break;
+                }
+            }
+        }
     }
     if (name == "")
         return "";
@@ -494,6 +676,12 @@ void() HUD_UpdateWeaponSlotCache =
         && hud_slot_cache_cshegrenade_ammo == predicted_player.ammo_cshegrenade
         && hud_slot_cache_csflashbang_ammo == predicted_player.ammo_csflashbang
         && hud_slot_cache_cssmokegrenade_ammo == predicted_player.ammo_cssmokegrenade
+        && hud_slot_cache_satchel_ammo == predicted_player.ammo_satchel
+        && hud_slot_cache_tripmine_ammo == predicted_player.ammo_tripmine
+        && hud_slot_cache_snark_ammo == predicted_player.ammo_snark
+        && hud_slot_cache_penguin_ammo == predicted_player.ammo_penguin
+        && hud_slot_cache_medkit_ammo == predicted_player.ammo_medkit
+        && hud_slot_cache_soflam_ammo == predicted_player.ammo_soflam
         && hud_slot_cache_slingshot == predicted_player.snowball_has_slingshot
         && hud_slot_cache_active == predicted_player.weapon)
         return;
@@ -509,6 +697,12 @@ void() HUD_UpdateWeaponSlotCache =
     hud_slot_cache_cshegrenade_ammo = predicted_player.ammo_cshegrenade;
     hud_slot_cache_csflashbang_ammo = predicted_player.ammo_csflashbang;
     hud_slot_cache_cssmokegrenade_ammo = predicted_player.ammo_cssmokegrenade;
+    hud_slot_cache_satchel_ammo = predicted_player.ammo_satchel;
+    hud_slot_cache_tripmine_ammo = predicted_player.ammo_tripmine;
+    hud_slot_cache_snark_ammo = predicted_player.ammo_snark;
+    hud_slot_cache_penguin_ammo = predicted_player.ammo_penguin;
+    hud_slot_cache_medkit_ammo = predicted_player.ammo_medkit;
+    hud_slot_cache_soflam_ammo = predicted_player.ammo_soflam;
     hud_slot_cache_slingshot = predicted_player.snowball_has_slingshot;
     hud_slot_cache_active = predicted_player.weapon;
 
@@ -588,14 +782,54 @@ string(float weapon_id, float format_id, float value_a, float value_b) HUD_Cache
 string() HUD_GetAmmoString =
 {
     float wep = predicted_player.weapon;
+
+    // Weapons with no ammunition of ANY kind — the gravity gun and the barnacle
+    // grapple are the only two, and both carry 0/0/0 manifest defaults
+    // (sh_weapon_manifest.qc:304, :368).  Both live in SLOT_PRIMARY, so without
+    // this they fall into the slot-ammo path below, W_SlotAmmo_HudFormat picks
+    // the single-number layout because their mag is 0, and HudPrimaryValue then
+    // returns their reserve — which is also 0.  The result is a permanent "0"
+    // sitting where every other gun shows a live count: visually identical to a
+    // weapon that has run dry, on a weapon that can never run dry.
+    //
+    // Melee never hit that path (W_SlotAmmo_UsesSlot only covers primary and
+    // secondary), which is why fists and the crowbar already draw no readout.
+    // "" is the supported "draw nothing" answer — HUD_DrawAmmo returns early on
+    // it (:1549) — so this gives the two of them the same treatment.
+    if (WeaponManifest_DefaultMag(wep)  <= 0
+     && WeaponManifest_DefaultAmmo(wep) <= 0
+     && WeaponManifest_DefaultAux(wep)  <= 0)
+        return "";
+
     if (W_SlotAmmo_UsesSlot(wep))
     {
         float fmt = W_SlotAmmo_HudFormat(predicted_player, wep);
         float a = W_SlotAmmo_HudPrimaryValue(predicted_player, wep);
-        float b = slotammo_ammo;
+        // Was `slotammo_ammo` — correct for mag weapons (mag / reserve) but
+        // wrong for the charge weapons, which want their pool ceiling as the
+        // second number.  The helper picks per weapon; both calls re-run
+        // W_SlotAmmo_GetForWeapon, so the globals stay consistent.
+        float b = W_SlotAmmo_HudSecondaryValue(predicted_player, wep);
         return HUD_CacheAmmoString(wep, fmt, a, b);
     }
 
+    // ------------------------------------------------------------------
+    // EVERYTHING BELOW IS REACHABLE ONLY FOR SLOT_UTILITY WEAPONS.
+    //
+    // W_SlotAmmo_UsesSlot() is TRUE for every PRIMARY and SECONDARY weapon,
+    // so the branch above returns first for all of them.  Of the 75 rows in
+    // this chain exactly 8 can ever run — hlgrenade, satchel, tripmine,
+    // snark, snowball and the three CS grenades.  The other 67 are dead.
+    //
+    // They are left in place rather than deleted because they are harmless
+    // and document each weapon's intended layout, but DO NOT EDIT THEM
+    // expecting a change on screen: for a slot weapon the HUD reads
+    // slot_primary_*/slot_secondary_* via W_SlotAmmo_Hud{Format,PrimaryValue}
+    // and nothing else.  This chain is why the displacer/hornetgun/shock
+    // rifle looked wired up while printing a hard 0 — their rows are here,
+    // their rows in shared/sh_weapon_slotammo.qc were missing, and only the
+    // latter is on the wire.  Fix ammo display THERE.
+    // ------------------------------------------------------------------
     if (predicted_player.weapon == WEP_DEAGLE)
         return HUD_CacheAmmoString(WEP_DEAGLE, 1, predicted_player.mag_deagle, predicted_player.ammo_deagle);
     else if (predicted_player.weapon == WEP_AK47)
@@ -618,12 +852,99 @@ string() HUD_GetAmmoString =
         return HUD_CacheAmmoString(WEP_CSAWP, 1, predicted_player.mag_awp, predicted_player.ammo_awp);
     else if (predicted_player.weapon == WEP_DOD98K)
         return HUD_CacheAmmoString(WEP_DOD98K, 1, predicted_player.mag_98k, predicted_player.ammo_98k);
+    else if (predicted_player.weapon == WEP_DODCOLT)
+        return HUD_CacheAmmoString(WEP_DODCOLT, 1, predicted_player.mag_dodcolt, predicted_player.ammo_dodcolt);
+    else if (predicted_player.weapon == WEP_DODLUGER)
+        return HUD_CacheAmmoString(WEP_DODLUGER, 1, predicted_player.mag_dodluger, predicted_player.ammo_dodluger);
+    else if (predicted_player.weapon == WEP_DODWEBLEY)
+        return HUD_CacheAmmoString(WEP_DODWEBLEY, 1, predicted_player.mag_dodwebley, predicted_player.ammo_dodwebley);
+    else if (predicted_player.weapon == WEP_DODGARAND)
+        return HUD_CacheAmmoString(WEP_DODGARAND, 1, predicted_player.mag_dodgarand, predicted_player.ammo_dodgarand);
+    else if (predicted_player.weapon == WEP_DODCARBINE)
+        return HUD_CacheAmmoString(WEP_DODCARBINE, 1, predicted_player.mag_dodcarbine, predicted_player.ammo_dodcarbine);
+    else if (predicted_player.weapon == WEP_DODK43)
+        return HUD_CacheAmmoString(WEP_DODK43, 1, predicted_player.mag_dodk43, predicted_player.ammo_dodk43);
+    else if (predicted_player.weapon == WEP_DODTOMMY)
+        return HUD_CacheAmmoString(WEP_DODTOMMY, 1, predicted_player.mag_dodtommy, predicted_player.ammo_dodtommy);
+    else if (predicted_player.weapon == WEP_DODMP40)
+        return HUD_CacheAmmoString(WEP_DODMP40, 1, predicted_player.mag_dodmp40, predicted_player.ammo_dodmp40);
+    else if (predicted_player.weapon == WEP_DODSTEN)
+        return HUD_CacheAmmoString(WEP_DODSTEN, 1, predicted_player.mag_dodsten, predicted_player.ammo_dodsten);
+    else if (predicted_player.weapon == WEP_DODGREASE)
+        return HUD_CacheAmmoString(WEP_DODGREASE, 1, predicted_player.mag_dodgrease, predicted_player.ammo_dodgrease);
+    else if (predicted_player.weapon == WEP_DODMP44)
+        return HUD_CacheAmmoString(WEP_DODMP44, 1, predicted_player.mag_dodmp44, predicted_player.ammo_dodmp44);
+    else if (predicted_player.weapon == WEP_DODBAR)
+        return HUD_CacheAmmoString(WEP_DODBAR, 1, predicted_player.mag_dodbar, predicted_player.ammo_dodbar);
+    // Day of Defeat, third batch.  The binoculars are absent on purpose: they
+    // have no ammunition at all (see sh_wpn_dodbinocs.qc), and the HUD already
+    // prints nothing for a weapon with none.
+    else if (predicted_player.weapon == WEP_DODBREN)
+        return HUD_CacheAmmoString(WEP_DODBREN, 1, predicted_player.mag_dodbren, predicted_player.ammo_dodbren);
+    else if (predicted_player.weapon == WEP_DODFG42)
+        return HUD_CacheAmmoString(WEP_DODFG42, 1, predicted_player.mag_dodfg42, predicted_player.ammo_dodfg42);
+    else if (predicted_player.weapon == WEP_DODFG42S)
+        return HUD_CacheAmmoString(WEP_DODFG42S, 1, predicted_player.mag_dodfg42s, predicted_player.ammo_dodfg42s);
+    else if (predicted_player.weapon == WEP_DODFCARB)
+        return HUD_CacheAmmoString(WEP_DODFCARB, 1, predicted_player.mag_dodfcarb, predicted_player.ammo_dodfcarb);
+    else if (predicted_player.weapon == WEP_DODENFIELD)
+        return HUD_CacheAmmoString(WEP_DODENFIELD, 1, predicted_player.mag_dodenfield, predicted_player.ammo_dodenfield);
+    else if (predicted_player.weapon == WEP_DODMORTAR)
+        return HUD_CacheAmmoString(WEP_DODMORTAR, 1, predicted_player.mag_dodmortar, predicted_player.ammo_dodmortar);
+    // Day of Defeat, second batch.  The four melee weapons are absent on
+    // purpose — they have no ammo, and the HUD's melee path already prints
+    // nothing for a weapon with none.
+    else if (predicted_player.weapon == WEP_DODSCOPED98K)
+        return HUD_CacheAmmoString(WEP_DODSCOPED98K, 1, predicted_player.mag_dodscoped98k, predicted_player.ammo_dodscoped98k);
+    else if (predicted_player.weapon == WEP_DODSPRING)
+        return HUD_CacheAmmoString(WEP_DODSPRING, 1, predicted_player.mag_dodspring, predicted_player.ammo_dodspring);
+    else if (predicted_player.weapon == WEP_DODENFIELDS)
+        return HUD_CacheAmmoString(WEP_DODENFIELDS, 1, predicted_player.mag_dodenfields, predicted_player.ammo_dodenfields);
+    else if (predicted_player.weapon == WEP_DOD30CAL)
+        return HUD_CacheAmmoString(WEP_DOD30CAL, 1, predicted_player.mag_dod30cal, predicted_player.ammo_dod30cal);
+    else if (predicted_player.weapon == WEP_DODMG34)
+        return HUD_CacheAmmoString(WEP_DODMG34, 1, predicted_player.mag_dodmg34, predicted_player.ammo_dodmg34);
+    else if (predicted_player.weapon == WEP_DODMG42)
+        return HUD_CacheAmmoString(WEP_DODMG42, 1, predicted_player.mag_dodmg42, predicted_player.ammo_dodmg42);
+    else if (predicted_player.weapon == WEP_DODBAZOOKA)
+        return HUD_CacheAmmoString(WEP_DODBAZOOKA, 1, predicted_player.mag_dodbazooka, predicted_player.ammo_dodbazooka);
+    else if (predicted_player.weapon == WEP_DODSCHRECK)
+        return HUD_CacheAmmoString(WEP_DODSCHRECK, 1, predicted_player.mag_dodschreck, predicted_player.ammo_dodschreck);
+    else if (predicted_player.weapon == WEP_DODPIAT)
+        return HUD_CacheAmmoString(WEP_DODPIAT, 1, predicted_player.mag_dodpiat, predicted_player.ammo_dodpiat);
     else if (predicted_player.weapon == WEP_HLSHOTGUN)
         return HUD_CacheAmmoString(WEP_HLSHOTGUN, 1, predicted_player.mag_shotgun, predicted_player.ammo_shotgun);
     else if (predicted_player.weapon == WEP_CSM3)
         return HUD_CacheAmmoString(WEP_CSM3, 1, predicted_player.mag_m3, predicted_player.ammo_m3);
     else if (predicted_player.weapon == WEP_CSMP5)
         return HUD_CacheAmmoString(WEP_CSMP5, 1, predicted_player.mag_mp5, predicted_player.ammo_mp5);
+    // The thirteen Counter-Strike 1.6 guns.  Mode 1 = magazine / reserve.
+    else if (predicted_player.weapon == WEP_CSP228)
+        return HUD_CacheAmmoString(WEP_CSP228, 1, predicted_player.mag_p228, predicted_player.ammo_p228);
+    else if (predicted_player.weapon == WEP_CSFIVESEVEN)
+        return HUD_CacheAmmoString(WEP_CSFIVESEVEN, 1, predicted_player.mag_fiveseven, predicted_player.ammo_fiveseven);
+    else if (predicted_player.weapon == WEP_CSELITE)
+        return HUD_CacheAmmoString(WEP_CSELITE, 1, predicted_player.mag_elite, predicted_player.ammo_elite);
+    else if (predicted_player.weapon == WEP_CSTMP)
+        return HUD_CacheAmmoString(WEP_CSTMP, 1, predicted_player.mag_tmp, predicted_player.ammo_tmp);
+    else if (predicted_player.weapon == WEP_CSMAC10)
+        return HUD_CacheAmmoString(WEP_CSMAC10, 1, predicted_player.mag_mac10, predicted_player.ammo_mac10);
+    else if (predicted_player.weapon == WEP_CSUMP45)
+        return HUD_CacheAmmoString(WEP_CSUMP45, 1, predicted_player.mag_ump45, predicted_player.ammo_ump45);
+    else if (predicted_player.weapon == WEP_CSP90)
+        return HUD_CacheAmmoString(WEP_CSP90, 1, predicted_player.mag_p90, predicted_player.ammo_p90);
+    else if (predicted_player.weapon == WEP_CSGALIL)
+        return HUD_CacheAmmoString(WEP_CSGALIL, 1, predicted_player.mag_galil, predicted_player.ammo_galil);
+    else if (predicted_player.weapon == WEP_CSFAMAS)
+        return HUD_CacheAmmoString(WEP_CSFAMAS, 1, predicted_player.mag_famas, predicted_player.ammo_famas);
+    else if (predicted_player.weapon == WEP_CSAUG)
+        return HUD_CacheAmmoString(WEP_CSAUG, 1, predicted_player.mag_aug, predicted_player.ammo_aug);
+    else if (predicted_player.weapon == WEP_CSSG552)
+        return HUD_CacheAmmoString(WEP_CSSG552, 1, predicted_player.mag_sg552, predicted_player.ammo_sg552);
+    else if (predicted_player.weapon == WEP_CSSG550)
+        return HUD_CacheAmmoString(WEP_CSSG550, 1, predicted_player.mag_sg550, predicted_player.ammo_sg550);
+    else if (predicted_player.weapon == WEP_CSXM1014)
+        return HUD_CacheAmmoString(WEP_CSXM1014, 1, predicted_player.mag_xm1014, predicted_player.ammo_xm1014);
     else if (predicted_player.weapon == WEP_CROSSBOW)
         return HUD_CacheAmmoString(WEP_CROSSBOW, 1, predicted_player.mag_crossbow, predicted_player.ammo_crossbow);
     else if (predicted_player.weapon == WEP_GRENADELAUNCHER)
@@ -638,6 +959,46 @@ string() HUD_GetAmmoString =
         return HUD_CacheAmmoString(WEP_G3SG1, 1, predicted_player.mag_g3sg1, predicted_player.ammo_g3sg1);
     else if (predicted_player.weapon == WEP_HLSMG)
         return HUD_CacheAmmoString(WEP_HLSMG, 1, predicted_player.mag_hlsmg, predicted_player.ammo_hlsmg);
+    // They Hunger's eight.  Mode 1 (magazine / reserve) for the seven with a
+    // magazine; mode 2 (a single number) for the tesla gun, which has no clip
+    // and no reload — the same shape the shock rifle and hivehand use.
+    else if (predicted_player.weapon == WEP_TH1911)
+        return HUD_CacheAmmoString(WEP_TH1911, 1, predicted_player.mag_th1911, predicted_player.ammo_th1911);
+    else if (predicted_player.weapon == WEP_THTOMMY)
+        return HUD_CacheAmmoString(WEP_THTOMMY, 1, predicted_player.mag_thtommy, predicted_player.ammo_thtommy);
+    else if (predicted_player.weapon == WEP_THGREASE)
+        return HUD_CacheAmmoString(WEP_THGREASE, 1, predicted_player.mag_thgrease, predicted_player.ammo_thgrease);
+    else if (predicted_player.weapon == WEP_THM14)
+        return HUD_CacheAmmoString(WEP_THM14, 1, predicted_player.mag_thm14, predicted_player.ammo_thm14);
+    else if (predicted_player.weapon == WEP_THM16)
+        return HUD_CacheAmmoString(WEP_THM16, 1, predicted_player.mag_thm16, predicted_player.ammo_thm16);
+    else if (predicted_player.weapon == WEP_THSAWOFF)
+        return HUD_CacheAmmoString(WEP_THSAWOFF, 1, predicted_player.mag_thsawoff, predicted_player.ammo_thsawoff);
+    else if (predicted_player.weapon == WEP_THTESLA)
+        return HUD_CacheAmmoString(WEP_THTESLA, 2, predicted_player.ammo_thtesla, 0);
+    // Sven Co-op and Opposing Force.  Mode 1 is "magazine / reserve"; mode 2 is
+    // the single-number layout, used by the three that have no magazine at all
+    // (the belt-fed minigun, the medkit's charge, the SOFLAM's five calls).
+    else if (predicted_player.weapon == WEP_UZI)
+        return HUD_CacheAmmoString(WEP_UZI, 1, predicted_player.mag_uzi, predicted_player.ammo_uzi);
+    else if (predicted_player.weapon == WEP_UZIAKIMBO)
+        return HUD_CacheAmmoString(WEP_UZIAKIMBO, 1, predicted_player.mag_uziakimbo, predicted_player.ammo_uziakimbo);
+    else if (predicted_player.weapon == WEP_SVM16)
+        return HUD_CacheAmmoString(WEP_SVM16, 1, predicted_player.mag_svm16, predicted_player.ammo_svm16);
+    else if (predicted_player.weapon == WEP_SNIPERRIFLE)
+        return HUD_CacheAmmoString(WEP_SNIPERRIFLE, 1, predicted_player.mag_sniper, predicted_player.ammo_sniper);
+    else if (predicted_player.weapon == WEP_SPORELAUNCHER)
+        return HUD_CacheAmmoString(WEP_SPORELAUNCHER, 1, predicted_player.mag_spore, predicted_player.ammo_sporelauncher);
+    else if (predicted_player.weapon == WEP_EAGLE)
+        return HUD_CacheAmmoString(WEP_EAGLE, 1, predicted_player.mag_eagle, predicted_player.ammo_eagle);
+    else if (predicted_player.weapon == WEP_ASSHOTGUN)
+        return HUD_CacheAmmoString(WEP_ASSHOTGUN, 1, predicted_player.mag_asshotgun, predicted_player.ammo_asshotgun);
+    else if (predicted_player.weapon == WEP_MINIGUN)
+        return HUD_CacheAmmoString(WEP_MINIGUN, 2, predicted_player.ammo_minigun, 0);
+    else if (predicted_player.weapon == WEP_MEDKIT)
+        return HUD_CacheAmmoString(WEP_MEDKIT, 2, predicted_player.ammo_medkit, 0);
+    else if (predicted_player.weapon == WEP_ASSOFLAM)
+        return HUD_CacheAmmoString(WEP_ASSOFLAM, 2, predicted_player.ammo_soflam, 0);
     else if (predicted_player.weapon == WEP_HLRPG)
         return HUD_CacheAmmoString(WEP_HLRPG, 1, predicted_player.mag_hlrpg, predicted_player.ammo_hlrpg);
     else if (predicted_player.weapon == WEP_HLGRENADE)
@@ -648,12 +1009,31 @@ string() HUD_GetAmmoString =
         return HUD_CacheAmmoString(WEP_TRIPMINE, 2, predicted_player.ammo_tripmine, 0);
     else if (predicted_player.weapon == WEP_SNARK)
         return HUD_CacheAmmoString(WEP_SNARK, 2, predicted_player.ammo_snark, 0);
+    // The penguin had no row here at all, so holding it fell through to the
+    // generic tail and showed the wrong number.  Mode 2 (a single count), the
+    // same as the snark it is a reskin of.
+    else if (predicted_player.weapon == WEP_PENGUIN)
+        return HUD_CacheAmmoString(WEP_PENGUIN, 2, predicted_player.ammo_penguin, 0);
     else if (predicted_player.weapon == WEP_HORNETGUN)
         return HUD_CacheAmmoString(WEP_HORNETGUN, 2, predicted_player.ammo_hornet, 0);
+    // Mode 2 (a single number, no magazine) for the same reason as the
+    // hivehand: the shock rifle has no clip and no reload, it just regrows.
+    else if (predicted_player.weapon == WEP_SHOCKRIFLE)
+        return HUD_CacheAmmoString(WEP_SHOCKRIFLE, 2, predicted_player.ammo_shockrifle, 0);
+    else if (predicted_player.weapon == WEP_DISPLACER)
+        return HUD_CacheAmmoString(WEP_DISPLACER, 2, predicted_player.ammo_displacer, 0);
+    // Mode 1: the jetpack is the only one of the four with a real magazine.
+    else if (predicted_player.weapon == WEP_JETPACK)
+        return HUD_CacheAmmoString(WEP_JETPACK, 1, predicted_player.mag_jetpack,
+                                   predicted_player.ammo_jetpack);
     else if (predicted_player.weapon == WEP_SNOWBALL)
         return HUD_CacheAmmoString(WEP_SNOWBALL, 2, predicted_player.ammo_snowball, 0);
     else if (predicted_player.weapon == WEP_CSHEGRENADE)
         return HUD_CacheAmmoString(WEP_CSHEGRENADE, 2, predicted_player.ammo_cshegrenade, 0);
+    else if (predicted_player.weapon == WEP_DODMILLS)
+        return HUD_CacheAmmoString(WEP_DODMILLS, 2, predicted_player.ammo_dodmills, 0);
+    else if (predicted_player.weapon == WEP_DODSTICK)
+        return HUD_CacheAmmoString(WEP_DODSTICK, 2, predicted_player.ammo_dodstick, 0);
     else if (predicted_player.weapon == WEP_CSFLASHBANG)
         return HUD_CacheAmmoString(WEP_CSFLASHBANG, 2, predicted_player.ammo_csflashbang, 0);
     else if (predicted_player.weapon == WEP_CSSMOKEGRENADE)
@@ -843,28 +1223,49 @@ void(string label, float is_active, vector pos) HUD_DrawUtilityDropRow =
 // per-row highlight.
 float  hud_util_cache_last_recompute;
 float  hud_util_cache_total;
-float  hud_util_cache_carried[5];
-string hud_util_cache_names[5];
+float  hud_util_cache_carried[UTILRING_COUNT];
+string hud_util_cache_names[UTILRING_COUNT];
 float  hud_util_cache_ammo_sum;
 
+// THE RING, NOT A COPY OF THE FIRST FIVE ROWS OF IT.
+//
+// This list used to be a hand-written `cands[5]` of HE / Snowball / CSHE /
+// Flash / Smoke, with a matching hand-written ammo_sum over the same five
+// fields.  The server's canonical order (W_UtilityRingAt, the thing impulse 4
+// and the scroll wheel actually walk) has ELEVEN entries, and the header above
+// says in as many words that the two must match — so six utilities you were
+// genuinely carrying were invisible here and the highlight jumped over rows
+// that were never drawn: satchel, tripmine, snark, penguin, medkit, SOFLAM.
+// That is the "the hud doesn't always display all of the utility you currently
+// have equipt" report, and it is the whole of it.
+//
+// Reading W_UtilityRingAt directly is what stops it happening again.  That
+// function is in shared/weapons/sh_wpn_snowball.qc, which compiles into CSQC as
+// well as SSQC, so appending a twelfth utility now updates this panel for free.
 float(vector first_pos) HUD_DrawUtilityDropdown =
 {
     float row = 0;
     float active = predicted_player.slot_utility;
     vector pos = first_pos;
-
-    float cands[5] = { WEP_HLGRENADE, WEP_SNOWBALL, WEP_CSHEGRENADE,
-                       WEP_CSFLASHBANG, WEP_CSSMOKEGRENADE };
+    float ci;
 
     // Detect any ammo change since the last rebuild — pickup / use /
     // drop instantly invalidates the cache regardless of throttle.
     // Sum is a good-enough fingerprint: any ammo field changing by ±1
-    // shifts the sum by ±1, never colliding within one tick.
+    // shifts the sum by ±1, never colliding within one tick.  It now
+    // covers all eleven, or a satchel spent while three grenades sat
+    // unchanged would not have moved the sum.
     float ammo_sum = predicted_player.ammo_hlgrenade
                    + predicted_player.ammo_snowball
                    + predicted_player.ammo_cshegrenade
                    + predicted_player.ammo_csflashbang
-                   + predicted_player.ammo_cssmokegrenade;
+                   + predicted_player.ammo_cssmokegrenade
+                   + predicted_player.ammo_satchel
+                   + predicted_player.ammo_tripmine
+                   + predicted_player.ammo_snark
+                   + predicted_player.ammo_penguin
+                   + predicted_player.ammo_medkit
+                   + predicted_player.ammo_soflam;
 
     float hud_fps = cvar("cl_hud_fps");
     if (hud_fps <= 0) hud_fps = 30;
@@ -876,18 +1277,17 @@ float(vector first_pos) HUD_DrawUtilityDropdown =
         hud_util_cache_last_recompute = cltime;
         hud_util_cache_ammo_sum = ammo_sum;
 
-        hud_util_cache_carried[0] = predicted_player.ammo_hlgrenade > 0;
-        hud_util_cache_carried[1] = predicted_player.ammo_snowball > 0;
-        hud_util_cache_carried[2] = predicted_player.ammo_cshegrenade > 0;
-        hud_util_cache_carried[3] = predicted_player.ammo_csflashbang > 0;
-        hud_util_cache_carried[4] = predicted_player.ammo_cssmokegrenade > 0;
-
         hud_util_cache_total = 0;
-        for (float ci = 0; ci < 5; ci++)
+        for (ci = 0; ci < UTILRING_COUNT; ci++)
         {
+            float uw = W_UtilityRingAt(ci);
+            // OWNERSHIP, not ammo, and the distinction is the medkit's: an
+            // emptied medkit is still in your hands and must still be listed,
+            // which is exactly the split W_UtilityEntityOwns encodes.
+            hud_util_cache_carried[ci] = W_UtilityEntityOwns(predicted_player, uw);
             if (hud_util_cache_carried[ci])
             {
-                hud_util_cache_names[ci] = HUD_WeaponName(cands[ci]);
+                hud_util_cache_names[ci] = HUD_WeaponName(uw);
                 hud_util_cache_total = hud_util_cache_total + 1;
             }
         }
@@ -898,16 +1298,56 @@ float(vector first_pos) HUD_DrawUtilityDropdown =
     if (hud_util_cache_total <= 1)
         return 0;
 
-    for (float i = 0; i < 5; i++)
+    for (float i = 0; i < UTILRING_COUNT; i++)
     {
         if (!hud_util_cache_carried[i])
             continue;
 
-        HUD_DrawUtilityDropRow(hud_util_cache_names[i], cands[i] == active, pos);
+        HUD_DrawUtilityDropRow(hud_util_cache_names[i],
+                               W_UtilityRingAt(i) == active, pos);
         pos_y = pos_y + HUD_DROP_HEIGHT + 1;
         row++;
     }
 
+    return row;
+};
+
+// Carried-weapon list for slot 1 or 2, drawn directly beneath that slot's row in
+// carry-list order so the next press of the slot key maps to the next row down —
+// the same contract the utility dropdown has with W_UtilityCycleCarried.
+//
+// Deliberately ALWAYS visible when the slot holds more than one, rather than
+// timed: this file removed slot auto-hide on purpose ("non-active slots stay
+// visible so the player keeps a constant view of their loadout"), and a list that
+// only exists mid-cycle would be the one thing on the HUD that hides itself.
+// With mp_maxprimary 1 the count can never exceed 1, so this draws nothing and
+// the HUD is pixel-identical to before.
+//
+// Reuses HUD_DrawUtilityDropRow verbatim — text plus a 2px accent bar on the
+// active row.  There are no weapon icons anywhere in the gamedir, so text is not
+// a compromise here, it is the only option.
+//
+// No cache: W_CarryCount/W_CarryAt are four float reads over a packed array, far
+// cheaper than the ammo-sum fingerprint the utility dropdown needs.
+float(float slot, vector first_pos) HUD_DrawCarryDropdown =
+{
+    float n = W_CarryCount(predicted_player, slot);
+    if (n <= 1)
+        return 0;
+
+    float active = predicted_player.weapon;
+    vector pos = first_pos;
+    float row = 0;
+    float i;
+    for (i = 0; i < n; i = i + 1)
+    {
+        float w = W_CarryAt(predicted_player, slot, i);
+        if (w == WEP_NONE)
+            break;
+        HUD_DrawUtilityDropRow(HUD_WeaponName(w), w == active, pos);
+        pos_y = pos_y + HUD_DROP_HEIGHT + 1;
+        row = row + 1;
+    }
     return row;
 };
 
@@ -927,23 +1367,42 @@ void() HUD_DrawWeaponSlots =
     // HUD_DrawWeaponSlot already dims inactive entries via bg_alpha
     // 0.6 / text_alpha 0.8.
 
+    // RUNNING Y, not a fixed multiple of the row pitch: slots 1 and 2 can each
+    // grow an inline carry list underneath them now, and everything below has to
+    // move down by however many rows that added.
+    float y = slot_y;
+
     if (hud_slot_cache_text1 != "")
-        HUD_DrawWeaponSlot(hud_slot_cache_text1, active == predicted_player.slot_primary, [slot_x, slot_y], 0);
+    {
+        HUD_DrawWeaponSlot(hud_slot_cache_text1, active == predicted_player.slot_primary, [slot_x, y], 0);
+        y = y + HUD_SLOT_HEIGHT + HUD_SLOT_GAP;
+        y = y + HUD_DrawCarryDropdown(SLOT_PRIMARY, [slot_x, y]) * (HUD_DROP_HEIGHT + 1);
+    }
 
     if (hud_slot_cache_text2 != "")
-        HUD_DrawWeaponSlot(hud_slot_cache_text2, active == predicted_player.slot_secondary, [slot_x, slot_y + (HUD_SLOT_HEIGHT + HUD_SLOT_GAP)], 0);
+    {
+        HUD_DrawWeaponSlot(hud_slot_cache_text2, active == predicted_player.slot_secondary, [slot_x, y], 0);
+        y = y + HUD_SLOT_HEIGHT + HUD_SLOT_GAP;
+        y = y + HUD_DrawCarryDropdown(SLOT_SECONDARY, [slot_x, y]) * (HUD_DROP_HEIGHT + 1);
+    }
 
     if (hud_slot_cache_text3 != "")
-        HUD_DrawWeaponSlot(hud_slot_cache_text3, active == predicted_player.slot_melee, [slot_x, slot_y + (HUD_SLOT_HEIGHT + HUD_SLOT_GAP) * 2], 0);
+    {
+        HUD_DrawWeaponSlot(hud_slot_cache_text3, active == predicted_player.slot_melee, [slot_x, y], 0);
+        y = y + HUD_SLOT_HEIGHT + HUD_SLOT_GAP;
+    }
 
     if (hud_slot_cache_text4 != "")
-        HUD_DrawWeaponSlot(hud_slot_cache_text4, active == predicted_player.slot_utility, [slot_x, slot_y + (HUD_SLOT_HEIGHT + HUD_SLOT_GAP) * 3], 0);
+    {
+        HUD_DrawWeaponSlot(hud_slot_cache_text4, active == predicted_player.slot_utility, [slot_x, y], 0);
+        y = y + HUD_SLOT_HEIGHT + HUD_SLOT_GAP;
+    }
 
     // Slot 5 — C4 (impulse 5).  Visible whenever the player carries a
     // charge, even if not currently holding it.  Lives outside the
     // utility cycle so it gets its own dedicated slot.  Label format
     // matches the other slots ("N NAME") via HUD_BuildWeaponSlotText.
-    float c4_y = slot_y + (HUD_SLOT_HEIGHT + HUD_SLOT_GAP) * 4;
+    float c4_y = y;
     if (predicted_player.ammo_cfc4 > 0)
     {
         // The C4 label is constant ("5 C4"), so build it once instead of
@@ -1250,6 +1709,19 @@ void() HUD_ProgWatch =
 // thin XP progress bar, plus the transient centered "RANK UP" banner.
 void() HUD_DrawRankWidget =
 {
+    // hud_rank_show 0 removes everything this function DRAWS — the "Lv N  rank"
+    // label, the XP bar, and the centred RANK UP banner, which lives down at the
+    // bottom of this same function and would otherwise still slam across the
+    // screen with the bar gone.  Registered in sh_cvar_table.qc, so this reads 1
+    // unless the player turned it off (an unregistered cvar would read 0 and hide
+    // it for everyone).
+    //
+    // The level-up STING is deliberately still played: it comes from HUD_ProgWatch,
+    // which is a separate call in HUD_DopamineFrame, and the ask was to remove the
+    // bar rather than to opt out of progression feedback entirely.
+    if (!cvar("hud_rank_show"))
+        return;
+
     float lvl = getstatf(STAT_LEVEL);
     float xp  = getstatf(STAT_XP);
     float xpn = getstatf(STAT_XP_NEXT);
@@ -1413,7 +1885,10 @@ void() CSQC_DrawWeaponHUD =
         // Swap to a non-scope weapon while scoped and the server's
         // zoomstage reset lags on high ping — clear it locally based on
         // the predicted weapon so the scope overlay disappears instantly.
-        if (predicted_zoomstage > 0 && !Weapon_HasScope(predicted_player.weapon))
+        // Weapon_HasZoomView, not Weapon_HasScope: the binoculars magnify without
+        // being a scope in any other sense (no sway, no hold-breath, no fog).
+        // See the note on that helper in sh_weapons.qc.
+        if (predicted_zoomstage > 0 && !Weapon_HasZoomView(predicted_player.weapon))
             predicted_zoomstage = 0;
 
         if (predicted_zoomstage > 0)
@@ -1552,6 +2027,182 @@ void() CSQC_DrawWeaponHUD =
 
     x = g_width - 20 - hud_ammo_cache_width;
     drawstring([x, y], mag_str, [32, 32], '1 1 1', 0.9, 0);
+
+    drawfont = prev_font;
+};
+
+// ============================================================
+//  func_tracktrain throttle readout
+// ============================================================
+//
+// GoldSrc puts a train control indicator on the HUD whenever you are driving
+// one (CHudTrain, hud.cpp / player.cpp's gmsgTrain).  It shows a discrete
+// throttle position rather than a speed, because that is exactly what the
+// controls give you: nine quarter-steps, quantised server-side by
+// TrackTrain_HudState into five displayable states.
+//
+// State arrives via CSQC_EVENT_TRAIN_HUD, unicast to the driver only and sent
+// on change.  TRAIN_HUD_OFF means "not driving" and hides the widget, which is
+// what the dismount send does.
+//
+// Deliberately text, not the HL sprite: the mod does not ship GoldSrc's
+// hud.spr train icons, and inventing an icon would be less legible than the
+// word.  Positioned above the speedometer's slot so the two don't collide.
+void() HUD_DrawTrainThrottle =
+{
+    if (csqc_train_hud_state == TRAIN_HUD_OFF)
+        return;
+
+    string label;
+    vector col;
+    if (csqc_train_hud_state == TRAIN_HUD_BACK)        { label = "REVERSE"; col = '1 0.55 0.2'; }
+    else if (csqc_train_hud_state == TRAIN_HUD_NEUTRAL){ label = "NEUTRAL"; col = '0.8 0.8 0.8'; }
+    else if (csqc_train_hud_state == TRAIN_HUD_SLOW)   { label = "SLOW";    col = '0.7 0.9 1'; }
+    else if (csqc_train_hud_state == TRAIN_HUD_MEDIUM) { label = "MEDIUM";  col = '0.5 0.85 1'; }
+    else                                               { label = "FAST";    col = '0.3 0.8 1'; }
+
+    float prev_font = drawfont;
+    drawfont = hud_font;
+
+    vector text_size = [22, 22];
+    string line = sprintf("TRAIN  %s", label);
+    float  w = stringwidth(line, 0, text_size);
+    float  x = g_width * 0.5 - w * 0.5;
+    float  y = g_height * 0.5 + 40;
+
+    drawstring([x, y], line, text_size, col, 0.9, 0);
+
+    // The control hint, once, in smaller type.  A player who has just pressed
+    // +use on a train has no other way to learn that the throttle is a TAP.
+    vector hint_size = [14, 14];
+    string hint = "+forward / +back to change speed   |   +use to release";
+    float  hw = stringwidth(hint, 0, hint_size);
+    drawstring([g_width * 0.5 - hw * 0.5, y + 26], hint, hint_size, '0.75 0.75 0.75', 0.6, 0);
+
+    drawfont = prev_font;
+};
+
+// ============================================================
+//  Carried inventory — Sven Co-op item_inventory
+// ============================================================
+//
+// State arrives via CSQC_EVENT_INVENTORY, unicast to the holder on change
+// (server/sv_item_inventory.qc, Inv_SendHud).  Count 0 hides the widget, which
+// is also its initial value, so it costs nothing on the maps that never use
+// the system.
+//
+// THE ICON IS A GOLDSRC .spr, AND THAT DICTATES BOTH CALLS BELOW.
+//
+// A .spr's pixels are not reachable through precache_pic — that asks the IMAGE
+// loader for a tga/png of the same name and finds nothing (the reasoning is
+// written out at cl_env_beam.qc:305-374).  The only route in is spriteframe(),
+// which returns the name of the shader the sprite loader already registered
+// for that frame, and drawpic accepts a shader name.  Rope_TongueShader
+// (cl_rope.qc:62) is the existing example of that two-step, including the
+// getmodelindex-first guard, and this follows it.
+//
+// The second half is the blend mode.  All three th_escape icons are texFormat
+// 1 = SPRHL_ADDITIVE, and for that rendertype the sprite loader fills palette
+// alpha with 255 for every index — so the sprite carries an opaque BLACK
+// background and drawing it normally would paste a black square on the HUD.
+// DRAWFLAG_ADD is what makes it composite the way Half-Life renders it.  This
+// is not a guess about these three files: it is the format every HL HUD icon
+// ships in.
+const float HUD_INV_ICON     = 42;    // drawn size, px (the source art is 72x72)
+const float HUD_INV_FONT     = 13;
+const float HUD_INV_GAP      = 6;
+// Left edge of the strip.  Kept separate from the bottom margin below: the two
+// used to be the same constant, so raising the stack to clear something also
+// pushed it right, and vice versa.
+const float HUD_INV_MARGIN   = 82;
+
+// Distance from the bottom of the screen to the BOTTOM of the lowest icon.
+//
+// Was 18, which put the first row's box at g_height-60..g_height-18 — straight
+// through the health number (g_height-52..g_height-16) and the money line
+// (g_height-74..g_height-56).  Carrying anything printed the icon on top of
+// your own HP.
+//
+// Then 82, which cleared the money line — but not the rank widget, which
+// HUD_DrawRankWidget puts at x 24..192, its XP bar at g_height-116..g_height-110
+// and its "Lv N Rank" label at g_height-132..g_height-120.  The first icon row
+// at 82 spans g_height-124..g_height-82, so it overlapped the label and the bar
+// in both axes: reported as "when you carry a model the hud element is placed
+// over the level progression".
+//
+// 140 puts the lowest icon's bottom at g_height-140, 8px above the top of the
+// rank label, so the stack starts clear of the whole bottom-left cluster and
+// still grows upward from there.
+const float HUD_INV_BOTTOM   = 140;
+
+// Sven tints the carried-item icons a cold blue rather than drawing them at full
+// white.  Multiplied into DRAWFLAG_ADD, so it reads as a blue-white glow rather
+// than a flat recolour — the icons stay legible and the sprite's own art still
+// shows through.
+const vector HUD_INV_TINT    = '0.62 0.78 1';
+
+string(string path) HUD_InvIconShader =
+{
+    if (path == "" || !path)
+        return "";
+    // queryonly: report whether the sprite is loaded rather than forcing a load
+    // on a client that never received the precache.  The server precaches every
+    // item_icon in item_inventory's spawn function, so a miss here means the
+    // sprite is genuinely absent from the mount, not merely late.
+    if (getmodelindex(path, TRUE) == 0)
+        return "";
+    return spriteframe(path, 0, 0);
+};
+
+void() HUD_DrawInventory =
+{
+    if (csqc_inv_count <= 0)
+        return;
+
+    float prev_font = drawfont;
+    drawfont = hud_font;
+
+    // Bottom-left, above the health/armour cluster and clear of the weapon belt
+    // on the right edge.
+    // QC locals are FUNCTION-scoped, so the label size is declared once here
+    // rather than inside both the loop and the overflow line (warning Q207).
+    vector sz = [HUD_INV_FONT, HUD_INV_FONT];
+    float y = g_height - HUD_INV_BOTTOM - HUD_INV_ICON;
+    float i = 0;
+    while (i < csqc_inv_count)
+    {
+        float  x     = HUD_INV_MARGIN;
+        string label = csqc_inv_label[i];
+        string sh    = HUD_InvIconShader(csqc_inv_icon[i]);
+
+        if (sh != "")
+        {
+            drawpic([x, y], sh, [HUD_INV_ICON, HUD_INV_ICON],
+                    HUD_INV_TINT, 1, DRAWFLAG_ADD);
+            x = x + HUD_INV_ICON + HUD_INV_GAP;
+        }
+
+        // The label is drawn whether or not the icon resolved.  A map whose
+        // sprite is missing still tells the player what they are carrying,
+        // which is the part the gameplay depends on.
+        if (label != "" && label)
+        {
+            drawstring([x, y + HUD_INV_ICON * 0.5 - HUD_INV_FONT * 0.5],
+                       label, sz, '1 1 1', 0.9, 0);
+        }
+
+        y = y - (HUD_INV_ICON + HUD_INV_GAP);
+        i = i + 1;
+    }
+
+    // Only ever visible if a map hands out more items than the wire describes.
+    // Saying so is better than silently showing a short list — the same reason
+    // the sender counts the overflow instead of dropping it.
+    if (csqc_inv_extra > 0)
+    {
+        drawstring([HUD_INV_MARGIN, y + HUD_INV_ICON * 0.5],
+                   sprintf("+%g more", csqc_inv_extra), sz, '0.8 0.8 0.8', 0.7, 0);
+    }
 
     drawfont = prev_font;
 };

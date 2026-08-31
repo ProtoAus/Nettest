@@ -105,8 +105,10 @@ void() item_generic =
     // since a half-specified hull collapses the bbox and takes the prop out of
     // the PVS -- the same failure mode documented in sv_cycler.qc for props
     // that got a hardcoded 32qu cube.
-    if (self.minhullsize != '0 0 0' && self.maxhullsize != '0 0 0')
-        setsize(self, self.minhullsize, self.maxhullsize);
+    //
+    // Stashed rather than applied immediately: the drop below has to run against
+    // HL's item hull, not this one.  Re-applied straight after.
+    float have_hull = (self.minhullsize != '0 0 0' && self.maxhullsize != '0 0 0');
 
     // Sequence.  The numeric key wins when present; otherwise resolve the name
     // through the model itself.
@@ -131,6 +133,81 @@ void() item_generic =
     }
 
     BrushSync_ApplyRenderKeys();
+
+    // DROP TO FLOOR, because item_generic is an ITEM.
+    //
+    // Sven's FGD derives it from ItemWithDefaultModel -> Pickup
+    // (sven-coop.fgd:3412, :392, :289), which is the CItem family, and
+    // CItem::Spawn ends with DROP_TO_FLOOR (halflife/dlls/items.cpp).  There is no
+    // "don't drop" spawnflag anywhere in that chain - Pickup's flag list is
+    // TOUCH Only / USE Only / Can Use w/o LoS / Disable Respawn and nothing else -
+    // so every item_generic in every Sven map is standing on whatever is under it,
+    // not on the coordinate the mapper typed.  th_ep1_01 has eleven skeleton props
+    // authored a few units high and they hang in the air here for exactly that
+    // reason.
+    //
+    // A FAILED drop is left alone rather than removed, and that is a deliberate
+    // divergence: CItem::Spawn deletes the entity and logs "fell out of level",
+    // which for a decorative prop hung deliberately over a stairwell would silently
+    // delete set dressing.  Leaving it where the mapper put it is the safer half of
+    // the difference, and it is the half that cannot lose content.
+    //
+    // droptofloor() traces the entity's own bbox 256 units down, so a prop on a
+    // table lands on the table.  WHICH bbox matters enormously, and using the
+    // model's own is what kept th_ep1_01's sitting skeleton hanging in the air.
+    //
+    // CItem::Spawn (halflife/dlls/items.cpp) sizes the item to a FIXED
+    // (-16,-16,0)..(16,16,16) hull and only THEN calls DROP_TO_FLOOR.  Every
+    // CItem-derived entity in Half-Life — item_generic included, via
+    // ItemWithDefaultModel -> Pickup -> CItem — therefore drops on a 32x32x16
+    // box regardless of how big or small its display model is.
+    //
+    // Dropping on the studio model's own bbox instead fails in both directions.
+    // A wide model (models/skeleton.mdl posed "s_sitting" spans most of a 64qu
+    // tile) starts solid against the wall or the crate it was authored beside,
+    // droptofloor returns 0, and the prop keeps the raw mapper Z — the reported
+    // "floating skeleton".  A model with a degenerate header bbox took the
+    // `maxs != mins` branch below and was skipped outright.
+    //
+    // So: drop on HL's hull, then put the real hull back.  The display hull is
+    // restored afterwards because it is what feeds PVS culling here — clamping a
+    // 256qu-tall tree to a 16qu box would pop it out of view at close range,
+    // which HL doesn't care about (it culls studio models by model extents) but
+    // FTE does.
+    if (self.movetype == MOVETYPE_NONE)
+    {
+        vector pre  = self.origin;
+        vector kmin = self.mins;
+        vector kmax = self.maxs;
+
+        setsize(self, '-16 -16 0', '16 16 16');
+        float landed = droptofloor();
+        if (!landed)
+            setorigin(self, pre);
+
+        // A FAILED drop is left in place rather than removed, and that is a
+        // deliberate divergence: CItem::Spawn deletes the entity and logs "fell
+        // out of level", which for a decorative prop hung deliberately over a
+        // stairwell would silently delete set dressing.  Leaving it where the
+        // mapper put it is the safer half of the difference, and it is the half
+        // that cannot lose content.
+        if (have_hull)
+            setsize(self, self.minhullsize, self.maxhullsize);
+        else
+            setsize(self, kmin, kmax);
+
+        if (cvar("sv_debug_spawns"))
+        {
+            if (!landed)
+                dprint(sprintf("item_generic \"%s\" at %v: no floor within 256qu, left in place\n",
+                               self.model, pre));
+            else if (self.origin != pre)
+                dprint(sprintf("item_generic \"%s\" dropped %g units to the floor\n",
+                               self.model, pre_z - self.origin_z));
+        }
+    }
+    else if (have_hull)
+        setsize(self, self.minhullsize, self.maxhullsize);
 
     // `angle KEY` is HL entdata's single-axis yaw shortcut; fold it into
     // angles_y exactly as cycler does, since FTE's parser may not translate it

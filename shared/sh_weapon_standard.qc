@@ -192,6 +192,12 @@ float(float now, .float mag_fld,
     // input that the server is going to reject.
     if (Weapon_LowerBlocksFire())
         return 0;
+    // A raised tactical shield occupies the hand that would pull the trigger.
+    // Gated here rather than per-weapon for the same reason the sprint and
+    // ladder gates above are: it has to hold on BOTH sides, or prediction fires
+    // a shot the server then refuses.
+    if (SH_ShieldBlocksFire())
+        return 0;
 #ifdef CSQC
     // Client-local fire latch. See .csqc_fire_guard in sh_customdefs.qc.
     // Must sit before the attack_finished check so stale snaps can't bypass it.
@@ -226,6 +232,9 @@ float(float now, .float mag_fld,
     self.weaponstate      = WS_FIRE;
     self.wep_action_id   += 1;
     self.wep_anim_start   = now;
+    // One refire period is exactly how long the third-person shoot pose should
+    // occupy — see .wep_state_dur in sh_weapons.qc.
+    self.wep_state_dur    = fire_delay;
 
     // sv_codstamina + cl_codscope: stamp the absolute-time at which
     // post-fire scope suppression should release.  Drives THREE
@@ -348,6 +357,7 @@ float(float now, .float mag_fld, .float ammo_fld,
     self.weaponstate     = WS_RELOAD;
     self.wep_action_id  += 1;
     self.wep_anim_start  = now;
+    self.wep_state_dur   = reload_dur;   // see .wep_state_dur in sh_weapons.qc
 #ifdef CSQC
     self.csqc_reload_guard = now + reload_dur;
 #endif
@@ -396,15 +406,115 @@ float(float now, float target_state, float delay) SH_StandardTryAction =
 // otherwise, in which case we fall back to the supplied default so a
 // freshly-loaded map doesn't see zero-length anims for one tick before
 // the engine catches up.
+// AND A SEQUENCE AUTHORED AT 0 FPS RETURNS INFINITY, not zero.  The engine
+// computes `(numframes-1)/timing` verbatim (gl_hlmdl.c:1763) with no divide
+// guard, so svencoop's v_9mmar.mdl `launch` — 181 frames at 0.00 fps — comes back
+// as +inf and sails straight past a `dur <= 0` test.  Any state that took its
+// length from it would never retire, which for the SMG's grenade is a weapon
+// frozen mid-launch for the rest of the map.  The seqprobe row prints it plainly:
+//     seqprobe models/v_9mmar.mdl ... launch(inf) ...
+// SEQ_DURATION_SANE_MAX is far above any real take here (the longest is the CS
+// knife's 12.583 s idle) and far below infinity, so it separates the two without
+// having to express a NaN/inf test in QC.
+const float SEQ_DURATION_SANE_MAX = 600;
+
 float(string viewmodel_path, float seq, float fallback) SH_SeqDuration =
 {
     float midx = getmodelindex(viewmodel_path);
     if (midx <= 0)
         return fallback;
     float dur = frameduration(midx, seq);
-    if (dur <= 0)
+    if (dur <= 0 || dur > SEQ_DURATION_SANE_MAX)
         return fallback;
     return dur;
+};
+
+// Resolve a sequence by NAME, so weapon code can say "reload" instead of a
+// magic index that quietly means something else after a model is swapped.
+// This is the same lookup the monster AI has always used
+// (AI_SetSequenceNamed / AI_SeqNameExists at sv_ai_anim.qc:505/:526) —
+// weapons simply never adopted it, and every sh_wpn_*.qc still hardcodes
+// indices it read out of the model by hand.
+//
+// `fallback` is returned when the model is not precached yet, carries no
+// sequence by that name, or has no names at all.  That last case is not
+// hypothetical: an IDPO conversion overwrites every frame name with
+// "frame0".."frameN", and FTE groups Quake MDL frames by stripping the
+// trailing digits, so the whole model collapses into ONE group named
+// "frame" and every lookup here whiffs.  Passing the old hardcoded index
+// as the fallback therefore degrades to exactly the previous behaviour.
+//
+// Range-check the upper end for the same reason AI_SeqForActivity does:
+// frameduration silently clamps an out-of-range index and hands back a
+// plausible duration for the WRONG sequence, which surfaces as a subtle
+// timing bug rather than an obviously missing animation.
+float(string viewmodel_path, string seqname, float fallback) SH_SeqForName =
+{
+    float midx = getmodelindex(viewmodel_path);
+    if (midx <= 0)
+        return fallback;
+
+    float n = modelframecount(midx);
+    float seq = frameforname(midx, seqname);
+    if (seq >= 0 && seq < n)
+        return seq;
+
+    // THE FALLBACK IS RANGE-CHECKED TOO, which the first version of this did not
+    // do.  It matters whenever the same path resolves to different models on
+    // different installs: sh_wpn_opsporelauncher.qc asks for sequence 9, which
+    // exists on the Sven copy of v_spore_launcher.mdl and not on the gearbox copy
+    // (0..8).  Handing that straight back would put an out-of-range index into
+    // .frame, and frameduration silently clamps out-of-range to 0 and returns a
+    // plausible duration for it - a wrong-animation bug wearing the costume of a
+    // timing bug.  0 is the honest answer: on every GoldSrc viewmodel in this tree
+    // sequence 0 is an idle, which is the safest thing to be caught playing.
+    if (n > 0 && (fallback < 0 || fallback >= n))
+        return 0;
+    return fallback;
+};
+
+// THE PROBE FORM.  Returns the sequence, or a HONEST -1 when the model does not
+// carry that name.
+//
+// SH_SeqForName above must never be used as a probe, and this exists because it
+// was.  Its range check launders a negative fallback into 0 — deliberately, and
+// correctly, for a real fallback — so `SH_SeqForName(m, "exploding_pinpull", -1)`
+// followed by `if (e >= 0) return e;` reads as "use the cooked pose if the model
+// has one" and actually means "always return sequence 0", which on every GoldSrc
+// viewmodel in this tree is the IDLE.
+//
+// That is precisely how the three Counter-Strike grenades ended up rendering their
+// entire pin-pull and throw as the resting pose: the cook looked like nothing was
+// happening at all, while the pin sound still played on schedule.
+//
+// Same range check on the upper end for the same reason SH_SeqForName has it, and
+// the same unprecached-model escape: an unloaded model cannot answer, so -1.
+float(string viewmodel_path, string seqname) SH_SeqTryName =
+{
+    float midx = getmodelindex(viewmodel_path);
+    if (midx <= 0)
+        return -1;
+
+    float n   = modelframecount(midx);
+    float seq = frameforname(midx, seqname);
+    if (seq >= 0 && seq < n)
+        return seq;
+    return -1;
+};
+
+// Two-name form, for a path that resolves to models from different source games
+// that named the same animation differently.  v_9mmar.mdl is the case that forced
+// it: valve and gearbox label the firing takes "shoot", Sven Co-op labels them
+// "fire1".."fire3".  Tries `first`, then `second`, then the fallback.
+float(string viewmodel_path, string first, string second, float fallback) SH_SeqForName2 =
+{
+    float midx = getmodelindex(viewmodel_path);
+    if (midx <= 0)
+        return fallback;
+    float seq = frameforname(midx, first);
+    if (seq >= 0 && seq < modelframecount(midx))
+        return seq;
+    return SH_SeqForName(viewmodel_path, second, fallback);
 };
 
 // Tick state for sequence-driven (GoldSrc) weapons that don't need the
@@ -437,6 +547,101 @@ float(float now, string viewmodel_path) SH_SeqDrivenTickState =
     }
     return 0;
 };
+
+#ifdef CSQC
+// ============================================================
+//  CLIENT ONLY — idle driver for viewmodels with NO looping idle
+// ============================================================
+//
+// Once a weapon is idle, wep_anim_start is 0 and cl_weapons.qc:1695 feeds
+// frame1time = cltime — absolute, unbounded — so the engine clamps a
+// NON-looping sequence to its final frame (gl_hlmdl.c:1076-1082) and the
+// viewmodel is a still image for the rest of the map.  A looping idle is the
+// easy answer and most Half-Life viewmodels have one, but plenty do not:
+// v_9mmar.mdl carries flags=0 on all eight sequences, and so do six of the
+// eight They Hunger viewmodels.  GoldSrc gets away with it because
+// CBasePlayerWeapon::WeaponIdle re-SENDS an idle every 10-15 s (mp5.cpp:259-283)
+// rather than relying on the loop flag; this reproduces that re-send.
+//
+// Anchoring is what makes it work: overriding frame1time with `now - anchor`
+// restarts the sequence at frame 0 each time one is rolled, so a non-looping
+// idle plays through, holds its last pose, and plays again on the next roll.
+//
+// One set of globals for every caller.  Only one weapon is drawn at a time,
+// and `wep` re-arms them on a switch — without that key a fidget index from
+// the previous gun would be handed to a model that may not have that many
+// sequences.
+//
+// The prototype for this lived open-coded in sh_wpn_hlsmg.qc, which is the
+// commented reference; the six They Hunger weapons would have been six more
+// copies of it.
+float csqc_seqidle_anchor;      // cltime the current idle sequence started at
+float csqc_seqidle_seq;         // which idle is playing
+float csqc_seqidle_next;        // cltime at which to roll the next one
+float csqc_seqidle_prev_state;  // previous render frame's weaponstate
+float csqc_seqidle_owner_wep;   // the .weapon the three above belong to
+
+// Call FIRST from a csqc_display_frame implementation, for EVERY state — it
+// has to see the non-idle frames to catch the return-to-idle edge.  Returns
+// the idle sequence to display, or -1 when the weapon is not idle, in which
+// case the caller falls through to its own per-state picks.
+//
+// seq_a is the resting idle (also the one used for the first idle after any
+// action, so the gun settles the same way every time); seq_b is the fidget
+// that alternates in with it.  Pass seq_a twice for a weapon with only one.
+float(float now, float wep, float state, float seq_a, float seq_b,
+      float rearm_min, float rearm_max) SH_SeqIdleDisplay =
+{
+    // Weapon switch: drop the previous gun's pick and force a roll below.
+    if (csqc_seqidle_owner_wep != wep)
+    {
+        csqc_seqidle_owner_wep  = wep;
+        csqc_seqidle_prev_state = -1;
+        csqc_seqidle_next       = 0;
+    }
+
+    // Non-idle -> idle edge, so the settle always starts from frame 0 rather
+    // than wherever a long-running roll happened to be.
+    float entered_idle = (state == WS_IDLE && csqc_seqidle_prev_state != WS_IDLE);
+    csqc_seqidle_prev_state = state;
+
+    if (state != WS_IDLE)
+        return -1;
+
+    if (entered_idle)
+    {
+        // Settle onto the resting idle's LAST frame, not its first.
+        //
+        // Restarting it from frame 0 here meant the idle animation replayed the
+        // instant you stopped firing, every time -- the gun visibly fidgeting
+        // after each burst.  GoldSrc does the opposite: PrimaryAttack pushes
+        // m_flTimeWeaponIdle out to +10..15 s (mp5.cpp:193) and WeaponIdle
+        // returns early until then (mp5.cpp:265), so no idle is sent at all and
+        // the viewmodel just holds the pose it finished shooting in.
+        //
+        // Anchoring one full sequence-length in the past reproduces that: the
+        // engine clamps a non-looping sequence to its final frame
+        // (gl_hlmdl.c:1076-1082), which IS the rest pose, so the gun settles
+        // with no motion.  The first real fidget then rolls below on the normal
+        // rearm timer.  Every weapon on this helper has non-looping idles --
+        // that is the reason the helper exists -- so the clamp is reliable.
+        csqc_seqidle_seq    = seq_a;
+        csqc_seqidle_anchor = now - SH_SeqDuration(predicted_player.weapon_viewmodel,
+                                                   seq_a, 2.0);
+        csqc_seqidle_next   = now + rearm_min + random() * (rearm_max - rearm_min);
+    }
+    else if (now >= csqc_seqidle_next)
+    {
+        csqc_seqidle_seq    = (random() < 0.5) ? seq_a : seq_b;
+        csqc_seqidle_anchor = now;
+        csqc_seqidle_next   = now + rearm_min + random() * (rearm_max - rearm_min);
+    }
+
+    csqc_viewmodel_sequence_time_override = TRUE;
+    csqc_viewmodel_sequence_time          = max(0, now - csqc_seqidle_anchor);
+    return csqc_seqidle_seq;
+};
+#endif // CSQC
 
 // ============================================================
 //  SERVER ONLY — hitscan + equip helpers
@@ -482,9 +687,25 @@ const float DMG_BLAST  = 4;		// explosions
 const float DMG_SONIC  = 8;		// houndeye shockwave
 const float DMG_CRUSH  = 16;	// doors, trains, movers
 const float DMG_FALL   = 32;
+const float DMG_DROWN  = 64;	// CBasePlayer::WaterMove, player.cpp:1275
 
 const float DMG_GIB_CORPSE = 62;	// CLUB|BLAST|SONIC|CRUSH|FALL — cbase.h:638
 float sv_dmg_bits;					// 0 == DMG_BULLET
+
+// THESE ARE NOT HALF-LIFE'S BITS.  The six above are a compact local vocabulary
+// with the same NAMES as cbase.h's and different VALUES: HL's DMG_BURN is 8 and
+// ours is DMG_SONIC, HL's DMG_FREEZE is 16 and ours is DMG_CRUSH.  Both of those
+// collisions sit inside DMG_GIB_CORPSE, so a map's damagetype assigned straight
+// into sv_dmg_bits would gib corpses in every gas trap on the map.  Anything
+// carrying HL's numbering must be TRANSLATED — see TriggerHurt_Translate in
+// server/sv_trigger_hurt.qc, which is currently the only source of them.
+
+// The DMGHUD_* enum this pairs with is in sh_weapons.qc, beside the wire event
+// that carries it — this block is inside #ifdef SSQC and the client needs them.
+//
+// Read-and-cleared by W_ApplyDamage exactly as sv_dmg_bits is, and for the same
+// reason: 58 call sites, almost none of which care.
+float sv_dmg_hudtype;
 
 // Damage this monster has landed on a PLAYER, cumulative.  Declared here rather
 // than with the other .ai_* fields because W_ApplyDamage writes it and compiles
@@ -608,6 +829,21 @@ void(vector center, float radius,
     entity e = findradius(center, radius);
     while (e)
     {
+        // LATCH THE LINK BEFORE ANYTHING REENTRANT RUNS.
+        //
+        // .chain is ONE shared temporary field, rebuilt in place by every
+        // findradius / findchain in the progs.  W_ApplyDamage below is an
+        // arbitrarily deep call — it reaches monster pain handlers, breakable
+        // chain reactions, trigger fires and, through a killed player, the
+        // whole death path — and any findradius reached from there rewrites
+        // .chain out from under this walk.  Reading e.chain after the damage
+        // (which is what this loop used to do) therefore truncated the blast
+        // at the first victim whose damage happened to run another radius
+        // query, or diverted it onto that query's list.  Players sort LAST in
+        // a findradius chain here, so the entity most likely to be skipped is
+        // the one the blast was aimed at.
+        entity nxt = e.chain;
+
         float dist = vlen(e.origin - center);
         float push_scale = max(0, 1 - dist / radius);
 
@@ -642,7 +878,7 @@ void(vector center, float radius,
             W_ApplyDamage(attacker, e, dmg);
         }
 
-        e = e.chain;
+        e = nxt;
     }
 
     // Brushmodel scan — findradius uses entity.origin which is (0,0,0)
@@ -803,8 +1039,9 @@ void(float base_spread, float move_spread, float full_spread_speed,
 
     if (spread > 0)
     {
-        sx  = SH_SpreadJitter(self.wep_action_id, 0) * spread;
-        sy  = SH_SpreadJitter(self.wep_action_id, 1) * spread;
+        float seed = SH_SpreadSeed();
+        sx  = SH_SpreadJitter(seed, 0) * spread;
+        sy  = SH_SpreadJitter(seed, 1) * spread;
         dir = normalize(v_forward + v_right * sx + v_up * sy);
     }
     else
@@ -923,8 +1160,8 @@ void(float base_spread, float move_spread, float full_spread_speed,
 void(float base_spread, float move_spread, float full_spread_speed,
      float close_dmg, float min_dmg, float falloff_range,
      float pen_power, float pen_dmg_mult,
-     optional float kick_pitch, optional float kick_variance,
-     optional float kick_strength) W_PenetratingHitscanShoot =
+     float kick_pitch, float kick_variance,
+     float kick_strength) W_PenetratingHitscanShoot =
 {
     vector src, dir, end, flat_vel;
     float spread, sx, sy, move_speed, dist, damage;
@@ -966,8 +1203,9 @@ void(float base_spread, float move_spread, float full_spread_speed,
 
     if (spread > 0)
     {
-        sx  = SH_SpreadJitter(self.wep_action_id, 0) * spread;
-        sy  = SH_SpreadJitter(self.wep_action_id, 1) * spread;
+        float seed = SH_SpreadSeed();
+        sx  = SH_SpreadJitter(seed, 0) * spread;
+        sy  = SH_SpreadJitter(seed, 1) * spread;
         dir = normalize(v_forward + v_right * sx + v_up * sy);
     }
     else

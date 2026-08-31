@@ -78,6 +78,100 @@ float(float midx) Montrace_IsMonsterIdx =
 	return FALSE;
 };
 
+// ----------------------------------------------------------------------------
+// The OTHER half of the same registry: where a monster's MUZZLE is, so a shot it
+// fired can draw a tracer.
+//
+// NO MONSTER IN THIS GAME HAS EVER DRAWN ONE.  CSQC_SpawnTracer is called from
+// the player weapon paths only (sh_weapon_logic.qc:1282, :1371, :1603), and the
+// one path that should have covered monsters - CSQC_BulletImpactRemote, which
+// reconstructs the tracer's start from the shooter entnum on the wire - resolves
+// that entnum two ways, and BOTH of them are structurally player-only:
+//
+//   findchain(classname, "player_visual_proxy")  CSQC entities, spawned by us
+//   findfloat(world, entnum, shooter_entnum)     also CSQC entities: .entnum is
+//                                                a field WE set on ents WE made
+//
+// A monster is a plain engine-networked entity with no CSQC counterpart at all,
+// so it is in neither set, the lookup returned world, and the tracer was skipped
+// entirely.  That is the whole of "the shock trooper's shot is invisible" - and
+// of every other monster's, which is why it is fixed here rather than in that
+// class.  What a monster's fire looks like today is a muzzle flash and a wall
+// puff with nothing in between.
+//
+// getentity() reaches the set findfloat cannot, and the modelindex registry
+// above is already the standing answer to "which of those are monsters".
+const float MONTRACE_MUZZLE_FRAC = 0.66;	// AI_MUZZLE_FRAC (sv_ai_combat.qc:31)
+const float MONTRACE_MUZZLE_FWD  = 12;		// AI_MUZZLE_FWD  (sv_ai_combat.qc:32)
+
+vector montrace_muzzle;		// result of the resolve below
+float  montrace_dbg_tracers;	// monster tracers actually drawn
+float  montrace_dbg_tracefail;	// ...and shots that could not be anchored
+
+// Why a resolve failed, because there are three different gates and they want
+// three different fixes: a slot past the end of the client's table, a slot the
+// client does not currently have, and a slot holding something that is not a
+// registered monster model.  A single "it failed" number sends you reading all
+// three.
+float  montrace_dbg_rej_range;
+float  montrace_dbg_rej_inactive;
+float  montrace_dbg_rej_notmon;
+
+float(float ent_index) Montrace_ResolveMuzzle =
+{
+	if (ent_index <= 0 || montrace_n <= 0)
+		return FALSE;
+
+	float maxents = (float)getentity(0, GE_MAXENTS);
+	if (maxents > 0 && ent_index >= maxents)
+	{
+		montrace_dbg_rej_range = montrace_dbg_rej_range + 1;
+		return FALSE;
+	}
+	if ((float)getentity(ent_index, GE_ACTIVE) == 0)
+	{
+		montrace_dbg_rej_inactive = montrace_dbg_rej_inactive + 1;
+		return FALSE;
+	}
+
+	// GATE ON THE REGISTRY, not merely on "the slot is occupied".  The entnum
+	// arrives from the wire and is read a ping later, by which time the entity in
+	// that slot is whatever the server has put there - and a monster dying frees
+	// its slot for reuse.  Anchoring a tracer on a door because the shooter is
+	// gone is worse than drawing no tracer at all, and this test costs one walk
+	// over a handful of shorts.
+	if (!Montrace_IsMonsterIdx((float)getentity(ent_index, GE_MODELINDEX)))
+	{
+		montrace_dbg_rej_notmon = montrace_dbg_rej_notmon + 1;
+		return FALSE;
+	}
+
+	// GE_ORIGINANDVECTORS sets v_forward/v_right/v_up as a side effect, which is
+	// the only honest way to get a network entity's facing here: GE_ANGLES exists
+	// but its own engine doc calls it a guess.
+	vector org  = (vector)getentity(ent_index, GE_ORIGINANDVECTORS);
+	vector bmin = (vector)getentity(ent_index, GE_ABSMIN);
+	vector bmax = (vector)getentity(ent_index, GE_ABSMAX);
+
+	// Same two thirds up the hull the server fired from.  It is an approximation
+	// on both sides - HL uses a per-model attachment point and neither end has
+	// one - but the two approximations are the SAME one, so the streak leaves
+	// where the muzzle flash is.
+	vector p = org;
+	if (bmax_z > bmin_z)
+		p_z = bmin_z + (bmax_z - bmin_z) * MONTRACE_MUZZLE_FRAC;
+
+	// Yaw plane only, matching AI_MuzzlePos: it pushes along the FACING rather
+	// than the aim because a monster's body does not pitch.
+	vector fwd = v_forward;
+	fwd_z = 0;
+	if ((fwd * fwd) > 0.0001)
+		p = p + normalize(fwd) * MONTRACE_MUZZLE_FWD;
+
+	montrace_muzzle = p;
+	return TRUE;
+};
+
 // Slab method, axis-aligned.  Returns the distance along `dir_unit` at which the
 // ray enters the box, or -1 for a miss.  `mt_hit_normal` is set to the face that
 // was entered, which the impact FX use to orient the particle spray.
@@ -245,12 +339,71 @@ void(vector trace_src, vector trace_end) CSQC_Monster_OverrideTrace =
 	trace_endcontents  = 0;
 };
 
+// Next cltime this report may print.  The rate limit lives INSIDE the report
+// rather than at the call site, because there are two call sites and only one of
+// them exists in a headless run - see below.
+float csqc_next_montrace_report;
+
+// TWO CALL SITES, and the reason is a property of the engine rather than a
+// style choice.  The natural home for a periodic client report is
+// CSQC_UpdateView, and under `vid_renderer headless` CSQC_UpdateView IS NEVER
+// CALLED AT ALL: Headless_SCR_UpdateScreen (engine/client/vid_headless.c:206)
+// sleeps 100 ms and returns without touching CSQC_DrawView.  Everything else
+// about CSQC runs normally headless - entity updates, event parsing, prints -
+// so the whole render path, and only the render path, is invisible to the
+// headless harness.  Calling this from the event parser too is what makes the
+// tracer counters readable in a log on a machine with no screen.
+//
+// It also prints its zeroes, deliberately.  A silent report cannot distinguish
+// "monsters fired and no tracer drew" from "no monster fired", which is the
+// exact confusion that let the original monster-collision bug ship in this very
+// file; `unanchored` is the honest denominator for `tracers`.
 void() CSQC_MonsterTrace_Report =
 {
-	if (!montrace_dbg_sweeps)
+	if (!cvar("developer"))
 		return;
-	print(sprintf("[montrace] models=%g sweeps=%g monster-hits=%g\n",
-	              montrace_n, montrace_dbg_sweeps, montrace_dbg_hits));
+	if (montrace_n <= 0)
+		return;			// no monsters on this map: nothing to report on
+	if (cltime < csqc_next_montrace_report)
+		return;
+	csqc_next_montrace_report = cltime + 2;	// matches the server's [ai] cadence
+
+	print(sprintf("[montrace] models=%g sweeps=%g monster-hits=%g tracers=%g unanchored=%g\n",
+	              montrace_n, montrace_dbg_sweeps, montrace_dbg_hits,
+	              montrace_dbg_tracers, montrace_dbg_tracefail));
+
+	// THE CONTROL, and it earns its keep the first time it runs.  `live` is a
+	// straight count of engine entity slots that answer GE_ACTIVE, so it
+	// separates "getentity works and none of those entities was our shooter"
+	// from "getentity answers nothing at all".  Those look identical in
+	// `inactive` and want completely different fixes.
+	//
+	// Walking every slot is fine here: it runs once per two seconds, only under
+	// `developer`, and only on a map that has monsters.
+	if (montrace_dbg_tracefail)
+	{
+		float live = 0, mons = 0, i;
+		float maxents = (float)getentity(0, GE_MAXENTS);
+		if (maxents > 4096)
+			maxents = 4096;
+		for (i = 1; i < maxents; i = i + 1)
+		{
+			if ((float)getentity(i, GE_ACTIVE) == 0)
+				continue;
+			live = live + 1;
+			if (Montrace_IsMonsterIdx((float)getentity(i, GE_MODELINDEX)))
+				mons = mons + 1;
+		}
+		print(sprintf("[montrace]   unanchored: range=%g inactive=%g notmon=%g | live-slots=%g of %g, monsters=%g\n",
+		              montrace_dbg_rej_range, montrace_dbg_rej_inactive,
+		              montrace_dbg_rej_notmon, live, maxents, mons));
+	}
+
 	montrace_dbg_sweeps = 0;
 	montrace_dbg_hits = 0;
+	montrace_dbg_tracers = 0;
+	montrace_dbg_tracefail = 0;
+	montrace_dbg_rej_range = 0;
+	montrace_dbg_rej_inactive = 0;
+	montrace_dbg_rej_notmon = 0;
 };

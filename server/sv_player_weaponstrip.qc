@@ -38,6 +38,9 @@ void(entity p) PlayerWeaponStrip_Apply =
     p.slot_melee     = WEP_NONE;
     p.slot_utility   = WEP_NONE;
     p.weapon         = WEP_NONE;
+    // The cursors above are only half the inventory now.  Leaving the carry lists
+    // populated would leave W_CarryHas approving weapons the strip just removed.
+    W_CarryClearAll(p);
 
     entity saved = self;
     self = p;

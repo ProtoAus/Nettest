@@ -397,6 +397,59 @@ void(entity m) AI_TalkTick =
 	}
 };
 
+// BUMP INTO ME AND I STEP ASIDE  —  CTalkMonster::Touch, talkmonster.cpp:876-896.
+//
+// Transcribed rather than approximated, because every clause in it is load-bearing
+// and each one corresponds to a way the behaviour goes wrong without it:
+//
+//     if ( pOther->IsPlayer() )                     // only players jostle
+//     {
+//         if ( m_afMemory & bits_MEMORY_PROVOKED ) return;   // not if I hate you
+//         if ( IsTalking() ) return;                         // stay put mid-line
+//         float speed = fabs(velocity.x) + fabs(velocity.y);
+//         if ( speed > 50 ) { SetConditions(bits_COND_CLIENT_PUSH);
+//                             MakeIdealYaw(pOther->pev->origin); }
+//     }
+//
+// The speed floor is why standing against a scientist does nothing while walking
+// into one moves him: leaning is not shoving.  HL sums the two axes rather than
+// taking the vector length, and that is kept - it is a cheaper, slightly more
+// generous test, and matching it means the threshold behaves identically.
+//
+// MakeIdealYaw is not cosmetic either.  It aims .ai_yaw_ideal at the player, and
+// TASK_GET_PATH_AWAY retreats along `ai_yaw_ideal + 180` - so this call is what
+// decides WHICH WAY "away" is.  Without it the scientist would step aside in
+// whatever direction he happened to be facing.
+//
+// Reachable at all only because SV_CheckTouchTriggers (sv_use.qc:425-446) walks
+// FL_MONSTER entities and calls .touch: this mod's players are MOVETYPE_NONE under
+// the QC pmove, so the engine emits no impact pairs for them and that sweep is the
+// only touch dispatcher there is.
+void() AI_TalkerTouch =
+{
+	if (!(other.flags & FL_CLIENT) || other.health <= 0)
+		return;
+	if (self.health <= 0 || self.ai_state == MS_DEAD || self.ai_script)
+		return;
+	if (self.ai_enemy == other)
+		return;				// bits_MEMORY_PROVOKED: you are the problem
+	if (Sentences_Speaking(self))
+		return;				// "Stay put during speech"
+
+	if (fabs(other.velocity_x) + fabs(other.velocity_y) <= 50)
+		return;				// leaning, not pushing
+
+	self.ai_cond    = self.ai_cond | COND_CLIENT_PUSH;
+	self.ai_pushpos = other.origin;
+	self.ai_yaw_ideal = vectoyaw(other.origin - self.origin);
+
+	// Glance at whoever shoved you.  This stands in for the TASK_FACE_PLAYER that
+	// closes HL's tlMoveAway: the walk overwrites .ai_yaw_ideal every tick with the
+	// direction of travel, so a facing task at the end of the schedule would aim
+	// the wrong way, while the look layer holds a target across the whole move.
+	AI_LookAt(self, other);
+};
+
 // Mark a class as a talker.  `grp` is the sentences.txt prefix: HL names its
 // groups <PREFIX>_<TOPIC><n>, so "SC" reaches SC_IDLE0.., SC_HELLO0.., and the
 // pain/fear sets a later pass can use.
@@ -404,6 +457,13 @@ void(entity m, string grp) AI_MakeTalker =
 {
 	m.ai_talker    = TRUE;
 	m.ai_talk_group = grp;
+	// The touch hook, installed here because "is a talker" is exactly the set of
+	// classes CTalkMonster::Touch applies to.  Never stamped over a class that
+	// already wants its own contact behaviour - nothing in the talker set does
+	// today, but the barnacle and the cockroach both do, and a silent overwrite
+	// here would be very hard to find later.
+	if (!m.touch)
+		m.touch = AI_TalkerTouch;
 	// Stagger the first line so a room of scientists does not open in unison.
 	m.ai_talk_next = time + 4 + random() * TALK_IDLE_MAX;
 };

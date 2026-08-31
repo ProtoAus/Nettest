@@ -43,13 +43,15 @@ const float CSUSP_SEQ_DRAW_S      = 6;
 const float CSUSP_SEQ_ATTACH_SIL  = 7;
 const float CSUSP_SEQ_DETACH_SIL  = 15;
 
-// --- State durations (seconds) ---
-// Tuned to roughly match the v_usp.mdl sequence lengths from CS 1.6.
-// Adjust these if the on-screen animation feels truncated or laggy.
+// --- State durations (seconds) — FALLBACKS ONLY ---
+// These were "tuned to roughly match" the v_usp.mdl sequence lengths by eye, and
+// roughly is what they were: every one runs 20-40 ms long against the real model
+// (draw 1.000, shoot 1.000/shootlast 0.938, reload 2.703, silencer 3.108), so
+// each state ended on a frozen final frame.  Small, but it is the same class of
+// error as the reload cues below and it costs nothing to just ask the model.
 const float CSUSP_DRAW_DURATION     = 1.02;
 const float CSUSP_FIRE_DURATION     = 1.03;
 const float CSUSP_RELOAD_DURATION   = 2.73;
-const float CSUSP_RELOAD_APPLY_TIME = 2.0;
 const float CSUSP_SILENCER_DURATION = 3.14;
 
 const float CSUSP_FIRE_DELAY        = 0.15;
@@ -59,16 +61,27 @@ const float CSUSP_DRYFIRE_DELAY     = 0.2;
 // Sequence-driven, so this only ticks the state machine (no frame stepping).
 const float CSUSP_FRAME_INTERVAL    = 0.05;
 
-// Reload sound timings (elapsed since reload start)
-const float CSUSP_RELOAD_CLIPOUT_TIME = 0.50;
-const float CSUSP_RELOAD_CLIPIN_TIME  = 1.40;
-const float CSUSP_RELOAD_SLIDE_TIME   = 2.20;
-
-// Draw sound timing (elapsed since draw start)
-const float CSUSP_DRAW_SLIDE_TIME     = 0.85;
-
-// Silencer toggle sound timing (elapsed since toggle start)
-const float CSUSP_SILENCER_SWAP_TIME  = 1.0;
+// SOUND CUES AS FRACTIONS OF THEIR OWN TAKE, read out of v_usp.mdl's studio
+// events rather than guessed.  They used to be absolute seconds and none of the
+// three reload cues landed where the animator put them:
+//
+//     event                      model frac   was      is now
+//     weapons/usp_clipout.wav      0.170      0.50 s   0.460 s
+//     weapons/usp_clipin.wav       0.400      1.40 s   1.081 s   <- 0.32 s late
+//     weapons/usp_sliderelease.wav 0.820      2.20 s   2.216 s
+//     weapons/usp_slideback.wav    0.542      0.85 s   0.542 s   <- 0.31 s late
+//     weapons/usp_silencer_on.wav  0.330      1.00 s   1.026 s
+//     weapons/usp_silencer_off.wav 0.252      1.00 s   0.783 s   <- 0.22 s late
+//
+// The clip visibly seated a third of a second before the click, which is the
+// same failure the .357 and the Glock had in a more obvious form.
+const float CSUSP_RELOAD_F_CLIPOUT = 0.170;
+const float CSUSP_RELOAD_F_CLIPIN  = 0.400;
+const float CSUSP_RELOAD_F_SLIDE   = 0.820;
+const float CSUSP_RELOAD_F_APPLY   = 0.740;   // was 2.0 s of 2.73 — kept, as balance
+const float CSUSP_DRAW_F_SLIDE     = 0.542;
+const float CSUSP_SILENCER_F_ON    = 0.330;
+const float CSUSP_SILENCER_F_OFF   = 0.252;
 
 const float MAX_MAG_CSUSP             = 12;
 const float MAX_AMMO_CSUSP            = 24;
@@ -98,8 +111,8 @@ const float CSUSP_SILENCED_MUZZLE_FORWARD = 48;
 const float CSUSP_SILENCED_MUZZLE_RIGHT   = 11;
 const float CSUSP_SILENCED_MUZZLE_DOWN    = 6.7;
 
-const string CSUSP_VIEWMODEL    = "models/weapons/wpn_csusp/v_usp.mdl";
-const string CSUSP_WORLDMODEL   = "models/weapons/wpn_csusp/w_usp.mdl";
+const string CSUSP_VIEWMODEL    = "models/v_usp.mdl";
+const string CSUSP_WORLDMODEL   = "models/w_usp.mdl";
 const string CSUSP_DEPLOY_SOUND = "";
 const string CSUSP_DISPLAY_NAME = "USP-45";
 
@@ -140,6 +153,37 @@ float() SH_CSUSPIdleSeq =
     return SH_CSUSPSeq(CSUSP_SEQ_IDLE_U);
 };
 
+// State lengths off the LIVE take, keyed on the silencer the same way the
+// sequence pick is — the silenced and unsilenced variants happen to be the same
+// length on cstrike's model, but nothing guarantees that on a replacement.
+float() SH_CSUSPDrawDuration =
+{
+    return SH_SeqDuration(CSUSP_VIEWMODEL, SH_CSUSPSeq(CSUSP_SEQ_DRAW_U), CSUSP_DRAW_DURATION);
+};
+float() SH_CSUSPFireDuration =
+{
+    return SH_SeqDuration(CSUSP_VIEWMODEL, SH_CSUSPSeq(CSUSP_SEQ_SHOOT1_U), CSUSP_FIRE_DURATION);
+};
+float() SH_CSUSPReloadDuration =
+{
+    return SH_SeqDuration(CSUSP_VIEWMODEL, SH_CSUSPSeq(CSUSP_SEQ_RELOAD_U), CSUSP_RELOAD_DURATION);
+};
+// The toggle plays the take for the state we are LEAVING: attaching while
+// unsilenced, detaching while silenced.
+float() SH_CSUSPSilencerSeq =
+{
+    return self.csusp_silenced ? CSUSP_SEQ_DETACH_SIL : CSUSP_SEQ_ATTACH_SIL;
+};
+float() SH_CSUSPSilencerDuration =
+{
+    return SH_SeqDuration(CSUSP_VIEWMODEL, SH_CSUSPSilencerSeq(), CSUSP_SILENCER_DURATION);
+};
+float() SH_CSUSPSilencerSndTime =
+{
+    return SH_CSUSPSilencerDuration()
+         * (self.csusp_silenced ? CSUSP_SILENCER_F_OFF : CSUSP_SILENCER_F_ON);
+};
+
 // ============================================================
 //  SHARED — state machine
 // ============================================================
@@ -153,7 +197,7 @@ float(float now) SH_CSUSPTickState =
     if (self.weaponstate == WS_SPECIAL)
     {
         elapsed = (self.wep_anim_start > 0) ? (now - self.wep_anim_start) : 0;
-        if (elapsed >= CSUSP_SILENCER_DURATION)
+        if (elapsed >= SH_CSUSPSilencerDuration())
         {
             self.csusp_silenced = !self.csusp_silenced;
             SH_WeaponEnterIdle();
@@ -162,9 +206,10 @@ float(float now) SH_CSUSPTickState =
         return 0;
     }
 
+    float rel = SH_CSUSPReloadDuration();
     return SH_StandardTickState(now, mag_csusp, ammo_csusp, MAX_MAG_CSUSP,
-        CSUSP_DRAW_DURATION, CSUSP_FIRE_DURATION,
-        CSUSP_RELOAD_DURATION, CSUSP_RELOAD_APPLY_TIME);
+        SH_CSUSPDrawDuration(), SH_CSUSPFireDuration(),
+        rel, rel * CSUSP_RELOAD_F_APPLY);
 };
 
 float(float now) SH_CSUSPTryFire =
@@ -179,7 +224,7 @@ float(float now) SH_CSUSPTryReload =
 {
     if (self.weaponstate == WS_SPECIAL)
         return 0;
-    return SH_StandardTryReload(now, mag_csusp, ammo_csusp, MAX_MAG_CSUSP, CSUSP_RELOAD_DURATION);
+    return SH_StandardTryReload(now, mag_csusp, ammo_csusp, MAX_MAG_CSUSP, SH_CSUSPReloadDuration());
 };
 
 float(float now) SH_CSUSPTryAltFire =
@@ -192,7 +237,7 @@ float(float now) SH_CSUSPTryAltFire =
     self.weaponstate     = WS_SPECIAL;
     self.wep_action_id  += 1;
     self.wep_anim_start  = now;
-    self.attack_finished = now + CSUSP_SILENCER_DURATION;
+    self.attack_finished = now + SH_CSUSPSilencerDuration();
     return 1;
 };
 
@@ -289,7 +334,7 @@ void() W_CSUSPFrame =
     // Using CHAN_WEAPON here would collide with the fire-sound dedup window.
     if (self.weaponstate == WS_DRAW)
     {
-        if (elapsed >= CSUSP_DRAW_SLIDE_TIME && self.csusp_snd_stage < 1)
+        if (elapsed >= SH_CSUSPDrawDuration() * CSUSP_DRAW_F_SLIDE && self.csusp_snd_stage < 1)
         {
             sound(self, CHAN_AUTO, "sounds/weapons/wpn_csusp/slideback.wav", 1, ATTN_NORM);
             self.csusp_snd_stage = 1;
@@ -297,18 +342,18 @@ void() W_CSUSPFrame =
     }
     else if (self.weaponstate == WS_RELOAD)
     {
-        if (elapsed >= CSUSP_RELOAD_CLIPOUT_TIME && self.csusp_snd_stage < 1)
+        if (elapsed >= SH_CSUSPReloadDuration() * CSUSP_RELOAD_F_CLIPOUT && self.csusp_snd_stage < 1)
         {
             sound(self, CHAN_AUTO, "sounds/weapons/wpn_csusp/clipout.wav", 1, ATTN_NORM);
             W_MagDropEffect(MAG_PISTOL, '4 -4 -6', '0 -30 -20');
             self.csusp_snd_stage = 1;
         }
-        if (elapsed >= CSUSP_RELOAD_CLIPIN_TIME && self.csusp_snd_stage < 2)
+        if (elapsed >= SH_CSUSPReloadDuration() * CSUSP_RELOAD_F_CLIPIN && self.csusp_snd_stage < 2)
         {
             sound(self, CHAN_AUTO, "sounds/weapons/wpn_csusp/clipin.wav", 1, ATTN_NORM);
             self.csusp_snd_stage = 2;
         }
-        if (elapsed >= CSUSP_RELOAD_SLIDE_TIME && self.csusp_snd_stage < 3)
+        if (elapsed >= SH_CSUSPReloadDuration() * CSUSP_RELOAD_F_SLIDE && self.csusp_snd_stage < 3)
         {
             sound(self, CHAN_AUTO, "sounds/weapons/wpn_csusp/sliderelease.wav", 1, ATTN_NORM);
             self.csusp_snd_stage = 3;
@@ -316,7 +361,7 @@ void() W_CSUSPFrame =
     }
     else if (self.weaponstate == WS_SPECIAL)
     {
-        if (elapsed >= CSUSP_SILENCER_SWAP_TIME && self.csusp_snd_stage < 1)
+        if (elapsed >= SH_CSUSPSilencerSndTime() && self.csusp_snd_stage < 1)
         {
             // self.csusp_silenced is still the OLD value here (gets flipped in tick state)
             if (self.csusp_silenced)
@@ -504,7 +549,7 @@ void() CSQC_PredictCSUSPCommand =
 
         if (self.weaponstate == WS_DRAW)
         {
-            if (csqc_csusp_snd_stage < 1 && elapsed >= CSUSP_DRAW_SLIDE_TIME)
+            if (csqc_csusp_snd_stage < 1 && elapsed >= SH_CSUSPDrawDuration() * CSUSP_DRAW_F_SLIDE)
             {
                 localsound("sounds/weapons/wpn_csusp/slideback.wav"); CSQC_RecordPredictedAutoSound();
                 csqc_csusp_snd_stage = 1;
@@ -512,18 +557,18 @@ void() CSQC_PredictCSUSPCommand =
         }
         else if (self.weaponstate == WS_RELOAD)
         {
-            if (csqc_csusp_snd_stage < 1 && elapsed >= CSUSP_RELOAD_CLIPOUT_TIME)
+            if (csqc_csusp_snd_stage < 1 && elapsed >= SH_CSUSPReloadDuration() * CSUSP_RELOAD_F_CLIPOUT)
             {
                 localsound("sounds/weapons/wpn_csusp/clipout.wav"); CSQC_RecordPredictedAutoSound();
                 CSQC_SpawnMag("models/weapons/pistolmag.mdl", '4 -4 -6', '0 -30 -20', '4 8 8', '0 180 0', '0 90 90');
                 csqc_csusp_snd_stage = 1;
             }
-            if (csqc_csusp_snd_stage < 2 && elapsed >= CSUSP_RELOAD_CLIPIN_TIME)
+            if (csqc_csusp_snd_stage < 2 && elapsed >= SH_CSUSPReloadDuration() * CSUSP_RELOAD_F_CLIPIN)
             {
                 localsound("sounds/weapons/wpn_csusp/clipin.wav"); CSQC_RecordPredictedAutoSound();
                 csqc_csusp_snd_stage = 2;
             }
-            if (csqc_csusp_snd_stage < 3 && elapsed >= CSUSP_RELOAD_SLIDE_TIME)
+            if (csqc_csusp_snd_stage < 3 && elapsed >= SH_CSUSPReloadDuration() * CSUSP_RELOAD_F_SLIDE)
             {
                 localsound("sounds/weapons/wpn_csusp/sliderelease.wav"); CSQC_RecordPredictedAutoSound();
                 csqc_csusp_snd_stage = 3;
@@ -531,7 +576,7 @@ void() CSQC_PredictCSUSPCommand =
         }
         else if (self.weaponstate == WS_SPECIAL)
         {
-            if (csqc_csusp_snd_stage < 1 && elapsed >= CSUSP_SILENCER_SWAP_TIME)
+            if (csqc_csusp_snd_stage < 1 && elapsed >= SH_CSUSPSilencerSndTime())
             {
                 if (self.csusp_silenced)
                     localsound("sounds/weapons/wpn_csusp/silenceroff.wav");
@@ -641,6 +686,10 @@ void() CSQC_CSUSPEquip =
     self.csqc_display_frame  = CSQC_CSUSPDisplayFrame;
     self.csqc_drop_clear     = CSQC_CSUSPDropClear;
     self.weapon_uses_sequences = TRUE;
+    // FLIPPED.  The "100% of 1491 verts at negative Y, mean -31.14" test that
+    // used to justify FALSE here measures screen SIDE, not which arm was
+    // modelled.  Reported left-handed in game with the rest of the CS
+    // handguns; full reasoning in sh_wpn_csglock.qc.
     self.weapon_viewmodel_flip = TRUE;
 };
 

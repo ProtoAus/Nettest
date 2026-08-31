@@ -14,6 +14,12 @@
 // file.  Used by solid_brush_SendEntity to inform CSQC's +use
 // predictor whether the door's ONE_MOVEMENT latch is exhausted.
 .float door_movement_done;
+// Same deal.  .door_flags (sv_doors.qc:742) is the NORMALISED spawnflag word
+// written at spawn by both the sliding and the rotating class.  Only bit 32 is
+// read here — DOOR_TOGGLE (sv_doors.qc:734) == DOORROT_TOGGLE
+// (sv_doors_rotating.qc:79) — spelled as a literal because both constants are
+// declared in files that compile AFTER this one in sv_progs.src.
+.float door_flags;
 
 // GoldSrc-convention render keys.  Stored on every replicated brush
 // so the map's entity string can specify them.  Only `renderamt` is
@@ -345,6 +351,25 @@ float(entity playerent, float changedflags) solid_brush_SendEntity =
     // (Normal) costs 1 byte; the animation overhead happens only on
     // clients, never on server bandwidth.
     WriteByte(MSG_ENTITY, bound(0, rint(self.renderfx), 16));
+    // GoldSrc ALTERNATE-TEXTURE selector.  This is the whole of the "+0/+A"
+    // mechanism: a brush face textured "+0name" has a sibling "+aname", the BSP
+    // loader chains them (engine gl/gl_model.c:3499-3501, guarded on fg_halflife
+    // at :3483), and the renderer picks the alternate whenever the entity's
+    // frame is non-zero (gl_model.c:3301-3305).  buttons.cpp:723 sets
+    // pev->frame = 1 with the comment "use alternate textures" and :744 puts it
+    // back to 0.
+    //
+    // sv_buttons.qc has ALWAYS set .frame 0/1 correctly, and the engine has
+    // always been able to render it — but a replicated brush is a CSQC entity,
+    // not an engine one, so the only frame the renderer ever sees is the one
+    // this delta writes.  It wrote every other render key and not this one, so
+    // every lit button, every emptied charger panel and every toggled func_wall
+    // in the GoldSrc corpus stayed on its base texture forever.
+    //
+    // Bounded rather than written raw: GoldSrc only ever uses 0 or 1 here, and a
+    // WriteByte of an out-of-range float wraps rather than clamps (the
+    // sv_breakable.qc lesson from PATCH 156).
+    WriteByte(MSG_ENTITY, bound(0, rint(self.frame), 255));
     // AAATRIGGER flag — CSQC hides the brush locally when cl_aaatrigger
     // is 0.  Server still treats the brush as solid for traces /
     // collisions; this is a pure visibility cue for mapper helpers.
@@ -455,6 +480,22 @@ float(entity playerent, float changedflags) solid_brush_SendEntity =
                 predict_block = 1;
         }
         WriteByte(MSG_ENTITY, predict_block);
+        // TOGGLE (bit 32).  A door parked at TOP closes on a re-press ONLY when
+        // TOGGLE is set: Door_ActivateSingle (sv_doors.qc:1063) and rotdoor_use
+        // (sv_doors_rotating.qc:906) both refuse otherwise, and a `wait -1` door
+        // never closes on its own timer either (rotdoor_hit_top:696).  Without
+        // this byte CSQC predicted the close on EVERY door — the brush snapped a
+        // few degrees shut, froze on the predraw's 0.05s lookahead cap with no
+        // corrective snapshot coming (a refused press dirties no SendFlags), and
+        // kept a live avelocity on the rotating-brush list so pmove shoved anyone
+        // who walked into it.
+        // Measured on th_ep1_01: of 16 func_door_rotating, 12 are `wait -1` and
+        // NONE set TOGGLE — and three of those twelve do not carry the "One Way"
+        // flag either, so gating on One Way (16, HL SF_DOOR_ONEWAY, a swing
+        // DIRECTION hint — doors.cpp:590) would have missed them.
+        // Buttons never write .door_flags, so this reads 0 for them, which is
+        // what CSQC wants: it already refuses to close a button from TOP.
+        WriteByte(MSG_ENTITY, (self.door_flags & 32) ? 1 : 0);
     }
 
     // Material code (BREAKABLE_*) — only meaningful on func_breakable.
@@ -501,11 +542,23 @@ float(entity playerent, float changedflags) solid_brush_SendEntity =
     WriteShort(MSG_ENTITY, bound(0, self.max_health, 32767));
     WriteByte(MSG_ENTITY, bound(0, self.cnt, 255));
 
-    // Broken flag — func_breakable flips this when destroyed. Client
+    // Bit 0 — broken flag.  func_breakable flips this when destroyed. Client
     // uses it to toggle drawmask / solid so the brush cleanly reappears
     // on round restart without relying on engine to re-send after a
     // SendEntity = __NULL__ transition.
-    WriteByte(MSG_ENTITY, self.breakable_broken ? 1 : 0);
+    //
+    // Bit 1 — BREAKABLE_INSTANT_CROWBAR (GoldSrc SF_BREAK_CROWBAR).  The client
+    // needs this, and the lack of it made the flag DEAD: sv_trust_clientbreak
+    // defaults to 1, so W_ApplyDamage skips its own func_breakable damage and
+    // the brush's HP comes entirely from the client's breakclaim — which had no
+    // idea the brush was crowbar-sensitive and always claimed the flat weapon
+    // damage.  The server-side `deal = 9999` in every melee weapon was being
+    // discarded before it reached the brush, so HL's instant crowbar break has
+    // never actually worked here.
+    //
+    // Folded into the existing byte rather than adding one: no wire growth.
+    WriteByte(MSG_ENTITY, (self.breakable_broken ? 1 : 0)
+                        | ((self.spawnflags & BREAKABLE_INSTANT_CROWBAR) ? 2 : 0));
 
     return TRUE;
 };
@@ -592,6 +645,16 @@ with it identically to the server.
 */
 void() func_wall =
 {
+    // CFuncWall::Spawn opens with `pev->angles = g_vecZero;` (bmodels.cpp:67) and
+    // that line is load-bearing, not tidiness: a func_wall never rotates, mappers
+    // routinely leave a stray `angles` on brushwork, and a GoldSrc submodel with no
+    // ORIGIN brush carries ABSOLUTE bounds with .origin '0 0 0' - so World_LinkEdict
+    // rotates its box about the WORLD origin and the brush is drawn and collided
+    // hundreds of units from where it belongs.  Same failure the DONT_MOVE button had
+    // (sv_buttons.qc), and the same idiom func_wall_toggle already carries below.
+    // 53 func_wall in the corpus carry a non-zero angles key with no origin brush.
+    self.angles = '0 0 0';
+
     SV_InitReplicatedSolidBrush();
     self.brush_type = BRUSH_TYPE_STATIC;
 };
@@ -620,10 +683,34 @@ void() func_wall =
 const float FWT_START_INVISIBLE = 1;   // Sven/GoldSrc flag 1
 const float FWT_USE_ANGLES      = 2;   // Sven flag 2 — honour Pitch Yaw Roll
 
+// TWO different things want EF_NODRAW on this class and only one of them is
+// the toggle.  BrushSync_ApplyRenderKeys sets the bit to express GoldSrc's
+// "renderamt 0 on a non-Normal rendermode means invisible", because .alpha
+// cannot carry a zero through FTE (see BrushSync_SetAlpha).  The toggle then
+// sets and clears the same bit for its own, unrelated reason — and _show
+// cleared it unconditionally, wiping the render-key answer the moment the
+// brush spawned visible.
+//
+// pizza_ya_san1's `wlt_komugiarea` is the case: rendermode 5 (additive) with
+// no renderamt at all, the standard idiom for an invisible-but-solid barrier.
+// ApplyRenderKeys correctly marked it NODRAW; func_wall_toggle then spawned it
+// "shown", stripped the bit, and left .alpha at 1 with SOLIDBRUSH_EF_ADDITIVE
+// still set — so the client drew a fully opaque additive slab, the single most
+// visible thing it could have produced.  CSQC's fx_hide guard could not save
+// it either: that tests alpha <= 0, and alpha is deliberately 1 here.
+//
+// So latch what the render keys decided and let the toggle own only its own
+// half.  Anything the keys hid stays hidden in BOTH toggle states; it is still
+// solid when shown, which is the entire point of the idiom.
+.float fwt_keys_nodraw;
+
 void() func_wall_toggle_show =
 {
     self.solid   = SOLID_BSP;
-    self.effects = self.effects - (self.effects & EF_NODRAW);
+    if (self.fwt_keys_nodraw)
+        self.effects = self.effects | EF_NODRAW;
+    else
+        self.effects = self.effects - (self.effects & EF_NODRAW);
     setorigin(self, self.origin);   // relink so the restored solidity takes effect
     self.SendFlags = -1;
 };
@@ -666,6 +753,10 @@ void() func_wall_toggle =
     SV_InitReplicatedSolidBrush();
     if (wasfreed(self))         // init removes brushes that have no model
         return;
+
+    // Read it BEFORE the first show/hide, which is the only place it can be
+    // read from: SV_InitReplicatedSolidBrush has just run the render keys.
+    self.fwt_keys_nodraw = (self.effects & EF_NODRAW) ? TRUE : FALSE;
 
     self.brush_type = BRUSH_TYPE_STATIC;
     self.use = func_wall_toggle_use;

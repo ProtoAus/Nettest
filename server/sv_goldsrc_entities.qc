@@ -16,6 +16,12 @@
 // Defined in sv_player.qc, which compiles after this file.
 void(float wep) W_GiveWeaponToSlot;
 
+// Defined in sv_goldsrc_ammo.qc (sv_progs.src:345), which compiles after this
+// file.  It has to live there rather than here: it needs the CAL_* constants and
+// the ammo bank fields, and QC forward-declares FUNCTIONS but not constants or
+// fields, so the dependency can only point this way.
+float(entity plyr, string cls, float qty) GoldSrc_GiveByClassname;
+
 // ---------------------------------------------------------------------------
 // target_cdaudio — play / stop a CD track.
 //
@@ -150,7 +156,7 @@ void() EntIterator_StepWorker =
 
     if (nxt)
     {
-        nxt.nextthink = time + src.delay_between_triggers;
+        nxt.nextthink = time + SV_ScaleSpawnDelay(src.delay_between_triggers);
         return;
     }
 
@@ -203,7 +209,7 @@ void() EntIterator_RunPass =
 
     if (paced && head != world)
     {
-        head.nextthink = time + src.delay_between_triggers;
+        head.nextthink = time + SV_ScaleSpawnDelay(src.delay_between_triggers);
         return;         // EndRun happens when the chain drains
     }
 
@@ -234,9 +240,12 @@ void() EntIterator_EndRun =
 
     if (self.run_mode == EI_RUN_TOGGLE && self.ei_running)
     {
+        // sv_monster_spawnrate lands HERE more than anywhere else: on a map like
+        // desertcircle this delay (14-20 s) times the player count is the whole
+        // wave cadence.  1 leaves it exactly as the map authored it.
         self.think     = EntIterator_RunPass;
-        self.nextthink = time + (self.delay_between_runs > 0
-                                 ? self.delay_between_runs : 0.5);
+        self.nextthink = time + SV_ScaleSpawnDelay(self.delay_between_runs > 0
+                                                   ? self.delay_between_runs : 0.5);
         return;
     }
 
@@ -248,7 +257,10 @@ void() trigger_entity_iterator_use =
     if (!IsMasterTriggered(self.master, activator))
         return;
 
-    float ut = sub_use_type ? sub_use_type : USE_TOGGLE;
+    // == USE_UNSET, not truthiness — USE_OFF is 0 and a ternary throws it away.
+    // This entity's whole point is that Off stops the loop (see EI_RUN_TOGGLE
+    // below), so the falsy test defeated it.  See sv_customdefs.qc.
+    float ut = (sub_use_type == USE_UNSET) ? USE_TOGGLE : sub_use_type;
 
     if (self.run_mode == EI_RUN_TOGGLE)
     {
@@ -336,6 +348,85 @@ const float SF_GPE_FILTER_NAME    = 2;
 const float SF_GPE_REEQUIP_ON_USE = 4;
 const float SF_GPE_APPEND_MAP_CFG = 8;
 
+// ---------------------------------------------------------------------------
+// One place that turns an "item_*" classname into an effect on a player.
+//
+// Three different paths hand out equipment by name — item_longjump's touch
+// (sv_goldsrc_pickups.qc), a game_player_equip's item chain, and the
+// maps/<name>.cfg manifest (sv_mapcfg_equip.qc) — and all three previously fed
+// the name to the WEAPON manifest, which has no item_* entries.  Every one of
+// them therefore dropped the item on the floor.
+//
+// Returns TRUE when it claimed the name, so a caller can skip its own lookup.
+// Lives here because sv_goldsrc_entities.qc is the earliest of the three in
+// sv_progs.src, which means no forward declaration is needed anywhere.
+// ---------------------------------------------------------------------------
+float(entity plyr, string cls) GoldSrc_GrantItemClass =
+{
+    if (!plyr || plyr.classname != "player")
+        return FALSE;
+
+    if (cls == "item_longjump")
+    {
+        plyr.pm_longjump = 1;
+        return TRUE;
+    }
+
+    return FALSE;
+};
+
+// ---------------------------------------------------------------------------
+// GoldSrc_GiveNamedItem — Half-Life's CBasePlayer::GiveNamedItem
+// (dlls/player.cpp:3472-3489) as a single entry point: hand it any pickup
+// CLASSNAME and it grants the thing, whatever kind of thing that is.
+//
+// Lifted out of GamePlayerEquip_Apply, which used to be the only place the
+// four-way chain existed.  It stopped being the only caller when the th_escape
+// map script arrived: PlayerCharacters::Equip hands each character a
+// semicolon-separated list of classnames — "weapon_colt1911;ammo_9mmclip",
+// "weapon_357;ammo_357" — which mixes both halves of the chain in one string,
+// and re-implementing the walk over there would have been the second copy that
+// drifts.  server/sv_mapscript_thescape.qc forward-declares this and calls it.
+//
+// REQUIRES `self` TO BE THE PLAYER — W_GiveWeaponToSlot operates on self, not
+// on an argument, so the caller sets it.  Both call sites do.
+//
+// The four steps, in HL's own order of specificity:
+//   1. GoldSrc_GrantItemClass — item_longjump and friends, which are not in
+//      the weapon manifest at all
+//   2. GoldSrc_GiveByClassname — every ammo_*, plus healthkit / battery / suit
+//   3. strip the "weapon_" prefix (WeaponManifest_NameKey folds
+//      "weapon_crowbar" to "weaponcrowbar", which it does not know; "crowbar"
+//      is the key it does)
+//   4. the weapon manifest
+//
+// `qty` is HL's max(1, atoi(value)) repeat count.  It is honoured on step 2 and
+// nowhere else, because repeating ammo and health means something and handing
+// somebody a second copy of a gun they already hold does not.
+// ---------------------------------------------------------------------------
+float(entity plyr, string cls, float qty) GoldSrc_GiveNamedItem =
+{
+    if (!plyr || plyr.classname != "player" || cls == "" || cls == __NULL__)
+        return FALSE;
+
+    if (GoldSrc_GrantItemClass(plyr, cls))
+        return TRUE;
+
+    if (GoldSrc_GiveByClassname(plyr, cls, qty))
+        return TRUE;
+
+    string nm = cls;
+    if (substring(nm, 0, 7) == "weapon_")
+        nm = substring(nm, 7, strlen(nm) - 7);
+
+    float wid = Weapon_IdFromStringOrDefault(nm, WEP_NONE);
+    if (wid == WEP_NONE)
+        return FALSE;
+
+    W_GiveWeaponToSlot(wid);
+    return TRUE;
+};
+
 void(entity gpe, entity plyr) GamePlayerEquip_Apply =
 {
     if (!plyr || plyr.classname != "player")
@@ -355,18 +446,9 @@ void(entity gpe, entity plyr) GamePlayerEquip_Apply =
     entity it = gpe.gpe_first_item;
     while (it)
     {
-        // Strip the leading "weapon_" before the manifest lookup:
-        // WeaponManifest_NameKey folds "weapon_crowbar" to "weaponcrowbar",
-        // which it does not know — "crowbar" is the key it does.
-        string nm = it.netname;
-        if (substring(nm, 0, 7) == "weapon_")
-            nm = substring(nm, 7, strlen(nm) - 7);
-
-        float wid = Weapon_IdFromStringOrDefault(nm, WEP_NONE);
-        if (wid != WEP_NONE)
-            W_GiveWeaponToSlot(wid);
-        else if (cvar("sv_debug_use"))
-            print(sprintf("[game_player_equip] no weapon for \"%s\" (qty %g)"
+        if (!GoldSrc_GiveNamedItem(plyr, it.netname, it.count)
+            && cvar("sv_debug_use"))
+            print(sprintf("[game_player_equip] nothing matched \"%s\" (qty %g)"
                           " — ignored\n", it.netname, it.count));
 
         it = it.gpe_next_item;
@@ -410,11 +492,70 @@ APPEND_MAP_CFG (8):  PARSED, NOT IMPLEMENTED.
 "equipmode"      PARSED, NOT IMPLEMENTED (0 give items / 1 modify inventory)
 "inventorymode"  PARSED, NOT IMPLEMENTED
 
-Only entries the weapon manifest recognises are handed out; anything else
-(item_suit, item_battery, ammo_*) is ignored — there is no armour or standalone
-ammo-pool system here.
+Weapon-manifest names, ammo_* and item_healthkit / item_battery / item_suit /
+item_longjump are all handed out; the quantity value is honoured.  Anything else
+is reported under sv_debug_use and ignored.
 */
 void() game_player_equip =
 {
     self.use = game_player_equip_use;
+};
+
+// ---------------------------------------------------------------------------
+// trigger_suitcheck — "does the activating player have the HEV suit?"
+// ---------------------------------------------------------------------------
+// NOT a stock GoldSrc or Sven entity, which is why it is in no FGD: it is a
+// MAP-SCRIPT entity, registered by Sven's own AngelScript for the HL campaign.
+// The source is on disk and this is a direct port of it —
+//   svencoop/scripts/maps/hlsp/trigger_suitcheck.as
+// registered from HLSP.as, which hl_c01_a1.cfg selects with `map_script HLSP`.
+//
+// Its whole job is the airlock in Anomalous Materials.  hl_c01_a1 gates Barney's
+// "you can't go in there without the HEV suit" nag NOT by testing the suit on
+// the nag itself — `hevnotrigger` has no master and no condition and fires
+// unconditionally — but by DELETING the nag once the suit is confirmed:
+//
+//   trigger_multiple "hevmastered" -> "check4suit"
+//   trigger_suitcheck "check4suit"  trigger_found "airlockbarneymm1"
+//   multi_manager "airlockbarneymm1" -> !BA_hevyes, killhevnotrigger, ...
+//   trigger_relay "killhevnotrigger" killtarget "hevnotrigger"
+//
+// With this entity missing, that whole chain was severed and Barney nagged
+// forever regardless of the suit.  The inert-relay fallback could not save it
+// either: `check4suit` has no `target` key at all, only `trigger_found`.
+//
+// Faithful details worth keeping: the script fires by NAME (FireTargets, not a
+// .target chain), passes ITSELF as the activator rather than the player, and
+// uses USE_TOGGLE.  It also supports a `trigger_notfound` branch that hl_c01_a1
+// does not use.
+.string trigger_found;      // fired when the activator HAS the suit
+.string trigger_notfound;   // fired when they do not
+
+void() trigger_suitcheck_use =
+{
+    if (!activator || activator.classname != "player")
+        return;
+
+    float got = activator.has_suit;
+    float n;
+    if (got) n = SV_FireTargetsByName(self.trigger_found,    self, USE_TOGGLE);
+    else     n = SV_FireTargetsByName(self.trigger_notfound, self, USE_TOGGLE);
+
+    // The whole entity is one boolean about the player, and it is not otherwise
+    // observable from outside — .has_suit has no HUD, and the branch that fires
+    // is a plain name fire indistinguishable from any other.  Report armour too,
+    // because "has the suit" and "has armour" are exactly the two things that
+    // get confused here: item_battery raises armour without the suit, and a
+    // game_player_equip granting item_suit raises both.
+    if (cvar("sv_debug_use"))
+        print(sprintf("[suitcheck] \"%s\": %s has_suit=%g armor=%g -> \"%s\" (%g ent)\n",
+                      self.targetname, activator.netname, got, activator.armor,
+                      got ? self.trigger_found : self.trigger_notfound, n));
+};
+
+void() trigger_suitcheck =
+{
+    self.solid    = SOLID_NOT;
+    self.movetype = MOVETYPE_NONE;
+    self.use      = trigger_suitcheck_use;
 };

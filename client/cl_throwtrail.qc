@@ -23,15 +23,60 @@ vector tt_last_origin [TT_PROJ_MAX];  // last origin we trailed FROM
 float  tt_has_last    [TT_PROJ_MAX];  // 1 once tt_last_origin is valid
 float  tt_proj_lru    [TT_PROJ_MAX];  // cltime of last write — LRU + stale detection
 
-// Lazy-resolved weapons.throwtrail handle (weapons.cfg can load after CSQC init).
-float pe_weapons_throwtrail;
-float tt_reload_cooldown;     // rate-limit the self-heal namespace reload (cltime)
+// --- Effect handles ------------------------------------------------------
+//
+// This started as one hardcoded handle for the thrown-object ribbon.  It now
+// carries the SHOT-projectile trails too, because `.traileffectnum` -- which is
+// what the RPG rocket and crossbow bolt were using -- does nothing whatsoever on
+// a CSQC entity.  It is an entity_state_t field, read only by
+// CL_LinkPacketEntities for server-networked packet entities (cl_ents.c:5601);
+// CopyCSQCEdictToEntity never looks at it.  Every projectile in this mod is a
+// SendEntity projectile, i.e. a CSQC entity on both the networked and the fake
+// path, so those assignments were dead code and neither trail ever drew.
+// trailparticles() -- this file -- is the mechanism that actually works.
+const int TT_FX_THROW  = 0;   // weapons.throwtrail  — thrown/grenade ribbon
+const int TT_FX_RPG    = 1;   // weapons.rpg_smoke   — RPG exhaust
+const int TT_FX_XBOW   = 2;   // weapons.xbow_tracer — crossbow bolt streak
+// The hornet is the ONE projectile in this mod that is a real server-networked
+// packet entity (W_HornetSpawn sets no SendEntity, because it homes server-side),
+// so it is the one case where .traileffectnum could in principle work.  It does
+// not, and the reason is engine-side and unreachable from QC:
+//
+//   the server's particleeffectnum only RESERVES A NAME (SV_ParticlePrecache_Add);
+//   the name list ships to each client at PRESPAWN; the client turns each name
+//   into a local index once, there and then, with P_FindParticleType; and that
+//   function returns P_INVALID on the FIRST lookup of any name whose config is
+//   not currently loaded -- it kicks off P_LoadParticleSet as a side effect and
+//   then falls through to the failure return WITHOUT re-searching, and cl_parse.c
+//   stores that.  The connect-time particle flush is what leaves the config
+//   unloaded at exactly that moment, so the slot is poisoned with P_INVALID for
+//   the whole session and CL_LinkPacketEntities silently draws no trail.
+//
+// It happens before CSQC_Init, so there is no QC hook to re-resolve it -- the
+// self-heal in ThrowTrail_Resolve below cannot reach a SERVER-side handle.  The
+// fix is therefore to stop using .traileffectnum for the hornet and draw its
+// ribbon here, where the handle IS self-healing.  See ThrowTrail_ScanHornets.
+const int TT_FX_HORNET_RED    = 3;   // weapons.hornet_trail_red
+const int TT_FX_HORNET_ORANGE = 4;   // weapons.hornet_trail_orange
+const int TT_FX_COUNT  = 5;
 
-float() ThrowTrail_Resolve =
+float tt_fx_handle[TT_FX_COUNT];   // lazily resolved; 0 = not looked up yet
+float tt_reload_cooldown;          // rate-limit the self-heal namespace reload (cltime)
+
+string(int fxslot) ThrowTrail_FxName =
 {
-    float fx = pe_weapons_throwtrail;
+    if (fxslot == TT_FX_RPG)           return "weapons.rpg_smoke";
+    if (fxslot == TT_FX_XBOW)          return "weapons.xbow_tracer";
+    if (fxslot == TT_FX_HORNET_RED)    return "weapons.hornet_trail_red";
+    if (fxslot == TT_FX_HORNET_ORANGE) return "weapons.hornet_trail_orange";
+    return "weapons.throwtrail";
+};
+
+float(int fxslot) ThrowTrail_Resolve =
+{
+    float fx = tt_fx_handle[fxslot];
     if (fx == 0)
-        fx = particleeffectnum("weapons.throwtrail");
+        fx = particleeffectnum(ThrowTrail_FxName(fxslot));
 
     // LIVENESS CHECK — query BODY (arg 1), not the name (arg 0).
     // PScript_Query (engine p_script.c): body=0 returns "config.name" and succeeds
@@ -50,25 +95,40 @@ float() ThrowTrail_Resolve =
             tt_reload_cooldown = cltime + 1;
             localcmd("r_part namespace weapons 1\nexec particles/weapons.cfg\nr_part namespace \"\" 0\n");
         }
-        pe_weapons_throwtrail = fx;   // remember it; it goes live after the reload
-        return 0;                      // not drawable yet — skip until then
+        tt_fx_handle[fxslot] = fx;   // remember it; it goes live after the reload
+        return 0;                     // not drawable yet — skip until then
     }
 
-    pe_weapons_throwtrail = fx;
+    tt_fx_handle[fxslot] = fx;
     return fx;
 };
 
-// Eligibility — which projectile types get a trail.  Thrown / grenade-shaped
-// only (crossbow bolts / RPGs / paintballs are shot, not thrown).
-float(float ptype) ThrowTrail_TypeEligible =
+// Which effect a projectile type trails with, or -1 for none.
+//
+// The thrown set gets the fat tumbling ribbon.  The two SHOT types get their own
+// tighter recipes: an RPG's exhaust is a broad pale plume (HL rpg.cpp:196-227
+// draws TE_BEAMFOLLOW with sprites/smoke.spr, life 4.0, rgb 224 224 255), while a
+// crossbow bolt just needs enough of a streak to be followable -- HL gives the
+// bolt no trail at all, but HL's bolt is a chunky sprite-lit prop and this one is
+// a 25 x 3.8 x 1.5 unit sliver crossing a room in about seven frames.
+float(float ptype) ThrowTrail_TypeFx =
 {
-    if (ptype == PROJ_TYPE_HLGRENADE)      return 1;
-    if (ptype == PROJ_TYPE_GRENADE)        return 1;
-    if (ptype == PROJ_TYPE_SNOWBALL)       return 1;
-    if (ptype == PROJ_TYPE_CSHEGRENADE)    return 1;
-    if (ptype == PROJ_TYPE_CSFLASHBANG)    return 1;
-    if (ptype == PROJ_TYPE_CSSMOKEGRENADE) return 1;
-    return 0;
+    if (ptype == PROJ_TYPE_HLGRENADE)      return TT_FX_THROW;
+    if (ptype == PROJ_TYPE_GRENADE)        return TT_FX_THROW;
+    if (ptype == PROJ_TYPE_SNOWBALL)       return TT_FX_THROW;
+    if (ptype == PROJ_TYPE_CSHEGRENADE)    return TT_FX_THROW;
+    if (ptype == PROJ_TYPE_CSFLASHBANG)    return TT_FX_THROW;
+    if (ptype == PROJ_TYPE_CSSMOKEGRENADE) return TT_FX_THROW;
+    if (ptype == PROJ_TYPE_RPG_ROCKET)     return TT_FX_RPG;
+    if (ptype == PROJ_TYPE_CROSSBOW_BOLT)  return TT_FX_XBOW;
+    // The two DoD rockets get the RPG's smoke trail — same thing, a rocket motor
+    // burning across a room.  The PIAT gets the THROWN trail instead: it has no
+    // motor at all (a spring-launched spigot bomb), so a smoke plume behind it
+    // would be inventing an exhaust the weapon does not have.
+    if (ptype == PROJ_TYPE_DOD_BAZOOKA)    return TT_FX_RPG;
+    if (ptype == PROJ_TYPE_DOD_SCHRECK)    return TT_FX_RPG;
+    if (ptype == PROJ_TYPE_DOD_PIAT)       return TT_FX_THROW;
+    return -1;
 };
 
 // Find the slot for entnum, or allocate a free / LRU one.  Fresh slots start
@@ -129,15 +189,40 @@ void(float entnum) ThrowTrail_OnProjectileRemove =
 // have entnum 0 -> NULL trailstate -> no cross-frame accumulator to save them).
 // We fix that here with a QC distance accumulator: hold the anchor still until the
 // projectile has travelled >= TT_MIN_SEG, then emit one beam segment spanning the
-// whole accumulated distance.  Keep TT_MIN_SEG >= the recipe `step` so every call
-// lays at least one node.  (Earlier this path still drew nothing only because the
-// effect HANDLE was dead — see ThrowTrail_Resolve's body-1 liveness fix; that is
-// now resolved, so the beam renders.)
-const float TT_MIN_SEG = 6;      // accumulate this far before emitting (>= recipe step)
+// whole accumulated distance.
+//
+// TT_MIN_SEG must be >= 2 * the LARGEST recipe `step`, not >= the step.  A `type
+// beam` node is a vertex, and a quad needs a start AND an end: floor(seglen/step)
+// == 1 is exactly as invisible as 0.  The old rule ("keep it >= the recipe step so
+// every call lays at least one node") guaranteed one, which is one short, and the
+// arithmetic then sorted the effects into working and dead purely by step size:
+//
+//   throwtrail  step 3 -> floor(6/3) = 2 nodes  -> drew  (grenades, snowball)
+//   rpg_smoke   step 4 -> floor(6/4) = 1 node   -> DEAD  (RPG exhaust)
+//   xbow_tracer step 6 -> floor(6/6) = 1 node   -> DEAD  (crossbow streak)
+//
+// All three share this one accumulator, so the LARGEST step sets the floor.
+//
+// AND NOTE WHAT THIS CONSTANT CANNOT DO.  It buys the second node that makes a
+// quad possible; it does not buy COVERAGE.  A type-beam emit spans
+// trunc(seglen/step)*step, never seglen, so the fraction of the path actually
+// drawn is trunc(seglen/step)*step/seglen and depends only on `step` — raising
+// TT_MIN_SEG raises both sides and leaves it unchanged.  That is why the same
+// round-1 edit visibly rescued the RPG plume (step 4, ~80% covered, wide and
+// long-lived) and did nothing for the crossbow bolt (step 6, ~60% covered with
+// 6-unit holes, thin, faint and short-lived).  The bolt was fixed in the RECIPE
+// (particles/trails.cfg), not here.
+//
+// xbow_tracer is now step 2, so rpg_smoke's 4 is the largest and the floor is 8;
+// 12 keeps headroom.  Raising any recipe's `step` past 6 without raising this
+// silently kills that trail again.
+// (Earlier this path still drew nothing only because the effect HANDLE was dead —
+// see ThrowTrail_Resolve's body-1 liveness fix; that is now resolved.)
+const float TT_MIN_SEG = 12;     // accumulate this far before emitting (>= 2 * recipe step)
 const float TT_MAX_SEG = 256;    // teleport/respawn guard — re-anchor, no streak
 
 // Emit the ribbon segment for one projectile (anchor -> current origin).
-void(entity p, int slot) ThrowTrail_Emit =
+void(entity p, int slot, float fx) ThrowTrail_Emit =
 {
     // Stale-slot guard: a reused entnum (no CSQC_Ent_Remove) leaves a slot anchored
     // at the previous projectile's last origin.  If untouched >0.5s, restart from
@@ -170,8 +255,42 @@ void(entity p, int slot) ThrowTrail_Emit =
 
     // Lay a beam ribbon segment over the accumulated path.  Consecutive segments
     // share the anchor point (= previous current), so the ribbon is continuous.
-    trailparticles(pe_weapons_throwtrail, p, anchor, p.origin);
+    trailparticles(fx, p, anchor, p.origin);
     tt_last_origin[slot] = p.origin;
+};
+
+// The same emit for something that is NOT a QC entity — a server-networked packet
+// entity, reachable only through getentity().  `world` is passed as the trail
+// entity, which means entnum 0 and therefore a NULL trailstate; that is exactly
+// what the CSQC-local fakes already get, and the distance accumulator above is
+// what compensates for it in both cases.
+void(vector org, int slot, float fx) ThrowTrail_EmitAt =
+{
+    if (tt_has_last[slot] && cltime - tt_proj_lru[slot] > 0.5)
+        tt_has_last[slot] = 0;
+
+    tt_proj_lru[slot] = cltime;
+
+    if (!tt_has_last[slot])
+    {
+        tt_last_origin[slot] = org;
+        tt_has_last[slot]    = 1;
+        return;
+    }
+
+    vector anchor = tt_last_origin[slot];
+    float  dist   = vlen(org - anchor);
+
+    if (dist > TT_MAX_SEG)
+    {
+        tt_last_origin[slot] = org;
+        return;
+    }
+    if (dist < TT_MIN_SEG)
+        return;
+
+    trailparticles(fx, world, anchor, org);
+    tt_last_origin[slot] = org;
 };
 
 // Idle-scan throttle.  The Tick used to walk the WHOLE edict list TWICE every
@@ -186,6 +305,107 @@ void(entity p, int slot) ThrowTrail_Emit =
 float tt_live_count;
 float tt_next_idle_scan;
 const float TT_IDLE_POLL_HZ = 60;
+
+// Walk one classname's entities, trailing every one whose type wants a trail.
+// Returns how many eligible ones were alive, which drives the idle poll above.
+float(string cname) ThrowTrail_ScanClass =
+{
+    float live = 0;
+    entity p = find(world, classname, cname);
+    while (p)
+    {
+        float fxslot = ThrowTrail_TypeFx(p.csqc_projectile_type);
+        if (fxslot >= 0)
+        {
+            live = live + 1;   // re-derive the live eligible count from reality
+            // NOTE: && does NOT short-circuit in QC, so Resolve() is a NESTED
+            // `if` and never &&'d with the eligibility test — see the long note
+            // in the Tick about poisoning the precache slot with an early lookup.
+            float fx = ThrowTrail_Resolve((int)fxslot);
+            if (fx != 0)
+            {
+                int slot = ThrowTrail_SlotFor(num_for_edict(p));
+                if (slot >= 0) ThrowTrail_Emit(p, slot, fx);
+            }
+        }
+        p = find(p, classname, cname);
+    }
+    return live;
+};
+
+// --- Hornets ----------------------------------------------------------------
+// The hornet is a server-networked PACKET entity, so find() cannot see it: CSQC's
+// edict list only contains entities the mod itself spawned or received through
+// CSQC_Ent_Update, and W_HornetSpawn deliberately sets no SendEntity because the
+// hornet homes server-side.  getentity() is the only way to read one, and
+// GE_MAXENTS bounds the scan so this is not a 65k walk.
+//
+// Colour is INFERRED FROM MEASURED SPEED rather than networked.  The server picks
+// red at 600 u/s and orange at 800 (hornet.h via sh_wpn_hlhornetgun.qc), on a
+// field CSQC cannot see; but the speed itself is observable from the origin delta
+// this function already has to compute for the ribbon.  700 is the midpoint.
+float tt_hornet_modelindex;
+float tt_hornet_mi_tried;
+
+float() ThrowTrail_ScanHornets =
+{
+    float live = 0;
+    float i, maxents;
+    vector org;
+    float mi, spd, dist;
+    int slot, fxslot;
+    float fx;
+
+    // getmodelindex returns 0 until the model is actually precached on this
+    // client; re-try until it resolves rather than latching a 0 forever.
+    if (!tt_hornet_modelindex)
+    {
+        tt_hornet_modelindex = getmodelindex("models/hornet.mdl");
+        if (!tt_hornet_modelindex)
+            return 0;
+    }
+
+    // getentity returns __variant, so every read goes through a typed local
+    // first — fteqcc will not apply `!` or a comparison to a variant directly.
+    float act;
+
+    maxents = getentity(0, GE_MAXENTS);
+    for (i = 1; i < maxents; i = i + 1)
+    {
+        act = getentity(i, GE_ACTIVE);
+        if (act == 0)
+            continue;
+        mi = getentity(i, GE_MODELINDEX);
+        if (mi != tt_hornet_modelindex)
+            continue;
+
+        org = getentity(i, GE_ORIGIN);
+        live = live + 1;
+
+        // Entnums of packet entities and of CSQC edicts share this slot table.
+        // They cannot collide in practice (a CSQC-local fake has entnum 0 and is
+        // keyed by num_for_edict instead), and a wrong slot only costs one
+        // re-anchored segment.
+        slot = ThrowTrail_SlotFor(i);
+        if (slot < 0)
+            continue;
+
+        // Speed from the accumulated delta, before ThrowTrail_EmitAt consumes it.
+        fxslot = TT_FX_HORNET_ORANGE;
+        if (tt_has_last[slot])
+        {
+            dist = vlen(org - tt_last_origin[slot]);
+            spd  = (frametime > 0) ? dist / frametime : 0;
+            if (spd > 0 && spd < 700)
+                fxslot = TT_FX_HORNET_RED;
+        }
+
+        fx = ThrowTrail_Resolve(fxslot);
+        if (fx != 0)
+            ThrowTrail_EmitAt(org, slot, fx);
+    }
+    return live;
+};
 
 // Per-frame entry point — called from CSQC_UpdateView alongside the other FX ticks.
 void() CSQC_ThrowTrail_Tick =
@@ -211,38 +431,20 @@ void() CSQC_ThrowTrail_Tick =
     // the lookup to the first thrown projectile — well after CSQC_WorldLoaded
     // re-execs the namespace — avoids the poison.  NOTE: && does NOT short-circuit
     // in QC, so Resolve() is a NESTED `if`, never &&'d with the eligibility test.
-    int slot;
-    entity p;
-
-    p = find(world, classname, "csqc_projectile");
-    while (p)
-    {
-        if (ThrowTrail_TypeEligible(p.csqc_projectile_type))
-        {
-            found = found + 1;   // re-derive the live eligible count from reality
-            if (ThrowTrail_Resolve() != 0)
-            {
-                slot = ThrowTrail_SlotFor(num_for_edict(p));
-                if (slot >= 0) ThrowTrail_Emit(p, slot);
-            }
-        }
-        p = find(p, classname, "csqc_projectile");
-    }
-    // Owner-side CSQC fakes for CS-style grenades (tagged with the matching type).
-    p = find(world, classname, "csqc_fake_csgrenade");
-    while (p)
-    {
-        if (ThrowTrail_TypeEligible(p.csqc_projectile_type))
-        {
-            found = found + 1;
-            if (ThrowTrail_Resolve() != 0)
-            {
-                slot = ThrowTrail_SlotFor(num_for_edict(p));
-                if (slot >= 0) ThrowTrail_Emit(p, slot);
-            }
-        }
-        p = find(p, classname, "csqc_fake_csgrenade");
-    }
+    // The three classnames that can carry a trail:
+    //   csqc_projectile       — the networked twin everyone EXCEPT the shooter sees
+    //   csqc_fake_csgrenade   — the CS grenades' owner-side fake
+    //   csqc_fake_projectile  — every other weapon's owner-side fake
+    // The shooter only ever sees a fake (projectile_SendEntity excludes the owner,
+    // sv_weapons.qc:2568), so a trail that is only wired on the networked entity is
+    // invisible to the person firing — which is exactly how the RPG's smoke and the
+    // crossbow's tracer were reported missing.
+    found  = ThrowTrail_ScanClass("csqc_projectile");
+    found += ThrowTrail_ScanClass("csqc_fake_csgrenade");
+    found += ThrowTrail_ScanClass("csqc_fake_projectile");
+    // ...and the hornet, which is not a CSQC edict at all — see the note on
+    // TT_FX_HORNET_RED for why its .traileffectnum could never work.
+    found += ThrowTrail_ScanHornets();
 
     tt_live_count = found;   // 0 → next frames idle-poll; >0 → scan every frame
 };
@@ -257,9 +459,10 @@ void() CSQC_ThrowTrail_Clear =
         tt_has_last[i]    = 0;
         tt_proj_lru[i]    = 0;
     }
-    // Force a fresh effect resolve next map so the handle re-binds against the
+    // Force a fresh effect resolve next map so the handles re-bind against the
     // current namespace (ThrowTrail_Resolve self-heals an unloaded type on its own,
     // but clearing here gives it a clean start across the level boundary).
-    pe_weapons_throwtrail = 0;
+    for (i = 0; i < TT_FX_COUNT; i = i + 1)
+        tt_fx_handle[i] = 0;
     tt_reload_cooldown    = 0;
 };

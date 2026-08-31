@@ -24,13 +24,28 @@ const float CVAR_SIDE_BOTH = 3;
 // The cvar registry (g_cvar_* parallel arrays below) is what auto-generates
 // cfg/allcommands.cfg and the settings menu — it must list every cvar with
 // its default.  QuakeC has no dynamic arrays, so the arrays are STATICALLY
-// sized to this cap, and CVar_Add's overflow guard SILENTLY drops everything
-// past it (a dropped cl_ads_* shows up as the "cl_ads_<weapon> missing" bug).
-// So this must stay comfortably above the live entry count
-//   (grep -cE "^\s*CVar_Add(UI)?\(" sh_cvar_table.qc, plus 6 per
-//    ADS_RegisterPoseCvars call).  ~705 used at 1280 → lots of headroom for
-// the growing weapon roster.  History: 256 → 512 → 768 → 1280.
-const float CVAR_TABLE_MAX = 1280;
+// sized to this cap, and CVar_Add's overflow guard drops everything past it.
+//
+// IT HAS OVERFLOWED FOR REAL, AND IT COST A LOT.  At 1280 the table held
+// 1385 attempted entries, so the LAST 105 never registered — every one of
+// them in the physics block, because that block is last in file order:
+// sv_phys_drops, the whole physics_ode_* family, every sv_physprop_* mass /
+// friction / sleep / impact / slide value, every sv_carry_* and
+// sv_gravgun_*, buoyancy, and pm_ramp_bumpcount.  An unregistered cvar reads
+// as 0 through cvar(), so each of those became "no threshold at all" rather
+// than "missing" — sv_physprop_impact_min_speed 70 → 0 turned the phys-prop
+// impact test into "fires on any deceleration whatsoever", which is why a
+// dropped weapon banged and smoked on every tick it touched the floor.
+// Nothing warned, because CVar_Add returned silently.  It no longer does:
+// CVar_CheckOverflow reports the drop count and the first casualty.
+//
+// THE ENTRY COUNT IS NOT THE NUMBER OF CVar_Add LINES.  ADS_RegisterPose
+// expands to SIX, and it is reached both directly and through
+// ADS_RegisterPoseCvars — 71 call sites, 426 entries, nearly a third of the
+// table.  Every new weapon with an ADS pose costs 6.  Count it properly:
+//   python <scratch>/cvarcount.py   (simulates CVar_Init in file order)
+// or just read the boot warning.  History: 256 → 512 → 768 → 1280 → 2048.
+const float CVAR_TABLE_MAX = 2048;
 
 // ---------- UI metadata constants ----------
 //
@@ -111,9 +126,25 @@ float  g_cvar_ui_enum [CVAR_TABLE_MAX];
 float  g_cvar_ui_min  [CVAR_TABLE_MAX];
 float  g_cvar_ui_max  [CVAR_TABLE_MAX];
 
+// Entries CVar_Add had to throw away, and the name of the first one — the
+// diagnosis for a whole class of "this cvar's default does nothing" bugs.
+// Never reset by CVar_Init's `g_cvar_count = 0`, so a re-init that fits still
+// leaves the previous overflow visible until the next map.
+float  g_cvar_overflow;
+string g_cvar_overflow_first;
+
 void(string section, string name, string def, float side) CVar_Add =
 {
-    if (g_cvar_count >= CVAR_TABLE_MAX) return;
+    if (g_cvar_count >= CVAR_TABLE_MAX)
+    {
+        // SILENT HERE ON PURPOSE — CVar_Init runs before the console is worth
+        // printing to, and one line per dropped cvar would be 105 lines of
+        // noise.  CVar_CheckOverflow reports the tally once, afterwards.
+        if (!g_cvar_overflow)
+            g_cvar_overflow_first = name;
+        g_cvar_overflow = g_cvar_overflow + 1;
+        return;
+    }
     g_cvar_section[g_cvar_count] = section;
     g_cvar_name   [g_cvar_count] = name;
     g_cvar_default[g_cvar_count] = def;
@@ -128,9 +159,14 @@ void(string section, string name, string def, float side,
      float ui_kind, float ui_tabs, string label, float ui_flags,
      float ui_enum, float ui_min, float ui_max) CVar_AddUI =
 {
-    if (g_cvar_count >= CVAR_TABLE_MAX) return;
+    // Add FIRST, then check whether it actually landed — the old form tested the
+    // ceiling itself and returned before CVar_Add ran, so an overflowing UI cvar
+    // was never counted by the overflow tally.  Writing g_cvar_ui_*[i] when the
+    // add was refused would be an out-of-bounds store, hence the guard, not a
+    // second ceiling test.
     float i = g_cvar_count;
     CVar_Add(section, name, def, side);
+    if (g_cvar_count == i) return;
     g_cvar_ui_label[i] = label;
     g_cvar_ui_kind [i] = ui_kind;
     g_cvar_ui_tabs [i] = ui_tabs;
@@ -357,6 +393,17 @@ void() CVar_Init =
     CVar_Add("Client", "cl_speedometer",          "0",     CVAR_SIDE_CL);
     CVar_Add("Client", "cl_predict_hits",         "1",     CVAR_SIDE_CL);
     CVar_Add("Client", "cl_envhud_debug",         "0",     CVAR_SIDE_CL);
+    // The bottom-left rank widget: "Lv N  <rank>" plus the thin XP progress bar
+    // (HUD_DrawRankWidget, client/cl_hud.qc).  0 hides both, and also suppresses
+    // the centred "RANK UP" banner and the orchestral-hit sting that go with it —
+    // hiding the bar while a banner still slams across the middle of the screen
+    // would not be "removing the experience bar".  Levelling itself is untouched:
+    // this is a draw toggle, the progression is server-side.
+    //
+    // Asked for as "is there a cvar for removing the experience bar?" — there was
+    // not.  Registered rather than merely read, because an unregistered cvar reads
+    // back as 0 and would have hidden the widget for everyone by default.
+    CVar_Add("Client", "hud_rank_show",           "1",     CVAR_SIDE_CL);
     // When 0, the local CSQC bullet trace passes through dropped-
     // weapon AABBs (which sit around the visible mesh and are
     // larger than the gun silhouette).  When 1, the AABB blocks
@@ -511,10 +558,74 @@ void() CVar_Init =
     ADS_RegisterPoseCvars("cl_ads_ak47");               // untuned
     ADS_RegisterPoseCvars("cl_ads_hdak47");             // untuned
     ADS_RegisterPoseCvars("cl_ads_awp");                // untuned
+    ADS_RegisterPoseCvars("cl_ads_m14");                // untuned — They Hunger M14, the only scoped one of its eight
+    ADS_RegisterPoseCvars("cl_ads_th1911");             // untuned — They Hunger Colt M1911A1
     ADS_RegisterPose("cl_ads_deagle",    "0",     "0",     "0",     "-2",    "4.15",  "1.35");
     ADS_RegisterPoseCvars("cl_ads_m4a1");               // untuned
     ADS_RegisterPoseCvars("cl_ads_scout");              // untuned
+    ADS_RegisterPoseCvars("cl_ads_sniperrifle");        // untuned — OpFor M40A1
     ADS_RegisterPose("cl_ads_usp",       "0",     "0",     "0",     "-5",    "9",     "4.9");
+    // The thirteen Counter-Strike 1.6 guns.  Untuned baselines: these are new
+    // meshes, so the CrossFire twins' hand-tuned poses do not transfer.
+    ADS_RegisterPoseCvars("cl_ads_csp228");
+    ADS_RegisterPoseCvars("cl_ads_csfiveseven");
+    ADS_RegisterPoseCvars("cl_ads_cselite");
+    ADS_RegisterPoseCvars("cl_ads_cstmp");
+    ADS_RegisterPoseCvars("cl_ads_csmac10");
+    ADS_RegisterPoseCvars("cl_ads_csump45");
+    ADS_RegisterPoseCvars("cl_ads_csp90");
+    ADS_RegisterPoseCvars("cl_ads_csgalil");
+    ADS_RegisterPoseCvars("cl_ads_csfamas");
+    ADS_RegisterPoseCvars("cl_ads_csaug");
+    ADS_RegisterPoseCvars("cl_ads_cssg552");
+    ADS_RegisterPoseCvars("cl_ads_cssg550");
+    ADS_RegisterPoseCvars("cl_ads_csxm1014");
+    // The four that gained iron sights when their viewmodels moved to the mount.
+    // The AK47, AWP, M4A1 and Scout already had prefixes (cl_ads_ak47 etc, above)
+    // from before the switch and keep them.
+    ADS_RegisterPoseCvars("cl_ads_csmp5");
+    ADS_RegisterPoseCvars("cl_ads_csm3");
+    ADS_RegisterPoseCvars("cl_ads_csm249");
+    // The G3SG1 is a SCOPE weapon, not a pose-ADS one, but W_SetADSProfile still
+    // takes a prefix and the CoD-scope path reads it — same as cl_ads_cssg550.
+    ADS_RegisterPoseCvars("cl_ads_csg3sg1");
+    // The twelve Day of Defeat weapons.  All untuned — the baseline pose, with
+    // six live cvars each, so alignment is a tuning pass rather than a rebuild.
+    ADS_RegisterPoseCvars("cl_ads_dodcolt");
+    ADS_RegisterPoseCvars("cl_ads_dodluger");
+    ADS_RegisterPoseCvars("cl_ads_dodwebley");
+    ADS_RegisterPoseCvars("cl_ads_dodgarand");
+    ADS_RegisterPoseCvars("cl_ads_dodcarbine");
+    ADS_RegisterPoseCvars("cl_ads_dodk43");
+    ADS_RegisterPoseCvars("cl_ads_dodtommy");
+    ADS_RegisterPoseCvars("cl_ads_dodmp40");
+    ADS_RegisterPoseCvars("cl_ads_dodsten");
+    ADS_RegisterPoseCvars("cl_ads_dodgrease");
+    ADS_RegisterPoseCvars("cl_ads_dodmp44");
+    ADS_RegisterPoseCvars("cl_ads_dodbar");
+    // Day of Defeat, second batch.  The three snipers get one prefix apiece
+    // because their scope poses differ; the machine guns and the launchers each
+    // share ONE, since within a family the hold is the same and three copies of
+    // the same numbers would just be three things to keep in step.  The four
+    // melee weapons register none — they set no ADS profile at all.
+    // The UNSCOPED K98 became ADS-eligible when its bayonet moved off +attack2
+    // onto the weapon-special impulse (sh_wpn_dod98k.qc), so it needs its own
+    // pose set — it was the only DoD long arm without one.
+    ADS_RegisterPoseCvars("cl_ads_dod98k");
+    ADS_RegisterPoseCvars("cl_ads_dodscoped98k");
+    ADS_RegisterPoseCvars("cl_ads_dodspring");
+    ADS_RegisterPoseCvars("cl_ads_dodenfields");
+    ADS_RegisterPoseCvars("cl_ads_dodmg");
+    ADS_RegisterPoseCvars("cl_ads_dodat");
+    // Third batch.  The scoped FG42 gets its own set even though it is a SCOPE
+    // weapon — W_SetADSProfile still takes a prefix and the CoD-scope path reads
+    // it.  The mortar and the binoculars register none: neither has iron sights,
+    // and both pass "" as their prefix.
+    ADS_RegisterPoseCvars("cl_ads_dodbren");
+    ADS_RegisterPoseCvars("cl_ads_dodfg42");
+    ADS_RegisterPoseCvars("cl_ads_dodfg42s");
+    ADS_RegisterPoseCvars("cl_ads_dodfcarb");
+    ADS_RegisterPoseCvars("cl_ads_dodenfield");
 
     // Weapon-lower pose — drives the off-screen viewmodel offset when
     // the player is grappling or (with sv_codladders 1) climbing a
@@ -744,6 +855,12 @@ void() CVar_Init =
     // Mag-drop visual gate (paired with cl_ejectcasing).  Same
     // short-circuit pattern — gate inside SpawnMag / SpawnRemoteMag.
     CVar_Add("Client", "cl_ejectmag",             "1",     CVAR_SIDE_CL);
+    // How many ejected casings/mags may exist at once.  0 = uncapped, which is
+    // what this was before and is a real problem on a belt-fed gun: 20 rounds a
+    // second times a ~30 s lifetime is ~600 physics-ticking, shadow-casting alias
+    // entities from ONE trigger pull.  Oldest-first eviction through a ring in
+    // client/cl_shells.qc; the ring's own ceiling is CSQC_EJECTA_RING (64).
+    CVar_Add("Client", "cl_ejecta_max",           "48",    CVAR_SIDE_CL);
     // Viewmodel lighting kill-switch.  Sets EF_FULLBRIGHT on the
     // viewmodel each frame, skipping LightPointValues + dlight loop
     // (gl_alias.c:1395 early-out).  Big perf win when firing near
@@ -1355,6 +1472,11 @@ void() CVar_Init =
     // with each weapon to "calibrate" the marker, then iterate on
     // the constants with reloads.
     CVar_Add("Client", "cl_debug_muzzle",           "0",         CVAR_SIDE_CL);
+    // Tactical shield trace, client half.  Edge-triggered, so a whole session
+    // costs a handful of lines.  Read it beside sv_debug_shield: every bug this
+    // feature has had was the two sides disagreeing about has_shield /
+    // shield_deployed, which neither log shows on its own.
+    CVar_Add("Client", "cl_debug_shield",           "0",         CVAR_SIDE_CL);
     // Brightness ceiling for the viewmodel's lighting sample (engine-side
     // patch). 0–255 byte; 180 keeps a slight ambient cap so the viewmodel
     // doesn't go fully blown-out under bright effects/lights.
@@ -1699,6 +1821,16 @@ void() CVar_Init =
     // kept for A/B.  Was unregistered and therefore stuck at 0 — the feature had
     // never actually run.
     CVar_Add("Client debug", "cl_physprop_hull_mode", "1", CVAR_SIDE_CL);
+    // Stand up a client-side hull for nearby monsters so the PREDICTED move
+    // collides with them the way the server already does.  Registered here on
+    // purpose: cl_physprop_hull_mode directly above spent its whole life
+    // unregistered and therefore stuck at 0, and nobody noticed.
+    CVar_Add("Client debug", "cl_monstersolid", "1", CVAR_SIDE_CL);
+    // Draw-side only, deliberately.  The server's send (sv_lookatnpc.qc) is
+    // change-gated and costs nothing while the crosshair is off an NPC, so gating
+    // it too would mean mirroring this to the server as a userinfo key or a stat —
+    // more machinery than the bytes are worth.  Don't "optimise" that later.
+    CVar_Add("Client debug", "cl_lookatnpc",   "1", CVAR_SIDE_CL);
     CVar_Add("Vehicles", "cl_car_wheels",        "1",     CVAR_SIDE_CL);  // render prop_car spinning/steering wheels from the wheelmodel key (0 = off / baked wheels)
     CVar_Add("Vehicles", "cl_car_wheel_radius",  "12.64", CVAR_SIDE_CL);  // visual wheel rolling radius (qu) driving the spin rate; match your wheel model
     CVar_Add("Vehicles", "cl_car_wheel_z",       "0",     CVAR_SIDE_CL);  // vertical nudge (qu) of the visual wheels along the car's up axis (tune so tyres meet the ground)
@@ -1783,6 +1915,17 @@ void() CVar_Init =
     CVar_AddUI("Multiplayer", "mp_friendlyfire",      "0",  CVAR_SIDE_SV,
         CVAR_UI_TOGGLE, CVAR_TAB_MULTI | CVAR_TAB_CREATE_GAME, "",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
+    // Sven's allied-NPC kill policy: 0 disallow, 1 allow, 2 allow by anything
+    // other than players / allied NPCs / the human passive class (default 2,
+    // svencoop/manual/mapping-config.html).  56 corpus map cfgs set it and 16
+    // more use its old spelling `killnpc`, which sv_mapcfg_equip.qc forwards
+    // here.  REGISTERED BUT NOT YET CONSUMED - nothing in this tree reads it.
+    // It is in the table so the value survives a map cfg with a real default
+    // instead of becoming an anonymous user cvar, and so whoever implements
+    // allied-NPC protection finds it already carrying the map's intent.
+    CVar_AddUI("Multiplayer", "mp_npckill",           "2",  CVAR_SIDE_SV,
+        CVAR_UI_SCALAR, CVAR_TAB_MULTI | CVAR_TAB_CREATE_GAME, "",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 2);
     // --- Prop Hunt (GAMEMODE_PROPHUNT) ---
     // Hide-phase length in seconds (the round-freeze IS the hide phase; only
     // seekers are locked).  Separate from mp_freezetime so other modes keep
@@ -1908,11 +2051,85 @@ void() CVar_Init =
     CVar_AddUI("Multiplayer", "mp_respawn",           "1",  CVAR_SIDE_SV,
         CVAR_UI_TOGGLE, CVAR_TAB_MULTI, "",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
+    // mp_flashlight — may players use the flashlight at all.
+    //
+    // DEFAULT 1, which is Sven's (default_map_settings.cfg:138 and
+    // server_example.cfg:136 both ship 1), so nothing changes for a map that
+    // never mentions it.  It exists because trigger_setcvar exists: all five
+    // hl_ placements of that entity set THIS cvar and nothing else, and two of
+    // them (hl_c17's "noflashlights", hl_c18's "noflashlight") set it to 0 to
+    // make their blackout sections actually dark.  uplink and hl_c01_a2 use the
+    // pair "flashlight_off"/"flashlight_on" to take it away and hand it back.
+    //
+    // Enforced in CSQC, because the flashlight IS CSQC — client/cl_flashlight.qc
+    // draws a dlight from the camera and the server has never been told about
+    // it.  So this is published to serverinfo (SV_UpdateMovementServerInfo) and
+    // read there with serverkeyfloat, exactly like mp_noblock: a client cannot
+    // reach past a server that has switched it off, because its own local cvar
+    // is not what gets consulted.
+    CVar_AddUI("Multiplayer", "mp_flashlight",        "1",  CVAR_SIDE_SV,
+        CVAR_UI_TOGGLE, CVAR_TAB_MULTI | CVAR_TAB_CREATE_GAME, "",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
+    // ---------------------------------------------------------------------
+    // Sven Co-op's pickup respawn set.
+    //
+    // THE CVAR PEOPLE ASK FOR BY NAME IS mp_respawnweapons, AND IT DOES NOT
+    // EXIST.  Not in svencoop's server.cfg, server_example.cfg,
+    // default_map_settings.cfg, the FGD's trigger_setcvar allowlist, or any
+    // AngelScript in the mount.  The real one is mp_weaponstay, and Sven's
+    // shipped server.cfg:34 sets it to 1.
+    //
+    // mp_weaponstay: "weapons stay on the ground after being picked up so
+    // other players can also pick them up.  0 = players must wait for the
+    // weapon to respawn if someone gets it first."
+    // (svencoop/default_map_settings.cfg:160-167)
+    //
+    // DEFAULT 0 HERE, WHERE SVEN SHIPS 1, and that divergence is deliberate.
+    // This mod's campaign feel is single-player Half-Life: a weapon you pick
+    // up is gone.  Defaulting to 1 would silently change how every map in the
+    // corpus plays.  cfg/server.cfg is the place to opt in.
+    CVar_AddUI("Multiplayer", "mp_weaponstay",        "0",  CVAR_SIDE_SV,
+        CVAR_UI_TOGGLE, CVAR_TAB_MULTI | CVAR_TAB_CREATE_GAME, "",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
+    // The three respawn delays (default_map_settings.cfg,
+    // manual/mapping-config.html).  Sven's encoding, and now honoured in full
+    // by Pickup_RespawnDelay (sv_weapons.qc):
+    //   -2  use the GAME DEFAULT delay - Half-Life's 20 s for weapons and
+    //       ammo, 30 s for items, or instant for weapons under mp_weaponstay
+    //   -1  never respawn UNLESS the entity carries m_flCustomRespawnTime
+    //    0  respawn instantly
+    //   >0  respawn after this many seconds
+    // Range starts at -2 for that reason; CVAR_UI_SCALAR clamps to it.
+    //
+    // DEFAULT -1 HERE, WHERE SVEN SHIPS -2, and the divergence is the same one
+    // mp_weaponstay makes just above: this mod's campaign feel is single-player
+    // Half-Life, where a pickup you take is gone, and defaulting to -2 would
+    // make every pickup in the corpus start coming back.  The DEFAULT carries
+    // that decision now instead of the -2 CASE carrying it, so a server.cfg
+    // copied from a Sven server means there what it means here.  Set -2 (or a
+    // positive number) to opt in.
+    CVar_AddUI("Multiplayer", "mp_weapon_respawndelay", "-1", CVAR_SIDE_SV,
+        CVAR_UI_SCALAR, CVAR_TAB_MULTI, "",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, -2, 600);
+    CVar_AddUI("Multiplayer", "mp_ammo_respawndelay",   "-1", CVAR_SIDE_SV,
+        CVAR_UI_SCALAR, CVAR_TAB_MULTI, "",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, -2, 600);
+    CVar_AddUI("Multiplayer", "mp_item_respawndelay",   "-1", CVAR_SIDE_SV,
+        CVAR_UI_SCALAR, CVAR_TAB_MULTI, "",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, -2, 600);
     // mp_dropweapons — what gear the player drops on death.
     //   0 = nothing
     //   1 = primary + secondary only
     //   2 = everything (current default — primary, secondary, melee,
     //       active utility, and every leftover grenade variant)
+    //
+    // NAME COLLISION WITH SVEN, AND THE MEANINGS DIFFER.  Sven's
+    // mp_dropweapons (default_map_settings.cfg:323-332) is a 0/1 permission
+    // toggle - "may players drop weapons at all" - and its death-drop rules
+    // live in a separate mp_weapon_droprules / mp_ammo_droprules pair.  Ours
+    // is the death-drop rule itself.  Left alone deliberately: this one is
+    // load-bearing here and renaming it to match Sven would break every
+    // server.cfg in the wild for the sake of a word.
     CVar_AddUI("Multiplayer", "mp_dropweapons",       "2",  CVAR_SIDE_SV,
         CVAR_UI_SCALAR, CVAR_TAB_MULTI, "",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 2);
@@ -1928,6 +2145,20 @@ void() CVar_Init =
     CVar_AddUI("Multiplayer", "mp_timelimit",         "25", CVAR_SIDE_SV,
         CVAR_UI_SCALAR, CVAR_TAB_MULTI | CVAR_TAB_CREATE_GAME, "",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 1, 999);
+    // How many PRIMARY / SECONDARY weapons a player may carry at once.  1 is the
+    // mod's historical behaviour exactly.  2 is the default because GoldSrc maps
+    // routinely hand out two primaries via game_player_equip or a map cfg, and at
+    // a limit of 1 W_GiveWeaponToSlot drops the first one on the floor.
+    //
+    // Replicated to CSQC via serverinfo (SV_UpdateMovementServerInfo) because
+    // pickup prediction needs it; W_CarryLimit in sh_weapons.qc is the only
+    // reader on either side.
+    CVar_AddUI("Multiplayer", "mp_maxprimary",        "2",  CVAR_SIDE_SV,
+        CVAR_UI_SCALAR, CVAR_TAB_MULTI, "",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 1, 4);
+    CVar_AddUI("Multiplayer", "mp_maxsecondary",      "2",  CVAR_SIDE_SV,
+        CVAR_UI_SCALAR, CVAR_TAB_MULTI, "",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 1, 4);
     CVar_AddUI("Multiplayer", "mp_weaponweight",      "1",  CVAR_SIDE_SV,
         CVAR_UI_TOGGLE, CVAR_TAB_MULTI, "",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
@@ -1939,11 +2170,22 @@ void() CVar_Init =
         CVAR_UI_TOGGLE, CVAR_TAB_MULTI, "",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
 
-    // func_door / func_door_rotating proximity auto-open.  0 (default) = doors open ONLY on +use /
-    // target-chain / damage — never on walk-near (and no every-frame direction reversal that the
-    // per-frame proximity re-fire caused).  1 = restore the legacy proximity trigger.  Read at door
-    // spawn (map load), so a map restart is needed for a change to take effect.
-    CVar_Add("Server", "sv_door_proximity", "0", CVAR_SIDE_SV);
+    // func_door / func_door_rotating touch-to-open.  1 (default) = Half-Life
+    // behaviour: a door without SF_DOOR_USE_ONLY (256) has a touch field and opens
+    // when you walk into it (doors.cpp:317-323, :485-513).  0 = doors open only on
+    // +use / target-chain / damage.
+    //
+    // This shipped at 0 for a long time, for two real bugs that are now fixed
+    // rather than avoided: the sliding door's trigger was a 60-unit halo built
+    // from the SWEPT bounds (doors flew open as you walked past), and it re-fired
+    // every frame you stood in it, which flipped TOGGLE doors back and forth.
+    // door_spawn_trigger now hugs the brush the way the rotating door always did,
+    // door_trigger_touch requires motion INTO the door, and both refuse while the
+    // door is off its resting pose.
+    //
+    // Read at door spawn (map load), so a map restart is needed for a change to
+    // take effect.  The locked-feedback arms it enables are read per touch.
+    CVar_Add("Server", "sv_door_proximity", "1", CVAR_SIDE_SV);
 
     // Evaluate the `master` key (multisource / game_team_master) on func_door and
     // func_door_rotating.  1 (default) = Half-Life behaviour: a mastered door
@@ -1978,6 +2220,19 @@ void() CVar_Init =
     // (permissive, wrong, but never-stuck) behaviour without a rebuild.
     // Read per fire, so it takes effect immediately.
     CVar_Add("Server", "sv_multisource_strict", "1", CVAR_SIDE_SV);
+
+    // Rollback for the OTHER half of multisource registration: Half-Life's
+    // CMultiSource::Register (dlls/buttons.cpp:261-269) has a second pass that
+    // registers every multi_manager naming the gate, because a manager's
+    // targets live in arbitrary keyvalues rather than in .target.  We used to
+    // skip that pass, so 440 corpus gates registered nothing, fell through to
+    // the zero-input branch and were permanently OPEN — hl_c01_a1's airlock
+    // among them, +use-able before the guard had checked anyone's suit.
+    //
+    // 1 restores the old permissive behaviour.  It exists because 440 gates is
+    // far more than can be play-tested, and one cvar is a cheaper rollback than
+    // a revert.  Read at registration time, so it needs a map reload.
+    CVar_Add("Server", "sv_multisource_no_mm_inputs", "0", CVAR_SIDE_SV);
 
     // Honour Half-Life's rule that a door accepts a player's direct +use ONLY
     // when SF_DOOR_USE_ONLY (256) is set.  1 (default) = HL behaviour on
@@ -2020,6 +2275,14 @@ void() CVar_Init =
     // deliberately shipping .ogg/.wav replacements for the mp3s a map names.
     CVar_Add("Server", "sv_sound_strip_undecodable", "0", CVAR_SIDE_SV);
 
+    // env_sound reverb wetness.  The 28 GoldSrc room tables were authored at EFX
+    // flGain 1.0 — reverb as loud as the dry signal — which is why the echo in
+    // some rooms was overwhelming.  Scales flGain, flReflectionsGain and
+    // flLateReverbGain together; 1 restores the original behaviour, 0 is off.
+    // Read by CSQC_EnvSound_Strength (client/cl_env_sound.qc), which was reading
+    // it unregistered.
+    CVar_Add("Client", "snd_env_reverb_strength", "0.4", CVAR_SIDE_CL);
+
     // Keep entities whose classname has no spawn function as inert
     // pass-through relays instead of dropping them (see
     // SV_OnEntityNoSpawnFunction in sv_goldsrc_compat.qc).  1 (default)
@@ -2056,6 +2319,28 @@ void() CVar_Init =
     // from "the graph is in twenty pieces so there was never a path to find".
     CVar_Add("Server", "sv_nav_linkdebug", "0", CVAR_SIDE_SV);
 
+    // GoldSrc says "info_nodes ARE the graph", and we honour that - but a map that
+    // sprinkles a token handful over a huge playfield produces a SHATTERED graph,
+    // not merely a sparse one, and monsters in the wrong fragment can never reach
+    // anything.  When the graph measures badly, flood-fill the gaps around player
+    // spawns and monster spawn points and re-link.  A well-noded map measures fine
+    // and is left exactly as the mapper built it.
+    //
+    // Set 0 to restore strict "info_nodes only".  See Nav_SupplementIfSparse.
+    CVar_Add("Server", "sv_nav_supplement", "1", CVAR_SIDE_SV);
+
+    // Sven's `freeroam` key: a monster with nothing to fight wanders the node
+    // graph instead of standing on its spawn point.  Set 0 to pin every NPC where
+    // it spawned, which is what this tree did before the key was implemented.
+    // `guard_ent` is deliberately NOT covered by this switch - guarding a named
+    // entity is a specific instruction from the map, not ambient behaviour.
+    CVar_Add("Server", "sv_ai_freeroam", "1", CVAR_SIDE_SV);
+
+    // The bar the graph has to clear to be left alone: the largest connected
+    // component must hold at least this percentage of all nodes.  desertcircle
+    // measured 53.6% before supplementing.
+    CVar_Add("Server", "sv_nav_supplement_pct", "90", CVAR_SIDE_SV);
+
     // How far apart two nav nodes may be and still be considered for a link.  Half-
     // Life's own node graph has no such limit; ours needs one because the link pass
     // is all-pairs and every candidate costs a trace.  Too small shatters the graph
@@ -2078,6 +2363,11 @@ void() CVar_Init =
     // that gates links travels through the air, so it reads a pit as perfectly
     // clear; nothing else in the build has ever checked that a monster following
     // the link would have anything to stand on.
+    //
+    // DO NOT SHIP THIS OFF.  It now also carries the step-height gate: the ground
+    // walk is what notices a rise, and Nav_ClimbRefine is what decides whether that
+    // rise is a ramp or a crate face.  Turning this off restores the graph that
+    // links onto surfaces monsters cannot climb.
     CVar_Add("Server", "sv_nav_linkfloor", "1", CVAR_SIDE_SV);
 
     // A* searches serviced per frame from the path request queue.  Requests are
@@ -2098,10 +2388,19 @@ void() CVar_Init =
     // its monsters standing still.
     CVar_Add("Server", "sv_ai_enable", "1", CVAR_SIDE_SV);
 
-    // How far a monster can notice a player.  Half-Life's own default, and it
-    // also bounds the cheap proximity test that keeps dormant monsters free —
-    // raising it makes every idle monster on the map wake more often.
-    CVar_Add("Server", "sv_ai_sight", "1024", CVAR_SIDE_SV);
+    // How far a monster can notice a player.  This said "Half-Life's own default"
+    // while carrying HALF of it: the SDK is `m_flDistLook = 2048.0`
+    // (dlls/monsters.cpp:2042), and dlls/basemonster.h:100 documents the field as
+    // "distance monster sees (Default 2048)".  Only CLeech overrides it (750).
+    // Reported as grunts not seeing the player until absurdly close, which is
+    // exactly what half the look distance produces.
+    //
+    // The cost is real and worth stating: this value also bounds the cheap
+    // proximity test that keeps dormant monsters free (AI_AnyPlayerNear), so
+    // doubling the radius quadruples the area in which idle monsters wake up.
+    // That is the price of HL parity here; drop it back to 1024 on a map that
+    // struggles.
+    CVar_Add("Server", "sv_ai_sight", "2048", CVAR_SIDE_SV);
 
     // Line-of-sight traces the whole AI layer may spend per FRAME, shared by
     // every monster.  When it runs out a monster is told "cannot see" for that
@@ -2144,23 +2443,146 @@ void() CVar_Init =
     // How much slower a shooter fires at long range.  0 is exactly Half-Life
     // (no distance term and no jitter at all); 1 adds up to AI_RANGE_CADENCE_MAX
     // seconds at the edge of the monster's own range.  See AI_ArmAttackCooldown.
-    CVar_Add("Server", "sv_ai_range_cadence", "1", CVAR_SIDE_SV);
+    // DEFAULT CHANGED 1 -> 0 for GoldSrc parity.  At 1 this added up to 0.8s of
+    // distance-scaled cooldown, and because AI_ArmAttackCooldown feeds ai_nextattack,
+    // that cooldown SUPPRESSES COND_CAN_RANGE1 itself (sv_ai_core.qc:664) rather than
+    // merely delaying the shot - so a shooter that could see and reach you was diverted
+    // into SCHED_COMBAT_FACE instead of firing, which reads as "they wait until they are
+    // on top of me".  Set it back to 1 to restore the slower, more deliberate long-range
+    // fire; intermediate values scale it.
+    CVar_Add("Server", "sv_ai_range_cadence", "0", CVAR_SIDE_SV);
+    // Half-Life's BuildRoute tries a straight walk BEFORE the node graph and only
+    // falls back to nodes in the branch its own comment calls "last ditch"
+    // (dlls/monsters.cpp:1535-1590).  Ours always went to the graph, which is why a
+    // monster with nothing at all between it and the player still walked the dog-leg
+    // between two nav waypoints instead of straight at you.  1 restores HL's order;
+    // 0 restores the always-use-the-graph behaviour exactly, which is the thing to
+    // try first if monsters start cutting across cover or pressing into walls.
+    // The straight-line test requires ground the whole way, so this cannot walk a
+    // monster off a ledge - see AI_LocalMoveClear in sv_ai_move.qc.
+    CVar_Add("Server", "sv_ai_directmove", "1", CVAR_SIDE_SV);
+    // How many members of one squad may fire at once.  2 is Half-Life exactly -
+    // SQSLOTS_ENGAGE is a TWO-BIT mask (sv_ai_defs.qc:442-444) and every one of
+    // the 11 slot bits is already spoken for by another family, so a bigger
+    // ration cannot be expressed as more bits without colliding with the grenade
+    // / agrunt / houndeye sets.  Above 2, Squad_MayEngage lets the surplus
+    // shooters through WITHOUT a bit instead, which keeps the per-family bit
+    // separation intact.  Raise it for a Sven-style firefight; 0 disables the
+    // ration entirely.
+    CVar_Add("Server", "sv_ai_engageslots", "2", CVAR_SIDE_SV);
+    // Monster spawn RATE multiplier, applied to the two things that actually
+    // pace a GoldSrc map's waves: trigger_entity_iterator's delay_between_runs /
+    // delay_between_triggers, and squadmaker's `delay`.  2 = twice as fast.
+    //
+    // This exists because the pacing is the MAP's, not the mod's, and it scales
+    // with player count.  desertcircle's base1iter is delay_between_runs 14 with
+    // classname_filter "player", so it fires its spawn relay once per living
+    // player per 14 s: a full Sven server is chaotic and a one-player game is
+    // nearly silent, by design.  1 keeps every map exactly as authored.
+    CVar_Add("Server", "sv_monster_spawnrate", "1", CVAR_SIDE_SV);
+    // Multiplier on every squadmaker's m_imaxlivechildren, which is what caps how
+    // many of its children may be alive at once.  desertcircle's makers are set to
+    // 1-3 each, so this is the ceiling on how big a fight can get however fast
+    // they spawn.  1 keeps the map as authored.  There is no "unlimited" value -
+    // see the note on SV_ScaleMaxLive for why 0 must not mean that.
+    CVar_Add("Server", "sv_monster_maxlive", "1", CVAR_SIDE_SV);
     // Use Half-Life's per-activity SetYawSpeed tables instead of this mod's
     // single hand-picked figure per class.  0 falls back to the old numbers;
     // the x2 in AI_ChangeYaw applies either way, because that one is a
     // straight bug fix rather than a tuning choice.
     CVar_Add("Server", "sv_ai_yawspeed_hl", "1", CVAR_SIDE_SV);
+    // Do monsters travel along the direction their BODY faces, or along the
+    // direction they WANT to face?  1 (the default) is the former: a monster
+    // turning while it walks describes a real arc into the turn instead of
+    // sliding sideways along the new heading with the model still pointing the
+    // old way.  0 restores the SDK behaviour (ideal_yaw, roach.cpp:365) and is
+    // the first thing to try if anything starts clipping door frames, because
+    // arcs take wider lines than straight re-aims do.
+    CVar_Add("Server", "sv_ai_arcturns", "1", CVAR_SIDE_SV);
+    // Can a NOISE pull a monster out of an idle scripted_sequence, or only
+    // damage?  0 = damage only (Half-Life's SCRIPT_BREAK_CONDITIONS exactly),
+    // 1 = also gunfire and grenades, 2 = also player footsteps.  Only ever
+    // affects a script the mapper left interruptible, and only while the actor is
+    // parked in its idle pose - see AI_ScriptNoiseWake for the full rule.
+    CVar_Add("Server", "sv_ai_script_wake", "1", CVAR_SIDE_SV);
     // Do dead NPCs drop a usable weapon?  1 = real pickup (Half-Life's own
     // behaviour), 0 = nothing.
     CVar_Add("Server", "sv_ai_dropweapons", "1", CVAR_SIDE_SV);
+    // Does touching a point_checkpoint move where the party RESPAWNS, or only
+    // revive the people who were already dead?  1 (default) is the former and is
+    // a deliberate divergence from point_checkpoint.as, which does only the
+    // latter — the reasoning is written out at PlayerPlaceAtSpawnPoint.  0 is the
+    // script-faithful behaviour.
+    CVar_Add("Server", "sv_checkpoint_respawn", "1", CVAR_SIDE_SV);
+    // func_global / trigger_save write their store to cfg/.  0 keeps it in
+    // memory only, where it still survives a changelevel (FTE does not reload
+    // progs) but not a server restart.  See server/sv_mapglobals.qc.
+    CVar_Add("Server", "sv_mapglobals_persist", "1", CVAR_SIDE_SV);
+    // Diagnostic: run the func_global store/resync/file round-trip check once at
+    // map load and print BAD=N.  Snapshots and restores the store, so it is safe
+    // to leave on.  See FuncGlobal_SelfTest in server/sv_mapglobals.qc.
+    CVar_Add("Server", "sv_mapglobals_selftest", "0", CVAR_SIDE_SV);
+    // Half-Life's env_global / globalstate table.  1 = the table survives a
+    // changelevel, which is what the reference does and what 8 of the corpus's
+    // 24 globals require (they are set on one map and read on the next).  0
+    // clears it at every map load — a rollback path, not a tuning knob.  See
+    // server/sv_globalstate.qc.
+    CVar_Add("Server", "sv_globalstate_persist", "1", CVAR_SIDE_SV);
+    // Diagnostic: exercise the table's add / set / gate contract once at map load
+    // and print BAD=N.  Uses a scratch name and rolls it back, so it is safe to
+    // leave on.  See GlobalState_SelfTest in server/sv_globalstate.qc.
+    CVar_Add("Server", "sv_globalstate_selftest", "0", CVAR_SIDE_SV);
     CVar_Add("Server", "sv_ai_agrunt_health", "90", CVAR_SIDE_SV);
     CVar_Add("Server", "sv_ai_agrunt_dmg", "8", CVAR_SIDE_SV);
     CVar_Add("Server", "sv_ai_bullsquid_health", "40", CVAR_SIDE_SV);
     CVar_Add("Server", "sv_ai_bullsquid_dmg", "10", CVAR_SIDE_SV);
+    // ---------------------------------------------------------------------
+    // The Sven Co-op / Opposing Force classes, from svencoop/skill.cfg
+    // ---------------------------------------------------------------------
+    // Every number in this block is copied out of a file on disk:
+    //   Sven Co-op/svencoop/skill.cfg  ("VERSION: Sven Co-op v5.23", 323 lines)
+    //
+    // It is worth stating why this matters more than the HL classes above.  The
+    // values above are Half-Life's own, and where a class exists in HL that is a
+    // real source that can be checked.  The classes below EXIST ONLY IN SVEN AND
+    // OPPOSING FORCE, there is no OpFor SDK on this machine, and this mod's
+    // numbers for them were therefore never sourced from anything - they were
+    // picked to look plausible beside their HL cousins.  Several are badly out:
+    //
+    //   monster_shocktrooper  fell through to the hgrunt's 50 HP.  Sven: 200.
+    //   monster_hwgrunt       likewise 50.  Sven: 200 - it is the HEAVY grunt.
+    //   monster_otis          fell through to Barney's 35.  Sven: 65.
+    //   monster_stukabat      60.  Sven: 123 (an odd number, and theirs).
+    //   monster_kingpin       250.  Sven: 450.
+    //   monster_alien_voltigore 200.  Sven: 350.
+    //   monster_babygarg      400.  Sven: 600.
+    //
+    // A shocktrooper at a quarter of its intended health is not a balance
+    // preference, it is a class that dies to one magazine on a map built around
+    // it taking four.  The HL classes deliberately keep HL's numbers; a server
+    // that wants Sven's throughout can set them, and the table is above.
     CVar_Add("Server", "sv_ai_pitdrone_health", "60", CVAR_SIDE_SV);
-    CVar_Add("Server", "sv_ai_pitdrone_dmg", "12", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_pitdrone_dmg", "15", CVAR_SIDE_SV);	// sk_pitdrone_dmg_spit
+    CVar_Add("Server", "sv_ai_pitdrone_melee", "25", CVAR_SIDE_SV);	// sk_pitdrone_dmg_bite / _whip
     CVar_Add("Server", "sv_ai_gonome_health", "200", CVAR_SIDE_SV);
-    CVar_Add("Server", "sv_ai_voltigore_health", "200", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_gonome_melee", "30", CVAR_SIDE_SV);	// sk_gonome_dmg_one_slash
+    CVar_Add("Server", "sv_ai_gonome_dmg", "15", CVAR_SIDE_SV);		// sk_gonome_dmg_guts
+    CVar_Add("Server", "sv_ai_voltigore_health", "350", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_voltigore_melee", "30", CVAR_SIDE_SV);	// sk_voltigore_dmg_punch
+    CVar_Add("Server", "sv_ai_voltigore_dmg", "40", CVAR_SIDE_SV);	// sk_voltigore_dmg_beam
+    // sk_shocktrooper_health / _kick, and sk_plr_shockrifle for the bolt: the
+    // trooper fires the PLAYER's shock rifle, which is why skill.cfg has no
+    // monster-side damage entry for it.
+    CVar_Add("Server", "sv_ai_shocktrooper_health", "200", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_shocktrooper_dmg", "15", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_shocktrooper_kick", "12", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_hwgrunt_health", "200", CVAR_SIDE_SV);	// sk_hwgrunt_health
+    CVar_Add("Server", "sv_ai_otis_health", "65", CVAR_SIDE_SV);		// sk_otis_health
+    // sk_otis_bullet.  A Desert Eagle, and Sven prices it like one - this is the
+    // single hardest-hitting NPC bullet in the game and it is theirs, not a
+    // guess.  It covers the OpFor torch and medic too: the same rig override
+    // that gave them the deagle SOUND gave them Barney's 10-damage 9 mm.
+    CVar_Add("Server", "sv_ai_otis_dmg", "34", CVAR_SIDE_SV);
     CVar_Add("Server", "sv_ai_turret_health", "50", CVAR_SIDE_SV);
     CVar_Add("Server", "sv_ai_turret_dmg", "8", CVAR_SIDE_SV);
     CVar_Add("Server", "sv_ai_leech_health", "8", CVAR_SIDE_SV);
@@ -2172,14 +2594,23 @@ void() CVar_Init =
     CVar_Add("Server", "sv_ai_barnacle_health", "25", CVAR_SIDE_SV);
     CVar_Add("Server", "sv_ai_barnacle_dmg", "10", CVAR_SIDE_SV);
     CVar_Add("Server", "sv_ai_scientist_health", "20", CVAR_SIDE_SV);
+    // HL sk_scientist_heal (skill.cfg).  How much one syringe gives back; the
+    // 60-second per-scientist cooldown is HL's and is not a cvar there either.
+    CVar_Add("Server", "sv_ai_scientist_heal",   "25", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_generic_health", "8", CVAR_SIDE_SV);
     CVar_Add("Server", "sv_ai_garg_health", "800", CVAR_SIDE_SV);
     CVar_Add("Server", "sv_ai_garg_dmg", "50", CVAR_SIDE_SV);
-    CVar_Add("Server", "sv_ai_garg_stomp_dmg", "50", CVAR_SIDE_SV);
-    CVar_Add("Server", "sv_ai_babygarg_health", "400", CVAR_SIDE_SV);
-    CVar_Add("Server", "sv_ai_stukabat_health", "60", CVAR_SIDE_SV);
-    CVar_Add("Server", "sv_ai_stukabat_dmg", "15", CVAR_SIDE_SV);
-    CVar_Add("Server", "sv_ai_kingpin_health", "250", CVAR_SIDE_SV);
-    CVar_Add("Server", "sv_ai_kingpin_dmg", "30", CVAR_SIDE_SV);
+    // 100, not 50.  Sven's skill.cfg:68 sk_gargantua_dmg_stomp is 100 and HL's is 100
+    // on medium and hard (50 is its EASY value); the two sibling numbers here, slash
+    // 50 and fire 4, were both taken from Sven's file, so 50 was an oversight rather
+    // than a balance choice.  It is now per-hit on the travelling wave, which is how
+    // HL applies it, rather than the peak of a radial blast.
+    CVar_Add("Server", "sv_ai_garg_stomp_dmg", "100", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_babygarg_health", "600", CVAR_SIDE_SV);	// sk_babygargantua_health
+    CVar_Add("Server", "sv_ai_stukabat_health", "123", CVAR_SIDE_SV);	// sk_stukabat
+    CVar_Add("Server", "sv_ai_stukabat_dmg", "12", CVAR_SIDE_SV);	// sk_stukabat_dmg_bite
+    CVar_Add("Server", "sv_ai_kingpin_health", "450", CVAR_SIDE_SV);	// sk_kingpin_health
+    CVar_Add("Server", "sv_ai_kingpin_dmg", "40", CVAR_SIDE_SV);	// sk_kingpin_melee
     CVar_Add("Server", "sv_ai_bigmomma_health", "1000", CVAR_SIDE_SV);
     CVar_Add("Server", "sv_ai_bigmomma_dmg", "50", CVAR_SIDE_SV);
     CVar_Add("Server", "sv_ai_bigmomma_mortar_dmg", "40", CVAR_SIDE_SV);
@@ -2198,9 +2629,52 @@ void() CVar_Init =
     // Fires each of the four HL equipment weapons once, two seconds apart, then
     // reports what is left alive in the world.  See W_HLEquipTest.
     CVar_Add("Server", "sv_hlequip_test", "0", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ammo_selftest", "0", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_wpnalias_test", "0", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_breakobj_test", "0", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_satchel_test", "0", CVAR_SIDE_SV);
+    // The five one-round launchers and their auto-reload poll.  Fires each of
+    // them once and asks whether the next round loads itself.  See
+    // W_LauncherSelfTest.
+    CVar_Add("Server", "sv_launcher_test", "0", CVAR_SIDE_SV);
+    // item_inventory + InventoryRules.  Builds its own items and its own rules
+    // entity and drives Inv_Collect / Inv_Drop / Inv_Gate directly — the map
+    // route needs a player standing in a brush volume holding a specific
+    // entity, which no headless run can reach.  See Inv_SelfTest.
+    CVar_Add("Server", "sv_inventory_test", "0", CVAR_SIDE_SV);
+    // th_escape's four map-local classes plus its 17 script functions.  Only
+    // runs on a map whose cfg names th_escape/th_escape, and it is DESTRUCTIVE
+    // to the live script state (it arms and expires the escape timer against
+    // its own probe), so it disarms itself when it finishes.  See THEsc_SelfTest.
+    CVar_Add("Server", "sv_thescape_test", "0", CVAR_SIDE_SV);
+    // GoldSrc's difficulty selector.  Nothing in THIS tree reads it — the sk_*
+    // values live in this table rather than being picked by suffix at runtime —
+    // but Sven map cfgs set it (th_escape.cfg says `skill 2`) and th_escape's
+    // script writes it when the player picks Normal or Nightmare, which is what
+    // decides which maps/<name>_skl.cfg block applies.  Registered so it is a
+    // declared cvar rather than an unaudited one; HL's own default is 1.
+    CVar_Add("Server", "skill", "1", CVAR_SIDE_SV);
+    // Forces every func_tank* on the map to take one shot, three seconds in.
+    // Exists because a turret's FIRE path is otherwise unreachable headlessly:
+    // it only runs once an unmanned tank has acquired a living player inside
+    // its arc AND its range, and on hl_c12/hl_c14 the spawn points are
+    // thousands of units from the nearest turret.  See Tank_SelfTest.
+    CVar_Add("Server", "sv_tank_selftest", "0", CVAR_SIDE_SV);
     // BULLET_MONSTER_9MM, sk_9mm_bullet2.  Her cone tightens with sustained fire
     // rather than her damage climbing — see ASN_SPREAD_* in mon_grunt.qc.
     CVar_Add("Server", "sv_ai_assassin_dmg", "5", CVAR_SIDE_SV);
+    // The M40A1 in a grunt-family NPC's hands, for `weapons 128` (and `weapons 8`
+    // on a male assassin, which sven-coop.fgd:3894 spells "Sniper Rifle").  40 is
+    // Sven Co-op's own figure - skill.cfg, sk_massassin_sniper - not a guess, and
+    // not the player rifle's 90/70, which no monster path could model anyway.
+    CVar_Add("Server", "sv_ai_sniper_dmg", "40", CVAR_SIDE_SV);
+    // An RPG grunt's rocket, for `weapons 64` (sven-coop.fgd:4339).  Sven ships no
+    // monster-RPG skill value, so this is the tree's own rocket at full strength -
+    // the same RPG_EXPLOSION_DAMAGE a player's launcher and func_tankrocket fire.
+    // What keeps him fair is the RATE, not the damage: GRU_RPG_REFIRE plus the
+    // minimum-range veto in Grunt_CheckAttack.  Turn it down here if that is the
+    // wrong trade on a given map.
+    CVar_Add("Server", "sv_ai_rpg_dmg", "120", CVAR_SIDE_SV);
     // Kills one monster, then proves the corpse rules on the body: bullets must
     // bleed it and never gib it, club damage must chip it and eventually gib.
     CVar_Add("Server", "sv_ai_corpsetest", "0", CVAR_SIDE_SV);
@@ -2212,8 +2686,55 @@ void() CVar_Init =
     // firetest run reports walkmove=0 by design, which left the whole locomotion
     // half of the event pump - footsteps included - with no number on it at all.
     CVar_Add("Server", "sv_ai_walktest", "0", CVAR_SIDE_SV);
+    CVar_Add("Server", "sv_ai_voicetest", "0", CVAR_SIDE_SV);
+    // Shoots eight known rigs from known directions at known hitgroups and reads
+    // back which death and flinch sequence each one actually chose.  The only
+    // harness that can see item G at all: every activity the picker returns
+    // already resolved to SOMETHING through the fallback chain before it existed,
+    // so a completely dead directional-death system logs exactly like a working
+    // one.
+    CVar_Add("Server", "sv_ai_deathtest", "0", CVAR_SIDE_SV);
+    // sk_gargantua_dmg_fire, Sven skill.cfg line 67.  PER TICK at 10 Hz, so a
+    // full 4.5-second sweep that never breaks line of sight is worth about 180 -
+    // which is why the flame is on a six-second cooldown and needs the target
+    // inside a 45-degree cone.
+    CVar_Add("Server", "sv_ai_garg_dmg_fire", "4", CVAR_SIDE_SV);
+    // Four grunts, one player, twenty seconds.  The other harnesses all spawn
+    // ONE of each class, which can never form a squad - two of a kind within
+    // 1024 units with line of sight is the whole precondition - so the squad
+    // behaviours had no test that could reach them.
+    CVar_Add("Server", "sv_ai_squadtest", "0", CVAR_SIDE_SV);
+    // Four monsters with four different cover triggers, shot once every two
+    // seconds for twenty.  Cover is the one behaviour the five-map regression
+    // structurally cannot reach: nothing in it ever damages a monster, so the
+    // whole system reports sched=0 and reads exactly like code that is not there.
+    CVar_Add("Server", "sv_ai_covertest", "0", CVAR_SIDE_SV);
     CVar_Add("Server", "sv_ai_bigmomma_maxcrabs", "10", CVAR_SIDE_SV);
     CVar_Add("Server", "sv_ai_bigmomma_crabgap", "8", CVAR_SIDE_SV);
+    // Multiplier on each info_bigmomma node's `health` key — HL's
+    // gSkillData.bigmommaHealthFactor.  Sven's shipped skill.cfg sets
+    // sk_bigmomma_health_factor to 1, so 1 is the default; raising it makes every
+    // stage of hl_c15 longer without touching the map.
+    CVar_Add("Server", "sv_ai_bigmomma_healthfactor", "1", CVAR_SIDE_SV);
+    // One-shot boot validator for the info_bigmomma chain; see BigMomma_SelfTest.
+    CVar_Add("Server", "sv_bigmomma_selftest", "0", CVAR_SIDE_SV);
+    // One-shot boot validator for the tentacle's baked sequence indices and its
+    // node graph; see Tent_SelfTest.
+    CVar_Add("Server", "sv_tentacle_selftest", "0", CVAR_SIDE_SV);
+    // PATCH 155.  Spawns one HL model at the map's spawn point playing a real
+    // sequence BACKWARDS, so a headless client can confirm .animrate crossed the
+    // wire.  The server cannot check this alone; see AI_AnimRateSelfTest.
+    CVar_Add("Server", "sv_animrate_selftest", "0", CVAR_SIDE_SV);
+    // One-shot boot validator for the Xen boids: forces the PVS gate and checks
+    // they actually fly.  See Flock_SelfTest.
+    CVar_Add("Server", "sv_flock_selftest", "0", CVAR_SIDE_SV);
+    // One-shot boot validator for the Nihilanth: rig sequence names, hl_c17's
+    // n_* support entities, and whether he emits his spheres and flies.
+    CVar_Add("Server", "sv_nihilanth_selftest", "0", CVAR_SIDE_SV);
+    // gSkillData.nihilanthHealth / nihilanthZap.  Valve's skill.cfg gives 800 and
+    // 30 on medium; both fall back to those when unset.
+    CVar_Add("Server", "sk_nihilanth_health", "800", CVAR_SIDE_SV);
+    CVar_Add("Server", "sk_nihilanth_zap", "30", CVAR_SIDE_SV);
     CVar_Add("Server", "sv_ai_apache_health", "250", CVAR_SIDE_SV);
     CVar_Add("Server", "sv_ai_apache_dmg", "10", CVAR_SIDE_SV);
     CVar_Add("Server", "sv_ai_osprey_health", "400", CVAR_SIDE_SV);
@@ -2228,6 +2749,10 @@ void() CVar_Init =
     // A second class, interleaved with the first.  The only way to test the
     // faction matrix headlessly: it takes two different classes side by side.
     CVar_Add("Server", "sv_ai_spawnclass2", "", CVAR_SIDE_SV);
+    // The map's `weapons` key for whatever sv_ai_spawntest spawns, so a loadout
+    // can be tested from in front of the monster instead of from a map that
+    // happens to place one.  0 = leave it to the class default.
+    CVar_Add("Server", "sv_ai_spawnweapons", "0", CVAR_SIDE_SV);
 
     // Debug: override every monster's locomotion mode as it spawns.
     // 0 = leave the class alone (ground), 1 = fly, 2 = swim, 3 = static.
@@ -2491,7 +3016,7 @@ void() CVar_Init =
     CVar_AddUI("Server", "sv_ads_spread_mult",           "0.35",   CVAR_SIDE_SV,
         CVAR_UI_SCALAR, CVAR_TAB_SERVER, "",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
-    CVar_AddUI("Server", "sv_eye_height",                "56",     CVAR_SIDE_SV,
+    CVar_AddUI("Server", "sv_eye_height",                "64",     CVAR_SIDE_SV,
         CVAR_UI_SCALAR, CVAR_TAB_SERVER, "",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
     CVar_AddUI("Server", "sv_hull_height",               "72",     CVAR_SIDE_SV,
@@ -2527,6 +3052,17 @@ void() CVar_Init =
     // spring stiffness depends on each crate's height and buoyancy, so a fixed
     // constant would feel right for one crate and wrong for every other.
     CVar_Add("Server", "sv_pushable_buoyancy_damping", "0.35",      CVAR_SIDE_SV);
+    // A crate's top speed, as a fraction of sv_maxspeed, before its own
+    // "friction" key scales it down further.  Below 1 on purpose: a crate that
+    // can outrun a walking player never resists them, because the only thing
+    // braking the pusher is their own collision with it.  1.48 restores
+    // GoldSrc's flat 400-friction ceiling.
+    CVar_Add("Server", "sv_pushable_speed_frac",   "0.85",          CVAR_SIDE_SV);
+    // Scales the per-usercmd shove by the command's own duration, so a high
+    // cl_cmdrate is not a strength stat and the crate ramps up instead of
+    // snapping to full speed in two commands.  GoldSrc's own fix, and its own
+    // default: sv_pushable_fixed_tick_fudge, func_break.cpp:967 / game.cpp:454.
+    CVar_Add("Server", "sv_pushable_tick_fudge",   "15",            CVAR_SIDE_SV);
     // Per-tick readout for a pushable: origin, velocity, ground contact,
     // submerged fraction, the waterline it found and its own base height.  The
     // settle behaviour is the part a headless server CAN be asked about.
@@ -2665,6 +3201,13 @@ void() CVar_Init =
     // shared/weapons/sh_wpn_*.qc. Read on every fire by
     // SH_ApplyViewKick (sh_weapon_logic.qc) and every pmove tick by
     // SH_TickViewKickDecay.
+    // Sven's medkit is "self-generating" (manual/weapons.html) and the rate is
+    // inside its binary, not in skill.cfg — so this is a chosen number, not a
+    // ported one.  2/sec refills an emptied 100-point medkit in 50 s.  0
+    // disables the regeneration outright and restores the old one-shot pool.
+    CVar_AddUI("Server", "sv_medkit_regen",              "2",      CVAR_SIDE_SV,
+        CVAR_UI_SCALAR, CVAR_TAB_SERVER, "Medkit recharge /sec",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 20);
     CVar_AddUI("Server", "sv_gunkick",                   "1",      CVAR_SIDE_SV,
         CVAR_UI_TOGGLE, CVAR_TAB_SERVER, "Gun-kick recoil",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
@@ -2733,6 +3276,27 @@ void() CVar_Init =
     CVar_AddUI("Server", "sv_hitbox_expand",             "32",    CVAR_SIDE_BOTH,
         CVAR_UI_SCALAR, CVAR_TAB_SERVER, "",
         CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
+    // Extra clearance, in units, between the top of a carrier's head and the
+    // origin of a visibly-carried item_inventory model (Inv_CarryOrigin,
+    // sv_item_inventory.qc).  0 = sit on the head; was an open-coded 8, which
+    // read as the model floating.  Negative sinks it into the head.
+    CVar_AddUI("Server", "sv_inv_carry_lift",            "0",     CVAR_SIDE_SV,
+        CVAR_UI_SCALAR, CVAR_TAB_SERVER, "Carried Item Height",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, -32, 64);
+    // dlls/crowbar.cpp:240 picks between Half-Life's two REAL crowbar rules:
+    //   1 (default) = the SINGLEPLAYER charged swing — first swing full damage,
+    //                 half thereafter until the bar has been idle 1 s past the
+    //                 last swing's cooldown.
+    //   0           = the literal `|| g_pGameRules->IsMultiplayer()` clause,
+    //                 i.e. flat full damage on every swing, which is what the
+    //                 SDK does for any multiplayer build (Sven included).
+    // Sustained DPS is identical either way once the 0.25 s hit refire lands;
+    // this only decides whether the opener hits harder than the follow-ups.
+    // CVAR_SIDE_BOTH so CSQC registers a local default — its hitclaim is what
+    // carries PvP damage, so it has to be able to compute the same number.
+    CVar_AddUI("Server", "sv_crowbar_charged_swing",     "1",     CVAR_SIDE_BOTH,
+        CVAR_UI_TOGGLE, CVAR_TAB_SERVER, "Crowbar charged swing",
+        CVAR_FLAG_SAVE_TO_SERVER_CFG, CVAR_ENUM_NONE, 0, 0);
     // Pose-refresh keepalive interval in server ticks (1 = every tick).
     // Read by sv_main.qc / sv_player.qc. Registered here so it exists at
     // table-init time instead of being auto-created on first cvar() read.
@@ -2776,6 +3340,10 @@ void() CVar_Init =
     // Internal stash for the menu's offline rcon password recall.  No UI.
     CVar_Add("Server", "sv_rcon_password_shadow",      "",         CVAR_SIDE_SV);
     // Admin-trigger cvars: self-resetting in StartFrame; never persisted.
+    // Set to 1 to spawn one zombie exactly where each connected player is aiming, so
+    // the crosshair-triggered CSQC_EVENT_LOOKAT_NPC wire can be driven from a headless
+    // harness. Self-clearing. See the block in StartFrame.
+    CVar_Add("Server", "sv_lookatnpc_test",              "0",      CVAR_SIDE_SV);
     CVar_AddUI("Server", "sv_roundrestart",              "0",      CVAR_SIDE_SV,
         CVAR_UI_ACTION, CVAR_TAB_RCON, "Restart Round",
         CVAR_FLAG_NO_LOCAL_FALLBACK, CVAR_ENUM_NONE, 0, 0);
@@ -2891,6 +3459,55 @@ void() CVar_Init =
         CVAR_UI_TOGGLE, CVAR_TAB_DEBUG, "", 0, CVAR_ENUM_NONE, 0, 0);
     CVar_AddUI("Server debug", "sv_debug_func_train",   "0", CVAR_SIDE_SV,
         CVAR_UI_TOGGLE, CVAR_TAB_DEBUG, "", 0, CVAR_ENUM_NONE, 0, 0);
+    // Screen shake, both ends.  Registered as a PAIR because the shake is only
+    // meaningful end-to-end: the server line proves UTIL_ScreenShake selected
+    // the player (FL_ONGROUND + radius), the client line proves the unicast
+    // arrived and with what quantised numbers.
+    CVar_AddUI("Server debug", "sv_debug_shake",        "0", CVAR_SIDE_SV,
+        CVAR_UI_TOGGLE, CVAR_TAB_DEBUG, "", 0, CVAR_ENUM_NONE, 0, 0);
+    CVar_AddUI("Server debug", "sv_shake_selftest",     "0", CVAR_SIDE_SV,
+        CVAR_UI_TOGGLE, CVAR_TAB_DEBUG, "", 0, CVAR_ENUM_NONE, 0, 0);
+    // The world-sound hearing rules: which noise types a talker listens for while
+    // idle, and whether the scared gaits count as running for the speed pick.
+    CVar_AddUI("Server debug", "sv_ai_sound_selftest",  "0", CVAR_SIDE_SV,
+        CVAR_UI_TOGGLE, CVAR_TAB_DEBUG, "", 0, CVAR_ENUM_NONE, 0, 0);
+    // Shoves a crate at a wall for two seconds and checks it is still on this
+    // side of it.  Needs a map with a func_pushable; skips itself otherwise.
+    CVar_AddUI("Server debug", "sv_pushable_selftest",  "0", CVAR_SIDE_SV,
+        CVAR_UI_TOGGLE, CVAR_TAB_DEBUG, "", 0, CVAR_ENUM_NONE, 0, 0);
+    CVar_AddUI("Server debug", "cl_debug_shake",        "0", CVAR_SIDE_CL,
+        CVAR_UI_TOGGLE, CVAR_TAB_DEBUG, "", 0, CVAR_ENUM_NONE, 0, 0);
+    // Every write to the global state table, plus a table dump at map load.
+    // The dump is the useful half on a campaign: it is the only way to see that
+    // a global set on the previous map actually arrived on this one.
+    CVar_AddUI("Server debug", "sv_debug_globalstate",  "0", CVAR_SIDE_SV,
+        CVAR_UI_TOGGLE, CVAR_TAB_DEBUG, "", 0, CVAR_ENUM_NONE, 0, 0);
+    // Headless entity-fire hook (server/sv_ai_debugcmds.qc).  Fires the named
+    // targetname once, sv_debug_firedelay seconds after the first player
+    // spawns.  These MUST be registered here rather than relying on a bare
+    // `+set` on the command line: an unregistered name reads back empty from
+    // cvar_string(), so the hook silently never armed.  The client-side
+    // equivalent is the `ent_fire` console command; this exists because the
+    // headless harness can only pass cvars, never type into a client.
+    CVar_AddUI("Server debug", "sv_debug_firetarget",   "",  CVAR_SIDE_SV,
+        CVAR_UI_NONE, CVAR_TAB_DEBUG, "", 0, CVAR_ENUM_NONE, 0, 0);
+    CVar_AddUI("Server debug", "sv_debug_firedelay",    "3", CVAR_SIDE_SV,
+        CVAR_UI_NONE, CVAR_TAB_DEBUG, "", 0, CVAR_ENUM_NONE, 0, 0);
+    CVar_AddUI("Server debug", "sv_debug_fireusetype",  "-1", CVAR_SIDE_SV,
+        CVAR_UI_NONE, CVAR_TAB_DEBUG, "", 0, CVAR_ENUM_NONE, 0, 0);
+    // Pulse the target repeatedly instead of once.  Some entities only mean
+    // anything when pulsed - Sven documents driving a momentary_rot_button by
+    // "triggering it in 0.1 s intervals" - and one fire moves such a wheel about
+    // a degree.  Default 1 pulse, so existing invocations are unchanged.
+    CVar_AddUI("Server debug", "sv_debug_firerepeat",   "1", CVAR_SIDE_SV,
+        CVAR_UI_NONE, CVAR_TAB_DEBUG, "", 0, CVAR_ENUM_NONE, 0, 0);
+    CVar_AddUI("Server debug", "sv_debug_fireinterval", "0.1", CVAR_SIDE_SV,
+        CVAR_UI_NONE, CVAR_TAB_DEBUG, "", 0, CVAR_ENUM_NONE, 0, 0);
+    // Lift the "wait for a player" gate, so pure server-side logic can be tested
+    // on a dedicated server with no client at all.  The headless client needs
+    // ~2 min to reach a spawn on a large Sven map.
+    CVar_AddUI("Server debug", "sv_debug_fire_noplayer", "0", CVAR_SIDE_SV,
+        CVAR_UI_TOGGLE, CVAR_TAB_DEBUG, "", 0, CVAR_ENUM_NONE, 0, 0);
     // +use ignores forward wall hits and resolves purely via the cone
     // scan — lets mappers place buttons behind windows/grates and
     // still have them activate from the room.
@@ -2899,6 +3516,9 @@ void() CVar_Init =
     CVar_AddUI("Server debug", "sv_debug_footsteps",    "0", CVAR_SIDE_BOTH,
         CVAR_UI_TOGGLE, CVAR_TAB_DEBUG, "", 0, CVAR_ENUM_NONE, 0, 0);
     CVar_AddUI("Server debug", "sv_debug_physprops",    "0", CVAR_SIDE_SV,
+        CVAR_UI_TOGGLE, CVAR_TAB_DEBUG, "", 0, CVAR_ENUM_NONE, 0, 0);
+    // Tactical shield trace, server half — pairs with cl_debug_shield.
+    CVar_AddUI("Server debug", "sv_debug_shield",       "0", CVAR_SIDE_SV,
         CVAR_UI_TOGGLE, CVAR_TAB_DEBUG, "", 0, CVAR_ENUM_NONE, 0, 0);
     // env_beam endpoint/target resolution + path_corner chain walking.
     CVar_AddUI("Server debug", "sv_debug_env_beam",     "0", CVAR_SIDE_SV,
@@ -3314,6 +3934,33 @@ void() CVar_RegisterMine =
         if (g_cvar_side[i] & my_side)
             CVar_DoRegister(g_cvar_name[i], g_cvar_default[i]);
     }
+};
+
+// Shout if CVar_Init could not fit.  Call this right after CVar_RegisterMine in
+// every VM.
+//
+// This exists because the failure is otherwise INVISIBLE and looks like anything
+// but a table overflow: the dropped cvars simply read 0 through cvar(), so a
+// threshold becomes "no threshold", a scale becomes "zero", a toggle becomes
+// "off" — and the code using them carries on without complaint.  The table
+// overflowed by 105 entries and it took a headless run printing cvar_string()
+// (empty, not "70") to see it at all.  NOT dprint: this must be visible without
+// `developer 1`.
+void() CVar_CheckOverflow =
+{
+    if (!g_cvar_overflow)
+        return;
+    string l1 = sprintf("^1CVAR TABLE OVERFLOW^7: %g cvars dropped (CVAR_TABLE_MAX=%g, needed >=%g).\n",
+                        g_cvar_overflow, CVAR_TABLE_MAX, CVAR_TABLE_MAX + g_cvar_overflow);
+    string l2 = sprintf("  first dropped: \"%s\" - it and everything after it reads as 0. "
+                        "Raise CVAR_TABLE_MAX in sh_cvar_table.qc.\n", g_cvar_overflow_first);
+#ifdef SSQC
+    bprint(PRINT_HIGH, l1);
+    bprint(PRINT_HIGH, l2);
+#else
+    print(l1);
+    print(l2);
+#endif
 };
 
 // CVar_WriteServerCfg — overwrite a config file (typically the root

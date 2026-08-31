@@ -7,6 +7,29 @@
 //  replicated to CSQC so the client list mirrors the server list.
 //
 
+// Sven trigger_teleport / info_teleport_destination keys.
+//
+// DECLARING THESE IS NOT COSMETIC even where the behaviour is unimplemented.  An
+// undeclared key falls through to ED_ParseUnknownEpair, which harvests it as a
+// multi_manager slot - so every one of hl_c05_a2's silo teleports was booking a
+// timed fire at a target literally named "teleport_cooldown":
+//
+//   [mm-parse] 'st_silo01_in' slot 1: target="teleport_cooldown" delay=0.001
+//
+// Harmless in that no such entity exists, but it burns manager slots and puts
+// nonsense in the logs of anyone debugging a real chain.
+//
+// teleport_cooldown itself stays UNIMPLEMENTED and deliberately so - the reasoning
+// is in TESTING.md under its own heading: 514 of its 770 uses are on the
+// destination, where the clock is shared server state the client cannot predict,
+// and a server-side refusal the client does not know about is a rubber-band.  The
+// bounce this map suffered was never a cooldown problem anyway; see
+// trigger_teleport_use below.
+.float teleport_cooldown;
+.float teleport_ignore_delay;
+.float teleport_start_inactive;
+.float teleport_if_blocked;
+
 // ---------------------------------------------------------------------------
 //  Destination lookup  (shared with NewQuake original)
 // ---------------------------------------------------------------------------
@@ -125,19 +148,79 @@ void() Teleport_NormaliseFlags =
 
     if (sven & 512) out = out | TELEPORT_KEEPVEL;     // Sven "Keep velocity"
     if (sven & 256) out = out | TELEPORT_KEEPANGLE;   // Sven "Keep Angles"
+    if (sven & 128) out = out | TELEPORT_RELATIVE;    // Sven "Relative Teleport"
     if (sven & 2)   out = out | TELEPORT_NOCLIENTS;   // Sven "No Clients"
 
     // Dropped, all unimplemented here: 1 Monsters, 4 Pushables, 8 Everything
     // else, 16 Fire On Enter, 32 Fire On Exit, 64 Random Destination,
-    // 128 Relative Teleport, 1024 Rotate (Dest Angles).  Dropping 4 and 8
-    // specifically MATTERS — left set they read as our Keep Velocity and Keep
-    // Angle, which is how -sp_campaign_portal's flag-909 teleports were
-    // accidentally preserving velocity.
+    // 1024 Rotate (Dest Angles).  Dropping 4 and 8 specifically MATTERS — left
+    // set they read as our Keep Velocity and Keep Angle, which is how
+    // -sp_campaign_portal's flag-909 teleports were accidentally preserving
+    // velocity.
     self.spawnflags = out;
+
+    // Sven's "Start Inactive".  Hammer cannot save a spawnflag past 2048, so Sven
+    // moved this one out into a keyvalue and says so in a comment in its own FGD
+    // (sven-coop.fgd:6843-6845, "Their respective properties below will add the
+    // flag when the entity is created instead").  Folded onto the runtime bit here,
+    // AFTER the assignment above, which would otherwise wipe it.
+    if (self.teleport_start_inactive)
+        self.spawnflags = self.spawnflags | TELEPORT_INACTIVE;
 
     if (cvar("sv_debug_use") && out != sven)
         dprint(sprintf("[teleport %s] flags %g -> %g (goldsrc)\n",
                        self.targetname, sven, out));
+};
+
+// CBaseTrigger::ToggleUse (halflife/dlls/triggers.cpp), which Sven extends to
+// trigger_teleport - stock Half-Life installs no SetUse on this class at all, but
+// Sven's FGD carries `teleport_start_inactive`, and a "start inactive" switch is
+// meaningless without something to switch it back on.
+//
+// A TELEPORTER YOU CANNOT TURN OFF IS THE BUG.  hl_c05_a2's secret silo is a
+// two-way pair whose destinations sit inside each other's brushes, and the map
+// drives it entirely through this use function:
+//
+//   trigger_auto -> st_silo01_in    (triggerstate absent = USE_OFF)  } both OFF
+//   trigger_auto -> st_silo01_out   (triggerstate absent = USE_OFF)  } at spawn
+//   multi_manager "silod01in2out":  st_silo01_out  @1s usetype 1 (ON)
+//                                   st_silo01_out  @4s usetype 0 (OFF)
+//   multi_manager "silod01out2in":  st_silo01_in   @1s ON, @4s OFF
+//
+// With no .use at all, every one of those six commands was silently discarded and
+// both halves stayed live forever - so arriving through one landed the player
+// standing inside the other, which fired immediately and sent them back.  The
+// reported symptom was "it keeps teleporting the player back and forth", and the
+// reporter's own guess ("I think they are being enabled too quickly") names the
+// delay 1 on that USE_ON exactly.
+//
+// HL's ToggleUse ignores useType and flips unconditionally; the explicit 0 and 1
+// in the map data are honoured here rather than flattened, because a manager that
+// fires OFF twice in a row must leave the trigger off, and a blind flip would turn
+// it back on.
+void() trigger_teleport_use =
+{
+    float was = (self.spawnflags & TELEPORT_INACTIVE);
+    float now = was;
+
+    if      (sub_use_type == USE_ON)  now = 0;
+    else if (sub_use_type == USE_OFF) now = TELEPORT_INACTIVE;
+    else                              now = was ? 0 : TELEPORT_INACTIVE;
+
+    if (now == was)
+        return;
+
+    self.spawnflags = now ? (self.spawnflags | TELEPORT_INACTIVE)
+                          : (self.spawnflags - (self.spawnflags & TELEPORT_INACTIVE));
+
+    // The client predicts this teleport, so the client has to be told.  .spawnflags
+    // is already the first thing trigger_teleport_SendEntity writes, so marking the
+    // entity dirty is the whole of the replication.
+    self.SendFlags = 1;
+
+    if (cvar("sv_debug_use"))
+        dprint(sprintf("[teleport %s] now %s (usetype %g)\n", self.targetname,
+                       now ? "INACTIVE" : "active", sub_use_type));
 };
 
 void() trigger_teleport =
@@ -164,6 +247,8 @@ void() trigger_teleport =
     // add to shared list for PM_CheckTeleportTriggers
     self.tele_next        = teleport_trigger_list;
     teleport_trigger_list = self;
+
+    self.use = trigger_teleport_use;
 
     // replicate to CSQC for client-side prediction
     self.pvsflags   = PVSF_NOREMOVE;

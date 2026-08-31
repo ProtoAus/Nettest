@@ -85,6 +85,42 @@ void(string id, vector pos, vector size, string label, string cvar_s, string des
     settings_tip(id, desc);
 };
 
+// Half-Life's high-definition model pack (valve_hd / bshift_hd), as a switch.
+//
+// NOT a plain settings_toggle_tip, for two reasons.
+//
+// FIRST, the cvar alone changes nothing.  fs_hdmodels is read only while the
+// searchpaths are being (re)built — the HD pack has to be mounted immediately
+// ABOVE the game it overrides, and that ordering is decided in FS_Addon_MountHD
+// at mount time (engine/common/fs.c).  Flipping the cvar with a map already up
+// leaves every model exactly as it was.
+//
+// SECOND, the rebuild is NOT safe mid-map.  fs_restart frees and re-creates
+// every searchpath, and the engine's own note on the lazy-mount path says a
+// rebuild "would dangle the loaded content -> crash".  So the restart is issued
+// only from the main menu with nothing loaded; in a game the switch is recorded
+// and the tip says when it will take.
+void(string id, vector pos, vector size) settings_toggle_hdmodels =
+{
+    float val = cvar("fs_hdmodels") > 0;
+    if (menu_toggle_button(id, pos, size, "HD Models", val))
+    {
+        settings_dispatch_local(strcat("fs_hdmodels ", val ? "1" : "0", "\n"));
+        // clientstate(): 1 = disconnected/menu only, 2 = connected to a game.
+        if (clientstate() < 2 && !isserver())
+        {
+            // Keep Menu_ApplyHDModels's latch in step, so a menu-VM reload
+            // triggered by this very rebuild doesn't queue a second one.  It
+            // tracks "the searchpaths already reflect the setting", which is
+            // exactly what is about to become true either way.
+            settings_dispatch_local(val ? "set _hdmodels_mounted 1\n"
+                                        : "set _hdmodels_mounted 0\n");
+            settings_dispatch_local("fs_restart\n");
+        }
+    }
+    settings_tip(id, "Prefer Half-Life's high-definition models (valve_hd / bshift_hd)\nover the low-poly originals, where a map's own models don't override them.\nApplies immediately from the main menu; in a game it takes effect next launch.");
+};
+
 void(vector pos, vector size, vector minmaxsteps, string cvar_s, string label, string fmt, string desc) cvar_slider_lc_tip =
 {
     // Mirror cvar_slider's body so the write side can route through
@@ -289,6 +325,19 @@ void() settings_menu =
 		cvar_slider([xpos, ypos], [left_width, 32], [0, 1, 10], "volume", "Volume", "%.1f");
 		ypos += 32 + 4;
 
+		// Music, which "Volume" above does NOT cover: FTE's `volume` is game
+		// sounds only (snd_dma.c:85), so without its own control level music
+		// runs at the engine's 0.3 against everything else at cfg/default.cfg's
+		// 0.07 - four times louder than the game.  Same cvar as the `mp3volume`
+		// console command (GoldSrc's name for it, client/cl_main.qc).
+		//
+		// Plain cvar_slider, not the cvar_slider_lc_tip variant: musicvolume is
+		// ordinary CVAR_ARCHIVE, so cvar_set reaches it.  The localcmd_local
+		// routing above is only needed for CVAR_NOTFROMSERVER cvars.
+		cvar_slider_tip([xpos, ypos], [left_width, 32], [0, 1, 10], "musicvolume", "Music Volume", "%.1f",
+			"Background music (MP3) level. 0 does not fade it - it stops tracks starting at all.");
+		ypos += 32 + 4;
+
 		current_fov = cvar("fov");
 		old_fov = current_fov;
 		sui_push_frame([xpos, ypos], [left_width, 12]);
@@ -401,6 +450,7 @@ void() settings_menu =
 		cvar_slider_tip([colR_x, yR], [colR_w, row_h], [0.5, 2.0, 6],   "r_renderscale",        "Render Scale",     "%.2f", "<1 renders below screen res then upscales (faster).\n>1 renders above then downsamples (SSAA, sharper).");  yR += row_step;
 		settings_enum_tip("gl_tex2d", [colR_x, yR], [colR_w, row_h], "2D Filter", "gl_texturemode2d", "n.l l.l nll lll", "Texture filtering for 2D (HUD/menu).\nFirst char = minify, third = magnify. n=nearest (crisp pixels), l=linear (blur).");      yR += row_step;
 		settings_enum_tip("gl_tex3d", [colR_x, yR], [colR_w, row_h], "3D Filter", "gl_texturemode",   "n.l l.l nll lll", "Texture filtering for the 3D world.\nMiddle char = mipmap blend; nll = crisp + smooth distance.");                              yR += row_step;
+		settings_toggle_hdmodels("hd_models", [colR_x, yR], [colR_w, row_h]);                                 yR += row_step;
 	}
 	else if (settings_tab == 3)
 	{

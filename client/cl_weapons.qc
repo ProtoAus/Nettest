@@ -14,11 +14,11 @@ float(float weapon_id) CSQC_PlayerHasWeapon =
     if (weapon_id == WEP_NONE)
         return FALSE;
 
-    if (self.slot_primary == weapon_id)
-        return TRUE;
-    if (self.slot_secondary == weapon_id)
-        return TRUE;
-    if (self.slot_melee == weapon_id)
+    // Exact mirror of W_SelectWeapon's gate on the server (sv_weapons.qc), which
+    // is why both now call the same shared W_CarryHas: a cursor comparison would
+    // refuse to select the second primary the player is demonstrably carrying,
+    // and the two sides would disagree about what a keypress did.
+    if (W_CarryHas(self, weapon_id))
         return TRUE;
     if (W_UtilityWeaponSelectable(weapon_id) && W_UtilityPlayerHasWeapon(weapon_id))
         return TRUE;
@@ -34,6 +34,10 @@ void(float new_weapon) CSQC_PredictSelectWeapon =
         return;
     if (!CSQC_PlayerHasWeapon(new_weapon))
         return;
+
+    // Latched before self.weapon is overwritten below — the ammo hand-off needs
+    // the OUTGOING weapon.
+    float prev_wep = self.weapon;
 
     if (self.weapon != WEP_NONE)
         self.previous_weapon = self.weapon;
@@ -59,6 +63,20 @@ void(float new_weapon) CSQC_PredictSelectWeapon =
     self.pm_weapon_blend_progress = 0;
 
     self.weapon         = new_weapon;
+    // Move the cursor and re-point the canonical ammo register, mirroring
+    // W_SelectWeapon on the server.  The client needs no W_RebindSlot — it
+    // dispatches equip by weapon id (CSQC_WeaponEquip below) rather than through
+    // per-slot function pointers — but it DOES need the ammo hand-off, or a
+    // predicted cycle between two primaries shows the wrong magazine until the
+    // next snapshot corrects it.
+    // EXACT MIRROR of the server's W_SelectWeapon: one W_SlotAmmo_PointAt does
+    // the persist / move / hydrate.  These two must move together — the client
+    // carried the identical bug (a HYDRATE of the outgoing weapon rather than a
+    // persist), which is precisely why nobody ever saw a desync from it: both
+    // halves were wrong the same way.
+    float nsl = WeaponManifest_Slot(new_weapon);
+    if (nsl == SLOT_PRIMARY || nsl == SLOT_SECONDARY)
+        W_SlotAmmo_PointAt(self, nsl, new_weapon);
     // C4 stays out of slot_utility — selecting it shouldn't clobber
     // the player's actual carried utility (HE/flash/etc.).
     if (W_UtilityWeaponSelectable(new_weapon) && new_weapon != WEP_CFC4)
@@ -389,8 +407,10 @@ void(float weapon_id) CSQC_SpawnFakeDrop =
     float drop_aux = 0;
     if (W_SlotAmmo_UsesSlot(weapon_id))
     {
-        W_SlotAmmo_SaveLegacy(self, weapon_id);
-        W_SlotAmmo_GetForWeapon(self, weapon_id);
+        // ReadWeapon, not SaveLegacy+Get: this must report the DROPPED weapon's
+        // own ammo without writing the slot cache, which belongs to whatever the
+        // cursor names.  With multi-carry those are not always the same weapon.
+        W_SlotAmmo_ReadWeapon(self, weapon_id);
         drop_mag = slotammo_mag;
         drop_ammo = slotammo_ammo;
         drop_aux = slotammo_aux;
@@ -400,10 +420,21 @@ void(float weapon_id) CSQC_SpawnFakeDrop =
     else if (weapon_id == WEP_TRIPMINE)        drop_ammo = self.ammo_tripmine;
     else if (weapon_id == WEP_SNARK)           drop_ammo = self.ammo_snark;
     else if (weapon_id == WEP_HORNETGUN)       drop_ammo = self.ammo_hornet;
+    else if (weapon_id == WEP_SHOCKRIFLE)      drop_ammo = self.ammo_shockrifle;
+    else if (weapon_id == WEP_THTESLA)         drop_ammo = self.ammo_thtesla;
+    // Sven Co-op and Opposing Force.  Single-pool weapons only - the magazine
+    // guns carry their reserve through the slot-ammo mirror instead.
+    else if (weapon_id == WEP_MINIGUN)         drop_ammo = self.ammo_minigun;
+    else if (weapon_id == WEP_MEDKIT)          drop_ammo = self.ammo_medkit;
+    else if (weapon_id == WEP_ASSOFLAM)        drop_ammo = self.ammo_soflam;
+    else if (weapon_id == WEP_DISPLACER)       drop_ammo = self.ammo_displacer;
+    else if (weapon_id == WEP_JETPACK)         drop_ammo = self.ammo_jetpack;
     else if (weapon_id == WEP_SNOWBALL)        drop_ammo = self.ammo_snowball;
     else if (weapon_id == WEP_CSHEGRENADE)     drop_ammo = self.ammo_cshegrenade;
     else if (weapon_id == WEP_CSFLASHBANG)     drop_ammo = self.ammo_csflashbang;
     else if (weapon_id == WEP_CSSMOKEGRENADE)  drop_ammo = self.ammo_cssmokegrenade;
+    else if (weapon_id == WEP_DODMILLS)        drop_ammo = self.ammo_dodmills;
+    else if (weapon_id == WEP_DODSTICK)        drop_ammo = self.ammo_dodstick;
     else if (weapon_id == WEP_SLINGSHOT)       drop_aux = self.snowball_has_slingshot;
 
     makevectors(input_angles);
@@ -427,21 +458,43 @@ void() CSQC_PredictDropWeapon =
     if (cur == WEP_NONE)
         return;
 
+    // A WEAPON WITH NO WORLD PICKUP CANNOT BE DROPPED, and predicting the drop
+    // anyway is what produced the reported "draw animation occurs when nothing
+    // is happening".  The chain: the server's dispatcher refuses (there is no
+    // drop function to call), while this ran regardless — clearing the slot and
+    // letting CSQC_PredictSelectStrongest stamp WS_DRAW plus a deploy sound on
+    // the next weapon.  One round trip later the correcting snapshot restores
+    // the weapon that never left and cl_player.qc:1071 stamps WS_DRAW a SECOND
+    // time.  Two draw animations, nothing dropped, and for the binoculars not
+    // even a visible object flying out — CSQC_SpawnFakeDrop below early-outs on
+    // the same empty string this now tests.
+    //
+    // A server-side fix alone could not have helped: the first draw is entirely
+    // client-side, and reconcile never writes weaponstate back
+    // (cl_player.qc:1022), so the server's refusal is invisible here by
+    // construction.  Testing the world model rather than an id list means a
+    // future pickup-less tool is covered without touching this again.
+    if (self.weapon_worldmodel == "")
+        return;
+
     // Spawn visual toss entity instantly
     CSQC_SpawnFakeDrop(cur);
 
     // Clear the vacated slot and zero its ammo via per-weapon drop clear
+    // Mirror of W_DropCurrentWeapon on the server: drop the entry from the carry
+    // list and fall the cursor back to whatever is still in that slot, rather
+    // than emptying it outright.  The old form also left the carry list holding
+    // the weapon it had just dropped, so for about one round trip
+    // CSQC_PlayerHasWeapon would happily approve selecting a gun on the floor.
     if (cur == self.slot_primary)
     {
-        W_SlotAmmo_SaveLegacy(self, cur);
-        self.slot_primary = WEP_NONE;
-        W_SlotAmmo_ClearForWeapon(self, cur);
+        W_CarryRemove(self, SLOT_PRIMARY, cur);
+        W_SlotAmmo_PointAt(self, SLOT_PRIMARY, W_CarryAt(self, SLOT_PRIMARY, 0));
     }
     else if (cur == self.slot_secondary)
     {
-        W_SlotAmmo_SaveLegacy(self, cur);
-        self.slot_secondary = WEP_NONE;
-        W_SlotAmmo_ClearForWeapon(self, cur);
+        W_CarryRemove(self, SLOT_SECONDARY, cur);
+        W_SlotAmmo_PointAt(self, SLOT_SECONDARY, W_CarryAt(self, SLOT_SECONDARY, 0));
     }
     else if (cur == self.slot_melee)
         self.slot_melee = WEP_NONE;
@@ -451,7 +504,20 @@ void() CSQC_PredictDropWeapon =
     // C4 stays out of slot_utility — dropping it shouldn't change the
     // carried utility (HE/flash/etc.) that the cycle tracks.
     if (W_UtilityWeaponSelectable(cur) && cur != WEP_CFC4)
+    {
+        // Mirror of the vacate-then-ask in the server's W_DropCurrentWeapon
+        // (server/sv_weapons.qc, the W_UtilityWeaponSelectable branch): the medkit is
+        // owned by the slot, so leaving the cursor on it makes W_UtilityNextCarried
+        // wrap round and return the very weapon just dropped.  The two sides must
+        // move together or CSQC predicts keeping a medkit the server threw away.
+        // The SOFLAM and the binoculars share the medkit's slot-based ownership
+        // (sh_wpn_snowball.qc:267 tests all three the same way), so vacating only
+        // the medkit let W_UtilityNextCarried wrap round and hand the other two
+        // straight back — the exact failure the comment above argues against.
+        if (cur == WEP_MEDKIT || cur == WEP_ASSOFLAM || cur == WEP_DODBINOCS)
+            self.slot_utility = WEP_NONE;
         self.slot_utility = W_UtilityNextCarried(cur);
+    }
 
     self.weapon         = WEP_NONE;
     self.weaponstate    = WS_IDLE;
@@ -967,6 +1033,12 @@ void(float isnew) CSQC_DroppedWeapon_Update =
         self.skeletonindex = 0;
     }
     setmodel(self, mdl);
+    // A dropped weapon whose model string arrived but resolved to modelindex 0
+    // is a pickup you can walk onto and cannot see.  The server cannot detect
+    // this - its own modelindex is fine - so the check has to live here.
+    if (isnew && !self.modelindex && cvar("sv_debug_pickups"))
+        print(sprintf("^1[dropped-weapon]^7 %s: model \"%s\" resolved to modelindex 0 (invisible)\n",
+                      Weapon_DisplayName(self.dropped_weapon_id), mdl));
     // Match the fake drop's per-weapon hitbox so the fake→real handoff
     // doesn't also change the pickup-touch radius visibly.
     vector real_mins = '0 0 0';
@@ -1092,14 +1164,23 @@ void(float wep, float mag, float ammo, float silencer) CSQC_ApplyPickupAmmo =
     else if (wep == WEP_SATCHEL)         {                                 self.ammo_satchel = ammo;         }
     else if (wep == WEP_TRIPMINE)        {                                 self.ammo_tripmine = ammo;        }
     else if (wep == WEP_SNARK)           {                                 self.ammo_snark = ammo;           }
-    else if (wep == WEP_HORNETGUN)       {                                 self.ammo_hornet = ammo;          }
     else if (wep == WEP_SNOWBALL)        {                                 self.ammo_snowball = ammo;        }
     else if (wep == WEP_CSHEGRENADE)     {                                 self.ammo_cshegrenade = ammo;     }
     else if (wep == WEP_CSFLASHBANG)     {                                 self.ammo_csflashbang = ammo;     }
     else if (wep == WEP_CSSMOKEGRENADE)  {                                 self.ammo_cssmokegrenade = ammo;  }
+    else if (wep == WEP_DODMILLS)        {                                 self.ammo_dodmills = ammo;        }
+    else if (wep == WEP_DODSTICK)        {                                 self.ammo_dodstick = ammo;        }
     else if (wep == WEP_SLINGSHOT)       {                                 self.snowball_has_slingshot = TRUE; }
-    else if (wep == WEP_PAINTBALL)       { self.mag_paintball = mag;       self.ammo_paintball = ammo;       }
     // Melee (WRENCH/KNIFE/HLCROWBAR) — no ammo fields.
+    //
+    // ONLY UTILITY WEAPONS BELONG BELOW THE SLOT BRANCH.  W_SlotAmmo_UsesSlot()
+    // is TRUE for every PRIMARY and SECONDARY weapon, so the first branch always
+    // wins for them and any `else if (wep == <slot weapon>)` here is unreachable.
+    // Twelve such rows were removed (hornetgun, shock rifle, displacer, jetpack,
+    // paintball and all eight They Hunger guns) — they read as wiring while doing
+    // nothing, which is exactly how the missing W_SlotAmmo_{Load,Save}Legacy rows
+    // for the first four stayed invisible.  To give a slot weapon its ammo, add a
+    // row to that bridge in shared/sh_weapon_slotammo.qc, not here.
 }
 
 // Safety net: if a predicted pickup never gets a confirm nor a rollback
@@ -1145,25 +1226,36 @@ void() CSQC_PickupPredict_Expire =
 // in a prior round).  We distinguish "genuine pending local predict"
 // by the Expire timeout: only actual predictions arm nextthink, and the
 // confirm / rollback branches clear it back to 0.
-float(float slot) CSQC_IsSlotPredictedFilled =
+// A COUNT of in-flight predicted pickups for this slot, not a boolean.
+//
+// It had to stop being a boolean once a slot can hold more than one weapon: with
+// mp_maxprimary 2 and one primary already held, a single pending pickup is fine
+// and the old "any pending -> refuse" test would have blocked the legitimate
+// second one for a whole round-trip.
+float(float slot) CSQC_SlotPredictedCount =
 {
     entity w = dropped_weapon_list;
-    float  i = 0;
+    float  i = 0, n = 0;
     while (w)
     {
         if (w.dropped_weapon_predicted_taken
             && w.nextthink > time
             && w.dropped_weapon_slot == slot)
-            return TRUE;
+            n = n + 1;
         w = w.dropped_weapon_next;
         i = i + 1;
         if (i > 4096)
         {
-            dprint("CSQC_IsSlotPredictedFilled: cycle in dropped_weapon_list\n");
-            return FALSE;
+            dprint("CSQC_SlotPredictedCount: cycle in dropped_weapon_list\n");
+            return n;
         }
     }
-    return FALSE;
+    return n;
+};
+
+float(float slot) CSQC_IsSlotPredictedFilled =
+{
+    return CSQC_SlotPredictedCount(slot) > 0;
 };
 
 float(float wep) CSQC_IsUtilityPredictedFilled =
@@ -1208,8 +1300,16 @@ void(entity w) CSQC_PredictPickupWeapon =
     // predict would refuse to take a real melee weapon while holding
     // fists and the player would see no preview pickup at all.
     float melee_held = self.slot_melee && self.slot_melee != WEP_MELEE;
-    if (slot == SLOT_PRIMARY   && (self.slot_primary   || CSQC_IsSlotPredictedFilled(SLOT_PRIMARY)))   return;
-    if (slot == SLOT_SECONDARY && (self.slot_secondary || CSQC_IsSlotPredictedFilled(SLOT_SECONDARY))) return;
+    // Mirrors weapon_touch's gate: already-held, or the slot is at its limit once
+    // in-flight predicted pickups are counted.  This is the ONE place a stale
+    // mp_max* serverinfo can bite, and the damage is bounded — a mispredicted
+    // pickup, corrected on the next snapshot.  Cycling never reads the limit.
+    if (slot == SLOT_PRIMARY || slot == SLOT_SECONDARY)
+    {
+        if (W_CarryIndexOf(self, slot, wep) >= 0) return;
+        if (W_CarryCount(self, slot) + CSQC_SlotPredictedCount(slot)
+            >= W_CarryLimit(slot)) return;
+    }
     if (slot == SLOT_MELEE     && (melee_held          || CSQC_IsSlotPredictedFilled(SLOT_MELEE)))     return;
     if (slot == SLOT_UTILITY)
     {
@@ -1226,8 +1326,8 @@ void(entity w) CSQC_PredictPickupWeapon =
 
     // Assign slot. CSQC dispatches equip by weapon id (CSQC_WeaponEquip),
     // so we don't need function pointers like the server does.
-         if (slot == SLOT_PRIMARY)   self.slot_primary   = wep;
-    else if (slot == SLOT_SECONDARY) self.slot_secondary = wep;
+         if (slot == SLOT_PRIMARY)   { W_CarryAdd(self, SLOT_PRIMARY, wep);   self.slot_primary   = wep; }
+    else if (slot == SLOT_SECONDARY) { W_CarryAdd(self, SLOT_SECONDARY, wep); self.slot_secondary = wep; }
     else if (slot == SLOT_MELEE)     self.slot_melee     = wep;
     else if (slot == SLOT_UTILITY && wep != WEP_SLINGSHOT)
     {
@@ -1411,13 +1511,15 @@ void() CSQC_PredictWeaponImpulse =
 
     switch (input_impulse)
     {
+    // Byte-for-byte the same decision the server makes in W_CheckImpulses, via
+    // the same shared W_SlotPressTarget.  It deliberately never reads the carry
+    // LIMIT, so a stale mp_max* serverinfo can mispredict a pickup but can never
+    // make a keypress select a different weapon here than it does there.
     case WEAPON_IMPULSE_PRIMARY:
-        if (self.slot_primary)
-            CSQC_PredictSelectWeapon(self.slot_primary);
+        CSQC_PredictSelectWeapon(W_SlotPressTarget(self, SLOT_PRIMARY));
         break;
     case WEAPON_IMPULSE_SECONDARY:
-        if (self.slot_secondary)
-            CSQC_PredictSelectWeapon(self.slot_secondary);
+        CSQC_PredictSelectWeapon(W_SlotPressTarget(self, SLOT_SECONDARY));
         break;
     case WEAPON_IMPULSE_MELEE:
         if (self.slot_melee)
@@ -1444,6 +1546,13 @@ void() CSQC_PredictWeaponImpulse =
             CSQC_PredictReload();
         break;
     case WEAPON_IMPULSE_SPECIAL:
+        // Tactical shield: refused outright, mirroring W_CheckImpulses.  Not a
+        // balance call — no shield model has a pose for it.  The USP's silencer
+        // toggle asked for sequence 7 and 15 against a 9-entry table, so it
+        // played `shield_up` and then an out-of-range index, which is why
+        // `impulse 7` looked like the only working way to raise the shield.
+        if (self.has_shield)
+            break;
         if (self.weapon == WEP_SNOWBALL)
             CSQC_PredictSnowballSpecial();
         else if (self.weapon == WEP_BUTTERFLY)
@@ -1456,6 +1565,63 @@ void() CSQC_PredictWeaponImpulse =
             CSQC_PredictCSUSPSpecial();
         else if (self.weapon == WEP_CFMK23)
             CSQC_PredictCFMk23Special();
+        else if (self.weapon == WEP_DODK43)
+            CSQC_PredictDodK43Special();
+        // THE THREE BAYONET RIFLES.  Every one of them binds .special on the
+        // server and none of them was on this list, so impulse 7 reached the
+        // server, the stab landed, the sound played — and the viewmodel never
+        // moved, because a weaponstate the SERVER alone sets never reaches
+        // predicted_player (reconcile does not write fire-decision state back,
+        // cl_player.qc:1022) and each weapon's WS_SPECIAL display arm therefore
+        // could not fire.  Reported as "only makes sound when you do the melee,
+        // no visuals" on the two Kar98ks, and as the Enfield having no bayonet
+        // at all.  sh_wpn_dodk43.qc:505 already carried the warning.
+        else if (self.weapon == WEP_DODENFIELD)
+            CSQC_PredictDodEnfSpecial();
+        else if (self.weapon == WEP_DOD98K)
+            CSQC_Predict98KSpecial();
+        else if (self.weapon == WEP_DODSCOPED98K)
+            CSQC_PredictDodS98KSpecial();
+        // The Garand's rifle butt, moved off +attack2 for the same reason the
+        // K43's was: the rifle declares an ADS profile, and a smash bound to
+        // .altfire meant the two fought over one button — every sight picture
+        // also swung the stock, and every swing also pulled the view in.
+        else if (self.weapon == WEP_DODGARAND)
+            CSQC_PredictDodGarandSpecial();
+        // The Bren / FG42 / scoped FG42 bipod.  On weapon-special rather than
+        // +attack2 because all three already use that button — the first two for
+        // the ADS hold, the scoped FG42 for its scope, which under sv_codscopes
+        // (shipped as 1) is owned outright by the CoD scope state machine.
+        else if (self.weapon == WEP_DODBREN || self.weapon == WEP_DODFG42
+                 || self.weapon == WEP_DODFG42S)
+            CSQC_PredictDodAutoSpecial();
+        // THE OTHER FIVE DEPLOYABLES.  The three machine guns, the BAR and the
+        // mortar plant on +attack2 and bound no .special at all, so weapon-special
+        // did nothing on them while it was the ONLY way to plant the three above —
+        // "none of the machine guns up_to_down work? I try weapon special and
+        // nothing?".  Both buttons now work on all six; the impulse path re-arms
+        // the button edge latch first (SH_StanceAltArmForImpulse).
+        else if (self.weapon == WEP_DOD30CAL || self.weapon == WEP_DODMG34
+                 || self.weapon == WEP_DODMG42)
+            CSQC_PredictDodMGSpecial();
+        else if (self.weapon == WEP_DODBAR)
+            CSQC_PredictDodBarSpecial();
+        else if (self.weapon == WEP_DODMORTAR)
+            CSQC_PredictDodMortarSpecial();
+        // WEP_GRAVITYGUN is DELIBERATELY absent and was re-checked here.  Its
+        // .special is W_GravGun_ToggleShift, which flips .gravshift_toggle and
+        // nothing else — no weaponstate, so there is no viewmodel take to miss.
+        // Everything the flag drives lives in GravShift_UpdateActivation, which is
+        // #ifdef SSQC and owns a SERVER-GLOBAL direction latch (gravshift_owner /
+        // gravshift_world_dir, republished as the "gravdir" serverinfo key); a
+        // client copy of the bit alone would change nothing the client renders.
+        // One snapshot late, not broken.
+        // The jetpack's boost level.  It is NOT on the prediction proxy and the
+        // client's own pmove reads it through SH_JetTickGravity, so an unpredicted
+        // cycle left the client flying at the boost it drew with while the server
+        // used the new one — the centreprint said 7 and you flew like a 3.
+        else if (self.weapon == WEP_JETPACK)
+            CSQC_PredictJetSpecial();
         break;
     case WEAPON_IMPULSE_C4:
         // Dedicated C4 select — gated on having a charge.  Skips the
@@ -1562,9 +1728,113 @@ void() CSQC_PredictGrappleHeldEdge =
     self.pm_grapple_held_last = held;
 };
 
+// SILENCE THE LOCALLY-PREDICTED WEAPON AUDIO WHEN THE LOCAL PLAYER DIES.
+//
+// The server already plays a null.wav on the victim's CHAN_WEAPON when it kills
+// them (sv_weapons.qc, PlayerKilled), and for every OTHER client that is both
+// correct and sufficient.  It can never work for the dying player themselves,
+// because the loop THEY hear was not played by the server at all:
+//
+//   * the gauss charge and the egon windup/run are played by CSQC prediction,
+//     with self == predicted_player (a CSQC-local spawn(), cl_player.qc);
+//   * CSQC's sound() is PF_cs_sound, which mixes on the NEGATED entity number —
+//     `S_StartSound(-entity->entnum, ...)` (fteqw/engine/client/pr_csqc.c:4756);
+//   * a server sound arrives on the POSITIVE entnum (cl_parse.c);
+//   * the mixer matches a stop on entnum + entchannel (snd_dma.c), and -N and +N
+//     are disjoint keys.
+//
+// On top of that the server's own copy of the charge is deliberately suppressed
+// on the shooter's machine by the predicted-echo dedup in cl_main.qc, so the
+// dying player has exactly ONE copy of the loop, it is on -predicted_player.entnum,
+// and nothing in the mod ever addressed that key.  Result: you die mid-charge and
+// the gauss keeps winding in your ears until you respawn.
+//
+// stopsound() is PF_stopsound -> S_StopSound(-entity->entnum, channel), i.e. the
+// SAME key CSQC's sound() writes, and channel 0 is a WILDCARD that clears every
+// channel on that entnum.  So one call covers every predicted weapon sound with
+// no per-weapon list, including weapons added later.
+//
+// Safe as a wildcard: nothing else attaches sound to predicted_player.  Pmove
+// footsteps and slides use localsound() (entnum 0), the CS-grenade ring uses its
+// own entity, and the fake RPG rocket uses its own entity.
+//
+// NOT DONE HERE, deliberately: zeroing the predicted-echo timestamps.  That
+// window exists to swallow the server echo of your own last predicted shot,
+// which arrives ~1 RTT after prediction played it — and dying immediately after
+// firing is the common case, so clearing it would make you hear your own last
+// shot twice on every death.  CSQC_ResetPredictionState already declines to
+// clear those globals on death for the same reason.
+//
+// Known remaining gap, out of scope here: the same loop also survives an
+// ordinary weapon SWITCH or DROP, because CSQC_WeaponEquip clears
+// .csqc_predict_cmd and the egon's own stop branch is what would have cut it.
+// The proper fix is a .csqc_weapon_holster hook invoked on the OUTGOING weapon
+// from CSQC_WeaponEquip — HL calls Holster() from the switch site, not only from
+// Killed().  That is a separate change; this one is the reported bug.
+float csqc_weapon_audio_was_dead;
+
+void() CSQC_SilenceLocalWeaponAudioOnDeath =
+{
+    float is_dead = getstatf(STAT_IS_DEAD);
+    if (is_dead && !csqc_weapon_audio_was_dead && predicted_player)
+    {
+        stopsound(predicted_player, 0);
+        // Clear the state that would otherwise re-issue the loop the moment the
+        // predictor runs again.
+        predicted_player.weaponstate = WS_IDLE;
+    }
+    csqc_weapon_audio_was_dead = is_dead;
+};
+
+// Headless-visible trace of the client's weapon state.  cl_debug_weapon has
+// only ever been a DRAWN panel, which no automated run can see — and "the
+// server reloaded but the gun never animated" is exactly the class of bug those
+// runs exist to catch (sh_wpn_hlrpg.qc:205 documents one that shipped).
+//
+// IT LIVES IN THE PREDICTION PATH, NOT THE DISPLAY PATH, and that is the whole
+// point of it: CSQC_GetWeaponDisplayFrame is only reached from
+// CSQC_AddPredictedViewmodel, i.e. from the render, and under
+// `vid_renderer headless` that never runs — a trace placed there produced zero
+// lines on a run that was working perfectly.  CSQC_PredictWeaponCommand runs
+// every prediction tick whether or not anything is being drawn.
+//
+// .weaponframe is the sequence the SERVER stamped, so a line here shows the
+// authoritative animation as well as the state that chooses the viewmodel's.
+// Prints on a weapon or state CHANGE only, so a held pose costs one line.
+float csqc_wepdbg_wep;
+float csqc_wepdbg_state;
+float csqc_wepdbg_armed;
+float csqc_wepdbg_deadstat;
+
 void() CSQC_PredictWeaponCommand =
 {
-    if (getstatf(STAT_IS_DEAD))
+    // Runs on both sides of the branch so the latch stays cleared while alive —
+    // otherwise the edge only fires once per map.
+    CSQC_SilenceLocalWeaponAudioOnDeath();
+
+    // ABOVE the death gate on purpose.  Below it, a headless harness client that
+    // never clears STAT_IS_DEAD produces exactly one line and then silence, which
+    // reads as "the weapon state never changed" when the truth is "this function
+    // stopped running" — two very different diagnoses.  `dead` is in the line so
+    // the log says which.
+    float wepdbg_dead = getstatf(STAT_IS_DEAD);
+    if (cvar("cl_debug_weapon") && predicted_player
+        && (!csqc_wepdbg_armed
+            || predicted_player.weapon      != csqc_wepdbg_wep
+            || predicted_player.weaponstate != csqc_wepdbg_state
+            || wepdbg_dead                  != csqc_wepdbg_deadstat))
+    {
+        csqc_wepdbg_armed    = TRUE;
+        csqc_wepdbg_wep      = predicted_player.weapon;
+        csqc_wepdbg_state    = predicted_player.weaponstate;
+        csqc_wepdbg_deadstat = wepdbg_dead;
+        print(sprintf("[wepdbg] t=%.2f wep=%g state=%g svframe=%g dead=%g mag=%g\n",
+                      cltime, csqc_wepdbg_wep, csqc_wepdbg_state,
+                      predicted_player.weaponframe, wepdbg_dead,
+                      predicted_player.slot_primary_mag));
+    }
+
+    if (wepdbg_dead)
         return;
 
     W_SlotAmmo_LoadCurrent(self);
@@ -1583,10 +1853,148 @@ void() CSQC_PredictWeaponCommand =
     vector saved_input_angles = input_angles;
     input_angles_x += csqc_codscope_sway_pitch;
     input_angles_y += csqc_codscope_sway_yaw;
+
+    // Tactical shield: take the attack buttons away from the weapon before it
+    // ever sees them, which is what the server does at the equivalent point
+    // (sv_weapons.qc, `shield_took_alt`).  Masking here rather than adding a
+    // test to each weapon is the whole point — there are three bespoke
+    // try-fires among the shield-legal weapons alone (knife, the three
+    // grenades, the USP), and SH_ShieldBlocksFire only reaches the ones that go
+    // through SH_StandardTryFire.  Missing that is why the shield could be
+    // raised and still slash, and why +attack2 aimed down sights in first
+    // person while the server was raising the shield in third.
+    //
+    // input_buttons is the client's own copy for prediction — the usercmd has
+    // already gone to the server, which applies its own identical gate.  This
+    // makes the two agree; it does not hide input from the server.
+    // DO NOT WRITE THIS WITH `&~=`.  fteqcc64 as shipped in this tree miscompiles
+    // that operator: `input_buttons &~= 4` leaves input_buttons EQUAL TO 4 rather
+    // than clearing bit 2, and it does so silently — no warning, no error.
+    // Measured with cl_debug_shield (see the harness at /c/tmp/shieldtest.sh):
+    //     raw=1 (+attack)  shield down -> masked=4   the weapon saw ALT-FIRE
+    //     raw=4 (+attack2) shield down -> masked=4   not masked at all
+    //     raw=1 (+attack)  shield UP   -> masked=1   fired through a raised shield
+    // which is exactly the reported "cannot fire any weapon with the shield, and
+    // the Glock burst-fires on +attack2".  Use the subtract idiom, which this tree
+    // already relies on in CSQC_SetLiveButton (client/cl_player.qc).
+    float saved_input_buttons = input_buttons;
+    if (self.has_shield)
+    {
+        // +attack2 belongs to the shield
+        input_buttons = input_buttons - (input_buttons & 4);
+        if (self.shield_deployed)
+            input_buttons = input_buttons - (input_buttons & 1);   // raised: no trigger
+    }
+
+    // cl_debug_shield — the client half of the shield trace; see the matching
+    // block in server/sv_weapons.qc (sv_debug_shield) for why both exist.  Edge
+    // triggered on the same four inputs, and it prints BOTH button globals,
+    // because they are separate paths and the ADS envelope reads the other one.
+    if (cvar("cl_debug_shield"))
+    {
+        float sdbg = (self.has_shield ? 1 : 0) | (self.shield_deployed ? 2 : 0)
+                   | (saved_input_buttons & 1 ? 4 : 0) | (saved_input_buttons & 4 ? 8 : 0);
+        if (sdbg != self.shield_dbg_last)
+        {
+            self.shield_dbg_last = sdbg;
+            // Split in two: fteqcc warns past 8 varargs, and the tree builds clean.
+            print(sprintf("[shield-cl] t=%.2f has=%g dep=%g raw=%g masked=%g live=%g\n",
+                          cltime, self.has_shield, self.shield_deployed,
+                          saved_input_buttons, input_buttons, csqc_live_buttons));
+            print(sprintf("[shield-cl]   wep=%g wstate=%g stat=%g vm=%s\n",
+                          self.weapon, self.weaponstate, getstatf(STAT_SHIELD),
+                          (self.has_shield && SH_ShieldViewModel(self.weapon) != "")
+                              ? SH_ShieldViewModel(self.weapon) : "(weapon's own)"));
+        }
+    }
+
     if (self.csqc_predict_cmd)
         self.csqc_predict_cmd();
+    input_buttons = saved_input_buttons;
     input_angles = saved_input_angles;
     W_SlotAmmo_SaveCurrent(self);
+};
+
+// ============================================================
+//  CSQC_ShieldDisplayFrame — the tactical shield's own sequence table
+//
+//  The nine combined models (models/shield/v_shield_*.mdl) do NOT share a
+//  sequence layout with the pistol / knife / grenade view models they replace,
+//  so the weapon's own csqc_display_frame is not consulted at all while one is
+//  on screen.  The three measured layouts, and what each wrong index used to
+//  play, are written up in shared/weapons/sh_wpn_csshield.qc.
+//
+//  The raise is an ANIMATION on the model already in hand, not a swap to a
+//  second model: shield_up for its own length, then shield_idle, and
+//  shield_down on the way back down.  csqc_shield_phase_start is stamped in
+//  CSQC_ResetToConfirmedState, which is the only place in the client that ever
+//  writes predicted_player.shield_deployed — so the edge cannot be missed the
+//  way it could if this function tried to detect it, since this function is
+//  skipped entirely in chase cam, in a cutscene and while scoped.
+// ============================================================
+
+float csqc_shield_phase_start;    // cltime of the last raise / lower edge
+float csqc_shield_was_deployed;   // previous shield_deployed, for that edge
+
+float() CSQC_ShieldDisplayFrame =
+{
+    float wep   = predicted_player.weapon;
+    float phase = max(0, cltime - csqc_shield_phase_start);
+    float up, down, idle_dur, t;
+
+    if (predicted_player.shield_deployed)
+    {
+        up = SH_ShieldUpDuration(wep);
+        if (phase < up)
+        {
+            csqc_viewmodel_sequence_time_override = TRUE;
+            csqc_viewmodel_sequence_time = phase;
+            return SH_ShieldSeqUp(wep);
+        }
+        // shield_idle carries no looping flag — measured, and not one sequence
+        // in any of the nine models does — so under a monotonic clock the
+        // engine runs it once and freezes on the last frame.  Wrap it by hand
+        // rather than let the held pose die two seconds after it is raised.
+        idle_dur = SH_ShieldIdleDuration(wep);
+        t = phase - up;
+        if (idle_dur > 0)
+            t = t - floor(t / idle_dur) * idle_dur;
+        csqc_viewmodel_sequence_time_override = TRUE;
+        csqc_viewmodel_sequence_time = t;
+        return SH_ShieldSeqIdle(wep);
+    }
+
+    // Lowering.  Hold shield_down for its own length before handing the model
+    // back to the weapon, or the slab snaps out of shot with no transition.
+    // The phase_start guard keeps a freshly picked-up shield (never raised, so
+    // the stamp is still 0) out of this branch.
+    down = SH_ShieldDownDuration(wep);
+    if (csqc_shield_phase_start > 0 && phase < down)
+    {
+        csqc_viewmodel_sequence_time_override = TRUE;
+        csqc_viewmodel_sequence_time = phase;
+        return SH_ShieldSeqDown(wep);
+    }
+
+    // Carried but down — the weapon drives, through the shield model's table.
+    // Pistols are the only shield-legal weapons with a magazine and they are
+    // all SLOT_SECONDARY, so slot_secondary_mag is the shot-accurate count
+    // without re-entering the slot-ammo cache from the render path.
+    return SH_ShieldWeaponSeq(wep, predicted_player.weaponstate,
+                              predicted_player.slot_secondary_mag,
+                              predicted_player.wep_action_id);
+};
+
+// TRUE when the shield model is the one actually on screen.  Not the same test
+// as .has_shield: a weapon with no combined model cannot be carried with a
+// shield at all (rule 2), but W_CheckImpulses drops the shield a frame LATER
+// than an admin `give` hands over an AK47, and for that one frame the model
+// lookup must lose rather than draw an AK47's indices against a shield table.
+float() CSQC_ShieldViewmodelActive =
+{
+    if (!predicted_player || !predicted_player.has_shield)
+        return FALSE;
+    return SH_ShieldViewModel(predicted_player.weapon) != "";
 };
 
 // ============================================================
@@ -1609,10 +2017,15 @@ float() CSQC_GetWeaponDisplayFrame =
     csqc_viewmodel_sequence_time_override = FALSE;
     csqc_viewmodel_sequence_time = elapsed;
 
-    if (predicted_player.csqc_display_frame)
-        return predicted_player.csqc_display_frame(elapsed);
+    // Must come after the override reset above, and before the per-weapon
+    // dispatch — the shield REPLACES that dispatch, it does not post-process it.
+    if (CSQC_ShieldViewmodelActive())
+        return CSQC_ShieldDisplayFrame();
 
-    return 0;
+    if (!predicted_player.csqc_display_frame)
+        return 0;
+
+    return predicted_player.csqc_display_frame(elapsed);
 };
 
 // ============================================================
@@ -1651,6 +2064,22 @@ void() CSQC_AddPredictedViewmodel =
         return;
 
     mdl = predicted_player.weapon_viewmodel;
+
+    // Tactical shield: Counter-Strike does not draw the shield beside the gun,
+    // it ships a COMBINED view model per pistol (cstrike/models/shield/
+    // v_shield_usp.mdl and its eight siblings), so this is a whole-model
+    // substitution rather than a second entity.
+    //
+    // ONE model for both states.  This used to swap again to v_shield_r.mdl on
+    // deploy, on the assumption that the file is the shield by itself.  It is
+    // not — it is the shield with a full FN Five-Seven in it, which is what
+    // "my gun turns into a five-seven when I press +attack2" was.  The raise
+    // lives inside the combined model as shield_up / shield_idle /
+    // shield_down; CSQC_ShieldDisplayFrame plays them.
+    float shield_vm = CSQC_ShieldViewmodelActive();
+    if (shield_vm)
+        mdl = SH_ShieldViewModel(predicted_player.weapon);
+
     if (mdl == "")
         return;
 
@@ -1668,7 +2097,12 @@ void() CSQC_AddPredictedViewmodel =
     csqc_viewmodel_ent.solid = SOLID_NOT;
     setsize(csqc_viewmodel_ent, '0 0 0', '0 0 0');
 
-    if (predicted_player.weapon_uses_sequences)
+    // `|| shield_vm` is load-bearing, not belt-and-braces.  All nine combined
+    // models are stock GoldSrc IDST and MUST take the sequence branch, but the
+    // weapon whose flag this normally is need not be: the Deagle's own view
+    // model is a flat IDPO frame bake and leaves weapon_uses_sequences unset,
+    // so a shield + Deagle took the frame-stepping branch and froze on frame 0.
+    if (predicted_player.weapon_uses_sequences || shield_vm)
     {
         // GoldSrc-format viewmodel: .frame is a sequence index, the engine
         // animates within the sequence based on .frame1time. We pass the
@@ -1689,7 +2123,26 @@ void() CSQC_AddPredictedViewmodel =
             elapsed = cltime;
         csqc_viewmodel_ent.frame    = seq;
         csqc_viewmodel_ent.frame1time = elapsed;
-        csqc_viewmodel_ent.frame2   = 0;
+        // .frame2 = seq, NOT 0.  On an HL model this engine reads .frame2 as the
+        // PREVIOUS SEQUENCE INDEX and cross-fades out of it over
+        // r_hlmdl_seqblend_time (0.12 s, gl_hlmdl.c) whenever oldseq != newseq.
+        // Writing a literal 0 told it "the previous sequence was index 0" for
+        // every weapon in the mod, and .frame2time is never written anywhere in
+        // the client, so the old pose was sampled at frame 0 of sequence 0.
+        //
+        // Setting .lerpfrac = 0 on the next line does NOT suppress it — that path
+        // never reads lerpweight at all; the blend has its own clock and its own
+        // trigger.  Making the two indices equal is what short-circuits it
+        // (gl_hlmdl.c's oldseq != newseq test), the same trick cl_muzzleflash.qc
+        // already uses.
+        //
+        // It bit the Sven M16 hardest because v_m16a2.mdl is one of only two
+        // viewmodels on the mount whose sequence 0 is `draw` rather than an idle:
+        // every shot cross-faded out of the draw pose, a 93.8-degree bone delta,
+        // which is the "very wrong firing animation".  Weapons whose sequence 0
+        // IS their idle were blending from something close to rest and mostly got
+        // away with it.
+        csqc_viewmodel_ent.frame2   = seq;
         csqc_viewmodel_ent.lerpfrac = 0;
     }
     else
@@ -1707,6 +2160,13 @@ void() CSQC_AddPredictedViewmodel =
     // cl_lefthand 1 then flips it back to left-handed (and vice versa
     // for right-handed source meshes).
     float vm_flip = predicted_player.weapon_viewmodel_flip;
+    // The nine shield models are stock right-handed Counter-Strike assets, so
+    // the per-weapon default belongs to the model that is NOT on screen.  It
+    // matters for the three grenades, which set the flag TRUE for their own
+    // left-handed meshes — mirroring a shield model would put the slab on the
+    // wrong arm and read as a different bug entirely.
+    if (shield_vm)
+        vm_flip = FALSE;
     if (cvar("cl_lefthand"))
         vm_flip = !vm_flip;
     // RF_NOSHADOW: the first-person viewmodel must never cast into the fake-shadow
@@ -1725,7 +2185,13 @@ void() CSQC_AddPredictedViewmodel =
     if (cvar("cl_viewmodel_nolight"))
         csqc_viewmodel_ent.effects |= EF_FULLBRIGHT;
     else
-        csqc_viewmodel_ent.effects &~= EF_FULLBRIGHT;
+        // NOT `&~=` — fteqcc64 miscompiles it into a plain assignment of the
+        // right-hand operand, so this line used to SET EF_FULLBRIGHT in the very
+        // branch that exists to clear it: once cl_viewmodel_nolight had been on,
+        // turning it off left the viewmodel permanently fullbright.  Same trap,
+        // same silence, as the shield button mask in CSQC_PredictWeaponCommand.
+        csqc_viewmodel_ent.effects = csqc_viewmodel_ent.effects
+                                   - (csqc_viewmodel_ent.effects & EF_FULLBRIGHT);
     // Bob / weight / sway offsets — engine treats .origin/.angles on an
     // RF_VIEWMODEL entity as camera-relative (R_RotateForEntity multiplies
     // by weaponmatrix), so writes here only affect screen position, not
@@ -1805,6 +2271,12 @@ void(float wepid, float wstate, float wep_action, float anim_start) CSQC_AddRemo
     {
         csqc_remotevm_ent.frame      = disp;
         csqc_remotevm_ent.frame1time = elapsed;
+        // Same HL sequence cross-fade as the first-person path above — and here
+        // .frame2 was not written at all, so it carried whatever the entity was
+        // last left holding.  Pinning it to the current sequence short-circuits
+        // the blend rather than leaving it to chance.
+        csqc_remotevm_ent.frame2     = disp;
+        csqc_remotevm_ent.lerpfrac   = 0;
     }
     else
     {
@@ -1851,18 +2323,75 @@ void(float weapon_id) CSQC_PrimeMuzzleSmokeOffsets =
     else if (weapon_id == WEP_FLAKSHOTGUN)  CSQC_MuzzleSmokeSetOffsets(FLAKSHOTGUN_MUZZLE_FORWARD, FLAKSHOTGUN_MUZZLE_RIGHT, FLAKSHOTGUN_MUZZLE_DOWN);
     else if (weapon_id == WEP_PISTOL)       CSQC_MuzzleSmokeSetOffsets(PISTOL_MUZZLE_FORWARD, PISTOL_MUZZLE_RIGHT, PISTOL_MUZZLE_DOWN);
     else if (weapon_id == WEP_357)          CSQC_MuzzleSmokeSetOffsets(W357_MUZZLE_FORWARD, W357_MUZZLE_RIGHT, W357_MUZZLE_DOWN);
+    else if (weapon_id == WEP_UZI)          CSQC_MuzzleSmokeSetOffsets(UZI_MUZZLE_FORWARD, UZI_MUZZLE_RIGHT, UZI_MUZZLE_DOWN);
+    else if (weapon_id == WEP_UZIAKIMBO)    CSQC_MuzzleSmokeSetOffsets(UZIAK_MUZZLE_FORWARD, UZIAK_MUZZLE_RIGHT, UZIAK_MUZZLE_DOWN);
+    else if (weapon_id == WEP_MINIGUN)      CSQC_MuzzleSmokeSetOffsets(MINIGUN_MUZZLE_FORWARD, MINIGUN_MUZZLE_RIGHT, MINIGUN_MUZZLE_DOWN);
+    else if (weapon_id == WEP_SVM16)        CSQC_MuzzleSmokeSetOffsets(SVM16_MUZZLE_FORWARD, SVM16_MUZZLE_RIGHT, SVM16_MUZZLE_DOWN);
+    else if (weapon_id == WEP_SNIPERRIFLE)  CSQC_MuzzleSmokeSetOffsets(SNIPER_MUZZLE_FORWARD, SNIPER_MUZZLE_RIGHT, SNIPER_MUZZLE_DOWN);
+    else if (weapon_id == WEP_EAGLE)        CSQC_MuzzleSmokeSetOffsets(EAGLE_MUZZLE_FORWARD, EAGLE_MUZZLE_RIGHT, EAGLE_MUZZLE_DOWN);
+    else if (weapon_id == WEP_ASSHOTGUN)    CSQC_MuzzleSmokeSetOffsets(ASSG_MUZZLE_FORWARD, ASSG_MUZZLE_RIGHT, ASSG_MUZZLE_DOWN);
     else if (weapon_id == WEP_DOD98K)       CSQC_MuzzleSmokeSetOffsets(K98_MUZZLE_FORWARD, K98_MUZZLE_RIGHT, K98_MUZZLE_DOWN);
+    else if (weapon_id == WEP_DODCOLT)      CSQC_MuzzleSmokeSetOffsets(DODCOLT_MUZZLE_FORWARD, DODCOLT_MUZZLE_RIGHT, DODCOLT_MUZZLE_DOWN);
+    else if (weapon_id == WEP_DODLUGER)     CSQC_MuzzleSmokeSetOffsets(DODLUGER_MUZZLE_FORWARD, DODLUGER_MUZZLE_RIGHT, DODLUGER_MUZZLE_DOWN);
+    else if (weapon_id == WEP_DODWEBLEY)    CSQC_MuzzleSmokeSetOffsets(DODWEBLEY_MUZZLE_FORWARD, DODWEBLEY_MUZZLE_RIGHT, DODWEBLEY_MUZZLE_DOWN);
+    else if (weapon_id == WEP_DODGARAND)    CSQC_MuzzleSmokeSetOffsets(DODGARAND_MUZZLE_FORWARD, DODGARAND_MUZZLE_RIGHT, DODGARAND_MUZZLE_DOWN);
+    else if (weapon_id == WEP_DODCARBINE)   CSQC_MuzzleSmokeSetOffsets(DODCARBINE_MUZZLE_FORWARD, DODCARBINE_MUZZLE_RIGHT, DODCARBINE_MUZZLE_DOWN);
+    else if (weapon_id == WEP_DODK43)       CSQC_MuzzleSmokeSetOffsets(DODK43_MUZZLE_FORWARD, DODK43_MUZZLE_RIGHT, DODK43_MUZZLE_DOWN);
+    else if (weapon_id == WEP_DODTOMMY)     CSQC_MuzzleSmokeSetOffsets(DODTOMMY_MUZZLE_FORWARD, DODTOMMY_MUZZLE_RIGHT, DODTOMMY_MUZZLE_DOWN);
+    else if (weapon_id == WEP_DODMP40)      CSQC_MuzzleSmokeSetOffsets(DODMP40_MUZZLE_FORWARD, DODMP40_MUZZLE_RIGHT, DODMP40_MUZZLE_DOWN);
+    else if (weapon_id == WEP_DODSTEN)      CSQC_MuzzleSmokeSetOffsets(DODSTEN_MUZZLE_FORWARD, DODSTEN_MUZZLE_RIGHT, DODSTEN_MUZZLE_DOWN);
+    else if (weapon_id == WEP_DODGREASE)    CSQC_MuzzleSmokeSetOffsets(DODGREASE_MUZZLE_FORWARD, DODGREASE_MUZZLE_RIGHT, DODGREASE_MUZZLE_DOWN);
+    else if (weapon_id == WEP_DODMP44)      CSQC_MuzzleSmokeSetOffsets(DODMP44_MUZZLE_FORWARD, DODMP44_MUZZLE_RIGHT, DODMP44_MUZZLE_DOWN);
+    else if (weapon_id == WEP_DODBAR)       CSQC_MuzzleSmokeSetOffsets(DODBAR_MUZZLE_FORWARD, DODBAR_MUZZLE_RIGHT, DODBAR_MUZZLE_DOWN);
+    // The Bren and the two FG42s share one triple, like the machine guns above.
+    else if (weapon_id == WEP_DODBREN || weapon_id == WEP_DODFG42 || weapon_id == WEP_DODFG42S)
+        CSQC_MuzzleSmokeSetOffsets(DODAUTO_MUZZLE_FORWARD, DODAUTO_MUZZLE_RIGHT, DODAUTO_MUZZLE_DOWN);
+    else if (weapon_id == WEP_DODFCARB)     CSQC_MuzzleSmokeSetOffsets(DODFCARB_MUZZLE_FORWARD, DODFCARB_MUZZLE_RIGHT, DODFCARB_MUZZLE_DOWN);
+    else if (weapon_id == WEP_DODENFIELD)   CSQC_MuzzleSmokeSetOffsets(DODENF_MUZZLE_FORWARD, DODENF_MUZZLE_RIGHT, DODENF_MUZZLE_DOWN);
+    else if (weapon_id == WEP_DODMORTAR)    CSQC_MuzzleSmokeSetOffsets(DODMORTAR_MUZZLE_FORWARD, DODMORTAR_MUZZLE_RIGHT, DODMORTAR_MUZZLE_DOWN);
+    else if (weapon_id == WEP_DODSCOPED98K) CSQC_MuzzleSmokeSetOffsets(DODS98K_MUZZLE_FORWARD, DODS98K_MUZZLE_RIGHT, DODS98K_MUZZLE_DOWN);
+    else if (weapon_id == WEP_DODSPRING)    CSQC_MuzzleSmokeSetOffsets(DODSPRING_MUZZLE_FORWARD, DODSPRING_MUZZLE_RIGHT, DODSPRING_MUZZLE_DOWN);
+    else if (weapon_id == WEP_DODENFIELDS)  CSQC_MuzzleSmokeSetOffsets(DODENFS_MUZZLE_FORWARD, DODENFS_MUZZLE_RIGHT, DODENFS_MUZZLE_DOWN);
+    // The three machine guns share one offset triple — their muzzles sit within
+    // a couple of units of each other and the smoke is a fat puff, not a line.
+    else if (weapon_id == WEP_DOD30CAL || weapon_id == WEP_DODMG34 || weapon_id == WEP_DODMG42)
+        CSQC_MuzzleSmokeSetOffsets(DODMG_MUZZLE_FORWARD, DODMG_MUZZLE_RIGHT, DODMG_MUZZLE_DOWN);
+    // ...and so do the three launchers, whose "muzzle" is the back of a tube.
+    else if (weapon_id == WEP_DODBAZOOKA || weapon_id == WEP_DODSCHRECK || weapon_id == WEP_DODPIAT)
+        CSQC_MuzzleSmokeSetOffsets(DODAT_MUZZLE_FORWARD, DODAT_MUZZLE_RIGHT, DODAT_MUZZLE_DOWN);
+    // (No melee entry — a knife has no muzzle, and the four DoD melee weapons
+    //  never call the muzzle-smoke chain.)
     else if (weapon_id == WEP_SCOUT)        CSQC_MuzzleSmokeSetOffsets(SCOUT_MUZZLE_FORWARD, SCOUT_MUZZLE_RIGHT, SCOUT_MUZZLE_DOWN);
     else if (weapon_id == WEP_M249)         CSQC_MuzzleSmokeSetOffsets(M249_MUZZLE_FORWARD, M249_MUZZLE_RIGHT, M249_MUZZLE_DOWN);
     else if (weapon_id == WEP_HLSHOTGUN)    CSQC_MuzzleSmokeSetOffsets(HLSG_MUZZLE_FORWARD, HLSG_MUZZLE_RIGHT, HLSG_MUZZLE_DOWN);
     else if (weapon_id == WEP_CSM3)         CSQC_MuzzleSmokeSetOffsets(M3_MUZZLE_FORWARD, M3_MUZZLE_RIGHT, M3_MUZZLE_DOWN);
     else if (weapon_id == WEP_CSMP5)        CSQC_MuzzleSmokeSetOffsets(MP5_MUZZLE_FORWARD, MP5_MUZZLE_RIGHT, MP5_MUZZLE_DOWN);
+    // The thirteen Counter-Strike 1.6 guns.
+    else if (weapon_id == WEP_CSP228)          CSQC_MuzzleSmokeSetOffsets(CSP228_MUZZLE_FORWARD, CSP228_MUZZLE_RIGHT, CSP228_MUZZLE_DOWN);
+    else if (weapon_id == WEP_CSFIVESEVEN)     CSQC_MuzzleSmokeSetOffsets(CSFIVESEVEN_MUZZLE_FORWARD, CSFIVESEVEN_MUZZLE_RIGHT, CSFIVESEVEN_MUZZLE_DOWN);
+    else if (weapon_id == WEP_CSELITE)         CSQC_MuzzleSmokeSetOffsets(CSELITE_MUZZLE_FORWARD, CSELITE_MUZZLE_RIGHT, CSELITE_MUZZLE_DOWN);
+    else if (weapon_id == WEP_CSTMP)           CSQC_MuzzleSmokeSetOffsets(CSTMP_MUZZLE_FORWARD, CSTMP_MUZZLE_RIGHT, CSTMP_MUZZLE_DOWN);
+    else if (weapon_id == WEP_CSMAC10)         CSQC_MuzzleSmokeSetOffsets(CSMAC10_MUZZLE_FORWARD, CSMAC10_MUZZLE_RIGHT, CSMAC10_MUZZLE_DOWN);
+    else if (weapon_id == WEP_CSUMP45)         CSQC_MuzzleSmokeSetOffsets(CSUMP45_MUZZLE_FORWARD, CSUMP45_MUZZLE_RIGHT, CSUMP45_MUZZLE_DOWN);
+    else if (weapon_id == WEP_CSP90)           CSQC_MuzzleSmokeSetOffsets(CSP90_MUZZLE_FORWARD, CSP90_MUZZLE_RIGHT, CSP90_MUZZLE_DOWN);
+    else if (weapon_id == WEP_CSGALIL)         CSQC_MuzzleSmokeSetOffsets(CSGALIL_MUZZLE_FORWARD, CSGALIL_MUZZLE_RIGHT, CSGALIL_MUZZLE_DOWN);
+    else if (weapon_id == WEP_CSFAMAS)         CSQC_MuzzleSmokeSetOffsets(CSFAMAS_MUZZLE_FORWARD, CSFAMAS_MUZZLE_RIGHT, CSFAMAS_MUZZLE_DOWN);
+    else if (weapon_id == WEP_CSAUG)           CSQC_MuzzleSmokeSetOffsets(CSAUG_MUZZLE_FORWARD, CSAUG_MUZZLE_RIGHT, CSAUG_MUZZLE_DOWN);
+    else if (weapon_id == WEP_CSSG552)         CSQC_MuzzleSmokeSetOffsets(CSSG552_MUZZLE_FORWARD, CSSG552_MUZZLE_RIGHT, CSSG552_MUZZLE_DOWN);
+    else if (weapon_id == WEP_CSSG550)         CSQC_MuzzleSmokeSetOffsets(CSSG550_MUZZLE_FORWARD, CSSG550_MUZZLE_RIGHT, CSSG550_MUZZLE_DOWN);
+    else if (weapon_id == WEP_CSXM1014)        CSQC_MuzzleSmokeSetOffsets(CSXM1014_MUZZLE_FORWARD, CSXM1014_MUZZLE_RIGHT, CSXM1014_MUZZLE_DOWN);
     else if (weapon_id == WEP_CSAWP)        CSQC_MuzzleSmokeSetOffsets(AWP_MUZZLE_FORWARD, AWP_MUZZLE_RIGHT, AWP_MUZZLE_DOWN);
     else if (weapon_id == WEP_DEAGLE)       CSQC_MuzzleSmokeSetOffsets(DEAGLE_MUZZLE_FORWARD, DEAGLE_MUZZLE_RIGHT, DEAGLE_MUZZLE_DOWN);
     else if (weapon_id == WEP_GLOCK)        CSQC_MuzzleSmokeSetOffsets(GLOCK_MUZZLE_FORWARD, GLOCK_MUZZLE_RIGHT, GLOCK_MUZZLE_DOWN);
     else if (weapon_id == WEP_G3SG1)        CSQC_MuzzleSmokeSetOffsets(G3SG1_MUZZLE_FORWARD, G3SG1_MUZZLE_RIGHT, G3SG1_MUZZLE_DOWN);
     else if (weapon_id == WEP_HLSMG)        CSQC_MuzzleSmokeSetOffsets(HLSMG_MUZZLE_FORWARD, HLSMG_MUZZLE_RIGHT, HLSMG_MUZZLE_DOWN);
     else if (weapon_id == WEP_HLGLOCK)      CSQC_MuzzleSmokeSetOffsets(HLGLOCK_MUZZLE_FORWARD, HLGLOCK_MUZZLE_RIGHT, HLGLOCK_MUZZLE_DOWN);
+    else if (weapon_id == WEP_TH1911)       CSQC_MuzzleSmokeSetOffsets(TH1911_MUZZLE_FORWARD, TH1911_MUZZLE_RIGHT, TH1911_MUZZLE_DOWN);
+    else if (weapon_id == WEP_THTOMMY)      CSQC_MuzzleSmokeSetOffsets(THTOMMY_MUZZLE_FORWARD, THTOMMY_MUZZLE_RIGHT, THTOMMY_MUZZLE_DOWN);
+    else if (weapon_id == WEP_THGREASE)     CSQC_MuzzleSmokeSetOffsets(THGREASE_MUZZLE_FORWARD, THGREASE_MUZZLE_RIGHT, THGREASE_MUZZLE_DOWN);
+    else if (weapon_id == WEP_THM14)        CSQC_MuzzleSmokeSetOffsets(THM14_MUZZLE_FORWARD, THM14_MUZZLE_RIGHT, THM14_MUZZLE_DOWN);
+    else if (weapon_id == WEP_THM16)        CSQC_MuzzleSmokeSetOffsets(THM16_MUZZLE_FORWARD, THM16_MUZZLE_RIGHT, THM16_MUZZLE_DOWN);
+    else if (weapon_id == WEP_THSAWOFF)     CSQC_MuzzleSmokeSetOffsets(THSAWOFF_MUZZLE_FORWARD, THSAWOFF_MUZZLE_RIGHT, THSAWOFF_MUZZLE_DOWN);
     else if (weapon_id == WEP_PAINTBALL)    CSQC_MuzzleSmokeSetOffsets(PAINTBALL_PROJ_MUZZLE_FORWARD, PAINTBALL_PROJ_MUZZLE_RIGHT, PAINTBALL_PROJ_MUZZLE_DOWN);
     else if (weapon_id == WEP_CFAUG)        CSQC_MuzzleSmokeSetOffsets(CFAUG_MUZZLE_FORWARD, CFAUG_MUZZLE_RIGHT, CFAUG_MUZZLE_DOWN);
     // Bone-attached weapons resolve the muzzle via $attachment each shot;
@@ -1908,6 +2437,12 @@ void(float weapon_id) CSQC_WeaponEquip =
     self.weapon_ads_prefix   = "";
     self.weapon_scope_class  = SCOPE_CLASS_NONE;
     self.weapon_muzzle_bone  = "";
+    // Emplaced-stance eligibility, cleared the same way.  NOT wep_deployed: this
+    // function re-runs on every snapshot reconcile, so zeroing the stance itself
+    // here would unplant a deployed weapon 20 times a second.  The stance comes
+    // off the prediction proxy; only the eligibility flag is rebuilt per equip.
+    self.weapon_deployable   = 0;
+    self.weapon_deploy_crouched = 0;
 
     if (weapon_id == WEP_DEAGLE)            CSQC_DeagleEquip();
     else if (weapon_id == WEP_KNIFE)        CSQC_KnifeEquip();
@@ -1920,6 +2455,38 @@ void(float weapon_id) CSQC_WeaponEquip =
     else if (weapon_id == WEP_CROSSBOW)     CSQC_CrossbowEquip();
     else if (weapon_id == WEP_357)          CSQC_357Equip();
     else if (weapon_id == WEP_DOD98K)       CSQC_98KEquip();
+    else if (weapon_id == WEP_DODCOLT)      CSQC_DodColtEquip();
+    else if (weapon_id == WEP_DODLUGER)     CSQC_DodLugerEquip();
+    else if (weapon_id == WEP_DODWEBLEY)    CSQC_DodWebleyEquip();
+    else if (weapon_id == WEP_DODGARAND)    CSQC_DodGarandEquip();
+    else if (weapon_id == WEP_DODCARBINE)   CSQC_DodCarbineEquip();
+    else if (weapon_id == WEP_DODK43)       CSQC_DodK43Equip();
+    else if (weapon_id == WEP_DODTOMMY)     CSQC_DodTommyEquip();
+    else if (weapon_id == WEP_DODMP40)      CSQC_DodMP40Equip();
+    else if (weapon_id == WEP_DODSTEN)      CSQC_DodStenEquip();
+    else if (weapon_id == WEP_DODGREASE)    CSQC_DodGreaseEquip();
+    else if (weapon_id == WEP_DODMP44)      CSQC_DodMP44Equip();
+    else if (weapon_id == WEP_DODBAR)       CSQC_DodBarEquip();
+    else if (weapon_id == WEP_DODBREN)      CSQC_DodBrenEquip();
+    else if (weapon_id == WEP_DODFG42)      CSQC_DodFG42Equip();
+    else if (weapon_id == WEP_DODFG42S)     CSQC_DodFG42SEquip();
+    else if (weapon_id == WEP_DODFCARB)     CSQC_DodFCarbEquip();
+    else if (weapon_id == WEP_DODENFIELD)   CSQC_DodEnfEquip();
+    else if (weapon_id == WEP_DODMORTAR)    CSQC_DodMortarEquip();
+    else if (weapon_id == WEP_DODBINOCS)    CSQC_DodBinocsEquip();
+    else if (weapon_id == WEP_DODSCOPED98K) CSQC_DodS98KEquip();
+    else if (weapon_id == WEP_DODSPRING)    CSQC_DodSpringEquip();
+    else if (weapon_id == WEP_DODENFIELDS)  CSQC_DodEnfSEquip();
+    else if (weapon_id == WEP_DOD30CAL)     CSQC_Dod30CalEquip();
+    else if (weapon_id == WEP_DODMG34)      CSQC_DodMG34Equip();
+    else if (weapon_id == WEP_DODMG42)      CSQC_DodMG42Equip();
+    else if (weapon_id == WEP_DODBAZOOKA)   CSQC_DodBazookaEquip();
+    else if (weapon_id == WEP_DODSCHRECK)   CSQC_DodSchreckEquip();
+    else if (weapon_id == WEP_DODPIAT)      CSQC_DodPiatEquip();
+    else if (weapon_id == WEP_DODAMERK)     CSQC_DodAmerkEquip();
+    else if (weapon_id == WEP_DODFAIRBAIRN) CSQC_DodFairbairnEquip();
+    else if (weapon_id == WEP_DODPARAKNIFE) CSQC_DodParaknifeEquip();
+    else if (weapon_id == WEP_DODSPADE)     CSQC_DodSpadeEquip();
     else if (weapon_id == WEP_SCOUT)        CSQC_ScoutEquip();
     else if (weapon_id == WEP_GRENADELAUNCHER) CSQC_GLEquip();
     else if (weapon_id == WEP_M249)         CSQC_M249Equip();
@@ -1927,6 +2494,20 @@ void(float weapon_id) CSQC_WeaponEquip =
     else if (weapon_id == WEP_HLSHOTGUN)    CSQC_ShotgunEquip();
     else if (weapon_id == WEP_CSM3)         CSQC_M3Equip();
     else if (weapon_id == WEP_CSMP5)        CSQC_MP5Equip();
+    // The thirteen Counter-Strike 1.6 guns.
+    else if (weapon_id == WEP_CSP228)          CSQC_CSP228Equip();
+    else if (weapon_id == WEP_CSFIVESEVEN)     CSQC_CSFiveSevenEquip();
+    else if (weapon_id == WEP_CSELITE)         CSQC_CSEliteEquip();
+    else if (weapon_id == WEP_CSTMP)           CSQC_CSTmpEquip();
+    else if (weapon_id == WEP_CSMAC10)         CSQC_CSMac10Equip();
+    else if (weapon_id == WEP_CSUMP45)         CSQC_CSUmp45Equip();
+    else if (weapon_id == WEP_CSP90)           CSQC_CSP90Equip();
+    else if (weapon_id == WEP_CSGALIL)         CSQC_CSGalilEquip();
+    else if (weapon_id == WEP_CSFAMAS)         CSQC_CSFamasEquip();
+    else if (weapon_id == WEP_CSAUG)           CSQC_CSAugEquip();
+    else if (weapon_id == WEP_CSSG552)         CSQC_CSSg552Equip();
+    else if (weapon_id == WEP_CSSG550)         CSQC_CSSg550Equip();
+    else if (weapon_id == WEP_CSXM1014)        CSQC_CSXM1014Equip();
     else if (weapon_id == WEP_REBAR)        CSQC_RebarEquip();
     else if (weapon_id == WEP_CSAWP)        CSQC_AWPEquip();
     else if (weapon_id == WEP_WRENCH)       CSQC_WrenchEquip();
@@ -1939,8 +2520,43 @@ void(float weapon_id) CSQC_WeaponEquip =
     else if (weapon_id == WEP_TRIPMINE)     CSQC_TripmineEquip();
     else if (weapon_id == WEP_SNARK)        CSQC_SnarkEquip();
     else if (weapon_id == WEP_HORNETGUN)    CSQC_HGunEquip();
+    else if (weapon_id == WEP_SHOCKRIFLE)   CSQC_ShockEquip();
+    else if (weapon_id == WEP_TH1911)       CSQC_TH1911Equip();
+    else if (weapon_id == WEP_THTOMMY)      CSQC_THTommyEquip();
+    else if (weapon_id == WEP_THGREASE)     CSQC_THGreaseEquip();
+    else if (weapon_id == WEP_THM14)        CSQC_THM14Equip();
+    else if (weapon_id == WEP_THM16)        CSQC_THM16Equip();
+    else if (weapon_id == WEP_THSAWOFF)     CSQC_THSawoffEquip();
+    else if (weapon_id == WEP_THSPANNER)    CSQC_THSpannerEquip();
+    else if (weapon_id == WEP_THTESLA)      CSQC_THTeslaEquip();
+    // Sven Co-op and Opposing Force.  A missing branch here leaves
+    // .weapon_viewmodel unset, and CSQC_AddPredictedViewmodel returns early on
+    // an empty string - so the weapon works and is simply invisible in your
+    // hands, which is a hard symptom to trace back to one absent line.
+    else if (weapon_id == WEP_MEDKIT)       CSQC_MedkitEquip();
+    else if (weapon_id == WEP_UZI)          CSQC_UziEquip();
+    else if (weapon_id == WEP_UZIAKIMBO)    CSQC_UziAkimboEquip();
+    else if (weapon_id == WEP_MINIGUN)      CSQC_MinigunEquip();
+    else if (weapon_id == WEP_SVM16)        CSQC_SVM16Equip();
+    else if (weapon_id == WEP_PIPEWRENCH)   CSQC_PWrenchEquip();
+    else if (weapon_id == WEP_SNIPERRIFLE)  CSQC_SniperEquip();
+    else if (weapon_id == WEP_SPORELAUNCHER) CSQC_SporeEquip();
+    else if (weapon_id == WEP_EAGLE)        CSQC_EagleEquip();
+    else if (weapon_id == WEP_ASSHOTGUN)    CSQC_ASShotgunEquip();
+    else if (weapon_id == WEP_ASSOFLAM)     CSQC_SoflamEquip();
+    // The last three Opposing Force weapons.  A missing row here is the symptom
+    // the comment above describes: the gun equips server-side and the client is
+    // left holding the previous weapon's viewmodel and prediction.
+    else if (weapon_id == WEP_OPKNIFE)      CSQC_OpKnifeEquip();
+    else if (weapon_id == WEP_OPSAW)        CSQC_SawEquip();
+    else if (weapon_id == WEP_PENGUIN)      CSQC_PenguinEquip();
+    else if (weapon_id == WEP_DISPLACER)    CSQC_DispEquip();
+    else if (weapon_id == WEP_JETPACK)      CSQC_JetEquip();
+    else if (weapon_id == WEP_BGRAPPLE)     CSQC_BGrapEquip();
     else if (weapon_id == WEP_SNOWBALL)     CSQC_SnowballEquip();
     else if (weapon_id == WEP_CSHEGRENADE)  CSQC_CSHEGrenadeEquip();
+    else if (weapon_id == WEP_DODMILLS)     CSQC_DodMillsEquip();
+    else if (weapon_id == WEP_DODSTICK)     CSQC_DodStickEquip();
     else if (weapon_id == WEP_CSFLASHBANG)  CSQC_CSFlashbangEquip();
     else if (weapon_id == WEP_CSSMOKEGRENADE) CSQC_CSSmokeGrenadeEquip();
     else if (weapon_id == WEP_PAINTBALL)    CSQC_PaintballEquip();

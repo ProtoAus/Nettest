@@ -123,6 +123,26 @@ float  csqc_present_valid;
 // us.  CSQC_Input_Frame folds it into input_angles_y once and zeroes it,
 // so the local view follows the door without disturbing pitch/roll.
 float csqc_door_yaw_offset;
+// func_tracktrain throttle readout state (TRAIN_HUD_*, sh_weapons.qc).  Set by
+// CSQC_EVENT_TRAIN_HUD, which the server unicasts to the driver on change.
+// TRAIN_HUD_OFF (0) is both the initial value and the "stopped driving" signal,
+// so the widget is hidden by default and hides itself again on dismount.
+float csqc_train_hud_state;
+
+// Sven item_inventory readout.  Filled by CSQC_EVENT_INVENTORY (cl_main.qc),
+// drawn by HUD_DrawInventory (cl_hud.qc).  The strings are strzone'd on
+// receipt and freed on the next update — they must outlive the parse, which a
+// readstring temp does not.
+//
+// Must stay equal to INV_HUD_MAX in server/sv_item_inventory.qc: the sender
+// caps its run at that number and the reader stores at most this many.  The
+// reader drains whatever it is sent regardless, so a mismatch would drop icons
+// rather than corrupt the stream.
+const float CSQC_INV_MAX = 8;
+float  csqc_inv_count;                  // items described by the last update
+float  csqc_inv_extra;                  // held but not described (over the cap)
+string csqc_inv_icon[CSQC_INV_MAX];
+string csqc_inv_label[CSQC_INV_MAX];
 
 // Shared CSQC weapon-prediction bookkeeping.
 float csqc_pred_sequence;

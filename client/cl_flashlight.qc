@@ -67,6 +67,32 @@ const float  FLASHLIGHT_FORWARD_OFFSET = 8;
 float csqc_flashlight_on;
 float csqc_flashlight_realtime_forced;   // one-shot: forced rt-dlight on first use
 
+// TELLING THE SERVER, which until now knew nothing about the torch at all.
+//
+// The flashlight is pure CSQC — the server has no field for it and never had a
+// reason to.  It has one now: Half-Life's cockroach bolts when the light on it
+// changes (CRoach::MonsterThink samples GETENTITYILLUM), and the light that
+// actually falls on a roach in a They Hunger cellar is the player's torch.  A
+// server-side reaction needs a server-side fact.
+//
+// One `cmd` on the EDGE, and edge-only is safe here: `cmd` rides the client's
+// RELIABLE stringcmd channel, so unlike a per-frame push there is nothing to
+// re-assert against loss.  A torch is toggled a handful of times a map, so the
+// whole feature costs a handful of short reliable messages.
+//
+// Latched to +1/+2 rather than 0/1 so the "never told" state is distinguishable
+// from "told OFF" and the first press after connecting always sends.
+float csqc_flashlight_told;
+
+void() CSQC_Flashlight_Tell =
+{
+    float want = csqc_flashlight_on ? 2 : 1;
+    if (csqc_flashlight_told == want)
+        return;
+    csqc_flashlight_told = want;
+    localcmd(sprintf("cmd fl %g\n", csqc_flashlight_on ? 1 : 0));
+};
+
 void() CSQC_Flashlight_Precache =
 {
     precache_sound(FLASHLIGHT_TOGGLE_SOUND);
@@ -91,9 +117,40 @@ void() CSQC_Flashlight_Precache =
 // pm_suppress_sounds so prediction-replay doesn't spam clicks
 // when a single keypress's command is replayed across the
 // reconcile window.
+// mp_flashlight, Sven's server-side permission for the flashlight
+// (default_map_settings.cfg:138).  READ FROM SERVERINFO, NOT FROM A
+// LOCAL CVAR: the light is drawn entirely here in CSQC, so a local
+// cvar() lookup would let any client hand itself a torch on a server
+// that has taken it away.  sv_main.qc publishes it on change; the
+// same route mp_noblock takes for the same reason.
+//
+// serverkeyfloat returns 0 for a key that was never published, which
+// would read as "banned", so an unset key is treated as ALLOWED —
+// only an explicit "0" switches it off.  That also keeps demos and
+// older servers working.
+float() CSQC_Flashlight_Allowed =
+{
+    string v = serverkey("mp_flashlight");
+    if (v == "" || !v)
+        return TRUE;
+    return (stof(v) != 0);
+};
+
 void() CSQC_Flashlight_Toggle =
 {
+    // Refuse the toggle rather than blanking it in the renderer, so
+    // the player gets no click and no light and learns immediately
+    // that the map has taken it off them.  hl_c17 and hl_c18 both
+    // fire trigger_setcvar to do exactly this.
+    if (!CSQC_Flashlight_Allowed())
+    {
+        csqc_flashlight_on = 0;
+        CSQC_Flashlight_Tell();
+        return;
+    }
+
     csqc_flashlight_on = !csqc_flashlight_on;
+    CSQC_Flashlight_Tell();
 
     if (!pm_suppress_sounds)
         localsound(FLASHLIGHT_TOGGLE_SOUND);
@@ -120,6 +177,17 @@ void() CSQC_Flashlight_Render =
 {
     if (!csqc_flashlight_on)
         return;
+    // Revoked mid-map — hl_c17 and hl_c18 both switch mp_flashlight off
+    // from a trigger_setcvar while the player may already have the light
+    // on, so the permission has to be re-checked per frame and not only
+    // at the toggle.  Latch it off so turning it back on later needs a
+    // fresh press.
+    if (!CSQC_Flashlight_Allowed())
+    {
+        csqc_flashlight_on = 0;
+        CSQC_Flashlight_Tell();
+        return;
+    }
     // Sven's "hud_flashlight" on a trigger_camera.  Also covers the general
     // case: the beam is cast from VF_ORIGIN, which during a cutscene is the
     // camera, so leaving it on would light whatever the cutscene is filming

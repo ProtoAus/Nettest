@@ -138,6 +138,15 @@ float(float now, float charge_start) SH_SnowballChargeMultiplier =
     return 1 + bound(0, hold_time / SNOWBALL_CHARGE_TIME, 1) * SNOWBALL_CHARGE_BONUS;
 };
 
+// These tables are the utility slot's registry, and a weapon missing from them
+// can be GIVEN but never reached: W_GiveWeaponToSlot deliberately returns before
+// W_SelectWeapon for utility items (sv_player.qc), so selection is the only route
+// in, and sv_weapons.qc's select gate is
+//     W_UtilityWeaponSelectable(w) && W_UtilityPlayerHasWeapon(w)
+// The medkit and SOFLAM were added later and were in NEITHER, so `give medkit`
+// reported success and left you holding nothing — direct select, mousewheel and
+// impulse-4 all refused, the equip binding was never installed, and walking over
+// a spawned pickup was silently ignored.
 float(float wep) W_UtilityWeaponSelectable =
 {
     return (wep == WEP_HLGRENADE
@@ -148,6 +157,18 @@ float(float wep) W_UtilityWeaponSelectable =
         || wep == WEP_SATCHEL
         || wep == WEP_TRIPMINE
         || wep == WEP_SNARK
+        || wep == WEP_PENGUIN
+        || wep == WEP_MEDKIT
+        || wep == WEP_ASSOFLAM
+        // Day of Defeat's two hand grenades.  Present in BOTH tables and in the
+        // ring below in the same change — the note at the top of this block is
+        // there because the medkit and the SOFLAM once made it into neither.
+        || wep == WEP_DODMILLS
+        || wep == WEP_DODSTICK
+        // DoD's binoculars.  A TOOL, like the medkit and the SOFLAM: ownership
+        // is slot-based rather than ammo-based, so it appears in both tables and
+        // in the ring, and in W_UtilityEntityOwns beside those two.
+        || wep == WEP_DODBINOCS
         || wep == WEP_CFC4);
 };
 
@@ -162,6 +183,18 @@ float(float wep) W_UtilityWeaponPickup =
         || wep == WEP_SATCHEL
         || wep == WEP_TRIPMINE
         || wep == WEP_SNARK
+        || wep == WEP_PENGUIN
+        || wep == WEP_MEDKIT
+        || wep == WEP_ASSOFLAM
+        // Day of Defeat's two hand grenades.  Present in BOTH tables and in the
+        // ring below in the same change — the note at the top of this block is
+        // there because the medkit and the SOFLAM once made it into neither.
+        || wep == WEP_DODMILLS
+        || wep == WEP_DODSTICK
+        // DoD's binoculars.  A TOOL, like the medkit and the SOFLAM: ownership
+        // is slot-based rather than ammo-based, so it appears in both tables and
+        // in the ring, and in W_UtilityEntityOwns beside those two.
+        || wep == WEP_DODBINOCS
         || wep == WEP_CFC4);
 };
 
@@ -179,22 +212,123 @@ float(entity player, float wep) W_UtilityEntityHasWeapon =
         return player.ammo_csflashbang > 0;
     if (wep == WEP_CSSMOKEGRENADE)
         return player.ammo_cssmokegrenade > 0;
+    if (wep == WEP_DODMILLS)
+        return player.ammo_dodmills > 0;
+    if (wep == WEP_DODSTICK)
+        return player.ammo_dodstick > 0;
     if (wep == WEP_SATCHEL)
         return player.ammo_satchel > 0;
     if (wep == WEP_TRIPMINE)
         return player.ammo_tripmine > 0;
     if (wep == WEP_SNARK)
         return player.ammo_snark > 0;
+    if (wep == WEP_PENGUIN)
+        return player.ammo_penguin > 0;
     if (wep == WEP_CFC4)
         return player.ammo_cfc4 > 0;
     if (wep == WEP_SLINGSHOT)
         return player.snowball_has_slingshot > 0;
+    // Ammo-based here on purpose, even though OWNERSHIP of these two is slot-based
+    // (see W_UtilityPlayerHasWeapon).  This function's callers are pickup
+    // questions, and an empty medkit must still be allowed to pick a medkit up.
+    if (wep == WEP_MEDKIT)
+        return player.ammo_medkit > 0;
+    if (wep == WEP_ASSOFLAM)
+        return player.ammo_soflam > 0;
+    // The binoculars now carry a real count (1 while held), for the reason set out
+    // in sh_wpn_dodbinocs.qc's header: the slot-based test that used to live here
+    // was CIRCULAR — slot_utility is the selection cursor, and the function that
+    // rebuilds the cursor asks this one whether the cursor is already on it.  All
+    // four proxy edits are done, so `> 0` is a real answer on both sides.
+    if (wep == WEP_DODBINOCS)
+        return player.ammo_dodbinocs > 0;
     return FALSE;
+};
+
+// The ownership question, asked of an ARBITRARY entity.
+//
+// Split out of W_UtilityPlayerHasWeapon (which is `self`-based and stays the
+// name every caller uses) so CSQC's HUD can ask it about predicted_player.  The
+// HUD used to carry its own hand-written five-weapon copy of this and had
+// drifted six weapons behind; a second copy of a rule this subtle is not worth
+// saving a parameter for.
+float(entity p, float wep) W_UtilityEntityOwns =
+{
+    if (!p)
+        return FALSE;
+
+    // The satchel keeps its owner while its charges are out — see the long note
+    // in W_UtilityPlayerHasWeapon below, which is where this rule is argued.
+    if (wep == WEP_SATCHEL && p.satchel_state != SATCHEL_STATE_HOLD)
+        return TRUE;
+
+    // Tools, not ordnance: an empty medkit still deploys, so the SLOT alone is
+    // enough to own one.  But the slot alone is not SAFE on its own — slot_utility
+    // is the selection cursor, and W_UtilityRefreshSlotBinding rebuilds it by
+    // asking this very function about each weapon in the ring, so a pure slot test
+    // says "you own it only while it is selected" and the first refresh after a
+    // pickup or a death disowns it for good.  That is what happened to the
+    // binoculars, which had NO count to fall back on (see sh_wpn_dodbinocs.qc).
+    //
+    // These two do have one, so they get BOTH clauses: the count breaks the circle
+    // and the slot keeps an emptied tool in hand.  Strictly more permissive than
+    // the old test, so nothing that worked before stops working.
+    if (wep == WEP_MEDKIT)
+        return (p.slot_utility == wep) || (p.ammo_medkit > 0);
+    if (wep == WEP_ASSOFLAM)
+        return (p.slot_utility == wep) || (p.ammo_soflam > 0);
+
+    // The binoculars fall through to the count now — no special case left.
+    return W_UtilityEntityHasWeapon(p, wep);
 };
 
 float(float wep) W_UtilityPlayerHasWeapon =
 {
-    return W_UtilityEntityHasWeapon(self, wep);
+    // The satchel is the ONE utility whose lifecycle needs the player to keep
+    // holding it after the last charge is thrown - the deployed charge has no
+    // fuse and nothing but this weapon can set it off.  Gating on ammo alone
+    // meant throwing your last satchel disowned the weapon: W_SelectWeapon
+    // refused it (sv_weapons.qc:3055-3059), impulse-4 skipped it, and
+    // W_UtilityRefreshSlotBinding (:2926-2928) reassigned the slot away -
+    // stranding the live charges on the map until a map change.
+    //
+    // Half-Life states the correct test twice, in CanDeploy (satchel.cpp:294)
+    // and IsUseable (:275), both as the same two clauses:
+    //     ammo > 0            -> you are carrying some
+    //     m_chargeReady != 0  -> you have some OUT
+    //
+    // DELIBERATELY NOT in W_UtilityEntityHasWeapon, even though that is where
+    // the rest of the table lives.  That function has exactly two callers and
+    // both are PICKUP questions, not ownership questions: sv_weapons.qc:2774
+    // is the duplicate-pickup gate, so putting the clause there would refuse
+    // to let you pick a satchel pouch up to rearm while your charges are out -
+    // precisely backwards.  The 12 callers of THIS wrapper are all the
+    // ownership/selection question, which is the one HL's CanDeploy answers.
+    //
+    // satchel_state is declared at sh_wpn_hlsatchel.qc:24, which compiles
+    // before this file in BOTH progs (59/97 vs 68/106).  Fields cannot be
+    // forward-declared in QC, so that ordering is load-bearing.
+    // ACTUALLY DELEGATED NOW.  The comment above claimed "the rule exists once"
+    // while three hand-copied clauses sat below it, and one of them had gone
+    // stale: the medkit / SOFLAM test here was still the pure `slot_utility ==
+    // wep` version, which W_UtilityEntityOwns had already been fixed to reject as
+    // CIRCULAR (see the note there).  slot_utility is the selection CURSOR, and
+    // W_UtilityRefreshSlotBinding rebuilds the cursor by walking the ring asking
+    // THIS function about every entry — so a pure cursor test means "you own it
+    // only while it is already selected", and the first refresh that lands the
+    // cursor anywhere else disowns the weapon permanently.
+    //
+    // Reported as: "weapon medkit is weird, if I have it selected for you to spawn
+    // in with it, you get to switch to it, it has 100 ammo, but switching off of
+    // it, make it unable to switch to it again?"  Exactly that — 100 charges sitting
+    // right there, and the ownership test never looked at them.  Identical to the
+    // binoculars failure in v29, which is what prompted the W_UtilityEntityOwns fix
+    // that this copy then missed.
+    //
+    // The three clauses stay documented above because this is where they were
+    // derived and where every caller looks for them; the BODY is one function now,
+    // so the next fix cannot land on only half of them.
+    return W_UtilityEntityOwns(self, wep);
 };
 
 // Cycle order for impulse 4 (utility cycle).  Note: C4 deliberately
@@ -209,17 +343,31 @@ float(float wep) W_UtilityPlayerHasWeapon =
 // would have made it eight branches of eight - so it is a table walk now.
 // The order and the semantics are unchanged for the original five; the HL
 // equipment is appended after them, which is where a player expects it.
-const float UTILRING_COUNT = 8;
+const float UTILRING_COUNT = 14;   // bumped with the binoculars — the tail entry is
+                                   // unreachable if this does not match W_UtilityRingAt
 float(float idx) W_UtilityRingAt =
 {
     if (idx == 0) return WEP_HLGRENADE;
     if (idx == 1) return WEP_SNOWBALL;
     if (idx == 2) return WEP_CSHEGRENADE;
-    if (idx == 3) return WEP_CSFLASHBANG;
-    if (idx == 4) return WEP_CSSMOKEGRENADE;
-    if (idx == 5) return WEP_SATCHEL;
-    if (idx == 6) return WEP_TRIPMINE;
-    return WEP_SNARK;
+    // DoD's two frag grenades, immediately after the CS one, because that is
+    // what they are and a player carrying several wants them adjacent — the
+    // same argument the penguin's placement beside the snark makes below.
+    if (idx == 3) return WEP_DODMILLS;
+    if (idx == 4) return WEP_DODSTICK;
+    if (idx == 5) return WEP_CSFLASHBANG;
+    if (idx == 6) return WEP_CSSMOKEGRENADE;
+    if (idx == 7) return WEP_SATCHEL;
+    if (idx == 8) return WEP_TRIPMINE;
+    if (idx == 9) return WEP_SNARK;
+    // Straight after the snark, because it IS the snark as far as the thrown
+    // creature is concerned and a player carrying both wants them adjacent.
+    if (idx == 10) return WEP_PENGUIN;
+    // Appended after the ordnance, so impulse-4 reaches the two tools last.
+    // UTILRING_COUNT must match the number of entries or the tail is unreachable.
+    if (idx == 11) return WEP_MEDKIT;
+    if (idx == 12) return WEP_ASSOFLAM;
+    return WEP_DODBINOCS;
 };
 
 float(float from_wep) W_UtilityNextCarried =

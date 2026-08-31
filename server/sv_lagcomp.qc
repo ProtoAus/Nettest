@@ -487,3 +487,21 @@ void(vector src, vector end, float moveflags, entity ignore) Lagcomp_TraceLine =
     Lagcomp_EndRewind();
     self.dimension_hit = saved_dim_hit;
 };
+
+// Box form of the same thing.  Half-Life's melee weapons fall back to a HULL
+// trace when the thin line misses (CCrowbar::Swing, dlls/crowbar.cpp), and that
+// fallback has to be lag-compensated for exactly the reason the line trace does.
+//
+// NOTE the argument order: FTE's tracebox is (start, mins, maxs, end, ...), not
+// (start, end, mins, maxs).  Getting that wrong compiles cleanly and traces a
+// zero-length box from the wrong place.
+void(vector src, vector mn, vector mx, vector end,
+     float moveflags, entity ignore) Lagcomp_TraceBox =
+{
+    float saved_dim_hit = self.dimension_hit;
+    self.dimension_hit = saved_dim_hit | PHYSDROP_DIM;
+    Lagcomp_BeginRewind(self);
+    tracebox(src, mn, mx, end, moveflags, ignore);
+    Lagcomp_EndRewind();
+    self.dimension_hit = saved_dim_hit;
+};

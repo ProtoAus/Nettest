@@ -173,6 +173,36 @@ entity(entity from) FuncTrain_NextCorner =
     return find(world, targetname, from.target);
 };
 
+// WHERE A CORNER ACTUALLY PUTS THE TRAIN.
+//
+// Half-Life does NOT put the entity's origin on the path_corner — it puts the
+// BRUSH'S CENTRE there.  Both destination sites in CFuncTrain say so:
+//     Activate: UTIL_SetOrigin(pev, pevTarg->origin - (pev->mins + pev->maxs) * 0.5)
+//                                                            (plats.cpp:822)
+//     Next:     LinearMove(pTarg->pev->origin - (pev->mins + pev->maxs) * 0.5, ...)
+//                                                            (plats.cpp:806)
+// This file read the corner origin raw at all five destination sites, which is
+// harmless ONLY when the func_train has an ORIGIN brush — ZHLT then offsets the
+// submodel geometry so (mins+maxs)*0.5 is ~0 and the two formulas agree.  With
+// no origin key the inline submodel carries ABSOLUTE bounds (the same case
+// sv_brushsync.qc:617-621 documents for func_wall), and the brush is translated
+// by the entire corner vector instead of by the small local offset.
+//
+// pizza_ya_san1's tr_soukoexit is exactly that: no origin key, submodel *74 with
+// centre (676 1888 -864), first corner at (676 1888 -936).  HL places it at
+// (0 0 -72); this placed it at (676 1888 -936), putting the brush's world box at
+// Y 3744 and Z -1856 against a world hull that ends at Y 2816 / Z -1024.  So the
+// train DID spawn, DID setmodel and was NOT invisible — func_train_find_first
+// teleported it bodily outside the map 0.1 s later, where it has no PVS leafs
+// and is never sent to the client.  "I just don't see it in the level."
+//
+// Measured over the corpus: 1107 func_train with an inline brushmodel, 527 with
+// no origin key, and every one of those 527 has |centre| > 16 (median 2432).
+vector(entity pc) FuncTrain_DestOrigin =
+{
+    return pc.origin - (self.mins + self.maxs) * 0.5;
+};
+
 // Per-tick movement step.  Re-evaluated every TRAIN_MOVE_TICK seconds
 // while the train is in transit between corners.  Each tick:
 //   1. Recompute the remaining vector to the destination.
@@ -190,10 +220,10 @@ entity(entity from) FuncTrain_NextCorner =
 // to (0, 200] so a typo doesn't lock think dispatch.
 float() FuncTrain_TickInterval =
 {
-    float hz = cvar("sv_func_tickrate");
-    if (hz <= 0) hz = 64;
-    if (hz > 200) hz = 200;
-    return 1.0 / hz;
+    // Floored at the server's real physics frame — see Mover_TickInterval in
+    // sv_customdefs.qc.  Scheduling shorter than a frame does not make a train
+    // smoother, it makes it SLOWER, by exactly the ratio.
+    return Mover_TickInterval(64);
 };
 
 void() func_train_move_tick =
@@ -206,7 +236,7 @@ void() func_train_move_tick =
         return;
     }
 
-    vector delta       = self.train_target.origin - self.origin;
+    vector delta       = FuncTrain_DestOrigin(self.train_target) - self.origin;
     float  dist_remain = vlen(delta);
 
     // Per-corner speed override (HL: "New train speed" on path_corner).
@@ -236,7 +266,7 @@ void() func_train_move_tick =
             dprint(sprintf("[train %s] tick snap to \"%s\" (dist=%g <= adv=%g*1.5)\n",
                            self.targetname, self.train_target.targetname,
                            dist_remain, advance));
-        setorigin(self, self.train_target.origin);
+        setorigin(self, FuncTrain_DestOrigin(self.train_target));
         self.velocity = '0 0 0';
         func_train_arrive();
         return;
@@ -291,7 +321,7 @@ void() func_train_move_to_target =
     // running the per-tick walker.
     if (self.train_target.spawnflags & PATH_TELEPORT)
     {
-        setorigin(self, self.train_target.origin);
+        setorigin(self, FuncTrain_DestOrigin(self.train_target));
         self.velocity = '0 0 0';
         func_train_arrive();
         return;
@@ -330,13 +360,19 @@ void() func_train_move_to_target =
 void() func_train_arrive =
 {
     if (cvar("sv_debug_func_train"))
-        dprint(sprintf("[train %s] arrive at \"%s\" origin=%v next=\"%s\"\n",
+        // Print the MOVER's origin as well as the corner's.  They are not the
+        // same thing and the difference is the entire func_train centre-offset
+        // bug (see FuncTrain_DestOrigin): a debug line that shows only the
+        // corner cannot distinguish a correctly-placed train from one sitting
+        // thousands of units outside the world.
+        dprint(sprintf("[train %s] arrive at \"%s\" corner=%v self.origin=%v next=\"%s\"\n",
                        self.targetname,
                        self.train_target.targetname,
                        self.train_target.origin,
+                       self.origin,
                        self.train_target.target));
 
-    setorigin(self, self.train_target.origin);
+    setorigin(self, FuncTrain_DestOrigin(self.train_target));
     self.velocity              = '0 0 0';
     self.mover_planned_velocity = '0 0 0';
     self.avelocity             = '0 0 0';   // pause rotation while stopped (HL behaviour)
@@ -353,7 +389,7 @@ void() func_train_arrive =
     // Stop the move sound and play the stop sound.
     if (self.train_movesound_active)
     {
-        sound(self, CHAN_BODY, "", 0, ATTN_NORM);     // cut the loop
+        SV_StopChannel(self, CHAN_BODY);              // cut the loop
         self.train_movesound_active = 0;
     }
     if (self.train_stopsound_path != "")
@@ -490,16 +526,44 @@ void() func_train_blocked =
 {
     if (self.dmg <= 0 || !other)
         return;
-    if (other.takedamage == DAMAGE_NO)
-        return;
-    // This path subtracts .health directly rather than going through
-    // W_ApplyDamage, so it does NOT inherit the cutscene_immune check in
-    // W_CanDamageTarget and has to repeat it.  A player watching a cutscene
-    // with the Invulnerable flag must not be ground up by a train they can't
-    // see and can't move away from.
+    // The cutscene_immune check is kept explicitly (W_ApplyDamage reaches it via
+    // W_CanDamageTarget, but bailing here also skips the shove).  A player
+    // watching a cutscene with the Invulnerable flag must not be ground up by a
+    // train they can't see and can't move away from.
     if (other.cutscene_immune)
         return;
-    other.health -= self.dmg;
+
+    // SHOVE, THEN DAMAGE — HL's order and HL's reason (plats.cpp:1022-1027).
+    vector away = other.origin - self.origin;
+    away_z = 0;
+    if (vlen(away) > 0.01)
+    {
+        away = normalize(away);
+        other.velocity_x = away_x * self.dmg;
+        other.velocity_y = away_y * self.dmg;
+        other.velocity_z = other.velocity_z + 300;
+    }
+
+    // W_ApplyDamage, NOT `other.health -= self.dmg`.
+    //
+    // The raw path looked harmless and was not: subtracting health kills
+    // nothing, so a blocker stays SOLID IN THE PATH — and a blocked
+    // MOVETYPE_PUSH brush does not advance .ltime, while every think in this
+    // file is scheduled on ltime.  So one monster wandering onto the rails
+    // stops the train permanently, for the rest of the map.
+    //
+    // Measured on the func_tracktrain twin of this function before it was
+    // fixed: a monster_houndeye reached health -5,300,000 on hl_c05_a1, still
+    // being decremented every frame, with the train frozen against it.
+    //
+    // The takedamage == DAMAGE_NO early-out is deliberately gone: players are
+    // DAMAGE_NO in this tree, so it silently exempted them from being crushed.
+    // W_ApplyDamage is the damage chokepoint and decides for itself — the same
+    // reasoning sv_platform_carry.qc:164-166 records for its crush call.
+    //
+    // BEHAVIOUR CHANGE, called out on purpose: train crush now genuinely kills
+    // where it previously drove health negative and did nothing else.
+    W_ApplyDamage(self, other, self.dmg);
 };
 
 // Deferred init — runs 0.1s after spawn so all path_corner entities
@@ -517,7 +581,7 @@ void() func_train_find_first =
                        self.targetname, self.target));
         return;
     }
-    setorigin(self, pc.origin);
+    setorigin(self, FuncTrain_DestOrigin(pc));
     self.train_target = pc;
     self.train_state  = 0;     // stay stopped until triggered
     // Replicate the snap — see the identical note in sv_func_tracktrain.qc.
@@ -585,6 +649,20 @@ void() func_train =
 
     self.use     = func_train_use;
     self.blocked = func_train_blocked;
+
+    // NOT in the player's +use search.  CFuncTrain derives from CBasePlatTrain,
+    // whose ObjectCaps is `CBaseEntity::ObjectCaps() & ~FCAP_ACROSS_TRANSITION`
+    // (halflife/dlls/plats.cpp:35) - which is ZERO, so it carries none of
+    // FCAP_IMPULSE_USE / CONTINUOUS_USE / ONOFF_USE and CBasePlayer::PlayerUse
+    // (player.cpp:1573) never finds it.  A train is started by a button or a
+    // trigger, never by walking up and pressing use on the carriage.
+    //
+    // .use is still installed, because that is what a trigger chain calls -
+    // th_ep1_01's `liftdrop_train` is fired by a func_button, and the button is
+    // the thing the player presses.  use_passthrough is specifically the "keep it
+    // out of the player's search" bit, so a press aimed past a train still reaches
+    // whatever is behind it (see the note in sv_customdefs.qc).
+    self.use_passthrough = TRUE;
 
     // Defer to find first stop so all path_corners have spawned.
     self.think     = func_train_find_first;

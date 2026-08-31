@@ -33,6 +33,33 @@ const float BREAKABLE_TOUCH             = 2;
 const float BREAKABLE_ONLY_EXPLOSION    = 4;
 const float BREAKABLE_ALWAYS_SHOOTABLE  = 8;
 const float BREAKABLE_INSTANT_CROWBAR   = 256;
+// GoldSrc's SF_BREAK_PRESSURE is bit 4 (util.h:443) — "can be broken by a
+// player standing on it".  Bit 4 is already spent here on ONLY_EXPLOSION, so it
+// is rehomed onto free bit 16 and Break_NormaliseFlags does the translation.
+// 122 brushes in the corpus set it, 55 of them WITHOUT the Touch bit (so they
+// reach a dispatcher only through the registration gate below): hl_c03's 29
+// Office Complex ceiling tiles, otokotati_no_kouzan's 35, th_ep1_02's 8.
+const float BREAKABLE_PRESSURE          = 16;
+
+// Every TOUCH-flagged func_breakable, in a spawn-time list that
+// SV_CheckTouchTriggers walks once per player per frame.
+//
+// WHY A LIST AND NOT findradius: findradius ranks on the brush CENTRE, and 22 of
+// the corpus's 215 touch breakables have a bbox half-diagonal larger than the
+// 128-unit sweep SV_CheckTouchTriggers already uses (max 163, th_ep3_05's
+// "elev_rail2"; 161 on hl_c11_a5), so a radius test would silently miss the big
+// ones.  Same reasoning that made momentary_button_list a list.
+//
+// Built at spawn and never rebuilt, which is correct because BreakableResetAll
+// restores brushes IN PLACE rather than removing them.  If a future code path
+// ever remove()s a func_breakable this list would hold a freed edict — guard the
+// walk on the classname at that point.
+entity  breakable_touch_list;
+.entity breakable_touch_next;
+
+// The health the MAP authored, latched before func_breakable's `if (health <= 0)
+// health = 20` default lands on it.  See the note where it is set.
+.float  breakable_touch_health;
 
 // ---------------------------------------------------------------------------
 // Break_NormaliseFlags — translate GoldSrc/Sven spawnflags into the mod's
@@ -84,6 +111,17 @@ void() Break_NormaliseFlags =
     if (sven & 512)
         out = out | BREAKABLE_ONLY_EXPLOSION;
 
+    // GoldSrc SF_BREAK_PRESSURE (util.h:443) is bit 4, which we spend on
+    // ONLY_EXPLOSION — rehome it onto bit 16.
+    //
+    // ORDERING DEPENDENCY, do not break it: `out` is rebuilt from scratch at
+    // the masked assignment above, which is what discards the junk bit 16 that
+    // four corpus brushes already carry.  This line then puts 16 back only for
+    // brushes that genuinely asked for Pressure.  If that mask is ever made
+    // additive, those four silently become pressure plates.
+    if (sven & 4)
+        out = out | BREAKABLE_PRESSURE;
+
     // HL's CBreakable::Spawn derives takedamage from SF_BREAK_TRIGGER_ONLY
     // ALONE — a targetname does NOT make a brush bulletproof.  That rule is
     // a Quake-ism we apply below unless ALWAYS_SHOOTABLE is set, and Sven
@@ -92,9 +130,9 @@ void() Break_NormaliseFlags =
     if (!(sven & BREAKABLE_TRIGGER_ONLY))
         out = out | BREAKABLE_ALWAYS_SHOOTABLE;
 
-    // Deliberately dropped, all unimplemented: 4 Pressure, 8 Repairable,
-    // 32 Show HUD Info, 64 Immune To Clients.  Dropping matters — leaving
-    // 4 or 8 set would collide with our own meanings for those bits.
+    // Deliberately dropped, all unimplemented: 8 Repairable, 32 Show HUD Info,
+    // 64 Immune To Clients.  Dropping matters — leaving 8 set would collide
+    // with our own meaning for that bit.
     self.spawnflags = out;
 
     if (cvar("sv_debug_breakables") && out != sven)
@@ -172,6 +210,10 @@ void(entity caller, entity triggerer) Trigger_UseTargets;
 void(entity caller, entity who, float useType) SUB_UseTargets;
 // Defined in sv_weapons.qc, which compiles after this file.
 void(entity drop_ent) W_PhysDropWake;
+// Defined in sv_goldsrc_ammo.qc (position 232 vs this file's 28).  It has to
+// live that late because it dispatches to every weapon, ammo and item spawn
+// function in the tree, which are spread from position 42 to 228.
+void(vector org, float idx) Breakable_SpawnObject;
 // Inter-call within this file — the .touch handler defined above
 // invokes the break handler defined below.
 void() func_breakable_break;
@@ -186,6 +228,12 @@ float() Brush_IsAATrigger;
 // file's break pipeline but resets differently — it has to be put back at its
 // SPAWN ORIGIN as well as restored, which no func_breakable ever needs.
 void() FuncPushable_ResetAll;
+// server/sv_env_explosion.qc (position 200; this file is 44).  A brush with
+// `explodemagnitude` set detonates when it breaks — HL's CBreakable::Die tail
+// (func_break.cpp:752-755).  Reached by forward declaration because .iMagnitude
+// and the env_explosion spawn function are both declared in that later file.
+void(vector center, float magnitude, entity expl_owner) ExplosionCreate;
+void() Explosion_Precache;
 
 // ============================================================
 //  Helpers
@@ -295,6 +343,29 @@ string(float mat) BreakableRandomImpactSound =
 //  in cl_breakable.qc.  Server only multicasts a one-shot event.)
 // ============================================================
 
+// The attacker-exclude entnum for the CSQC effect events below, or 0 meaning
+// "nobody predicted this, send to everyone".
+//
+// Two reasons this is a function and not `num_for_edict(self.dmg_inflictor)`:
+//
+//   1. Only a CLIENT can have predicted the effect.  The whole point of the
+//      exclude is to suppress the server's copy for the one player whose CSQC
+//      already played it; a world entity never predicts anything, so naming one
+//      here suppresses the effect for a player who never saw it.
+//   2. Only a client's entnum is guaranteed to fit the byte it ships in.
+//      .dmg_inflictor is whatever dealt the damage, which on a GoldSrc map is
+//      routinely an env_laser / func_tank / trigger_hurt at an arbitrary edict
+//      number.  hl_c12's lasers sit at edicts 456-593, and WriteByte WRAPS
+//      rather than clamps — 526 went out as 14, silently muting breakable
+//      impacts for whichever player held edict 14.  The engine logged it as
+//      `Write*: value 526 is outside of the required 0 to 255 range`.
+float() BreakableExcludeEntnum =
+{
+    if (self.dmg_inflictor && (self.dmg_inflictor.flags & FL_CLIENT))
+        return num_for_edict(self.dmg_inflictor);
+    return 0;
+};
+
 void() BreakableSpawnDebris =
 {
     float damage_scale = max(self.max_health, 20);
@@ -303,11 +374,7 @@ void() BreakableSpawnDebris =
     // Attacker-exclude entnum — mirrors the sound events. The shooter's
     // CSQC already spawned matching gibs in CSQC_PredictBreakableBreak,
     // so skipping them on the server broadcast prevents doubled debris.
-    // 0 means "no predictor" (explosion, world trigger, etc.) → send to
-    // everyone.
-    float exclude = 0;
-    if (self.dmg_inflictor)
-        exclude = num_for_edict(self.dmg_inflictor);
+    float exclude = BreakableExcludeEntnum();
 
     // Directional throw payload — only meaningful when self.explosion
     // is 1.  Direction is the unit vector from the attacker to the
@@ -392,9 +459,7 @@ void() BreakablePlayImpactSound =
     // (The per-brush noise2 override is dropped in this path; attacker
     // hears a correct variant via prediction, remotes get the style
     // default. Rare enough to punt on exact parity.)
-    float exclude = 0;
-    if (self.dmg_inflictor)
-        exclude = num_for_edict(self.dmg_inflictor);
+    float exclude = BreakableExcludeEntnum();
 
     // Brushes have origin '0 0 0' in most cases; use the bbox center so
     // pointsound on the client attenuates from the actual brush location.
@@ -449,10 +514,117 @@ void() func_breakable_touch =
     if (other.is_dead)               return;
     if (self.breakable_broken)       return;
 
-    entity oldactivator = activator;
-    activator = other;
-    func_breakable_break();
-    activator = oldactivator;
+    // A NOCLIPPING PLAYER MUST NOT SHATTER THE MAP.  Half-Life cannot hit this
+    // because noclip makes the player SOLID_NOT and BreakTouch is engine
+    // dispatched; here the dispatcher is SV_CheckTouchTriggers, which a live
+    // noclipper still runs (only DEAD players skip pmove).  Without this an
+    // admin flying across the level breaks every touch brush he passes through,
+    // and the speed gate below makes it worse rather than better because noclip
+    // speed is high.  PM_MOVETYPE_NONE (frozen) is excluded for the same reason.
+    //
+    // 5 and 4 rather than the named constants: PM_MOVETYPE_NOCLIP and
+    // PM_MOVETYPE_NONE are plain globals in shared/sh_pmove.qc, which compiles at
+    // sv_progs.src:465, long after this file at :44 — QC forward-declares
+    // functions but not constants.  The FIELD is fine (shared/sh_weapons.qc:28,
+    // position 14).
+    if (other.pm_movetype == 5 || other.pm_movetype == 4)
+        return;
+
+    // Unbreakable glass never sets .breakable_broken (func_breakable_break
+    // returns early on it), so without this the arms below would re-enter the
+    // whole break path every single frame the player is in contact with such a
+    // brush.  Cheap per call, but unbounded.  This is HL's own !IsBreakable()
+    // test (func_break.cpp:437, matUnbreakableGlass) and it gates BOTH arms.
+    if (self.style == BREAKABLE_UNBREAKABLE_GLASS)
+        return;
+
+    // ---- ARM 1: SF_BREAK_TOUCH — "crashed through by a running player" ----
+    //
+    // CBreakable::BreakTouch (func_break.cpp:442-454):
+    //     flDamage = pevToucher->velocity.Length() * 0.01;
+    //     if (flDamage >= pev->health) { ...break... }
+    // i.e. damage is speed/100, and the brush only goes if that reaches its
+    // health.  Not optional now the handler is reachable: most corpus touch
+    // breakables are health 1 (break at 100 u/s, which a walking player clears),
+    // but the health 50/60/100 ones need a real impact — svencoop1's four
+    // health-60 gruntsrepel* brushes and th_ep3_05's elev_rail2 are not meant to
+    // shatter because somebody leaned on them.
+    //
+    // SPEED SOURCE.  `other.velocity` is the WRONG number here and reading it
+    // was quietly defeating this whole arm.  HL dispatches BreakTouch from
+    // inside the move, at the impact, so its velocity is the approach speed.
+    // Ours is dispatched by SV_CheckTouchTriggers AFTER PM_PlayerMove, and
+    // PM_SlideMove has already reflected the into-the-plane component out of
+    // pm_velocity against this very brush — so a player sprinting head-on into
+    // a pane arrived here reading near zero, and the harder he ran the more
+    // completely the speed that should have broken it was erased first.
+    // .pm_impact_speed is latched at the top of PM_PlayerMove for exactly this.
+    //
+    // Gate value: HL compares against the LIVE pev->health (func_break.cpp:446),
+    // so a pane already shot down to 3 HP is crashable-through.  We cannot just
+    // read self.health, because this class defaults a health-key-less brush to
+    // 20 where HL leaves it at 0 and a 0-health brush is meant to shatter on any
+    // contact (th_ep1_00's *69).  So: no authored health -> gate of 0; otherwise
+    // track the live value.
+    //
+    // NOT ported: HL's `pOther->TakeDamage(pev, pev, flDamage/4, DMG_SLASH)` on
+    // the player immediately afterwards.  This file's docstring promises break
+    // on contact, not a mutual collision, and hurting the player for walking
+    // through a health-1 pane is the sort of thing that gets noticed.
+    if (self.spawnflags & BREAKABLE_TOUCH)
+    {
+        float gate = (self.breakable_touch_health <= 0) ? 0 : self.health;
+        if (other.pm_impact_speed * 0.01 >= gate)
+        {
+            entity oldactivator = activator;
+            activator = other;
+            func_breakable_break();
+            activator = oldactivator;
+            return;
+        }
+    }
+
+    // ---- ARM 2: SF_BREAK_PRESSURE — "broken by a player standing on it" ----
+    //
+    // func_break.cpp:456-472.  Two things about HL's version are easy to get
+    // wrong and both matter:
+    //
+    //  1. The test is PURELY GEOMETRIC — `pevToucher->absmin.z >= pev->maxs.z - 2`,
+    //     the toucher's feet at or above the brush top minus 2.  There is no
+    //     FL_ONGROUND or groundentity test anywhere in it.
+    //  2. It is a SEQUENTIAL `if`, not an `else` — a brush with both bits runs
+    //     both arms in the same call, and 67 corpus brushes set both.
+    //
+    // absmax_z rather than maxs_z is a deliberate divergence: HL's pev->maxs.z
+    // is model-relative, which agrees with world space only for a submodel with
+    // no ORIGIN brush.  Three of the 122 corpus pressure brushes carry an
+    // `origin` key, and for those absmax_z is right where the SDK's own field
+    // would be wrong.
+    if ((self.spawnflags & BREAKABLE_PRESSURE)
+        && other.absmin_z >= self.absmax_z - 2)
+    {
+        BreakablePlayImpactSound();     // HL's DamageSound() — the creak first
+
+        // ltime, NOT time.  This is a MOVETYPE_PUSH entity, and FTE schedules a
+        // pusher's think against its OWN ltime clock (sv_phys.c), which for a
+        // breakable never advances because nothing here ever sets nextthink —
+        // so every func_breakable in the map sits at ltime 0 forever.  Writing
+        // `time + delay` at t=240 would ask for a think 240 s of ltime away and
+        // the tile would collapse minutes later, or never.  HL writes
+        // `pev->nextthink = pev->ltime + m_flDelay` (func_break.cpp:469) for
+        // precisely this reason.
+        //
+        // The zero-delay fudge is HL's too, complete with its own BUGBUG
+        // comment at func_break.cpp:465-467.
+        self.think     = func_breakable_break;
+        self.nextthink = self.ltime + ((self.delay > 0) ? self.delay : 0.1);
+
+        // HL's SetTouch(NULL) — stop re-arming the pending collapse every frame
+        // the player keeps standing there.  SV_CheckTouchTriggers dispatches on
+        // an identity test against func_breakable_touch, so clearing .touch
+        // takes this brush out of the walk immediately.
+        self.touch = __NULL__;
+    }
 };
 
 // Use wrapper: a player pressing +use directly on a breakable is a
@@ -504,9 +676,7 @@ void() func_breakable_break =
     // (attacker's predicted variant is already correct; remote viewers
     // get the style default) — accept the drift for MVP since noise1
     // is rare in practice.
-    float exclude = 0;
-    if (self.dmg_inflictor)
-        exclude = num_for_edict(self.dmg_inflictor);
+    float exclude = BreakableExcludeEntnum();
 
     WriteByte(MSG_MULTICAST, SVC_CGAMEPACKET);
     WriteByte(MSG_MULTICAST, CSQC_EVENT_BREAKABLE_BREAK_SOUND);
@@ -579,6 +749,37 @@ void() func_breakable_break =
     self.takedamage = DAMAGE_NO;
     self.breakable_broken = TRUE;
     self.SendFlags |= 1;
+
+    // Sven's "Spawn On Break" pickup, dropped a little above the brush centre.
+    //
+    // LAST, and that ordering is load-bearing: the item is MOVETYPE_TOSS and
+    // spawns inside the volume the crate occupied, so it has to be created
+    // AFTER the brush goes SOLID_NOT or it starts the frame embedded in a
+    // solid.  Everything above only reads self, so moving this to the end
+    // costs nothing.
+    if (self.spawnobject)
+        Breakable_SpawnObject(center + '0 0 16', self.spawnobject);
+
+    // Explode on break — HL's CBreakable::Die tail (func_break.cpp:752-755).
+    //
+    // LAST, and that ordering is the SDK's, not a convenience: Die() clears
+    // pev->solid, fires its targets and creates the spawn object BEFORE
+    // ExplosionCreate, so the blast's radius trace is not blocked by the brush
+    // that produced it and the spawned pickup is already in the world to be
+    // thrown.  Placing it above any of those would change who the explosion can
+    // see.
+    //
+    // Explodable() is `ExplosionMagnitude() > 0` (func_break.h:49) and the FGD
+    // default is 0, so a brush without the key is unaffected.  15 brushes across
+    // 5 Sven hl_ maps carry it — hl_c07_a1's six 75s, hl_c07_a2's 2000 and two
+    // 200s, hl_c11_a5's 200 — and until now every one of them broke silently.
+    if (self.explodemagnitude > 0)
+    {
+        if (cvar("sv_debug_use"))
+            print(sprintf("[breakable] \"%s\" detonating, magnitude %g at %v\n",
+                          self.targetname, self.explodemagnitude, center));
+        ExplosionCreate(center, self.explodemagnitude, self);
+    }
 };
 
 // ============================================================
@@ -616,11 +817,19 @@ void() BreakableResetAll =
             else
                 e.takedamage = DAMAGE_YES;
 
-            // Re-arm the touch-break handler on TOUCH brushes.
-            if (e.spawnflags & BREAKABLE_TOUCH)
+            // Re-arm the contact handler on TOUCH / PRESSURE brushes, matching
+            // the spawn-time gate.
+            if ((e.spawnflags & (BREAKABLE_TOUCH | BREAKABLE_PRESSURE))
+                && !(e.spawnflags & BREAKABLE_TRIGGER_ONLY))
                 e.touch = func_breakable_touch;
             else
                 e.touch = __NULL__;
+
+            // Cancel any pending PRESSURE collapse.  A brush that was mid-creak
+            // when the round reset would otherwise still fire its scheduled
+            // break — the .touch re-arm above does not undo a queued think.
+            e.think     = __NULL__;
+            e.nextthink = 0;
 
             if (e.switchshadstyle)
                 lightstyle(e.switchshadstyle, "a");
@@ -672,6 +881,20 @@ void() func_breakable =
 {
     // MUST be first — everything below reads .spawnflags.
     Break_NormaliseFlags();
+
+    // CBreakable::Spawn stashes `m_angle = pev->angles.y` and then clears it
+    // (func_break.cpp, immediately after the takedamage branch) — the yaw is the
+    // GIB DIRECTION, not a rotation of the brush, and leaving it set is the same
+    // bug the DONT_MOVE button had: a GoldSrc submodel with no ORIGIN brush carries
+    // absolute bounds with .origin '0 0 0', so World_LinkEdict rotates its box about
+    // the WORLD origin and the brush lands hundreds of units away.
+    //
+    // All three axes go, not just HL's yaw.  Nothing in this file reads .angles (the
+    // gib spread is radial here), and of the 41 corpus breakables that carry a stray
+    // angles key with no origin brush, 3 set pitch or roll — which HL leaves in place
+    // and which displaces them just as badly.  Zeroing more than HL costs nothing
+    // because a func_breakable never rotates in either engine.
+    self.angles = '0 0 0';
 
     setmodel(self, self.model);
     self.breakable_model = self.model;   // save for round reset
@@ -754,6 +977,18 @@ void() func_breakable =
     precache_model("models/gibs/woodgib2.mdl");
     precache_model("models/gibs/woodgib3.mdl");
 
+    // Only when the brush actually detonates — no reason to pull the explosion
+    // sprite and its three samples onto every map that has a crate.
+    if (self.explodemagnitude > 0)
+        Explosion_Precache();
+
+    // Latch the AUTHORED health before the default is applied.  HL's
+    // CBreakable::Spawn has no such clamp, so a brush with no health key sits at
+    // pev->health 0 and CBreakable::BreakTouch's `flDamage >= pev->health` is
+    // trivially true — it breaks on any contact at all.  The touch speed gate
+    // has to compare against that raw value, or the three corpus brushes with no
+    // health key would need 2000 u/s to break something HL breaks by leaning on.
+    self.breakable_touch_health = self.health;
     if (self.health <= 0)
         self.health = 20;
     self.max_health = self.health;
@@ -779,10 +1014,28 @@ void() func_breakable =
     else
         self.takedamage = DAMAGE_YES;
 
-    // BREAKABLE_TOUCH installs a .touch callback that routes player
-    // collisions into the standard break path.  Independent from
-    // takedamage — a TOUCH+TRIGGER_ONLY brush is bullet-proof but
-    // breaks when the player walks into it.
-    if (self.spawnflags & BREAKABLE_TOUCH)
+    // BREAKABLE_TOUCH and BREAKABLE_PRESSURE both install a .touch callback that
+    // routes player collisions into the standard break path.
+    //
+    // TRIGGER_ONLY suppresses BOTH, exactly as HL does: CBreakable::Spawn
+    // installs BreakTouch on everything and then clears it again for
+    // trigger-only brushes (func_break.cpp:167-169), so a trigger-only brush is
+    // inert to contact of every kind.  This used to be a documented divergence
+    // ("a TOUCH+TRIGGER_ONLY brush is bullet-proof but breaks when the player
+    // walks into it"); it costs one clause to be right, and the corpus has one
+    // brush that sets 1|4 and none that set 1|2.
+    //
+    // HL gates on nothing else — the flag tests live inside BreakTouch — but
+    // enrolling only the two flags that can actually do something keeps the list
+    // that SV_CheckTouchTriggers walks per player per frame short.
+    if ((self.spawnflags & (BREAKABLE_TOUCH | BREAKABLE_PRESSURE))
+        && !(self.spawnflags & BREAKABLE_TRIGGER_ONLY))
+    {
         self.touch = func_breakable_touch;
+        // ...and put it somewhere that will actually CALL that handler.  See the
+        // note on breakable_touch_list, and the third arm of
+        // SV_CheckTouchTriggers (sv_use.qc) which is the only thing that dispatches it.
+        self.breakable_touch_next = breakable_touch_list;
+        breakable_touch_list      = self;
+    }
 };

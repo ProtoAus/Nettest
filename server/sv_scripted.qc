@@ -82,7 +82,17 @@
 const float SF_SCRIPT_WAITTILLSEEN     = 1;	// parsed, not implemented
 const float SF_SCRIPT_EXITAGITATED     = 2;	// leave the scene alert and provoked
 const float SF_SCRIPT_REPEATABLE       = 4;	// may be triggered again afterwards
-const float SF_SCRIPT_LEAVECORPSE      = 8;	// parsed, not implemented
+// 8 chooses between Half-Life's two endings for a body the script killed
+// (scripted.cpp:828-836): clear use/think/touch and leave it forever, or
+// SUB_StartFadeOut.  BOTH arms land on "permanent" in this tree, so the flag is
+// honoured by being a no-op — and that is a fact worth writing down rather than a
+// gap.  There is no corpse fade here at all: SF_MON_FADE_CORPSE (sv_ai_defs.qc)
+// is declared and read by nothing, and AI_Died leaves every body in the world.
+// HL's SetUse/SetThink/SetTouch NULL needs no counterpart either — the talker's
+// use gate already refuses a dead body (sv_ai_talk.qc) and .ai_dead_done stops
+// the corpse thinking.  13 of the 491 th_* scripts set this; when a fade does
+// exist, this is the flag it hangs off.
+const float SF_SCRIPT_LEAVECORPSE      = 8;	// see above: no-op, correctly
 const float SF_SCRIPT_NOINTERRUPT      = 32;	// damage cannot break this scene
 const float SF_SCRIPT_OVERRIDESTATE    = 64;	// parsed, not implemented
 const float SF_SCRIPT_NOSCRIPTMOVEMENT = 128;	// no-op here: we do not extract
@@ -109,10 +119,12 @@ const float SF_SCRIPT_NOSCRIPTMOVEMENT = 128;	// no-op here: we do not extract
 .float  ss_body;
 .float  ss_bodyend;		// when the body's current sequence finishes
 
-// How long the claim retry runs before giving up.  Half-Life retries forever;
-// this stops at roughly ten minutes because a name that has not appeared by then
-// is a mapper typo, not a squadmaker that has yet to fire, and a permanent 1 Hz
-// think per broken script is a real cost on a map with hundreds of them.
+// How many misses before the claim retry says so out loud.  NOT a give-up: it
+// used to be one, and that was wrong - a name that has not appeared in nine
+// minutes is very often a squadmaker that has yet to fire, which is precisely
+// pizza_ya_san1's four seated customers and its `mi`.  Half-Life never gives up
+// (dlls/scripted.cpp:476-489) and neither do we; this is only the point at which
+// a still-unresolved script earns one line in the log.
 const float SCRIPT_CLAIM_TRIES = 120;
 
 // The force-finish deadline.  No legitimate Half-Life animation is anywhere near
@@ -139,6 +151,7 @@ float ai_dbg_script_done;	// scenes that finished and fired their chain
 float ai_dbg_script_lost;	// triggered with no monster to be found
 float ai_dbg_script_noseq;	// sequence names the model does not carry
 float ai_dbg_script_forced;	// watchdog force-finishes
+float ai_dbg_script_died;	// scenes whose actor died on a 1000 event
 
 // Boot census, printed once.  "How many scripts are on this map and how many of
 // them claim an actor at spawn" is the number that says whether the opening
@@ -330,6 +343,76 @@ void(entity m) Script_StartPlay =
 };
 
 // ---------------------------------------------------------------------------
+// the actor died in the scene
+// ---------------------------------------------------------------------------
+// Half-Life's CineCleanup DEAD_DYING branch (scripted.cpp:818-841), reached when
+// m_iszPlay raised SCRIPT_EVENT_DEAD (1000) part-way through — which is how a
+// choreographed death is authored: the ANIMATION says when the character dies,
+// not the map.  Nine scripted_sequences across the th_* corpus play such a
+// sequence (sstruggle on four scientists, draghole on three hgrunts,
+// fall_elevator on th_ep1_03's lavaman), and every one of them used to finish its
+// death animation and then stand back up at full health.
+//
+// This is NOT AI_Died and must not become it.  Half-Life's own comment on the
+// line is "BUGBUG -- This doesn't call Killed()", and the omission is correct
+// here for three separate reasons:
+//   * no death ANIMATION.  The sequence that just played WAS the death and the
+//     body has to hold its last frame.  AI_Died routes through SCHED_DIE, whose
+//     TASK_PLAY_DEATH would overwrite the pose with diesimple.
+//   * no death VOICE.  The scene's own 1008 events carry the lines it wants.
+//   * no weapon drop.  th_ep2_01's holegrunt is dragged into a vent; leaving an
+//     MP5 on the floor where he vanished is not the scene.
+// So the shared part — AI_BecomeCorpse — is called directly and nothing else.
+void(entity m) Script_DieInPlace =
+{
+	ai_dbg_script_died = ai_dbg_script_died + 1;
+
+	// FREEZE THE POSE.  Half-Life spells this `pev->framerate = 0` plus
+	// StopAnimation(); here it is already done for us — Script_Release cleared
+	// .ai_seqname and called AI_ResetActivity, which sets .ai_seq = -1, and
+	// AI_AnimPump returns immediately on that.  .frame is never touched by either,
+	// and FTE does not wrap a non-looping HL sequence, so the body simply holds the
+	// final frame with no extra work and nothing new on the wire.
+	//
+	// MOVETYPE IS DELIBERATELY LEFT ALONE, and this is the one place this function
+	// refuses to follow CineCleanup.  Half-Life sets MOVETYPE_NONE, which freezes
+	// th_ep1_03's `lavaman` in mid-air over the pit at the end of fall_elevator;
+	// the un-ground test in Script_Release exists precisely to stop that (see its
+	// comment) and it is worth more than the fidelity.  A corpse on MOVETYPE_STEP
+	// falls, exactly as AI_Died's corpses do.
+	AI_StopMoving(m);
+	AI_PathClear(m);
+
+	// Kill any looping sample the class started at spawn, same reason and same two
+	// lines as AI_Died: TASK_DIE is where that normally happens and this path never
+	// reaches it.
+	if (m.ai_snd_loop != "")
+	{
+		AI_SoundEx(m, m.ai_snd_loopchan, m.ai_snd_loop, 0, ATTN_NORM, 100, SOUNDFLAG_FOLLOW);
+		m.ai_snd_loop = "";
+	}
+
+	AI_BecomeCorpse(m);
+
+	m.ai_state = MS_DEAD;
+	m.ai_enemy = world;
+	m.ai_cond  = COND_NONE;
+	// THE LATCH, and without it the rest of this function is undone one tick later:
+	// AI_SelectSchedule hands a MS_DEAD monster SCHED_DIE until .ai_dead_done is
+	// set, and SCHED_DIE's TASK_PLAY_DEATH would replace the held pose with an
+	// ordinary death animation.  Set here rather than in TASK_DIE because for this
+	// path the death HAS finished animating — that is what the 1000 event meant.
+	m.ai_dead_done = TRUE;
+
+	// Hand the squad slot, the nav slot and the monster chain back, exactly as
+	// Monster_Killed does before AI_Died.  A scripted death is still a death:
+	// without this a th_ep2_01 vent grunt would pin its squadmaker's child budget
+	// forever.  Idempotent, so a later remove() or a shot into the corpse can call
+	// it again.
+	Monster_Teardown(m);
+};
+
+// ---------------------------------------------------------------------------
 // release
 // ---------------------------------------------------------------------------
 // The single way out of a scene, from all five directions: completion, damage,
@@ -348,9 +431,21 @@ void(entity m, float firechain) Script_Release =
 {
 	entity s = m.ai_script;
 
+	// Read this BEFORE the actor is handed back, because the whole tail of this
+	// function branches on it.  DEAD_DYING is set by one thing only — the 1000
+	// event in AI_HandleSharedEvent — so it is an exact test for "this scene was a
+	// death", and it cannot collide with the shot-mid-scene path: AI_Died calls us
+	// while deadflag is still DEAD_NO and only reaches DEAD_DEAD afterwards.
+	float dying = (m.deadflag == DEAD_DYING);
+
 	m.ai_script      = world;
 	m.ai_scriptstate = SCRIPTST_NONE;
 	m.ai_scriptgo    = FALSE;
+	// A monster that has been through a script once is no longer "waiting for a
+	// script", whatever its spawnflags still say.  Half-Life never needs to ask
+	// the question — SF_MONSTER_WAIT_FOR_SCRIPT only gates MonsterInit — but the
+	// HUD readout does: see the note in LookatNPC_Tick (server/sv_lookatnpc.qc).
+	m.ai_script_played = TRUE;
 
 	// Hand the body back to the animation system.  Without clearing the name the
 	// monster keeps re-asserting its scripted pose (AI_SetActivity's idempotence
@@ -359,12 +454,83 @@ void(entity m, float firechain) Script_Release =
 	m.ai_seqname = "";
 	AI_ResetActivity(m);
 
-	if (m.ai_state == MS_SCRIPT)
+	// PUT THE ACTOR BACK ON THE GROUND, or take the ground away from it.
+	//
+	// This is the tail of Half-Life's CineCleanup (dlls/scripted.cpp:842-889),
+	// which nothing here implemented:
+	//
+	//     pev->origin.z += 1;
+	//     pev->flags |= FL_ONGROUND;
+	//     int drop = DROP_TO_FLOOR( ENT(pev) );
+	//     if ( drop < 0 )       pev->origin = oldOrigin;   // ended in solid
+	//     else if ( drop == 0 ) pev->flags &= ~FL_ONGROUND; // hanging in air
+	//
+	// The `drop == 0` arm is the whole point and is the half that was missing: a
+	// sequence that ends with the actor unsupported must hand it back to GRAVITY,
+	// not leave it standing on nothing.  th_ep1_03's `lavaman` is exactly that -
+	// a scientist who hangs from a lift ("hanging_idle2"), plays "fall_elevator"
+	// and is supposed to drop into the lava.  Without this he finished the
+	// sequence and stood in mid-air over the pit, which is the reported
+	// "monster_scientist lavaman stands floating in the air".
+	//
+	// Runs for a posed body too.  A body has no AI to notice it is unsupported, so
+	// it is the case that needs the un-grounding most.
+	//
+	// NOT run when the actor is dead: a corpse has already been sized to its
+	// one-unit pancake by AI_Died and re-dropping it here would fight that.
+	//
+	// `dying` is admitted deliberately, and is the exception that proves the rule:
+	// its health is already 0 (the 1000 event zeroed it) but AI_BecomeCorpse has
+	// NOT run yet — Script_DieInPlace is called further down — so there is no
+	// pancake to fight, and skipping the block is exactly what would leave
+	// th_ep1_03's lavaman hanging over the lava as a corpse instead of falling into
+	// it.  Half-Life skips it (CineCleanup returns before this block) and freezes
+	// him in the air; this is the same divergence the block's own comment already
+	// argues for, extended to the case that made the actor dead.
+	if ((dying || (m.ai_state != MS_DEAD && m.health > 0)) && m.movetype != MOVETYPE_NONE)
+	{
+		vector oldorg = m.origin;
+		entity oldds  = self;
+		self = m;
+		setorigin(m, m.origin + '0 0 1');
+		m.flags = m.flags | FL_ONGROUND;
+		if (!droptofloor())
+		{
+			// Either "ended inside solid" or "nothing under it".  Half-Life tells
+			// the two apart from DROP_TO_FLOOR's -1 / 0; QC's droptofloor collapses
+			// both to FALSE, so the distinction is made by hand: put the actor back
+			// where the sequence left it, and only clear FL_ONGROUND when the spot
+			// is actually free.  A monster whose origin is in solid must KEEP its
+			// footing or it falls through the world.
+			setorigin(m, oldorg);
+			traceline(oldorg, oldorg - '0 0 2', MOVE_NORMAL, m);
+			if (trace_fraction == 1 && !trace_startsolid)
+				m.flags = m.flags - (m.flags & FL_ONGROUND);
+		}
+		self = oldds;
+	}
+
+	// The scene's own animation killed the actor — make the corpse and hold the
+	// last frame.  Ahead of the MS_SCRIPT arm because that arm's job is to hand a
+	// LIVE actor back to the AI, and this one must never reach it.
+	if (dying)
+		Script_DieInPlace(m);
+	else if (m.ai_state == MS_SCRIPT)
 	{
 		// Half-Life's CineCleanup: normally back to idle, but EXITAGITATED (2) means
 		// the scene ended with the actor spooked - it leaves alert and provoked, and
 		// that is how a scripted scare hands over to a real fight.
-		if (s && (s.spawnflags & SF_SCRIPT_EXITAGITATED))
+		//
+		// A DEAD actor is never handed back to idle.  CineCleanup's own guard is
+		// `if (pev->health > 0) m_IdealMonsterState = MONSTERSTATE_IDLE; else
+		// m_IdealMonsterState = MONSTERSTATE_DEAD` (scripted.cpp:898-909), and
+		// FixScriptMonsterSchedule repeats it (`if (m_IdealMonsterState !=
+		// MONSTERSTATE_DEAD)`).  Without it an actor killed mid-scene is resurrected
+		// standing when the scene ends, which is the reported "the NPC just jumps
+		// back to position alive standing".
+		if (m.health <= 0)
+			m.ai_state = MS_DEAD;
+		else if (s && (s.spawnflags & SF_SCRIPT_EXITAGITATED))
 		{
 			m.ai_state = MS_ALERT;
 			m.ai_cond  = m.ai_cond | COND_PROVOKED;
@@ -644,6 +810,49 @@ void(entity s, entity m) Script_BodyTick =
 	s.nextthink = time + 0.5;
 };
 
+// Is there a maker on this map that will one day produce an actor by this name?
+//
+// squadmaker/monstermaker hand their `netname` to each child as its targetname
+// (sv_monsters.qc:1877 and :2118), so a script waiting on a name that a maker
+// declares is waiting for something that has not been asked to exist yet — the
+// normal, correct case for a mid-map set piece.  th_escape is the example that
+// prompted this: the unnamed scripted_sequence at (4701,-4285,-1032) holds
+// "standing_idle" for "jail_sheriff", and the only jail_sheriff there will ever
+// be is the monster_gman that squadmaker "jail_sheriffspawn" spawns when
+// "populate_jail" runs at the END of the map.  The script therefore misses for
+// the entire run and the watchdog printed
+//     [script] "": still looking for "jail_sheriff" after 120 tries
+// which reads as a fault and is not one.
+//
+// Only the DIAGNOSTIC is gated.  The retry itself keeps running either way —
+// that is the whole point of removing the give-up, and gating the retry on this
+// would reintroduce it for every script whose actor is placed rather than made.
+//
+// Runs once per script, at the threshold, over two find() chains.  Not hot.
+float(string want) Script_MakerWillSupply =
+{
+    if (want == "")
+        return FALSE;
+
+    entity m = find(world, classname, "squadmaker");
+    while (m)
+    {
+        if (m.netname == want)
+            return TRUE;
+        m = find(m, classname, "squadmaker");
+    }
+
+    m = find(world, classname, "monstermaker");
+    while (m)
+    {
+        if (m.netname == want)
+            return TRUE;
+        m = find(m, classname, "monstermaker");
+    }
+
+    return FALSE;
+};
+
 void() Script_Think =
 {
 	entity m = self.ss_mon;
@@ -704,18 +913,34 @@ void() Script_Think =
 		dprint(sprintf("[script] \"%s\" cannot find \"%s\" yet (moveto=%g radius=%g)\n",
 		               self.targetname, self.m_iszentity, self.m_fmoveto, self.m_flradius));
 
-	if (self.ss_tries > SCRIPT_CLAIM_TRIES)
-	{
-		self.ss_claiming = FALSE;
-		self.nextthink   = 0;
-		dprint(sprintf("[script] \"%s\": gave up looking for \"%s\"\n",
-		               self.targetname, self.m_iszentity));
-		return;
-	}
-	// Half-Life retries at 1 Hz forever.  Fast at first (a monster the map spawns
-	// at load is there within a tick or two), then slow, because a name that has
-	// not turned up in ten seconds is usually never turning up.
-	self.nextthink = time + ((self.ss_tries < 10) ? 1 : 5);
+	// NO GIVE-UP.  Half-Life's CineThink (dlls/scripted.cpp:476-489) retries at
+	// 1 Hz for the whole map, and the 120-try cutoff that used to be here stopped
+	// at ~565 s on the reasoning that a name absent for nine minutes is a mapper
+	// typo rather than a squadmaker that has yet to fire.  pizza_ya_san1 is the
+	// counter-example, five times over: scrp_jk2 / scrp_farmer2 / scrp_electro2 /
+	// scrp_gamesaba2 hold "sit_pizza" / "sit_bigmac" for mon_jk2 & co., and
+	// scrip_mi2 holds "smile_sit_hiji" for mon_mi2 - all squadmaker children that
+	// cannot exist until the players have voted the map open and pressed fifteen
+	// ml_gomi* buttons, and NOTHING in the BSP targets those five scripts, so this
+	// retry is their only route to an actor.  Past the old deadline the four
+	// customers stood at their chairs in a default idle for the rest of the map
+	// with no recovery path whatsoever.  Say so once at the old threshold, so a
+	// genuine mapper typo is still visible in the log, and keep going.
+	// ...but not when a squadmaker/monstermaker on the map declares that name, in
+	// which case "the actor does not exist yet" is the design, not a defect.  See
+	// Script_MakerWillSupply.
+	if (self.ss_tries == SCRIPT_CLAIM_TRIES)
+	if (!Script_MakerWillSupply(self.m_iszentity))
+		dprint(sprintf("[script] \"%s\": still looking for \"%s\" after %g tries - still retrying\n",
+		               self.targetname, self.m_iszentity, self.ss_tries));
+
+	// Half-Life's rate, permanently.  The fast phase is for the ordinary case (a
+	// monster the map places at load is there within a tick or two); 1 Hz after it
+	// is HL's own figure and bounds the visible pop-in - a customer standing up
+	// before dropping into the chair - to a single second when a squadmaker
+	// finally fires.  Only scripts still LOOKING pay it: six on pizza_ya_san1,
+	// seven on hl_c01_a1.
+	self.nextthink = time + 1;
 };
 
 // ---------------------------------------------------------------------------
@@ -975,14 +1200,17 @@ void() AI_ReportScripts =
 	dprint(sprintf("[ai]   script: claimed=%g moved=%g played=%g done=%g\n",
 	               ai_dbg_script_claimed, ai_dbg_script_moved,
 	               ai_dbg_script_played, ai_dbg_script_done));
-	dprint(sprintf("[ai]   script bail: lost=%g noseq=%g stuck=%g forced=%g broke=%g\n",
+	// `died` is not a bail — it is a scene that worked — but it belongs on this
+	// line rather than the one above because it is the outcome an operator wants to
+	// read NEXT TO the failures; the four-number line is the possession ledger.
+	dprint(sprintf("[ai]   script bail: lost=%g noseq=%g stuck=%g forced=%g broke=%g died=%g\n",
 	               ai_dbg_script_lost, ai_dbg_script_noseq,
 	               ai_dbg_script_stuck, ai_dbg_script_forced,
-	               ai_dbg_script_broke));
+	               ai_dbg_script_broke, ai_dbg_script_died));
 
 	ai_dbg_script_claimed = 0; ai_dbg_script_moved  = 0;
 	ai_dbg_script_played  = 0; ai_dbg_script_done   = 0;
 	ai_dbg_script_lost    = 0; ai_dbg_script_noseq  = 0;
 	ai_dbg_script_stuck   = 0; ai_dbg_script_forced = 0;
-	ai_dbg_script_broke   = 0;
+	ai_dbg_script_broke   = 0; ai_dbg_script_died   = 0;
 };

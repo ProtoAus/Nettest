@@ -261,15 +261,32 @@ void() CSQC_ViewFX_UpdateState =
     float ads_target = 0;
     if (predicted_player
         && (csqc_live_buttons & 4)            // +attack2 bit
+        && !predicted_player.has_shield       // the shield owns that button
         && !sprint_target)
     {
+        // THE SHIELD GATE IS NOT BELT-AND-BRACES.  This envelope reads
+        // csqc_live_buttons directly, which is a different path from the one
+        // CSQC_PredictWeaponCommand masks — so masking input_buttons there did
+        // NOT reach here, and the gun still went to the eye while the server was
+        // raising the shield.  That mismatch is exactly the reported "in third
+        // person +attack2 covers you, in first person it aims down sights".
+        // There is also no pose to aim with: a pistol held one-handed beside a
+        // slab cannot be brought up to the sights, which is why Counter-Strike
+        // gives the button to the shield outright.
         // Bar ADS while reloading on every ADS weapon — gun is busy
         // racking / inserting shells, can't be brought up to the eye.
         // Mirrors the grapple / lower-envelope cancellation pattern.
         // Pose-ADS weapons — eligibility from the weapon's own field
         // (set in its Equip via W_SetADSProfile), not a hardcoded list.
+        // SH_DeployLocksPlayer: the +attack2 that plants a bipod must not also
+        // bring the gun to the eye.  This is the second of the two ADS paths —
+        // Weapon_IsADSActive in sh_weapon_logic.qc is the other, and it reads
+        // input_buttons while this one reads csqc_live_buttons, so a gate added to
+        // only one of them reaches only half the effect (see the shield note above,
+        // which is the same trap).
         if (predicted_player.weaponstate != WS_RELOAD
-         && predicted_player.weapon_ads_eligible)
+         && predicted_player.weapon_ads_eligible
+         && !SH_DeployLocksPlayer(predicted_player))
             ads_target = 1;
         // sv_codscopes adds scout / awp to the ADS-eligible set so
         // the CoD scope state machine in cl_codscope.qc can ride the
@@ -313,7 +330,11 @@ void() CSQC_ViewFX_UpdateState =
     // PM_ReadMovevar makes sv_codladders work both on listen servers
     // (read local cvar) and remote servers (read serverkeyfloat).
     float lower_target = 0;
-    if (predicted_player.grapple_rope_active)
+    // WEP_BGRAPPLE is exempt: the lower envelope exists so an ordinary gun
+    // gets out of the way while both hands are on a rope, but the barnacle
+    // grapple IS the rope - hiding it would hide the one viewmodel whose
+    // fire/firetravel/firereached sequences are the whole point.
+    if (predicted_player.grapple_rope_active && predicted_player.weapon != WEP_BGRAPPLE)
         lower_target = 1;
     else if (predicted_player.pm_carrying && predicted_player.weapon != WEP_GRAVITYGUN)
         lower_target = 1;   // HL2 +use carry drops the gun off-screen; the gravity gun stays up

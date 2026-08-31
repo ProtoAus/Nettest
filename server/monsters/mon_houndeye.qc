@@ -40,11 +40,31 @@ const float HE_BLAST_RADIUS   = 384;
 const float HE_ATTACK_RANGE   = 384;	// it must be close for the blast to matter
 const float HE_ATTACK_DELAY   = 3.0;
 
-// houndeye.cpp:531-536.  A SOLO houndeye's ring is the palest of the five - the
-// colour is a squad-size readout, and brighter/bluer means more of them are
-// about to thump you at once.  There is no squad system here yet, so every
-// houndeye is solo and gets the solo colour; the ramp goes in with the squads.
+// houndeye.cpp:511-541, CHoundeye::WriteBeamColor.  THE RING COLOUR IS A SQUAD
+// READOUT, and now that squads exist it can finally say what it was designed to
+// say: the deeper and bluer the ring, the more houndeyes are about to thump you
+// at once.  A solo houndeye gets the palest.
+//
+// Valve's table is not a smooth ramp and is reproduced rather than tidied - the
+// step from 2 to 3 is the big one and 4 goes darker rather than bluer:
+//   solo 188 220 255   |   2: 101 133 221   |   3: 67 85 255   |   4: 62 33 211
 const vector HE_BEAM_COLOUR_SOLO = '188 220 255';
+const vector HE_BEAM_COLOUR_2    = '101 133 221';
+const vector HE_BEAM_COLOUR_3    = '67 85 255';
+const vector HE_BEAM_COLOUR_4    = '62 33 211';
+
+vector(entity m) Houndeye_BeamColour =
+{
+	float n = Squad_Count(m);
+	if (n <= 1) return HE_BEAM_COLOUR_SOLO;
+	if (n == 2) return HE_BEAM_COLOUR_2;
+	if (n == 3) return HE_BEAM_COLOUR_3;
+	// HL's default case for a squad bigger than 4 falls back to the SOLO colour
+	// (houndeye.cpp:534-539, with an at_aiconsole complaint) - which reads as a
+	// bug, since a bigger pack would suddenly look weaker than a smaller one.
+	// Clamped to the four-strong colour instead, and said out loud.
+	return HE_BEAM_COLOUR_4;
+};
 
 // How many eye textures houndeyeT.mdl actually carries.  HL's HOUNDEYE_EYE_FRAMES
 // is 4 and it sets skin = 3, which is out of range for the three skin families
@@ -81,35 +101,35 @@ void() Houndeye_WarnSound =
 {
 	if (self.gag)
 		return;
-	sound(self, CHAN_VOICE, sprintf("houndeye/he_hunt%g.wav", ceil(random() * 3)), 1, ATTN_NORM);
+	AI_Sound(self, CHAN_VOICE, sprintf("houndeye/he_hunt%g.wav", ceil(random() * 3)), 1, ATTN_NORM);
 };
 
 void() Houndeye_IdleSound =
 {
 	if (self.gag)
 		return;
-	sound(self, CHAN_VOICE, sprintf("houndeye/he_idle%g.wav", ceil(random() * 4)), 1, ATTN_NORM);
+	AI_Sound(self, CHAN_VOICE, sprintf("houndeye/he_idle%g.wav", ceil(random() * 4)), 1, ATTN_NORM);
 };
 
 void() Houndeye_AlertSound =
 {
 	if (self.gag)
 		return;
-	sound(self, CHAN_VOICE, sprintf("houndeye/he_alert%g.wav", ceil(random() * 3)), 1, ATTN_NORM);
+	AI_Sound(self, CHAN_VOICE, sprintf("houndeye/he_alert%g.wav", ceil(random() * 3)), 1, ATTN_NORM);
 };
 
 void() Houndeye_PainSound =
 {
 	if (self.gag)
 		return;
-	sound(self, CHAN_VOICE, sprintf("houndeye/he_pain%g.wav", ceil(random() * 5)), 1, ATTN_NORM);
+	AI_Sound(self, CHAN_VOICE, sprintf("houndeye/he_pain%g.wav", ceil(random() * 5)), 1, ATTN_NORM);
 };
 
 void() Houndeye_Death =
 {
 	if (self.gag)
 		return;
-	sound(self, CHAN_VOICE, sprintf("houndeye/he_die%g.wav", ceil(random() * 3)), 1, ATTN_NORM);
+	AI_Sound(self, CHAN_VOICE, sprintf("houndeye/he_die%g.wav", ceil(random() * 3)), 1, ATTN_NORM);
 };
 
 // ---------------------------------------------------------------------------
@@ -121,7 +141,7 @@ void() Houndeye_Event =
 	{
 		// The wind-up growl, 0.20 s in.  Purely the tell — no damage here.
 		if (!self.gag)
-			sound(self, CHAN_WEAPON, sprintf("houndeye/he_attack%g.wav", ceil(random() * 3)), 1, ATTN_NORM);
+			AI_Sound(self, CHAN_WEAPON, sprintf("houndeye/he_attack%g.wav", ceil(random() * 3)), 1, ATTN_NORM);
 		return;
 	}
 
@@ -130,7 +150,7 @@ void() Houndeye_Event =
 		// 2.36 s in: the sonic blast.  Radius damage centred on the houndeye
 		// itself, so backing off during the wind-up genuinely saves you.
 		if (!self.gag)
-			sound(self, CHAN_WEAPON, sprintf("houndeye/he_blast%g.wav", ceil(random() * 3)), 1, ATTN_NORM);
+			AI_Sound(self, CHAN_WEAPON, sprintf("houndeye/he_blast%g.wav", ceil(random() * 3)), 1, ATTN_NORM);
 
 		// THE ATTACK, MADE VISIBLE.  houndeye.cpp:571-612 writes exactly two
 		// TE_BEAMCYLINDER rings from the same centre - a wide one at the full
@@ -142,9 +162,10 @@ void() Houndeye_Event =
 		// rim at the same moment the outer one does, so the gap between them
 		// narrows as they travel and the eye reads a wavefront rather than two
 		// unrelated circles.
-		vector c = self.origin + '0 0 16';
-		Shockwave_Multicast(c, HE_BLAST_RADIUS,     0.2, 16, HE_BEAM_COLOUR_SOLO, SHOCKWAVE_EXPAND);
-		Shockwave_Multicast(c, HE_BLAST_RADIUS / 2, 0.2, 16, HE_BEAM_COLOUR_SOLO, SHOCKWAVE_EXPAND);
+		vector c  = self.origin + '0 0 16';
+		vector bc = Houndeye_BeamColour(self);
+		Shockwave_Multicast(c, HE_BLAST_RADIUS,     0.2, 16, bc, SHOCKWAVE_EXPAND);
+		Shockwave_Multicast(c, HE_BLAST_RADIUS / 2, 0.2, 16, bc, SHOCKWAVE_EXPAND);
 
 		float d = cvar("sv_ai_houndeye_dmg");
 		if (d <= 0)
@@ -163,7 +184,7 @@ void() Houndeye_Event =
 	if (ai_event_code == HE_AE_ANGERSOUND1 || ai_event_code == HE_AE_ANGERSOUND2)
 	{
 		if (!self.gag)
-			sound(self, CHAN_VOICE, sprintf("houndeye/he_alert%g.wav", ceil(random() * 3)), 1, ATTN_NORM);
+			AI_Sound(self, CHAN_VOICE, sprintf("houndeye/he_alert%g.wav", ceil(random() * 3)), 1, ATTN_NORM);
 		return;
 	}
 
@@ -241,9 +262,31 @@ float(entity m, float act) Houndeye_YawSpeed =
 	return 90;						// WALK, RUN, TURN, default
 };
 
+// houndeye.cpp:1272-1288.  Hurt, of either weight, and it backs off.
+//
+// HL rolls 40 % for SCHED_HOUND_HOP_RETREAT first - a scripted backward LEAP,
+// taken only when a 128-unit hull trace behind the hound comes back clear - and
+// falls through to ordinary cover otherwise.  The hop is not ported: it is a
+// bespoke schedule built on TASK_HOUND_HOP_BACK, which sets a velocity and an
+// activity houndeye.mdl does carry, and it belongs with the rest of that class's
+// movement rather than with the cover mechanism.  Recorded here rather than
+// silently dropped, because the two behaviours look quite different in play and
+// somebody comparing against Half-Life will notice the leap is missing.
+float() Houndeye_SelectSched =
+{
+	entity m = self;
+	if (m.ai_state != MS_COMBAT || !m.ai_enemy)
+		return SCHED_NONE;
+	return Cover_ScheduleIfHurt(m);
+};
+
 void(entity m) Houndeye_ClassInit =
 {
 	m.ai_class = CLASS_ALIEN_MONSTER;	// HL's CHoundEye::Classify
+	m.ai_selectsched = Houndeye_SelectSched;
+	// THREE attack slots, squadmonster.h:41-44 - a looser ration than the
+	// grunt's two, because a houndeye pack is supposed to overlap its blasts.
+	m.ai_slots_attack = SQSLOTS_HOUND_ATTACK;
 
 	// No melee at all: the blast IS the attack, and giving it a melee range would
 	// let the generic ladder pick SCHED_MELEE_ATTACK1, which resolves to an
@@ -269,7 +312,7 @@ void(entity m) Houndeye_ClassInit =
 	m.ai_death      = Houndeye_Death;
 	m.ai_tick       = Houndeye_Tick;
 
-	if (m.bloodcolor <= 0)
+	if (m.bloodcolor == 0)
 		m.bloodcolor = 195;		// HL BLOOD_COLOR_GREEN
 };
 

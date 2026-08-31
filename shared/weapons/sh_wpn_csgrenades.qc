@@ -1,10 +1,48 @@
 // ============================================================
-//  shared/weapons/sh_wpn_csgrenades.qc  -  CS HE / flash / smoke
+//  shared/weapons/sh_wpn_csgrenades.qc  -  FIVE thrown grenades, two games
 //
 //  Slot  : SLOT_UTILITY (multi-carry)
 //  Fire  : hold +attack to pull pin, release to throw.  Fuse starts on
 //          release and detonates after two seconds.
 // ============================================================
+//
+//  THE FILE NAME IS NOW A LITTLE WRONG and that is deliberate.  It covers the
+//  three Counter-Strike grenades it was written for PLUS Day of Defeat's Mills
+//  bomb and stick grenade, because the two DoD grenades are functionally the CS
+//  HE grenade with different assets and different numbers — pull a pin, throw,
+//  two-second fuse, bounce, radius explosion.  Everything in here already
+//  dispatches on `wep`, so adding them cost a row in each table instead of a
+//  second seven-hundred-line copy of the projectile lifecycle (bounce sounds,
+//  resting, the CSQC fake, the explode event, the auto-switch tail).  Renaming
+//  the file would have meant touching two .src files and every reference for no
+//  behavioural gain, so the header carries the correction instead.
+//
+//  THE TWO SETS DO NOT SHARE A SEQUENCE LAYOUT, which is the one thing that had
+//  to be generalised rather than tabulated.  Measured:
+//
+//    cstrike v_hegrenade.mdl      idle1 / pullpin / throw  / draw
+//    dod     v_mills.mdl          idle  / draw    / pinpull/ holster / throw
+//                                 + exploding_idle / _draw / _pinpull / _throw
+//    dod     v_stick.mdl          same nine as v_mills
+//
+//  Different names AND different order — `throw` is index 2 on the CS models
+//  and index 4 on the DoD ones — so the four CSGREN_SEQ_* constants below are
+//  now FALLBACKS and every lookup goes through SH_CSGrenSeq*, by name.  Feeding
+//  a CS index to a DoD model would have played `holster` for a throw.
+//
+//  THE DoD MODELS CARRY A LIVE-GRENADE SET the CS ones do not: exploding_idle,
+//  exploding_draw, exploding_pinpull and exploding_throw, meant for a grenade
+//  whose pin is already out.  Wired — see SH_CSGrenSeqPullpin/Throw, which pick
+//  the exploding_* take once the pin is gone, because standing there holding a
+//  live grenade with the pin still in it is exactly the pose those exist to
+//  replace.  On a CS model the lookup falls back to the ordinary take.
+//
+//  ONE DoD GRENADE IS DELIBERATELY ABSENT: the US Mk2 frag.  Its view model is
+//  dod/models/v_grenade.mdl, and `v_grenade.mdl` is one of the TEN model names
+//  DoD reuses from Half-Life — with the dod mount deliberately at the bottom of
+//  fs_addons.txt (see the note there), that path resolves to Sven's HL hand
+//  grenade and always will.  There is no way to ask for the DoD one from QC, and
+//  the role is already covered twice over by the HL hand grenade and the CS HE.
 
 .float csgren_throw_pending;
 .float csgren_spawn_time;
@@ -12,20 +50,56 @@
 .float csgren_fake_spawned_serial;
 .float csgren_next_bounce_sound;
 .float csgren_resting;
+// Pin-sound latch.  WS_SPECIAL is held for as long as the player cooks the
+// grenade, so the mark inside the pull-pin take needs a once-only guard rather
+// than an edge.
+.float csgren_pin_played;
 
 const float MAX_AMMO_CSHEGRENADE      = 1;
 const float MAX_AMMO_CSFLASHBANG      = 2;
 const float MAX_AMMO_CSSMOKEGRENADE   = 1;
+// DoD issued its riflemen more grenades than CS does, and they are the cheaper
+// weapon here (no flash, no smoke, no utility beyond blast), so two apiece.
+const float MAX_AMMO_DODMILLS         = 2;
+const float MAX_AMMO_DODSTICK         = 2;
 
+// FALLBACKS ONLY — see the sequence note in the header.  These are the CS
+// layout; the DoD models differ in both name and order and are reached by name.
 const float CSGREN_SEQ_IDLE           = 0;
 const float CSGREN_SEQ_PULLPIN        = 1;
 const float CSGREN_SEQ_THROW          = 2;
 const float CSGREN_SEQ_DEPLOY         = 3;
 
 const float CSGREN_FRAME_INTERVAL     = 0.05;
+
+// FALLBACKS ONLY.  These three used to be the live numbers, applied to all five
+// grenades, and not one of the five actually matched them:
+//
+//                    deploy   pinpull   throw
+//   assumed here      0.730     0.790    0.520
+//   cstrike HE/flash/ 0.667     0.976    0.767
+//     smoke
+//   dod v_stick       0.750     0.833    0.025
+//   dod v_mills       0.857     0.733    0.025
+//
+// The throw row is what you could see.  WS_FIRE ran for 0.520 s against a 0.767 s
+// throw take, so the CS release animation was cut off at 68% every single time
+// and the next grenade's deploy spliced in over the top of it — and on the LAST
+// grenade the state exited there, so the arm never finished the throw at all.
+// Everything below now asks the model that actually loaded, the same way every
+// other sequence-driven weapon in this tree does; these stay only as the value
+// used if a model is missing or not yet precached.
 const float CSGREN_DEPLOY_DURATION    = 0.73;
 const float CSGREN_PULLPIN_DURATION   = 0.79;
 const float CSGREN_THROW_DURATION     = 0.52;
+
+// The DoD models' throw take is TWO FRAMES (0.025 s): a release pose, not an
+// arc, because DoD plays holster/draw straight afterwards.  The projectile is
+// spawned CSGREN_THROW_DELAY into WS_FIRE, so a phase that short would end the
+// state before the grenade ever left the hand.  The throw PHASE is floored here;
+// a short take simply holds its final pose (an empty hand) for the remainder,
+// which is what it depicts anyway.
+const float CSGREN_THROW_MIN          = 0.25;
 const float CSGREN_THROW_DELAY        = 0.12;
 const float CSGREN_DRYFIRE_DELAY      = 0.2;
 const float CSGREN_FUSE_TIME          = 2.0;
@@ -52,26 +126,53 @@ const float FLASHBANG_RADIUS          = 2000;
 const float FLASHBANG_MAX_BLINDNESS   = 5;
 const float FLASHBANG_DECAY_RATE      = 1;
 
-const string CSHE_VIEWMODEL           = "models/weapons/wpn_cshegrenade/v_hegrenade.mdl";
-const string CSHE_WORLDMODEL          = "models/weapons/wpn_cshegrenade/w_hegrenade.mdl";
-const string CSHE_PMODEL              = "models/weapons/wpn_cshegrenade/p_hegrenade.mdl";
-const string FLASH_VIEWMODEL          = "models/weapons/wpn_csflashbang/v_flashbang.mdl";
-const string FLASH_WORLDMODEL         = "models/weapons/wpn_csflashbang/w_flashbang.mdl";
-const string FLASH_PMODEL             = "models/weapons/wpn_csflashbang/p_flashbang.mdl";
-const string SMOKE_VIEWMODEL          = "models/weapons/wpn_cssmokegrenade/v_smokegrenade.mdl";
-const string SMOKE_WORLDMODEL         = "models/weapons/wpn_cssmokegrenade/w_smokegrenade.mdl";
-const string SMOKE_PMODEL             = "models/weapons/wpn_cssmokegrenade/p_smokegrenade.mdl";
+// THE MOUNTED COUNTER-STRIKE MODELS, not the mod-local copies under
+// models/weapons/wpn_cs*grenade/.
+//
+// Those copies are not what Counter-Strike ships.  The v_ and p_ ones are
+// custom high-poly replacements (526 KB and 279 KB against Valve's 246 KB and
+// 26 KB), and the w_ ones are worse than that: they are QUAKE-format models
+// (`IDPO`, not `IDST`), 653 KB with 128 frames apiece, and the flashbang's and
+// the smoke grenade's are byte-for-byte the same file as each other.  The whole
+// set resolves out of the cstrike mount that fs_addons.txt already carries and
+// that a hundred-odd other models here already depend on, so these are the
+// authentic ones at a fraction of the size.
+//
+// To go back, put the models/weapons/wpn_cs<x>grenade/ paths back on these nine
+// lines and on the matching precaches in shared/sh_customdefs.qc; the old files
+// are all still on disk.
+const string CSHE_VIEWMODEL           = "models/v_hegrenade.mdl";
+const string CSHE_WORLDMODEL          = "models/w_hegrenade.mdl";
+const string CSHE_PMODEL              = "models/p_hegrenade.mdl";
+const string FLASH_VIEWMODEL          = "models/v_flashbang.mdl";
+const string FLASH_WORLDMODEL         = "models/w_flashbang.mdl";
+const string FLASH_PMODEL             = "models/p_flashbang.mdl";
+const string SMOKE_VIEWMODEL          = "models/v_smokegrenade.mdl";
+const string SMOKE_WORLDMODEL         = "models/w_smokegrenade.mdl";
+const string SMOKE_PMODEL             = "models/p_smokegrenade.mdl";
 
 const string CSHE_PIN_SOUND           = "sounds/weapons/wpn_cshegrenade/pinpull.wav";
 const string FLASH_PIN_SOUND          = "sounds/weapons/wpn_csflashbang/pinpull.wav";
 const string SMOKE_PIN_SOUND          = "sounds/weapons/wpn_cssmokegrenade/pinpull.wav";
 const string FLASH_RING_SOUND         = "sounds/weapons/wpn_csflashbang/ringing.wav";
 
+// Day of Defeat's two, out of the mounted dod gamedir.  All six names are
+// DoD-exclusive — unlike v_grenade.mdl, which is why the US frag is not here
+// (see the header).
+const string DODMILLS_VIEWMODEL       = "models/v_mills.mdl";
+const string DODMILLS_WORLDMODEL      = "models/w_mills.mdl";
+const string DODMILLS_PMODEL          = "models/p_mills.mdl";
+const string DODSTICK_VIEWMODEL       = "models/v_stick.mdl";
+const string DODSTICK_WORLDMODEL      = "models/w_stick.mdl";
+const string DODSTICK_PMODEL          = "models/p_stick.mdl";
+
 string(float wep) CSGrenadeViewModel =
 {
     if (wep == WEP_CSHEGRENADE) return CSHE_VIEWMODEL;
     if (wep == WEP_CSFLASHBANG) return FLASH_VIEWMODEL;
     if (wep == WEP_CSSMOKEGRENADE) return SMOKE_VIEWMODEL;
+    if (wep == WEP_DODMILLS) return DODMILLS_VIEWMODEL;
+    if (wep == WEP_DODSTICK) return DODSTICK_VIEWMODEL;
     return "";
 };
 
@@ -80,6 +181,8 @@ string(float wep) CSGrenadeWorldModel =
     if (wep == WEP_CSHEGRENADE) return CSHE_WORLDMODEL;
     if (wep == WEP_CSFLASHBANG) return FLASH_WORLDMODEL;
     if (wep == WEP_CSSMOKEGRENADE) return SMOKE_WORLDMODEL;
+    if (wep == WEP_DODMILLS) return DODMILLS_WORLDMODEL;
+    if (wep == WEP_DODSTICK) return DODSTICK_WORLDMODEL;
     return "";
 };
 
@@ -88,14 +191,34 @@ string(float wep) CSGrenadeDisplayName =
     if (wep == WEP_CSHEGRENADE) return "HE GRENADE";
     if (wep == WEP_CSFLASHBANG) return "FLASHBANG";
     if (wep == WEP_CSSMOKEGRENADE) return "SMOKE";
+    if (wep == WEP_DODMILLS) return "MILLS BOMB";
+    if (wep == WEP_DODSTICK) return "STICK GRENADE";
     return "GRENADE";
 };
 
+// The classnames, in one place rather than repeated as a ternary in the drop
+// and spawn commons — which is where a fourth entry would have been forgotten.
+// weapon_handgrenade is Half-Life's and is NOT taken here; these are DoD's own.
+string(float wep) CSGrenadeClassname =
+{
+    if (wep == WEP_CSHEGRENADE) return "weapon_cshegrenade";
+    if (wep == WEP_CSFLASHBANG) return "weapon_csflashbang";
+    if (wep == WEP_DODMILLS) return "weapon_mills";
+    if (wep == WEP_DODSTICK) return "weapon_stick";
+    return "weapon_cssmokegrenade";
+};
+
+// DoD's grenade models carry NO pin event of their own (their only 5004 is
+// rifleselect on the draw), so both borrow the CS HE pin — the closest sample in
+// any mounted game, and the alternative is silence on the most important frame
+// of the animation.
 string(float wep) CSGrenadePinSound =
 {
     if (wep == WEP_CSHEGRENADE) return CSHE_PIN_SOUND;
     if (wep == WEP_CSFLASHBANG) return FLASH_PIN_SOUND;
     if (wep == WEP_CSSMOKEGRENADE) return SMOKE_PIN_SOUND;
+    if (wep == WEP_DODMILLS) return CSHE_PIN_SOUND;
+    if (wep == WEP_DODSTICK) return CSHE_PIN_SOUND;
     return "";
 };
 
@@ -104,6 +227,8 @@ float(float wep) CSGrenadeProjectileType =
     if (wep == WEP_CSHEGRENADE) return PROJ_TYPE_CSHEGRENADE;
     if (wep == WEP_CSFLASHBANG) return PROJ_TYPE_CSFLASHBANG;
     if (wep == WEP_CSSMOKEGRENADE) return PROJ_TYPE_CSSMOKEGRENADE;
+    if (wep == WEP_DODMILLS) return PROJ_TYPE_DOD_MILLS;
+    if (wep == WEP_DODSTICK) return PROJ_TYPE_DOD_STICK;
     return PROJ_TYPE_HLGRENADE;
 };
 
@@ -113,6 +238,8 @@ float(entity player, float wep) CSGrenadeEntityAmmo =
     if (wep == WEP_CSHEGRENADE) return player.ammo_cshegrenade;
     if (wep == WEP_CSFLASHBANG) return player.ammo_csflashbang;
     if (wep == WEP_CSSMOKEGRENADE) return player.ammo_cssmokegrenade;
+    if (wep == WEP_DODMILLS) return player.ammo_dodmills;
+    if (wep == WEP_DODSTICK) return player.ammo_dodstick;
     return 0;
 };
 
@@ -121,13 +248,155 @@ void(entity player, float wep, float ammo) CSGrenadeSetEntityAmmo =
     if (wep == WEP_CSHEGRENADE) player.ammo_cshegrenade = ammo;
     else if (wep == WEP_CSFLASHBANG) player.ammo_csflashbang = ammo;
     else if (wep == WEP_CSSMOKEGRENADE) player.ammo_cssmokegrenade = ammo;
+    else if (wep == WEP_DODMILLS) player.ammo_dodmills = ammo;
+    else if (wep == WEP_DODSTICK) player.ammo_dodstick = ammo;
+};
+
+// --- Balance, for the two DoD grenades ------------------------------------
+//
+// The CS HE grenade is 100 peak / 5 min over 260 units and is a one-per-life
+// finisher.  These two are carried two apiece, so they hit for a little less
+// over a slightly wider area — a grenade you have two of should not also be
+// the more lethal one:
+//
+//   Mills bomb      85 / 5 over 280   defensive grenade, thick casing, wide
+//   stick grenade   80 / 5 over 300   offensive: less fragmentation, more blast
+//
+// That is the real difference between the two types and it maps cleanly onto
+// peak-vs-radius, so it is what the numbers say.
+float(float wep) CSGrenadeBlastDamage =
+{
+    if (wep == WEP_DODMILLS) return 85;
+    if (wep == WEP_DODSTICK) return 80;
+    return CSHE_EXPLOSION_DAMAGE;
+};
+
+float(float wep) CSGrenadeBlastRadius =
+{
+    if (wep == WEP_DODMILLS) return 280;
+    if (wep == WEP_DODSTICK) return 300;
+    return CSHE_EXPLOSION_RADIUS;
+};
+
+// TRUE for a grenade that does damage on detonation — i.e. everything except
+// the flashbang and the smoke, which have their own effects elsewhere.
+float(float wep) CSGrenadeIsExplosive =
+{
+    return (wep == WEP_CSHEGRENADE || wep == WEP_DODMILLS || wep == WEP_DODSTICK);
+};
+
+// --- Sequence resolution, by NAME -----------------------------------------
+//
+// See the header: the CS and DoD models disagree about both the labels and the
+// order, so nothing here may use a bare index.  `live` selects the DoD
+// exploding_* take — the pose for a grenade whose pin is already out — and is
+// ignored by the CS models, which have no such set and fall through to the
+// ordinary take.
+// EVERY "DOES THIS MODEL HAVE THAT TAKE" TEST BELOW USES SH_SeqTryName, NOT
+// SH_SeqForName WITH A -1 FALLBACK.  They used the latter, and it does not mean
+// what it looks like: SH_SeqForName range-checks its fallback and turns a negative
+// one into 0 (sh_weapon_standard.qc), which on these models is `idle`.  So
+// `if (SH_SeqForName(m, "exploding_pinpull", -1) >= 0)` was ALWAYS true and always
+// handed back the idle pose.
+//
+// That is the whole of the reported "cs grenades, no cooking of grenades in the
+// v_model": v_hegrenade / v_flashbang / v_smokegrenade carry exactly four takes —
+// idle, pullpin, throw, deploy — and no exploding_* set, so holding +attack
+// rendered the resting pose for the entire cook AND the entire throw, while the
+// pin sound still played on time out of a hand that never moved.  It also mistimed
+// the throw phase, which was measured against idle's 0.333 s instead of throw's
+// 0.767 s.  The DoD Mills and stick were unaffected for the cook — they really do
+// carry exploding_pinpull — but lost their `pinpull` spelling to the same defect.
+float(float wep) SH_CSGrenSeqIdle =
+{
+    string m = CSGrenadeViewModel(wep);
+    // CS spells it idle1, DoD spells it idle.  Try both before the fallback.
+    float s = SH_SeqTryName(m, "idle1");
+    if (s >= 0) return s;
+    return SH_SeqForName(m, "idle", CSGREN_SEQ_IDLE);
+};
+
+float(float wep) SH_CSGrenSeqDeploy =
+{
+    // TWO SPELLINGS, like every other take in this file.  DoD calls it `draw`,
+    // Counter-Strike calls it `deploy` — and this asked only for `draw`, so on the
+    // three CS models the name missed and it survived purely on the fallback index
+    // happening to be 3, which is where cstrike puts `deploy`.  A coincidence, and
+    // one that would break silently the moment a mount reordered anything.
+    string m = CSGrenadeViewModel(wep);
+    float s = SH_SeqTryName(m, "draw");
+    if (s >= 0) return s;
+    return SH_SeqForName(m, "deploy", CSGREN_SEQ_DEPLOY);
+};
+
+float(float wep, float live) SH_CSGrenSeqPullpin =
+{
+    string m = CSGrenadeViewModel(wep);
+    if (live)
+    {
+        // The COOKED pose — pin out, arm cocked, fuse burning.  DoD only.
+        float e = SH_SeqTryName(m, "exploding_pinpull");
+        if (e >= 0) return e;
+    }
+    // CS: "pullpin".  DoD: "pinpull".  Two spellings of one action.
+    float s = SH_SeqTryName(m, "pullpin");
+    if (s >= 0) return s;
+    return SH_SeqForName(m, "pinpull", CSGREN_SEQ_PULLPIN);
+};
+
+float(float wep, float live) SH_CSGrenSeqThrow =
+{
+    string m = CSGrenadeViewModel(wep);
+    if (live)
+    {
+        float e = SH_SeqTryName(m, "exploding_throw");
+        if (e >= 0) return e;
+    }
+    return SH_SeqForName(m, "throw", CSGREN_SEQ_THROW);
+};
+
+// --- Live durations, read off the model that actually loaded ---
+//
+// Every one of these takes `wep` rather than reading self.weapon, because the
+// CSQC display frame runs with `self` set to the viewmodel entity, not the
+// player, and has to pass predicted_player.weapon in explicitly.
+float(float wep) SH_CSGrenDeployDuration =
+{
+    return SH_SeqDuration(CSGrenadeViewModel(wep), SH_CSGrenSeqDeploy(wep),
+                          CSGREN_DEPLOY_DURATION);
+};
+
+float(float wep) SH_CSGrenPullpinDuration =
+{
+    return SH_SeqDuration(CSGrenadeViewModel(wep), SH_CSGrenSeqPullpin(wep, FALSE),
+                          CSGREN_PULLPIN_DURATION);
+};
+
+// The throw PHASE, not the throw take — see CSGREN_THROW_MIN.
+float(float wep) SH_CSGrenThrowPhase =
+{
+    float d = SH_SeqDuration(CSGrenadeViewModel(wep), SH_CSGrenSeqThrow(wep, TRUE),
+                             CSGREN_THROW_DURATION);
+    if (d < CSGREN_THROW_MIN)
+        return CSGREN_THROW_MIN;
+    return d;
+};
+
+// Where in the pull-pin take the pin actually comes free.  cstrike's models
+// carry the event at frame 27 of 40 (0.675); the DoD pair carry none, and their
+// pin sample is a different, shorter noise, so they keep the head of the take.
+float(float wep) SH_CSGrenPinFrac =
+{
+    if (wep == WEP_DODMILLS || wep == WEP_DODSTICK)
+        return 0.0;
+    return 0.675;
 };
 
 float(float wep) CSGrenadeRandomExplodeSample =
 {
     float r;
     r = random();
-    if (wep == WEP_CSHEGRENADE)
+    if (wep == WEP_CSHEGRENADE || wep == WEP_DODMILLS || wep == WEP_DODSTICK)
     {
         if (r < 0.333) return 0;
         if (r < 0.666) return 1;
@@ -146,6 +415,14 @@ string(float wep, float snd_idx) CSGrenadeExplodeSound =
         if (snd_idx == 1) return "sounds/weapons/wpn_cshegrenade/explode2.wav";
         return "sounds/weapons/wpn_cshegrenade/explode3.wav";
     }
+    // DoD's own three, and it ships exactly three, so the same 3-way roll the CS
+    // HE grenade uses maps onto them one-for-one.
+    if (wep == WEP_DODMILLS || wep == WEP_DODSTICK)
+    {
+        if (snd_idx == 0) return "weapons/explode3.wav";
+        if (snd_idx == 1) return "weapons/explode4.wav";
+        return "weapons/explode5.wav";
+    }
     if (wep == WEP_CSFLASHBANG)
     {
         if (snd_idx == 0) return "sounds/weapons/wpn_csflashbang/explode1.wav";
@@ -160,6 +437,14 @@ string(float wep, float snd_idx) CSGrenadeBounceSound =
 {
     if (wep == WEP_CSHEGRENADE)
         return "sounds/weapons/wpn_cshegrenade/bounce.wav";
+    // DoD names its bounce samples grenade_hit1..3.  Three of them, so the same
+    // roll the explode sound uses picks one.
+    if (wep == WEP_DODMILLS || wep == WEP_DODSTICK)
+    {
+        if (snd_idx == 0) return "weapons/grenade_hit1.wav";
+        if (snd_idx == 1) return "weapons/grenade_hit2.wav";
+        return "weapons/grenade_hit3.wav";
+    }
     if (wep == WEP_CSFLASHBANG)
     {
         if (snd_idx == 0) return "sounds/weapons/wpn_csflashbang/bounce1.wav";
@@ -191,7 +476,7 @@ float(float now) SH_CSGrenadeTickState =
 
     if (self.weaponstate == WS_DRAW)
     {
-        if (elapsed >= CSGREN_DEPLOY_DURATION)
+        if (elapsed >= SH_CSGrenDeployDuration(self.weapon))
         {
             SH_WeaponEnterIdle();
             return 1;
@@ -204,9 +489,16 @@ float(float now) SH_CSGrenadeTickState =
 
     if (self.weaponstate == WS_FIRE)
     {
-        float fire_total = CSGREN_THROW_DURATION;
+        // The grenade that is IN THE AIR decides how long the throw takes —
+        // self.weapon may already have been re-pointed by W_UtilityNextAfterSpent
+        // on the last one, and asking the new weapon's model would time the
+        // throw against a take from a different grenade.
+        float thrown = self.csgren_throw_type;
+        if (!thrown) thrown = self.weapon;
+
+        float fire_total = SH_CSGrenThrowPhase(thrown);
         if (CSGrenadeEntityAmmo(self, self.weapon) > 0)
-            fire_total = fire_total + CSGREN_DEPLOY_DURATION;
+            fire_total = fire_total + SH_CSGrenDeployDuration(self.weapon);
         if (elapsed >= fire_total)
         {
             SH_WeaponEnterIdle();
@@ -253,7 +545,7 @@ float(float now) SH_CSGrenadeThrow =
     self.weaponstate = WS_FIRE;
     self.wep_action_id += 1;
     self.wep_anim_start = now;
-    self.attack_finished = now + CSGREN_THROW_DURATION;
+    self.attack_finished = now + SH_CSGrenThrowPhase(wep);
 
     if (CSGrenadeEntityAmmo(self, wep) <= 0)
         self.slot_utility = W_UtilityNextAfterSpent(wep);
@@ -280,6 +572,16 @@ void() SH_CSGrenadeSettleModel =
 void(entity player) W_CSHEGrenadePickupCopy =
 {
     player.ammo_cshegrenade = self.ammo_cshegrenade;
+};
+
+void(entity player) W_DodMillsPickupCopy =
+{
+    player.ammo_dodmills = self.ammo_dodmills;
+};
+
+void(entity player) W_DodStickPickupCopy =
+{
+    player.ammo_dodstick = self.ammo_dodstick;
 };
 
 void(entity player) W_CSFlashbangPickupCopy =
@@ -312,10 +614,13 @@ void() W_CSGrenadeExplode =
     WriteByte(MSG_MULTICAST, snd_idx);
     multicast(epos, MULTICAST_PVS);
 
-    if (wep == WEP_CSHEGRENADE)
+    // The CS HE grenade plus DoD's two — see CSGrenadeIsExplosive.  The
+    // flashbang and the smoke reach their effects by other routes and must not
+    // fall in here.
+    if (CSGrenadeIsExplosive(wep))
     {
-        W_RadiusExplode(self.origin, CSHE_EXPLOSION_RADIUS,
-                        CSHE_EXPLOSION_DAMAGE, CSHE_EXPLOSION_MIN_DAMAGE,
+        W_RadiusExplode(self.origin, CSGrenadeBlastRadius(wep),
+                        CSGrenadeBlastDamage(wep), CSHE_EXPLOSION_MIN_DAMAGE,
                         800, 350, self.owner);
     }
 
@@ -400,6 +705,16 @@ void() W_CSGrenadeSpawnProjectile =
     gren.solid = SOLID_BBOX;
     setmodel(gren, CSGrenadeWorldModel(self.csgren_throw_type));
     setsize(gren, '-2 -2 -2', '2 2 2');
+    // FTE's point-hull threshold is Quake's `size[0] < 3` (q1bsp.c:1554), not
+    // GoldSrc's `size[0] <= 8`.  This bbox is 4 wide, so without the override
+    // the grenade collides with the world as HL's 32x32x36 crouch hull
+    // (hulls[3], gl_model.c:5564) offset by clip_mins - mins = (-14,-14,-16) —
+    // it bounces off nothing visible up to 30 units short of walls, and the
+    // bounce normals are wrong.  Same defect as the snark; see the long note in
+    // sh_wpn_hlsnark.qc's W_SnarkSpawn.  1 == hulls[0] == the point hull.
+    // Set on the CSQC-predicted copy too, or prediction disagrees with the
+    // server about every wall the grenade meets.
+    gren.hull = 1;
     setorigin(gren, self.origin + self.view_ofs + v_forward * 16);
     gren.velocity = self.velocity
                   + v_forward * CSGREN_THROW_FORWARD
@@ -428,9 +743,16 @@ void() W_CSGrenadeFire =
     r = SH_CSGrenadeTryPinPull(time);
     if (r == 1)
     {
-        self.weaponframe = CSGREN_SEQ_PULLPIN;
+        // `live` is FALSE here: the pin is coming out during THIS take, so the
+        // ordinary pinpull is the one that shows it happening.  The exploding_*
+        // set is for afterwards.
+        self.weaponframe = SH_CSGrenSeqPullpin(self.weapon, FALSE);
         self.wep_nextframe = time + CSGREN_FRAME_INTERVAL;
-        sound(self, CHAN_WEAPON, CSGrenadePinSound(self.weapon), 1, ATTN_NORM);
+        self.csgren_pin_played = 0;
+        // The sound is NOT played here.  cstrike's pullpin take carries its pin
+        // event at frame 27 of 40 — two thirds in — so firing it on the button
+        // press put the noise a full 0.66 s before the hand did anything.  It is
+        // emitted from W_CSGrenadeFrame below, on the model's own mark.
     }
     else if (r == -1)
         sound(self, CHAN_WEAPON, "sounds/weapons/dryfire1.wav", 1, ATTN_NORM);
@@ -441,7 +763,9 @@ void() W_CSGrenadeRelease =
     if (!SH_CSGrenadeThrow(time))
         return;
 
-    self.weaponframe = CSGREN_SEQ_THROW;
+    // `live` TRUE: by the time the throw plays the pin is already gone, which is
+    // exactly what the DoD models' exploding_throw depicts.
+    self.weaponframe = SH_CSGrenSeqThrow(self.weapon, TRUE);
     self.wep_nextframe = time + CSGREN_FRAME_INTERVAL;
     self.csgren_throw_pending = 1;
     self.csgren_spawn_time = time + CSGREN_THROW_DELAY;
@@ -454,8 +778,28 @@ void() W_CSGrenadeFrame =
 
     if (self.weaponstate == WS_SPECIAL)
     {
+        // The pin comes free partway through the take — see W_CSGrenadeFire.
+        float held = (self.wep_anim_start > 0) ? (time - self.wep_anim_start) : 0;
+        if (!self.csgren_pin_played
+            && held >= SH_CSGrenPullpinDuration(self.weapon) * SH_CSGrenPinFrac(self.weapon))
+        {
+            sound(self, CHAN_WEAPON, CSGrenadePinSound(self.weapon), 1, ATTN_NORM);
+            self.csgren_pin_played = 1;
+        }
+
         if (!self.button0)
+        {
+            // A TAP MUST STILL PULL THE PIN.  The mark sits 0.659 s into the
+            // pullpin take, and a release before that threw the grenade in total
+            // silence — you cannot throw a live grenade without the pin having come
+            // out, so if the release beats the mark the sound is owed here.
+            if (!self.csgren_pin_played)
+            {
+                sound(self, CHAN_WEAPON, CSGrenadePinSound(self.weapon), 1, ATTN_NORM);
+                self.csgren_pin_played = 1;
+            }
             W_CSGrenadeRelease();
+        }
         return;
     }
 
@@ -489,7 +833,7 @@ void() W_CSGrenadeFrame =
 void(float wep) W_CSGrenadeEquipCommon =
 {
     W_StandardEquipSetup(CSGrenadeViewModel(wep), CSGrenadeDisplayName(wep),
-        CSGREN_SEQ_DEPLOY, CSGREN_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
+        SH_CSGrenSeqDeploy(wep), CSGREN_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
     self.fire = W_CSGrenadeFire;
     self.reload = __NULL__;
     self.wepframe = W_CSGrenadeFrame;
@@ -502,6 +846,8 @@ void(float wep) W_CSGrenadeEquipCommon =
 void() W_CSHEGrenadeEquip = { W_CSGrenadeEquipCommon(WEP_CSHEGRENADE); };
 void() W_CSFlashbangEquip = { W_CSGrenadeEquipCommon(WEP_CSFLASHBANG); };
 void() W_CSSmokeGrenadeEquip = { W_CSGrenadeEquipCommon(WEP_CSSMOKEGRENADE); };
+void() W_DodMillsEquip = { W_CSGrenadeEquipCommon(WEP_DODMILLS); };
+void() W_DodStickEquip = { W_CSGrenadeEquipCommon(WEP_DODSTICK); };
 
 void(float wep, void() equip_func, void() drop_func, void(entity) copy_func) W_CSGrenadeDropCommon =
 {
@@ -513,9 +859,7 @@ void(float wep, void() equip_func, void() drop_func, void(entity) copy_func) W_C
 
     setmodel(tgt, CSGrenadeWorldModel(wep));
     setsize(tgt, '-16 -16 0', '16 16 40');
-    tgt.classname = (wep == WEP_CSHEGRENADE) ? "weapon_cshegrenade" :
-                    (wep == WEP_CSFLASHBANG) ? "weapon_csflashbang" :
-                    "weapon_cssmokegrenade";
+    tgt.classname = CSGrenadeClassname(wep);
     tgt.solid = SOLID_NOT;
     tgt.movetype = MOVETYPE_TOSS;
     tgt.weapon = wep;
@@ -537,13 +881,17 @@ void() W_CSFlashbangDrop =
 void() W_CSSmokeGrenadeDrop =
 { W_CSGrenadeDropCommon(WEP_CSSMOKEGRENADE, W_CSSmokeGrenadeEquip, W_CSSmokeGrenadeDrop, W_CSSmokeGrenadePickupCopy); };
 
+void() W_DodMillsDrop =
+{ W_CSGrenadeDropCommon(WEP_DODMILLS, W_DodMillsEquip, W_DodMillsDrop, W_DodMillsPickupCopy); };
+
+void() W_DodStickDrop =
+{ W_CSGrenadeDropCommon(WEP_DODSTICK, W_DodStickEquip, W_DodStickDrop, W_DodStickPickupCopy); };
+
 void(float wep, void() equip_func, void() drop_func, void(entity) copy_func, float ammo) W_CSGrenadeSpawnCommon =
 {
     setmodel(self, CSGrenadeWorldModel(wep));
     setsize(self, '-16 -16 0', '16 16 40');
-    self.classname = (wep == WEP_CSHEGRENADE) ? "weapon_cshegrenade" :
-                     (wep == WEP_CSFLASHBANG) ? "weapon_csflashbang" :
-                     "weapon_cssmokegrenade";
+    self.classname = CSGrenadeClassname(wep);
     self.solid = SOLID_TRIGGER;
     self.movetype = MOVETYPE_TOSS;
     self.weapon = wep;
@@ -581,6 +929,24 @@ void() weapon_cssmokegrenade =
 };
 
 void() weapon_smokegrenade = { weapon_cssmokegrenade(); };
+
+// Day of Defeat's two.  `weapon_mills` and `weapon_stick` are the mod's own
+// spelling — DoD hands grenades out with the class kit and gave neither a map
+// entity — and neither name is taken anywhere else in this tree.  Deliberately
+// NOT `weapon_handgrenade`, which is Half-Life's and already spoken for.
+void() weapon_mills =
+{
+    W_CSGrenadeSpawnCommon(WEP_DODMILLS, W_DodMillsEquip, W_DodMillsDrop,
+        W_DodMillsPickupCopy, MAX_AMMO_DODMILLS);
+    W_RegisterMapWeapon(weapon_mills);
+};
+
+void() weapon_stick =
+{
+    W_CSGrenadeSpawnCommon(WEP_DODSTICK, W_DodStickEquip, W_DodStickDrop,
+        W_DodStickPickupCopy, MAX_AMMO_DODSTICK);
+    W_RegisterMapWeapon(weapon_stick);
+};
 
 #endif // SSQC
 
@@ -851,6 +1217,51 @@ void(vector pos) CSQC_SpawnSmokePuff =
     puff.csgren_smoke_colour = '0.62 0.64 0.64' + '1 1 1' * (random() * 0.12);
 };
 
+// Explosion smoke, as distinct from SMOKE-GRENADE smoke.
+//
+// env_explosion used to call CSQC_SpawnSmokePuff above, and that puff is tuned
+// for a smoke grenade: it holds its spawn for up to 3.6 s and then lives 11-17 s,
+// because a grenade's whole job is to sit there and deny a sightline for a round.
+// Stacked on the emitter's 6 bursts x 0.5 s that put explosion smoke on screen for
+// the better part of TWENTY SECONDS after the bang - "usually too long for
+// whatever they were going for", and it is: nothing about a detonation wants a
+// lingering cloud.  Half-Life's own explosion is one sprite plus a short puff.
+//
+// Same puff entity, same draw path, same colour ramp - only the TIMING differs, so
+// this cannot change how a smoke grenade looks.  Deliberately a separate function
+// rather than a parameter on the one above: the grenade's numbers are tuned and
+// nobody editing an explosion should be able to reach them by accident.
+//
+// Rise is a little faster and the growth a little smaller: a puff that has ~2 s
+// instead of ~14 to tell its story has to read as "kicked up and dissipated"
+// rather than "settled in".
+void(vector pos) CSQC_SpawnExplosionSmokePuff =
+{
+    entity puff;
+    vector dir;
+    float spread;
+
+    dir = CSQC_CSGrenadeSmokeRandomDir();
+    spread = random() * 34;
+
+    puff = spawn();
+    puff.classname = "csgren_smoke_puff";
+    setorigin(puff, pos + dir * spread + [0, 0, random() * 8]);
+    puff.drawmask = 0;
+    puff.csgren_smoke_next = csgren_smoke_list;
+    csgren_smoke_list = puff;
+    // Near-immediate: a blast's smoke is there on the frame of the flash.
+    puff.csgren_smoke_spawn_time = cltime + random() * 0.18;
+    puff.csgren_smoke_life = 1.3 + random() * 0.9;
+    puff.csgren_smoke_start_size = 8 + random() * 10;
+    puff.csgren_smoke_end_size = 44 + random() * 30;
+    puff.csgren_smoke_drift = [(random() * 26) - 13,
+                               (random() * 26) - 13,
+                               10 + random() * 12];
+    puff.csgren_smoke_phase = random() * 6.28;
+    puff.csgren_smoke_colour = '0.62 0.64 0.64' + '1 1 1' * (random() * 0.12);
+};
+
 void(vector pos) CSQC_SpawnSmokeCloud =
 {
     float i;
@@ -1006,7 +1417,7 @@ void(float wep, vector pos, float snd_idx) CSQC_CSGrenadeExplodeFX =
     if (snd != "")
         pointsound(pos, snd, 1, ATTN_NORM);
 
-    if (wep == WEP_CSHEGRENADE)
+    if (CSGrenadeIsExplosive(wep))
     {
         te_explosion(pos);
         CSQC_SpawnCSGrenadeSprite(pos, snd_idx);
@@ -1123,6 +1534,16 @@ void() CSQC_SpawnFakeCSGrenade =
         gren.csqc_projectile_type = PROJ_TYPE_CSHEGRENADE;
     setmodel(gren, CSGrenadeWorldModel(self.csgren_throw_type));
     setsize(gren, '-2 -2 -2', '2 2 2');
+    // FTE's point-hull threshold is Quake's `size[0] < 3` (q1bsp.c:1554), not
+    // GoldSrc's `size[0] <= 8`.  This bbox is 4 wide, so without the override
+    // the grenade collides with the world as HL's 32x32x36 crouch hull
+    // (hulls[3], gl_model.c:5564) offset by clip_mins - mins = (-14,-14,-16) —
+    // it bounces off nothing visible up to 30 units short of walls, and the
+    // bounce normals are wrong.  Same defect as the snark; see the long note in
+    // sh_wpn_hlsnark.qc's W_SnarkSpawn.  1 == hulls[0] == the point hull.
+    // Set on the CSQC-predicted copy too, or prediction disagrees with the
+    // server about every wall the grenade meets.
+    gren.hull = 1;
     setorigin(gren, self.origin + self.view_ofs + v_forward * 16);
     gren.owner = self;
     gren.weapon = self.csgren_throw_type;
@@ -1144,10 +1565,19 @@ void() CSQC_SpawnFakeCSGrenade =
     gren.nextthink = time + CSGREN_FUSE_TIME;
 };
 
+float csqc_csgren_pin_played;
+float csqc_csgren_pin_action;
+
 void() CSQC_PredictCSGrenadeCommand =
 {
     float r;
     float was_fire;
+
+    if (predicted_player.wep_action_id != csqc_csgren_pin_action)
+    {
+        csqc_csgren_pin_action = predicted_player.wep_action_id;
+        csqc_csgren_pin_played = FALSE;
+    }
 
     if (input_buttons & 1)
     {
@@ -1155,11 +1585,9 @@ void() CSQC_PredictCSGrenadeCommand =
         if (r == 1)
         {
             CSQC_MarkPendingWeaponAck();
-            if (!pm_suppress_sounds)
-            {
-                localsound(CSGrenadePinSound(self.weapon));
-                CSQC_RecordPredictedWeaponSound();
-            }
+            // Sound deferred to the model's own mark — see W_CSGrenadeFire.
+            csqc_csgren_pin_played = FALSE;
+            csqc_csgren_pin_action = predicted_player.wep_action_id;
         }
         else if (r == -1)
         {
@@ -1172,8 +1600,30 @@ void() CSQC_PredictCSGrenadeCommand =
         }
     }
 
+    // Predicted pin sound, on the model's own mark inside the pull-pin take.
+    if (self.weaponstate == WS_SPECIAL && !csqc_csgren_pin_played
+        && !pm_suppress_sounds && self.wep_anim_start > 0)
+    {
+        if (csqc_pred_time - self.wep_anim_start
+            >= SH_CSGrenPullpinDuration(self.weapon) * SH_CSGrenPinFrac(self.weapon))
+        {
+            localsound(CSGrenadePinSound(self.weapon));
+            CSQC_RecordPredictedWeaponSound();
+            csqc_csgren_pin_played = TRUE;
+        }
+    }
+
     if (self.weaponstate == WS_SPECIAL && !(input_buttons & 1))
     {
+        // A tap that beats the pin mark still owes the pin sound — mirrors the
+        // server's arm in W_CSGrenadeFrame.  Emitted BEFORE the throw so the order
+        // is pin-then-throw whichever path got there first.
+        if (!csqc_csgren_pin_played && !pm_suppress_sounds)
+        {
+            localsound(CSGrenadePinSound(self.weapon));
+            CSQC_RecordPredictedWeaponSound();
+            csqc_csgren_pin_played = TRUE;
+        }
         if (SH_CSGrenadeThrow(csqc_pred_time))
         {
             CSQC_MarkPendingWeaponAck();
@@ -1209,10 +1659,16 @@ void() CSQC_PredictCSGrenadeCommand =
 
 float(float elapsed) CSQC_CSGrenadeDisplayFrame =
 {
+    float wep = predicted_player.weapon;
+
     if (predicted_player.weaponstate == WS_DRAW)
-        return CSGREN_SEQ_DEPLOY;
+        return SH_CSGrenSeqDeploy(wep);
     if (predicted_player.weaponstate == WS_SPECIAL)
-        return CSGREN_SEQ_PULLPIN;
+        // WS_SPECIAL IS THE HELD-PIN STATE, not the pulling of it: the pin comes
+        // out at the start and the player then stands there cooking it until
+        // they release.  So this is where the DoD models' exploding_pinpull
+        // belongs — a hand holding a live grenade with the lever down.
+        return SH_CSGrenSeqPullpin(wep, TRUE);
     if (predicted_player.weaponstate == WS_FIRE)
     {
         // Two-phase WS_FIRE display (see SH_CSGrenadeTickState):
@@ -1222,15 +1678,21 @@ float(float elapsed) CSQC_CSGrenadeDisplayFrame =
         // so it doesn't pick up mid-anim — same pattern as snowball.
         // The deploy phase only renders when ammo > 0 (the tick state
         // exits WS_FIRE early on the last grenade).
-        if (elapsed >= CSGREN_THROW_DURATION)
+        // The take that is playing belongs to the grenade that was THROWN, which
+        // on the last one is no longer predicted_player.weapon.
+        float thrown = predicted_player.csgren_throw_type;
+        if (!thrown) thrown = wep;
+
+        float phase = SH_CSGrenThrowPhase(thrown);
+        if (elapsed >= phase)
         {
             csqc_viewmodel_sequence_time_override = TRUE;
-            csqc_viewmodel_sequence_time = max(0, elapsed - CSGREN_THROW_DURATION);
-            return CSGREN_SEQ_DEPLOY;
+            csqc_viewmodel_sequence_time = max(0, elapsed - phase);
+            return SH_CSGrenSeqDeploy(wep);
         }
-        return CSGREN_SEQ_THROW;
+        return SH_CSGrenSeqThrow(thrown, TRUE);
     }
-    return CSGREN_SEQ_IDLE;
+    return SH_CSGrenSeqIdle(wep);
 };
 
 void() CSQC_CSGrenadeDropClear =
@@ -1249,11 +1711,56 @@ void(float wep) CSQC_CSGrenadeEquipCommon =
     self.csqc_display_frame = CSQC_CSGrenadeDisplayFrame;
     self.csqc_drop_clear = CSQC_CSGrenadeDropClear;
     self.weapon_uses_sequences = TRUE;
+    // FLIPPED, because the model under these three constants changed.  The
+    // old value here was FALSE and its justification was "100% of verts at
+    // negative Y (HE -29.56, flash/smoke -29.34)" — a measurement of the
+    // mod-local high-poly replacements that are no longer what gets loaded.
+    //
+    // That test does not actually decide handedness, and measuring the rest of
+    // the roster the same way proves it: the CrossFire viewmodels are ALSO
+    // 100% negative-Y (v_mp5 -3.05, v_m4 -5.86) and every one of them sets
+    // flip TRUE, while wpn_csusp's is -31.14 and sets FALSE.  Where the mesh
+    // sits along Y says nothing about which arm was modelled.
+    //
+    // Counter-Strike's own v_hegrenade / v_flashbang / v_smokegrenade (438
+    // verts each, meanY -18.63, identical arm mesh across all three) are
+    // authored left-handed and are reported as such in game, so they are
+    // mirrored here the same way the 32 CrossFire weapons are.  RF_XFLIP also
+    // inverts the cull winding, so backfaces stay hidden.
+    //
+    // cl_lefthand XORs against this, so a player who wants them the other way
+    // round still can; and reverting is this one word.
+    //
+    // THE TWO DAY OF DEFEAT GRENADES ARE THE EXCEPTION — see below.  They ride
+    // this common equip for everything else, so the flip is corrected after the
+    // call rather than by forking the whole function.
     self.weapon_viewmodel_flip = TRUE;
 };
 
 void() CSQC_CSHEGrenadeEquip = { CSQC_CSGrenadeEquipCommon(WEP_CSHEGRENADE); };
 void() CSQC_CSFlashbangEquip = { CSQC_CSGrenadeEquipCommon(WEP_CSFLASHBANG); };
 void() CSQC_CSSmokeGrenadeEquip = { CSQC_CSGrenadeEquipCommon(WEP_CSSMOKEGRENADE); };
+
+// NOT flipped.  models/v_mills.mdl and models/v_stick.mdl come from the mounted
+// Day of Defeat gamedir, not from cstrike, and DoD authored its viewmodels the
+// opposite way round from Counter-Strike's — every one of the other 24 DoD
+// weapons in this tree leaves weapon_viewmodel_flip at its FALSE default and
+// none of them has ever been reported wrong.  These two were the only DoD
+// weapons routed through a Counter-Strike equip, so they inherited a flip that
+// belongs to the three CS grenades above and came out left-handed.
+//
+// The stick was the one reported; the Mills bomb is the same model set from the
+// same mount through the same call, so it is corrected with it rather than left
+// to be reported separately.
+void() CSQC_DodMillsEquip =
+{
+    CSQC_CSGrenadeEquipCommon(WEP_DODMILLS);
+    self.weapon_viewmodel_flip = FALSE;
+};
+void() CSQC_DodStickEquip =
+{
+    CSQC_CSGrenadeEquipCommon(WEP_DODSTICK);
+    self.weapon_viewmodel_flip = FALSE;
+};
 
 #endif // CSQC

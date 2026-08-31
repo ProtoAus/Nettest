@@ -13,24 +13,32 @@
 .float mag_scout;
 .float ammo_scout;
 
-// --- Animation frames ---
-const float SCOUT_FRAME_INTERVAL      = 0.0333334;   // 1/30
+// --- Sequence indices (GoldSrc IDST viewmodel, models/v_scout.mdl) ---
+//
+// FALLBACKS ONLY — resolved by NAME through SH_SeqForName; see sh_wpn_csaug.qc.
+// Read out of cstrike/models/v_scout.mdl itself:
+//   [0] idle1   16fps  11f  0.625s
+//   [1] shoot   35fps  46f  1.286s  f0 5001 (muzzleflash) f13 "scout_bolt"
+//   [2] shoot   35fps  46f  1.286s  <- SAME LABEL, frame-identical duplicate
+//   [3] reload  30fps  61f  2.000s  f13 "scout_clipout" f37 "scout_clipin"
+//   [4] draw    30fps  31f  1.000s
+//
+// Only ONE shoot take is used.  Both carry the label "shoot", so SH_SeqForName
+// resolves either request to index 1 anyway, and the pair is byte-identical in
+// fps, frame count and events — there is nothing to pick between.
+const float SCOUT_SEQ_IDLE   = 0;
+const float SCOUT_SEQ_SHOOT  = 1;
+const float SCOUT_SEQ_RELOAD = 3;
+const float SCOUT_SEQ_DRAW   = 4;
 
-const float SCOUT_DRAW_START          = 175;
-const float SCOUT_DRAW_END            = 194;
-
-const float SCOUT_FIRE_START          = 12;
-const float SCOUT_FIRE_END            = 56;
-const float SCOUT_FIRE_BOLT_FRAME     = 30;
+const float SCOUT_FRAME_INTERVAL      = 0.0333334;   // state-machine tick rate
 const float SCOUT_FIRE_DELAY          = 1.0;
 
-const float SCOUT_RELOAD_START        = 105;
-const float SCOUT_RELOAD_END          = 163;
-const float SCOUT_RELOAD_CLIPOUT      = 125;
-const float SCOUT_RELOAD_CLIPIN       = 143;
-const float SCOUT_RELOAD_APPLY        = 149;
-
-const float SCOUT_IDLE_FRAME          = 1;
+// Event marks as a FRACTION of their sequence.
+const float SCOUT_FIRE_F_BOLT         = 0.2889;   // frame 13 / 45
+const float SCOUT_RELOAD_F_CLIPOUT    = 0.2167;   // frame 13 / 60
+const float SCOUT_RELOAD_F_CLIPIN     = 0.6167;   // frame 37 / 60
+const float SCOUT_RELOAD_F_APPLY      = 0.6500;   // just after the fresh mag seats
 
 const float MAX_MAG_SCOUT             = 10;
 const float MAX_AMMO_SCOUT            = 30;
@@ -52,16 +60,29 @@ const float SCOUT_MUZZLE_FORWARD = 42;
 const float SCOUT_MUZZLE_RIGHT   = 8.3;
 const float SCOUT_MUZZLE_DOWN    = 4.95;
 
-// --- Pre-computed state durations ---
-const float SCOUT_DRAW_DURATION      = (SCOUT_DRAW_END - SCOUT_DRAW_START) * SCOUT_FRAME_INTERVAL;
-const float SCOUT_FIRE_DURATION      = (SCOUT_FIRE_END - SCOUT_FIRE_START) * SCOUT_FRAME_INTERVAL;
-const float SCOUT_RELOAD_DURATION    = (SCOUT_RELOAD_END - SCOUT_RELOAD_START) * SCOUT_FRAME_INTERVAL;
-const float SCOUT_RELOAD_APPLY_TIME  = (SCOUT_RELOAD_APPLY - SCOUT_RELOAD_START) * SCOUT_FRAME_INTERVAL;
-
-const string SCOUT_VIEWMODEL    = "models/weapons/wpn_csscout/v_scout.mdl";
-const string SCOUT_WORLDMODEL   = "models/weapons/wpn_csscout/w_scout.mdl";
+// v_/w_/p_ all resolve through the mounted cstrike gamedir.  Only the viewmodel
+// moved — it was a mod-bundled IDPO re-bake — so the animation half of this file
+// went sequence-driven with the path.
+const string SCOUT_VIEWMODEL    = "models/v_scout.mdl";
+const string SCOUT_WORLDMODEL   = "models/w_scout.mdl";
 const string SCOUT_DEPLOY_SOUND = "";
 const string SCOUT_DISPLAY_NAME = "SCOUT";
+
+// Sound stage latch — a sequence-driven model never steps weaponframe.
+.float scout_snd_stage;
+
+// ============================================================
+//  SHARED — sequence resolution
+// ============================================================
+
+float() SH_ScoutSeqIdle   = { return SH_SeqForName(SCOUT_VIEWMODEL, "idle1",  SCOUT_SEQ_IDLE); };
+float() SH_ScoutSeqReload = { return SH_SeqForName(SCOUT_VIEWMODEL, "reload", SCOUT_SEQ_RELOAD); };
+float() SH_ScoutSeqDraw   = { return SH_SeqForName(SCOUT_VIEWMODEL, "draw",   SCOUT_SEQ_DRAW); };
+float() SH_ScoutSeqShoot  = { return SH_SeqForName(SCOUT_VIEWMODEL, "shoot",  SCOUT_SEQ_SHOOT); };
+
+float() SH_ScoutDrawDuration   = { return SH_SeqDuration(SCOUT_VIEWMODEL, SH_ScoutSeqDraw(),   1.000); };
+float() SH_ScoutReloadDuration = { return SH_SeqDuration(SCOUT_VIEWMODEL, SH_ScoutSeqReload(), 2.000); };
+float() SH_ScoutFireDuration   = { return SH_SeqDuration(SCOUT_VIEWMODEL, SH_ScoutSeqShoot(),  1.286); };
 
 // ============================================================
 //  SHARED — state machine
@@ -69,9 +90,11 @@ const string SCOUT_DISPLAY_NAME = "SCOUT";
 
 float(float now) SH_ScoutTickState =
 {
+    float rel = SH_ScoutReloadDuration();
     return SH_StandardTickState(now, mag_scout, ammo_scout, MAX_MAG_SCOUT,
-        SCOUT_DRAW_DURATION, SCOUT_FIRE_DURATION,
-        SCOUT_RELOAD_DURATION, SCOUT_RELOAD_APPLY_TIME);
+        SH_ScoutDrawDuration(),
+        SH_SeqDuration(SCOUT_VIEWMODEL, self.weaponframe, 1.286),
+        rel, rel * SCOUT_RELOAD_F_APPLY);
 };
 
 float(float now) SH_ScoutTryFire =
@@ -83,7 +106,7 @@ float(float now) SH_ScoutTryFire =
 
 float(float now) SH_ScoutTryReload =
 {
-    float r = SH_StandardTryReload(now, mag_scout, ammo_scout, MAX_MAG_SCOUT, SCOUT_RELOAD_DURATION);
+    float r = SH_StandardTryReload(now, mag_scout, ammo_scout, MAX_MAG_SCOUT, SH_ScoutReloadDuration());
     if (r == 1)
         self.zoomstage = 0;   // unscope on reload
     return r;
@@ -144,8 +167,9 @@ void() W_ScoutFire =
 
     if (r == 1)
     {
-        self.weaponframe   = SCOUT_FIRE_START;
-        self.wep_nextframe = time + SCOUT_FRAME_INTERVAL;
+        self.weaponframe     = SH_ScoutSeqShoot();
+        self.wep_nextframe   = time + SCOUT_FRAME_INTERVAL;
+        self.scout_snd_stage = 0;
 
         W_ScoutShoot();
         self.zoomstage = 0;
@@ -173,46 +197,62 @@ void() W_ScoutReload =
 {
     if (SH_ScoutTryReload(time))
     {
-        self.weaponframe   = SCOUT_RELOAD_START;
-        self.wep_nextframe = time + SCOUT_FRAME_INTERVAL;
-        self.sv_zoomstage  = 0;
+        self.weaponframe     = SH_ScoutSeqReload();
+        self.wep_nextframe   = time + SCOUT_FRAME_INTERVAL;
+        self.scout_snd_stage = 0;
+        self.sv_zoomstage    = 0;
     }
 };
 
 void() W_ScoutFrame =
 {
     float result;
+    float elapsed = (self.wep_anim_start > 0) ? (time - self.wep_anim_start) : 0;
 
-    self.weaponframe  += 1;
+    // Sequence-driven model — DO NOT step weaponframe per tick.
     self.wep_nextframe += SCOUT_FRAME_INTERVAL;
 
-    if (self.weaponstate == WS_FIRE && self.weaponframe == SCOUT_FIRE_BOLT_FRAME)
-        sound(self, CHAN_AUTO, "sounds/weapons/wpn_csscout/bolt.wav", 1, ATTN_NORM);
-
-    if (self.weaponstate == WS_RELOAD)
+    if (self.weaponstate == WS_FIRE)
     {
-        if (self.weaponframe == SCOUT_RELOAD_CLIPOUT)
+        if (elapsed >= SH_ScoutFireDuration() * SCOUT_FIRE_F_BOLT
+            && self.scout_snd_stage < 1)
+        {
+            sound(self, CHAN_AUTO, "sounds/weapons/wpn_csscout/bolt.wav", 1, ATTN_NORM);
+            self.scout_snd_stage = 1;
+        }
+    }
+    else if (self.weaponstate == WS_RELOAD)
+    {
+        float rel = SH_ScoutReloadDuration();
+
+        if (elapsed >= rel * SCOUT_RELOAD_F_CLIPOUT && self.scout_snd_stage < 1)
         {
             sound(self, CHAN_AUTO, "sounds/weapons/wpn_csscout/clipout.wav", 1, ATTN_NORM);
             W_MagDropEffect(MAG_RIFLE, '4 -4 -6', '0 -30 -20');
+            self.scout_snd_stage = 1;
         }
-        if (self.weaponframe == SCOUT_RELOAD_CLIPIN)
+        if (elapsed >= rel * SCOUT_RELOAD_F_CLIPIN && self.scout_snd_stage < 2)
+        {
             sound(self, CHAN_AUTO, "sounds/weapons/wpn_csscout/clipin.wav", 1, ATTN_NORM);
+            self.scout_snd_stage = 2;
+        }
     }
 
     result = SH_ScoutTickState(time);
     if (result & 1)
     {
-        self.weaponframe   = SCOUT_IDLE_FRAME;
-        self.wep_nextframe = 0;
+        self.weaponframe     = SH_ScoutSeqIdle();
+        self.wep_nextframe   = 0;
+        self.scout_snd_stage = 0;
     }
 };
 
 void() W_ScoutEquip =
 {
     W_SetADSProfile(FALSE, "cl_ads_scout", SCOPE_CLASS_SNIPER_BOLT);
-    W_StandardEquipSetup(SCOUT_VIEWMODEL, SCOUT_DISPLAY_NAME, SCOUT_DRAW_START,
+    W_StandardEquipSetup(SCOUT_VIEWMODEL, SCOUT_DISPLAY_NAME, SH_ScoutSeqDraw(),
         SCOUT_FRAME_INTERVAL, PLAYER_ATTACKANIM_SHOT);
+    self.scout_snd_stage = 0;
     self.fire     = W_ScoutFire;
     self.reload   = W_ScoutReload;
     self.wepframe = W_ScoutFrame;
@@ -232,7 +272,7 @@ void() W_ScoutDrop =
     self.mag_scout  = 0;
     self.ammo_scout = 0;
 
-    setmodel(tgt, "models/weapons/wpn_csscout/w_scout.mdl");
+    setmodel(tgt, "models/w_scout.mdl");
     setsize(tgt, '-16 -16 0', '16 16 48');
     tgt.classname    = "weapon_scout";
     tgt.solid        = SOLID_NOT;
@@ -249,7 +289,7 @@ void() W_ScoutDrop =
 
 void() weapon_scout =
 {
-    setmodel(self, "models/weapons/wpn_csscout/w_scout.mdl");
+    setmodel(self, "models/w_scout.mdl");
     setsize(self, '-16 -16 0', '16 16 48');
     self.classname     = "weapon_scout";
     self.solid         = SOLID_TRIGGER;
@@ -273,16 +313,19 @@ void() weapon_scout =
 
 #ifdef CSQC
 
-float csqc_scout_reload_snd_stage;
-float csqc_scout_bolt_played;
-
-const float SCOUT_FIRE_BOLT_TIME = (SCOUT_FIRE_BOLT_FRAME - SCOUT_FIRE_START) * SCOUT_FRAME_INTERVAL;
-const float SCOUT_RELOAD_CLIPOUT_TIME = (SCOUT_RELOAD_CLIPOUT - SCOUT_RELOAD_START) * SCOUT_FRAME_INTERVAL;
-const float SCOUT_RELOAD_CLIPIN_TIME = (SCOUT_RELOAD_CLIPIN - SCOUT_RELOAD_START) * SCOUT_FRAME_INTERVAL;
+float csqc_scout_snd_stage;
+float csqc_scout_snd_action;
 
 void() CSQC_PredictScoutCommand =
 {
     float r;
+    float elapsed;
+
+    if (predicted_player.wep_action_id != csqc_scout_snd_action)
+    {
+        csqc_scout_snd_action = predicted_player.wep_action_id;
+        csqc_scout_snd_stage  = 0;
+    }
 
     // Alt-fire: zoom toggle
     if (input_buttons & 4)
@@ -305,7 +348,7 @@ void() CSQC_PredictScoutCommand =
         if (r == 1)
         {
             CSQC_MarkPendingWeaponAck();
-            csqc_scout_bolt_played = FALSE;
+            csqc_scout_snd_stage = 0;
             if (CSQC_BeginFireActionEffects())
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_csscout/fire.wav", 1, ATTN_NONE);
@@ -335,31 +378,35 @@ void() CSQC_PredictScoutCommand =
         }
     }
 
-    // Predicted bolt sound during fire cycle
-    if (self.weaponstate == WS_FIRE && !csqc_scout_bolt_played
-        && !pm_suppress_sounds && self.wep_anim_start > 0)
+    // Predicted bolt-cycle / reload sounds, timed off the loaded model's own
+    // sequence durations rather than a stepped frame number.
+    if (!pm_suppress_sounds && self.wep_anim_start > 0)
     {
-        if (csqc_pred_time - self.wep_anim_start >= SCOUT_FIRE_BOLT_TIME)
-        {
-            localsound("sounds/weapons/wpn_csscout/bolt.wav");
-            CSQC_RecordPredictedAutoSound();
-            csqc_scout_bolt_played = TRUE;
-        }
-    }
+        elapsed = csqc_pred_time - self.wep_anim_start;
 
-    // Predicted reload sounds
-    if (self.weaponstate == WS_RELOAD && !pm_suppress_sounds && self.wep_anim_start > 0)
-    {
-        float reload_elapsed = csqc_pred_time - self.wep_anim_start;
-
-        if (csqc_scout_reload_snd_stage < 1 && reload_elapsed >= SCOUT_RELOAD_CLIPOUT_TIME)
+        if (self.weaponstate == WS_FIRE)
         {
-            localsound("sounds/weapons/wpn_csscout/clipout.wav"); CSQC_RecordPredictedAutoSound();
-            CSQC_SpawnMag("models/weapons/riflemag.mdl", '4 -4 -6', '0 -30 -20', '4 8 8', '0 180 0', '0 90 90');
-            csqc_scout_reload_snd_stage = 1;
+            if (csqc_scout_snd_stage < 1
+                && elapsed >= SH_ScoutFireDuration() * SCOUT_FIRE_F_BOLT)
+            {
+                localsound("sounds/weapons/wpn_csscout/bolt.wav");
+                CSQC_RecordPredictedAutoSound();
+                csqc_scout_snd_stage = 1;
+            }
         }
-        if (csqc_scout_reload_snd_stage < 2 && reload_elapsed >= SCOUT_RELOAD_CLIPIN_TIME)
-        { localsound("sounds/weapons/wpn_csscout/clipin.wav"); CSQC_RecordPredictedAutoSound(); csqc_scout_reload_snd_stage = 2; }
+        else if (self.weaponstate == WS_RELOAD)
+        {
+            float rel = SH_ScoutReloadDuration();
+
+            if (csqc_scout_snd_stage < 1 && elapsed >= rel * SCOUT_RELOAD_F_CLIPOUT)
+            {
+                localsound("sounds/weapons/wpn_csscout/clipout.wav"); CSQC_RecordPredictedAutoSound();
+                CSQC_SpawnMag("models/weapons/riflemag.mdl", '4 -4 -6', '0 -30 -20', '4 8 8', '0 180 0', '0 90 90');
+                csqc_scout_snd_stage = 1;
+            }
+            if (csqc_scout_snd_stage < 2 && elapsed >= rel * SCOUT_RELOAD_F_CLIPIN)
+            { localsound("sounds/weapons/wpn_csscout/clipin.wav"); CSQC_RecordPredictedAutoSound(); csqc_scout_snd_stage = 2; }
+        }
     }
 
     SH_ScoutTickState(csqc_pred_time);
@@ -369,18 +416,23 @@ void() CSQC_PredictScoutReload =
 {
     if (SH_ScoutTryReload(csqc_pred_time))
     {
-        csqc_scout_reload_snd_stage = 0;
+        csqc_scout_snd_stage  = 0;
+        csqc_scout_snd_action = predicted_player.wep_action_id;
         CSQC_MarkPendingWeaponAck();
     }
 };
 
+// Sequence-driven: return the SEQUENCE index, not a stepped frame.
 float(float elapsed) CSQC_ScoutDisplayFrame =
 {
-    return CSQC_StandardDisplayFrame(elapsed, SCOUT_FRAME_INTERVAL,
-        SCOUT_DRAW_START, SCOUT_DRAW_END,
-        SCOUT_FIRE_START, SCOUT_FIRE_END,
-        SCOUT_RELOAD_START, SCOUT_RELOAD_END,
-        SCOUT_IDLE_FRAME);
+    if (predicted_player.weaponstate == WS_DRAW)
+        return SH_ScoutSeqDraw();
+    if (predicted_player.weaponstate == WS_RELOAD)
+        return SH_ScoutSeqReload();
+    if (predicted_player.weaponstate == WS_FIRE)
+        return SH_ScoutSeqShoot();
+
+    return SH_ScoutSeqIdle();
 };
 
 void() CSQC_ScoutDropClear =
@@ -401,7 +453,14 @@ void() CSQC_ScoutEquip =
 	self.csqc_predict_reload = CSQC_PredictScoutReload;
 	self.csqc_display_frame  = CSQC_ScoutDisplayFrame;
 	self.csqc_drop_clear     = CSQC_ScoutDropClear;
-    self.weapon_viewmodel_flip = TRUE;
+	// GoldSrc-format viewmodel: .frame holds the SEQUENCE index and the engine
+	// animates within it via .frame1time.
+	self.weapon_uses_sequences = TRUE;
+	// FLIPPED.  The FALSE that used to sit here described the OLD bundled
+	// viewmodel (models/weapons/wpn_csscout/v_scout.mdl), an IDPO re-bake.  This
+	// weapon now draws stock cstrike models/v_scout.mdl, whose arm meshes are the
+	// ones v_aug / v_glock18 / v_usp use — all flipped.  cl_lefthand XORs.
+	self.weapon_viewmodel_flip = TRUE;
 };
 
 #endif // CSQC

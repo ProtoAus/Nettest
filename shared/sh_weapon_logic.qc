@@ -39,6 +39,23 @@ float() Phys_ForceIter =
 // Flat spread bonus set by SH_GetSpreadScale — add to spread after multiplying by scale.
 float sh_spread_flat;
 
+// Per-pellet spread seed offset, for shotguns that go through the SINGLE-BULLET
+// hitscan paths instead of W_*FirePellets / CSQC_PredictedShotgunImpact.
+//
+// Those two already spell the pattern out as SH_SpreadJitter(wep_action_id + i),
+// so each pellet takes a different deterministic jitter.  The single-bullet paths
+// seed on wep_action_id ALONE, which is correct for a rifle and catastrophic in a
+// loop: every pellet gets the identical sx/sy, so a nine-pellet blast is really
+// one bullet fired nine times in a single randomly-chosen direction up to the
+// full cone off the crosshair.  That is the "fires in a wild direction every
+// shot" report on the Shorty, which is the only weapon here shaped that way.
+//
+// CONSUMED ON READ.  Both hitscan paths take this into their local seed and
+// immediately zero it, so a caller that forgets to clear it cannot leak an
+// offset into the next weapon's shot — the failure mode is at worst one pellet
+// of one blast, never a persistent aim bias.
+float sh_spread_seed_offset;
+
 // Deterministic spread random — produces the same value on client and server
 // for the same seed (wep_action_id). Use different offsets for sx vs sy.
 float(float seed) SH_SpreadHash =
@@ -53,6 +70,18 @@ float(float seed) SH_SpreadHash =
 float(float shot_id, float axis) SH_SpreadJitter =
 {
     return SH_SpreadHash(shot_id + axis * 0.7193) * 2 - 1;
+};
+
+// The seed for THIS trace's spread jitter, consuming any per-pellet offset a
+// shotgun set before the call.  See sh_spread_seed_offset above for why it is
+// consumed rather than left standing.  Axis 2 (the view-kick yaw jitter) is
+// deliberately NOT routed through here: the kick is one impulse per trigger
+// pull, so it must stay on the bare shot id for every pellet of a blast.
+float() SH_SpreadSeed =
+{
+    float s = self.wep_action_id + sh_spread_seed_offset;
+    sh_spread_seed_offset = 0;
+    return s;
 };
 
 // sv_gunkick — apply a per-shot view-kick impulse. Adds an upward
@@ -89,7 +118,7 @@ float(string name, float default_val) SH_GunkickCvar =
 #endif
 };
 
-void(float kick_pitch, float kick_variance, optional float weapon_strength) SH_ApplyViewKick =
+void(float kick_pitch, float kick_variance, float weapon_strength) SH_ApplyViewKick =
 {
     if (SH_GunkickCvar("sv_gunkick", 1) <= 0)
         return;
@@ -319,6 +348,20 @@ float() Weapon_IsADSActive =
         return 0;
     if (!(input_buttons & 4))               // +attack2 bit
         return 0;
+    // A DEPLOYABLE WEAPON OWNS +attack2 ONCE IT IS DOWN.  The BAR, the Bren and the
+    // three machine guns all declare an ADS profile AND use the same button to
+    // plant the bipod, so every plant press also dragged the gun to the eye and
+    // multiplied the spread — on top of a plant take that was never posed for an
+    // ADS offset.  A gun already resting on its bipod has no sight picture left to
+    // take up, and the bipod is its accuracy mechanic, so hipfire-to-sights stays
+    // available on the SHOULDERED gun and stops existing the moment it is planted
+    // or on its way there.
+    //
+    // Mirrored in client/cl_viewfx.qc, which is a SEPARATE path reading
+    // csqc_live_buttons — masking input_buttons here does not reach it.  Both
+    // sites, always; that asymmetry is the documented two-button-paths trap.
+    if (SH_DeployLocksPlayer(self))
+        return 0;
     // Ducking is allowed — CoD-style hold-aim works crouched.
     if (self.pm_movetype == PM_MOVETYPE_NOCLIP)
         return 0;
@@ -336,6 +379,8 @@ float() Weapon_IsADSActive =
     if (self.grapple_rope_active)
         return 0;
     if (self.pm_carrying)
+        return 0;
+    if (self.pm_inv_blockfire)  // item_inventory effect_block_weapons
         return 0;
     if (self.pm_incar)      // driving a prop_car — gun lowered, fire blocked
         return 0;
@@ -423,7 +468,17 @@ void() SH_WeaponEnterIdle =
 // pm_suppress_sounds is available.
 
 #ifdef CSQC
-void() CSQC_MuzzleFlash;
+// Burning powder -- the tint every conventional firearm passes.  Declared here
+// rather than beside CSQC_MuzzleFlash because cl_muzzleflash.qc is unit 24 in
+// cl_progs.src and this file is unit 21, so a constant defined there is not
+// visible to the shared hitscan helpers below (or to any weapon file).
+const vector MUZZLE_TINT_DEFAULT = '1 0.8 0.4';
+
+// REQUIRED 0..1 RGB tint -- never make this optional again, see the definition
+// in cl_muzzleflash.qc.  Conventional firearms pass MUZZLE_TINT_DEFAULT; energy
+// weapons (gauss, egon, shock rifle, displacer, tesla) pass their own so the
+// room isn't lit orange by a cyan bolt.
+void(vector colour) CSQC_MuzzleFlash;
 void(vector pos, vector eye_pos, vector colour, float damage, float hitgroup) CSQC_AddDebugImpact;
 void(vector pos, vector normal, float damage, float is_exit) CSQC_BulletImpact;
 void() HUD_TriggerHitmarker;
@@ -577,9 +632,114 @@ float(entity target, vector hit_pos, float bone_id) W_HitgroupClassify =
     //      headshot" buff.
     // GENERIC has a 1× multiplier and no debug label, which is what
     // we want for non-player hits.
+    //
+    // ...WITH ONE EXCEPTION, and it is not a loosening of the rule above but an
+    // application of it: an NPC with REGISTERED PER-BONE HITBOXES is not being
+    // classified by the Z-zone guess at all.  Everything in the list of horrors
+    // above is a bbox-shaped inanimate object whose "head" is a fiction invented
+    // by dividing its bounding box; a GoldSrc .mdl monster carries real hitboxes
+    // authored by Valve, each with its own hitgroup, and FTE reports the struck
+    // one directly:
+    //
+    //   hlmdl_hitbox_t { int bone; int body; ... }   engine/gl/model_hl.h:199-205
+    //     ("body" is the studio format's `group` - "value reported to gamecode on
+    //      impact"), copied to trace->surface_id at gl_hlmdl.c:1729/:1744.
+    //
+    // HL's group numbering (HITGROUP_HEAD 1 .. HITGROUP_RIGHTLEG 7) is the same
+    // numbering our constants use, so the value passes straight through.  This is
+    // the answer to "check if hitboxes have body damage multipliers for them":
+    // the multiplier table has always existed, and NPCs were the one target class
+    // that could never reach it - every shot on a monster was flat 1x, so there
+    // was no such thing as a headshot on a headcrab.
+    //
+    // NOTE THE ASYMMETRY, which is deliberate.  A monster only gets a real
+    // hitgroup from the ENGINE's per-bone answer; it never falls through to the
+    // Z-height classifier below.  A model with no hitbox chunk, or a brush-trace
+    // hit (bone_id 0), stays GENERIC - i.e. exactly today's behaviour - so this
+    // cannot resurrect the crate-headshot bug through a monster-shaped door.
+    //
+    // ...BUT "the engine's answer" IS NOT ALWAYS INSIDE HL'S 0..7, and the range
+    // test alone silently threw the rest away.  Measured across every models/*.mdl
+    // this mod names, resolved through the live mount order: FOURTEEN carry boxes
+    // whose group is 8, 10 or 11, and on the humanoids it is most of the head.
+    //
+    //   model                head hitbox volume actually tagged HITGROUP_HEAD
+    //   massn / massnf         0%   <- the assassin could not be headshot AT ALL
+    //   agrunt                21%
+    //   barney, otis          22%
+    //   hgrunt +medic/opfor/  28%
+    //     sniper
+    //
+    // barney's head is three boxes - one tagged 1, and two tagged 10 that together
+    // are 78% of the head's volume - and that split is IDENTICAL in valve, valve_hd
+    // and svencoop, so this is not fallout from making Sven Co-op the master mount.
+    // It has been true since monsters first reached the multiplier table; the mount
+    // work is just what made it get measured.
+    //
+    // 10 IS A REAL GROUP, not corruption.  Sven Co-op's own game code reads it -
+    // svencoop/scripts/maps/hunger/monsters/monster_th_cyberfranklin.as:391 is
+    // `if (ptr.iHitgroup == 10 && ...)` -> "hit armor", ricochet - and Half-Life's
+    // SDK has no case for it either (dlls/combat.cpp:482-500 switches on 1..7 and
+    // lets everything else fall to default), which is exactly why Valve could tag
+    // half a head 10 without noticing.
+    //
+    // So: honour 1..7 verbatim, and for anything OUTSIDE that range ask the bone
+    // the box hangs off.  That is not a new mapping invented here - W_BoneToHitgroup
+    // is the classifier this file already uses for players, and every out-of-range
+    // bone in those fourteen models is a name it already knows (Bip01 Head, Spine,
+    // Spine1/2/3, Pelvis, L/R Arm, L/R Foot).  The turrets are the control: their
+    // out-of-range boxes hang off Base01 / Top01 / Top_Lid01 / Trim01, the
+    // classifier knows none of them, and they stay GENERIC - which is what a turret
+    // should be.
+    //
+    // GROUP 0 IS LEFT ALONE, and that is the line that keeps this honest.  0 is
+    // HITGROUP_GENERIC in the format itself, i.e. an author saying "no zone here",
+    // so a headcrab whose every box is 0 stays flat.  Only groups the format has no
+    // meaning for get re-asked.  Same reason the asymmetry above survives: this
+    // never reaches the Z-height guess, so a monster-shaped breakable still cannot
+    // grow a head.
     if (target.classname != "player"
         && target.classname != "player_visual_proxy")
+    {
+        if (target.flags & FL_MONSTER)
+        if (bone_id > 0)
+        {
+            // trace_surface_id is declared `int` (cl_defs.qc:348), and sprintf's
+            // %g will not take one - same reason sv_ragdoll.qc:296 keeps its own
+            // `float s_surf = trace_surface_id;`.  One float local, used for both
+            // the range test and the print, so the two can never disagree.
+            float raw_group = trace_surface_id;
+
+            if (raw_group >= HITGROUP_HEAD)
+            if (raw_group <= HITGROUP_RIGHTLEG)
+                return raw_group;
+
+            // Swap trace_ent for the lookup, same idiom as the player path below:
+            // W_BoneToHitgroup reads it as a global, and the caller's trace state
+            // must come back untouched.  Distinct local names because fteqcc scopes
+            // locals to the FUNCTION - `hg` and `saved_te` already exist further
+            // down, and reusing either is a duplicate definition, not a shadow.
+            float mon_hg;
+            entity saved_mte = trace_ent;
+            trace_ent = target;
+            mon_hg = W_BoneToHitgroup(bone_id);
+            trace_ent = saved_mte;
+
+            // The silence was half the bug: until now a monster hit produced no
+            // log line at any verbosity, so "headshots do nothing on grunts" had
+            // no way to be observed short of counting damage by hand.  Same cvar
+            // as the player print below (registered CVAR_SIDE_BOTH), so one switch
+            // covers both sides of the wire.
+            if (cvar("cl_debug_hitgroup"))
+                print(sprintf("[hitgroup] monster %s bone=%g raw_group=%g -> %g\n",
+                              target.classname, bone_id, raw_group, mon_hg));
+
+            if (mon_hg != HITGROUP_GENERIC)
+                return mon_hg;
+        }
+
         return HITGROUP_GENERIC;
+    }
 
     // Prop Hunt: a disguised hider is a prop-shaped player — no anatomy.
     // Flatten BEFORE the Z-zone math or the top ~22% of every crate is a
@@ -788,7 +948,7 @@ void() CSQC_TryPlayPredictedHitmarker =
 // hitgroup damage multiplier, so re-deriving it here would read FX-clobbered trace_endpos and
 // (when the hand is raised to head height) Z-classify an ARM hit as a HEADSHOT -> 4x -> predict
 // a kill the server never makes (victim "dies" on the shooter's screen but is alive with hp).
-void(entity target, float body_dmg, float bone_id, optional float in_hitgroup) CSQC_TryPredictDeath =
+void(entity target, float body_dmg, float bone_id, float in_hitgroup) CSQC_TryPredictDeath =
 {
     if (!target || target == world) return;
     if (target.classname != "player_visual_proxy") return;
@@ -943,8 +1103,11 @@ void(entity target, float body_dmg, float bone_id, optional float in_hitgroup) C
 // (Patch 36 Part B): the FX calls between the trace and this function (CSQC_BulletImpactSilent
 // re-traces for the impact decal) clobber trace_bone_id/trace_surface_id to 0, so re-deriving
 // the hitgroup HERE would lose the box and fall back to a Z-height guess (arms -> chest/stomach).
-// If omitted/0, falls back to the (possibly stale) re-derivation for legacy callers (melee).
-void(entity target, float damage, float bone_id, optional float in_hitgroup) CSQC_SendHitclaim =
+// Pass HITGROUP_GENERIC (0) to ask for the re-derivation explicitly -- the melee callers do.
+// NOT `optional`: an unpassed QC param is stale garbage, and a stale value inside
+// [HITGROUP_HEAD..HITGROUP_RIGHTLEG] passes the guard below and lands the damage on a random
+// limb.  Every caller states its hitgroup.  See cl_hud.qc:828 for the same call, same reason.
+void(entity target, float damage, float bone_id, float in_hitgroup) CSQC_SendHitclaim =
 {
     // Diagnostics gated on cl_debug_hitclaim — uses print() so output
     // is visible without `developer 1`. Cheap to leave the cvar at 0
@@ -1129,7 +1292,7 @@ void(float spread_base, float spread_move, float spread_fullspeed,
     CSQC_Impact_ResetShot();
 #endif
 
-    CSQC_MuzzleFlash();
+    CSQC_MuzzleFlash(MUZZLE_TINT_DEFAULT);
 
     makevectors(input_angles);
     vector fwd = v_forward;
@@ -1147,8 +1310,9 @@ void(float spread_base, float spread_move, float spread_fullspeed,
 
     if (spread > 0)
     {
-        sx  = SH_SpreadJitter(self.wep_action_id, 0) * spread;
-        sy  = SH_SpreadJitter(self.wep_action_id, 1) * spread;
+        float seed = SH_SpreadSeed();
+        sx  = SH_SpreadJitter(seed, 0) * spread;
+        sy  = SH_SpreadJitter(seed, 1) * spread;
         dir = normalize(fwd + rt * sx + up * sy);
     }
     else
@@ -1238,6 +1402,35 @@ void(float spread_base, float spread_move, float spread_fullspeed,
             CSQC_BulletImpactSilent(trace_endpos, trace_plane_normal);
             CSQC_SendHitclaim(trace_ent, damage, hit_bid, hit_hg);
         }
+        // NO BLOOD ON AN NPC UNLESS THE SERVER AGREES ONE LANDED.
+        //
+        // The client and the server were deciding "did I hit that monster" with two
+        // different tests against two different volumes, and the client's was always
+        // the more generous of the two:
+        //
+        //   client: CSQC_Monster_OverrideTrace / the cl_monstersolid proxies, both a
+        //           plain ray-vs-AABB against getentity(GE_ABSMIN/GE_ABSMAX)
+        //   server: traceline(... MOVE_HITMODEL), which FTE resolves through
+        //           HLMDL_Trace (gl_hlmdl.c:1616) against the model's own PER-BONE
+        //           hitboxes, and world.c:1411-1421 OVERWRITES the bbox result with
+        //           it - so a ray inside the box but outside every bone is a clean
+        //           miss and does exactly zero damage.
+        //
+        // The bounding box is a strict superset of the bones, so every shot that
+        // clips a shoulder-width of empty air drew a flesh splash and took no health.
+        // Two further divergences pull the same way: the server poses monsters for
+        // that trace from .frame1time, which the mod never wrote for a monster (fixed
+        // separately, see W_MonstersExpandHitboxes), and lag compensation rewinds
+        // players only, so a walking NPC is not even in the same place server-side.
+        //
+        // The invariant asked for is "either it hit or it didn't", so the effect now
+        // waits for the authority.  W_ImpactEffectSend delivers it to the shooter
+        // ~ping later at the hitbox-precise position (sv_weapons.qc:1197 now includes
+        // the shooter for monster targets).  The tracer below still stops at the body,
+        // so the ribbon does not overshoot while the confirmation is in flight.
+        else if (trace_ent.classname == "csqc_monster_proxy")
+        {
+        }
         else
         {
             CSQC_BulletImpact(trace_endpos, trace_plane_normal, damage, 0);
@@ -1291,8 +1484,8 @@ void(float spread_base, float spread_move, float spread_fullspeed,
 void(float spread_base, float spread_move, float spread_fullspeed,
      float close_dmg, float min_dmg, float falloff_range,
      float pen_power, float pen_dmg_mult,
-     optional float kick_pitch, optional float kick_variance,
-     optional float kick_strength) CSQC_PredictedPenetratingImpact =
+     float kick_pitch, float kick_variance,
+     float kick_strength) CSQC_PredictedPenetratingImpact =
 {
     vector src, dir, end, flat_vel, entry_pos, exit_pos, exit_normal, nudge_pos;
     float move_speed, spread, sx, sy, dist, damage, wall_thick;
@@ -1304,7 +1497,7 @@ void(float spread_base, float spread_move, float spread_fullspeed,
     CSQC_Impact_ResetShot();
 #endif
 
-    CSQC_MuzzleFlash();
+    CSQC_MuzzleFlash(MUZZLE_TINT_DEFAULT);
 
     // Apply the per-shot kick impulse first so the trace direction
     // below uses the kicked aim (matches W_PenetratingHitscanShoot on
@@ -1333,8 +1526,9 @@ void(float spread_base, float spread_move, float spread_fullspeed,
 
     if (spread > 0)
     {
-        sx  = SH_SpreadJitter(self.wep_action_id, 0) * spread;
-        sy  = SH_SpreadJitter(self.wep_action_id, 1) * spread;
+        float seed = SH_SpreadSeed();
+        sx  = SH_SpreadJitter(seed, 0) * spread;
+        sy  = SH_SpreadJitter(seed, 1) * spread;
         dir = normalize(fwd + rt * sx + up * sy);
     }
     else
@@ -1431,6 +1625,13 @@ void(float spread_base, float spread_move, float spread_fullspeed,
             }
             break;   // bullets stop on player (matches server)
         }
+        // Same NPC rule as CSQC_PredictedImpact — the client's AABB test is a
+        // superset of the server's per-bone one, so predicting the splash here
+        // guarantees splashes with no damage behind them.  Let the server's
+        // CSQC_EVENT_IMPACT deliver it.
+        else if (trace_ent.classname == "csqc_monster_proxy")
+        {
+        }
         else
         {
             CSQC_BulletImpact(trace_endpos, trace_plane_normal, damage, 0);
@@ -1496,8 +1697,8 @@ void(float spread_base, float spread_move, float spread_fullspeed,
 // per-pellet falloff so break prediction agrees with authoritative HP math.
 void(float pellets, float spread_val,
      float close_dmg, float min_dmg, float falloff_range,
-     optional float kick_pitch, optional float kick_variance,
-     optional float kick_strength) CSQC_PredictedShotgunImpact =
+     float kick_pitch, float kick_variance,
+     float kick_strength) CSQC_PredictedShotgunImpact =
 {
     vector src, dir, end;
     vector fwd, rt, up;
@@ -1510,7 +1711,7 @@ void(float pellets, float spread_val,
     CSQC_Impact_ResetShot();
 #endif
 
-    CSQC_MuzzleFlash();
+    CSQC_MuzzleFlash(MUZZLE_TINT_DEFAULT);
 
     // sv_gunkick — one impulse per trigger pull (not per pellet),
     // mirroring the server's W_*FirePellets path. Bias input_angles
@@ -1619,10 +1820,30 @@ void(float pellets, float spread_val,
 // the server, where W_BoneToHitgroup → W_HitgroupDamageMultiplier
 // applies the headshot multiplier (knife slash 20 × 4 = 80 to the head).
 void(entity target, float damage) CSQC_PredictBreakableBreak;
+
+// Half-Life's head_hull, (-16,-16,-18)..(16,16,18).  Mirrors MELEE_HULL_MIN/MAX
+// in sv_weapons.qc; kept as its own pair because that file is server-only and
+// this one compiles into both VMs.
+const vector CSQC_MELEE_HULL_MIN = '-16 -16 -18';
+const vector CSQC_MELEE_HULL_MAX = '16 16 18';
+
+// TRUE when the last CSQC_PredictedMeleeTraceEx actually issued a localsound().
+// FALSE means it stayed deliberately silent - the monster-proxy branch - and the
+// caller must NOT arm the predicted-echo mute.  See the long note in the monster
+// branch below for what arming it anyway cost.
+float csqc_melee_played_sound;
+
+// The three-sound form.  `body_snd1..3` are used when the swing lands on
+// something Half-Life would call a body (a player or a non-machine monster);
+// pass "" for a weapon with no flesh set and it falls back to hit_snd1/2 exactly
+// as before.
 float(float range, float damage,
-      string hit_snd1, string hit_snd2, string miss_snd) CSQC_PredictedMeleeTrace =
+      string hit_snd1, string hit_snd2, string miss_snd,
+      string body_snd1, string body_snd2, string body_snd3) CSQC_PredictedMeleeTraceEx =
 {
     vector src, end;
+
+    csqc_melee_played_sound = FALSE;
 
     makevectors(input_angles);
     src = self.origin + self.view_ofs;
@@ -1633,24 +1854,66 @@ float(float range, float damage,
     // movement hull were missing for the same bbox-cull reason.
     W_PlayersExpandHitboxes();
     CSQC_WeaponTraceLine(src, end, MOVE_NORMAL | MOVE_HITMODEL, self);
+
+    // The head-hull fallback, matching W_MeleeTrace on the server.
+    //
+    // Half-Life wraps its hull retry in `#ifndef CLIENT_DLL` because its client
+    // neither applies damage nor picks the impact sound - both come back from the
+    // server.  Here the client predicts both, so it has to widen the same way or
+    // it plays the MISS sound on every swing the server counts as a hit and the
+    // viewmodel picks the wrong swing variant to go with it.
+    if (trace_fraction >= 1.0)
+        tracebox(src, CSQC_MELEE_HULL_MIN, CSQC_MELEE_HULL_MAX, end,
+                 MOVE_NORMAL | MOVE_HITMODEL, self);
+
     W_PlayersRestoreHitboxes();
+
+    // MONSTERS.  CSQC cannot see them - they are engine-networked entities, not
+    // CSQC entities - so without this the swing traced straight THROUGH a zombie
+    // and reported whatever was behind it.  The visible cost was not just a lost
+    // hit: the wall behind won the trace, so a swing that connected on the server
+    // produced a stone-chip puff and the metal hitwall sample on the attacker's
+    // own screen.  That is the reported "melee hitting zombies makes metal sound".
+    //
+    // Same override the bullet path already uses (cl_monstertrace.qc); it only
+    // replaces the trace when a monster sits CLOSER than whatever was found, so
+    // the wall in front of you still wins.
+    CSQC_Monster_OverrideTrace(src, end);
 
     if (trace_fraction < 1.0)
     {
         float is_player_hit =
             (trace_ent != world && trace_ent.entnum >= 1 && trace_ent.entnum <= maxclients)
             || (trace_ent.classname == "player_visual_proxy");
+        float is_monster_hit = (trace_ent.classname == "csqc_monster_proxy");
 
         if (is_player_hit)
         {
-            CSQC_SendHitclaim(trace_ent, damage, 0);   // melee = body damage only
+            CSQC_SendHitclaim(trace_ent, damage, 0, HITGROUP_GENERIC);   // melee = body damage only
         }
-        else
+        else if (!is_monster_hit)
         {
             // Predict breakable destruction locally so the attacker sees
             // the crate / glass hide instantly instead of waiting ~ping ms
             // for the server's solid_brush_SendEntity update.
-            CSQC_PredictBreakableBreak(trace_ent, damage);
+            //
+            // Skipped for the monster proxy: it is a LABEL, not the monster - the
+            // real entity is engine-networked and CSQC holds no handle to it - so
+            // handing it to the breakable predictor would ask a stand-in with no
+            // model and no health to break.
+            //
+            // INSTANT BREAK.  func_break.cpp:539-542 — a client hitting a
+            // crowbar-sensitive brush with DMG_CLUB gets `flDamage = pev->health`,
+            // i.e. it goes in one hit whatever its HP.  Every melee weapon here
+            // already had that rule server-side, and it never once fired: with
+            // sv_trust_clientbreak defaulting to 1, W_ApplyDamage skips its own
+            // func_breakable damage entirely and the brush's HP is spent by THIS
+            // claim - which knew nothing about the flag and always claimed the
+            // flat weapon damage.  So HL's instant crowbar break has been dead.
+            float melee_break_dmg = damage;
+            if (trace_ent.brush_instant_melee && trace_ent.brush_health > 0)
+                melee_break_dmg = trace_ent.brush_health;
+            CSQC_PredictBreakableBreak(trace_ent, melee_break_dmg);
         }
 
         // Visual impact effect — branch on hit type the same way
@@ -1663,7 +1926,56 @@ float(float range, float damage,
         //                Impact_SpawnSmokeOnly is NOT quality-gated, so
         //                the melee smoke shows even when cl_impact_quality 0
         //                turns the bullet-impact particles off entirely.
-        if (is_player_hit)
+        //   monster hit → same flesh burst as a player.  This is the visible half
+        //                 of the monster override above.
+        // NO BLOOD AND NO BODY SOUND ON AN NPC UNLESS THE SERVER AGREES.
+        //
+        // Same invariant, same reason and the same shape as the bullet path's
+        // csqc_monster_proxy branch (see the long note at CSQC_PredictFireWeapon):
+        // `is_monster_hit` comes from CSQC_Monster_OverrideTrace, which is a
+        // ray-vs-AABB over getentity(GE_ABSMIN/GE_ABSMAX), while the server's
+        // W_MeleeTrace runs MOVE_HITMODEL and resolves through HLMDL_Trace against
+        // the model's PER-BONE hitboxes.  The box is a strict superset of the
+        // bones, so the shell of empty air around a zombie's silhouette was
+        // producing a flesh burst and a hitbody sample for a swing that landed
+        // exactly zero damage - reported as "melee will make a body hit sound, but
+        // no hit marker until the player is close enough".
+        //
+        // The bullet path was given this treatment and the melee path was not,
+        // which is why the same defect kept being reported after the bullet half
+        // was fixed.
+        //
+        // ON A REAL HIT the server plays hitbody1/2/3 itself with a plain sound()
+        // on CHAN_WEAPON (sh_wpn_hlcrowbar.qc and every other melee weapon).
+        //
+        // THAT SAMPLE ONLY REACHES THE ATTACKER IF NOTHING ARMS THE ECHO MUTE.
+        // This comment used to assert it "reaches the attacker like everyone
+        // else", full stop, and that was wrong: CSQC_Event_Sound
+        // (client/cl_main.qc:1400-1405) drops EVERY CHAN_WEAPON sound aimed at the
+        // local player for a full second after csqc_last_predicted_weapon_sound_time
+        // is stamped - and every melee caller stamped it unconditionally, right
+        // after this function returned.  So a swing that landed on a monster went
+        // silent on the attacker's own screen while everyone else heard it: the
+        // client deliberately played nothing, and then muted the server's answer.
+        //
+        // csqc_melee_played_sound below is the fix.  It reports whether this call
+        // actually issued a localsound(), and CSQC_RecordPredictedMeleeSound only
+        // arms the window when it did.  The invariant this branch exists for -
+        // silence on a swing that merely clipped the bounding box - is untouched;
+        // what changes is that silence no longer suppresses the server's verdict
+        // on the swings that really connected.
+        //
+        // The flesh burst was never affected: it arrives with W_ImpactEffectSend,
+        // which already includes the shooter when the target is a monster.
+        //
+        // It must NOT fall through to the wall sound below: that is the separate
+        // "melee hitting zombies makes metal sound" bug the monster override was
+        // added to fix.  Hence the explicit empty branch rather than dropping
+        // is_monster_hit from the test.
+        if (is_monster_hit)
+        {
+        }
+        else if (is_player_hit)
         {
             CSQC_BulletImpactSilent(trace_endpos, trace_plane_normal);
         }
@@ -1675,21 +1987,74 @@ float(float range, float damage,
         if (cvar("cl_debug_impacts")
             && !(trace_ent && trace_ent.classname == "csqc_dropped_weapon"))
             CSQC_AddDebugImpact(trace_endpos, src, '0 1 0', 0, 0);
-        if (hit_snd2 != "" && random() < 0.5)
+
+        // Sound, split the way crowbar.cpp splits it: flesh for a body, the
+        // material sample for everything else.
+        //
+        // A monster gets NEITHER here - see the branch above.  Silence on the
+        // fringe of the box is the point: the server plays the body sample on a
+        // real hit, and a swing that only clipped the bounding box has to sound
+        // like nothing happened, because nothing did.
+        if (is_monster_hit)
+        {
+        }
+        else if (is_player_hit && body_snd1 != "")
+        {
+            float br = random();
+            if (body_snd3 != "" && br > 0.666)      localsound(body_snd3);
+            else if (body_snd2 != "" && br > 0.333) localsound(body_snd2);
+            else                                    localsound(body_snd1);
+            csqc_melee_played_sound = TRUE;
+        }
+        else if (hit_snd2 != "" && random() < 0.5)
+        {
             localsound(hit_snd2);
+            csqc_melee_played_sound = TRUE;
+        }
         else if (hit_snd1 != "")
+        {
             localsound(hit_snd1);
+            csqc_melee_played_sound = TRUE;
+        }
         return TRUE;
     }
 
     if (miss_snd != "")
+    {
         localsound(miss_snd);
+        csqc_melee_played_sound = TRUE;
+    }
     return FALSE;
+};
+
+// Back-compat wrapper: every melee weapon that has no separate flesh set keeps
+// calling this and behaves exactly as before, minus the two bugs the Ex form
+// fixes for everyone (the monster override and the head-hull fallback).
+float(float range, float damage,
+      string hit_snd1, string hit_snd2, string miss_snd) CSQC_PredictedMeleeTrace =
+{
+    return CSQC_PredictedMeleeTraceEx(range, damage, hit_snd1, hit_snd2, miss_snd,
+                                      "", "", "");
 };
 
 void() CSQC_RecordPredictedWeaponSound =
 {
     csqc_last_predicted_weapon_sound_time = cltime;
+};
+
+// The melee form.  Arms the predicted-echo mute ONLY if the trace it follows
+// actually played something.  A swing that landed on a monster proxy plays
+// nothing by design (see the long note in CSQC_PredictedMeleeTraceEx), and arming
+// the window there swallowed the server's authoritative impact sample for a full
+// second — so the attacker heard nothing at all while everyone else heard the hit.
+//
+// Every melee weapon calls this instead of CSQC_RecordPredictedWeaponSound.  A
+// weapon that plays its OWN sounds around the trace (the CS knife, the butterfly)
+// keeps the unconditional form, because it has something to suppress regardless.
+void() CSQC_RecordPredictedMeleeSound =
+{
+    if (csqc_melee_played_sound)
+        csqc_last_predicted_weapon_sound_time = cltime;
 };
 
 void() CSQC_RecordPredictedAutoSound =

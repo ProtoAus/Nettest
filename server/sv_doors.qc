@@ -20,6 +20,10 @@
 // Forward decls — sh_pmove.qc compiles AFTER this file in sv_progs.src,
 // so the moving-brush list helpers it defines need to be predeclared
 // here for Mover_Start / Mover_TravelTick to reference them.
+// Sven InventoryRules gate — defined in sv_item_inventory.qc (position 265),
+// which compiles after this file; the KEY FIELDS it reads live in
+// sv_customdefs.qc for exactly that reason.
+float(entity rules, entity who) Inv_Gate;                            // sv_item_inventory.qc
 void(entity c) MovingBrush_AddToList;
 void(entity c) MovingBrush_RemoveFromList;
 
@@ -72,9 +76,12 @@ float(string master_name, entity who) IsMasterTriggered;
 // and the per-entity files compiled after it) sets these before each
 // .use() call to communicate USE_OFF / USE_ON / USE_TOGGLE semantics and
 // the firing entity (multisource needs the caller to dedupe inputs).
-// Default sub_use_type=0 falls back to USE_TOGGLE inside the loop below
-// — preserves behaviour for legacy callers (button / breakable / etc.)
-// that don't know about useType yet.
+// sub_use_type == USE_UNSET (-1) falls back to USE_TOGGLE inside the loop
+// below — preserves behaviour for legacy callers (button / breakable / etc.)
+// that don't know about useType yet.  The sentinel is NOT 0: USE_OFF is 0, and
+// using it for "unset" silently promoted every explicit Off in the mod to a
+// Toggle.  See sv_customdefs.qc.  worldspawn seeds the global (sv_main.qc) and
+// SV_PlayerTryUse re-seeds it per press (sv_use.qc).
 float  sub_use_type;       // declared here so sv_doors.qc compiles standalone
 entity sub_use_caller;
 // Set by SUB_DelayedFire (sv_triggers.qc) on its throwaway temp entity so
@@ -93,6 +100,7 @@ void(entity caller, entity triggerer) Trigger_UseTargets =
     entity oldcaller;
     float  oldusetype;
     float  olddirect;
+    float  oldtouch;
 
     if (!caller.target)
         return;
@@ -101,6 +109,7 @@ void(entity caller, entity triggerer) Trigger_UseTargets =
     oldcaller    = sub_use_caller;
     oldusetype   = sub_use_type;
     olddirect    = sv_use_is_player_direct;
+    oldtouch     = sv_use_is_player_touch;
     activator    = triggerer;
 
     // The targets fired by this chain are activated INDIRECTLY (the
@@ -112,12 +121,24 @@ void(entity caller, entity triggerer) Trigger_UseTargets =
     // SV_PlayerTryUse where the flag is still TRUE) would be seen by
     // the door as a direct player press rather than a chain fire —
     // which is what NO_TRIGGER / USE_ONLY discriminate on.
+    // ...and the same for the touch flag, for the same reason: a door opened by
+    // a shoulder fires its own target chain, and a second, unrelated locked door
+    // downstream of that chain must not click.
     sv_use_is_player_direct = FALSE;
+    sv_use_is_player_touch  = FALSE;
 
     // Default useType for legacy callers — they invoke this two-arg
     // form without setting sub_use_type, so treat as toggle (the HL
     // default for SUB_UseTargets).
-    if (sub_use_type == 0)
+    //
+    // THE SENTINEL IS USE_UNSET (-1), NOT 0.  This test used to read
+    // `sub_use_type == 0`, and USE_OFF is 0, so every explicit Off in the mod
+    // was rewritten to Toggle right here — see the long note on USE_UNSET in
+    // sv_customdefs.qc.  Anything reaching this function without having set the
+    // global gets USE_UNSET now (worldspawn seeds it, sv_use.qc re-seeds it per
+    // player press) and still lands on USE_TOGGLE, which is HL's default for
+    // SUB_UseTargets.
+    if (sub_use_type == USE_UNSET)
         sub_use_type = USE_TOGGLE;
 
     target_entity = find(world, targetname, caller.target);
@@ -151,6 +172,7 @@ void(entity caller, entity triggerer) Trigger_UseTargets =
     sub_use_caller          = oldcaller;
     sub_use_type            = oldusetype;
     sv_use_is_player_direct = olddirect;
+    sv_use_is_player_touch  = oldtouch;
 };
 
 // ============================================================================
@@ -254,13 +276,50 @@ float(string snd) Door_IsSilentSound =
     return FALSE;
 };
 
+// ---------------------------------------------------------------------------
+// SV_StopChannel — actually stop a looping sound on one entity/channel.
+//
+// `sound(e, chan, "", 0, ATTN_NORM)` DOES NOT DO THIS, and six call sites in
+// this tree believed it did.  FTE's SV_StartSound (engine/server/sv_send.c:1300):
+//
+//     if (!sample)          ctx.sampleidx = 0;    // the real stop path
+//     else if (!*sample)    return;               // <-- an empty string, silently
+//
+// and QC cannot reach the first branch: PF_sound fetches the argument with
+// PR_GetStringOfs, and PR_StringToNative (qclib/initlib.c:1074-1115) never
+// returns NULL - a zero string offset comes back as `stringtable + 0`, which
+// is a valid pointer to "".  So every one of those calls took the second
+// branch and sent nothing at all.
+//
+// Doors got away with it by accident: Door_PlayStopSound plays noise1 on the
+// SAME CHAN_VOICE, and Quake's SND_PickChannel frees whatever was on an
+// ent/channel pair before starting the new sound - so the arrival sound was
+// doing the stopping, not the stop.  The plat family is where it showed,
+// because it is the only mover that puts its arrival sound on a DIFFERENT
+// channel (CHAN_WEAPON) from its movement loop, mirroring HL's
+// CHAN_STATIC/CHAN_WEAPON split.  hl_c01_a1's `ele_2` has movesnd 12
+// (plats/talkmove1.wav, loop-cued) and nothing ever replaced it: the lift
+// arrived, fired its chain, and kept grinding for the rest of the map.
+//
+// The fix is to play something real on the channel.  common/null.wav is
+// GoldSrc's own silence (1244 bytes, present in both the valve and svencoop
+// mounts) and is already this file's sentinel for "no sound", so it needs no
+// new asset.  Precached in Door_PrecacheSounds; if a user's install somehow
+// lacks it FTE late-precaches with one warning rather than failing.
+const string SND_SILENCE = "common/null.wav";
+
+void(entity e, float chan) SV_StopChannel =
+{
+    sound(e, chan, SND_SILENCE, 1, ATTN_NORM);
+};
+
 void() Door_StopMoveSound =
 {
     // Cut the current door movement sound on CHAN_VOICE.  This matters
     // for loop-cued GoldSrc movement WAVs: if there is no stop sound to
     // replace the channel, the loop can otherwise continue after the
     // brush has arrived.
-    sound(self, CHAN_VOICE, "", 0, ATTN_NORM);
+    SV_StopChannel(self, CHAN_VOICE);
 };
 
 void() Door_PlayMoveSound =
@@ -292,11 +351,29 @@ void() Door_PlayStopSound =
 const string DOOR_DEFAULT_LOCKED_SND = "buttons/button2.wav";
 .float door_locked_snd_time;
 
+// Half-Life's PlayLockSounds debounce.  doors.cpp:96-98 defines
+//     #define DOOR_SENTENCEWAIT 6
+//     #define DOOR_SOUNDWAIT    3
+//     #define BUTTON_SOUNDWAIT  0.5
+// and picks between the last two on its `fbutton` argument (doors.cpp:114-117).
+// This value used to be 0.5 — the BUTTON one — which was survivable while +use
+// was the only way to reach a locked door.  It is not survivable from a touch
+// field: SV_CheckTouchTriggers dispatches once per player per frame, so leaning
+// on a locked door machine-guns the click twice a second forever.  Every caller
+// here is a door, so take the door value.  (func_button has its own locked path
+// in sv_buttons.qc and does not come through here.)
+//
+// locked_sentence / unlocked_sentence stay unimplemented: no .qc reads either
+// key, there is no SENTENCEG_PlaySequentialSz equivalent, and no th_* map sets
+// them — so HL's sentence half of PlayLockSounds (doors.cpp:139-152,
+// DOOR_SENTENCEWAIT 6) is deliberately out of scope rather than half-ported.
+const float DOOR_SOUNDWAIT = 3;
+
 void() Door_PlayLockedSound =
 {
     if (self.door_locked_snd_time > time)
         return;
-    self.door_locked_snd_time = time + 0.5;
+    self.door_locked_snd_time = time + DOOR_SOUNDWAIT;
 
     if (!Door_IsSilentSound(self.noise_locked))
         sound(self, CHAN_ITEM, self.noise_locked, 1, ATTN_NORM);
@@ -322,8 +399,18 @@ float() Door_MasterBlocks =
         dprint(sprintf("[door %s] locked by master \"%s\"\n",
                        self.targetname, self.master));
     // Only the player gets the click — a trigger chain hitting a locked door
-    // should be silent.
-    if (sv_use_is_player_direct)
+    // should be silent.  Touch counts as a player: CBaseDoor::DoorTouch's very
+    // first refusal arm is
+    //     if (m_sMaster && !UTIL_IsMasterTriggered(m_sMaster, pOther))
+    //         PlayLockSounds(pev, &m_ls, TRUE, FALSE);
+    //                                            (doors.cpp:496-497)
+    // and it does NOT return — the refusal itself lands one frame later in
+    // DoorActivate's own master test (doors.cpp:532-533).  Our early return here
+    // collapses the two into one step; the audible result is identical.  48 of
+    // the 128 corpus doors that gain a touch field carry a master (th_ep1_01's
+    // padlock doors among them), so without this arm the single most common
+    // locked door in the game would be mute to a shoulder.
+    if (sv_use_is_player_direct || sv_use_is_player_touch)
         Door_PlayLockedSound();
     return TRUE;
 };
@@ -349,6 +436,12 @@ float() Door_MasterBlocks =
 // geometry-push direction fallback for the unlikely case where
 // .blocked side-effects zeroed self.velocity briefly.
 .vector mover_planned_velocity;
+// The angular half of the same pause.  A func_platrot spins and translates in
+// lockstep (Plat_RotStart sizes the avelocity so both finish together), but the wedge
+// pause below only ever stopped the translation - so a blocked platrot kept turning
+// and arrived at its end angle while still short of its end position.  Stash it here
+// while paused and hand it back when the wedge clears.
+.vector mover_paused_avelocity;
 
 // Per-tick travel think — runs at sv_func_tickrate during the move.
 // Two passes:
@@ -401,10 +494,11 @@ void() Mover_TravelTick =
         pre_velocity = self.mover_planned_velocity;
     float wedged = Mover_GeometryBlockPush();
 
-    float hz = cvar("sv_func_tickrate");
-    if (hz <= 0)   hz = 40;
-    if (hz > 200)  hz = 200;
-    float tick_dt = 1.0 / hz;
+    // Floored at the server's real physics frame — see Mover_TickInterval in
+    // sv_customdefs.qc.  A door scheduled faster than the server runs travels at
+    // tick*fps of its authored speed, which on a slow server is a door that takes
+    // twice as long to open as the map says.
+    float tick_dt = Mover_TickInterval(40);
 
     if (wedged)
     {
@@ -426,6 +520,12 @@ void() Mover_TravelTick =
             {
                 self.velocity  = '0 0 0';
                 self.SendFlags = 1;
+            }
+            if (self.avelocity != '0 0 0')
+            {
+                self.mover_paused_avelocity = self.avelocity;
+                self.avelocity              = '0 0 0';
+                self.SendFlags              = 1;
             }
             if (cvar("sv_debug_doors"))
                 dprint(sprintf("[door %s] tick: PAUSE (wedge ahead, no reverse)\n",
@@ -454,6 +554,12 @@ void() Mover_TravelTick =
         {
             self.velocity  = self.mover_planned_velocity;
             self.SendFlags = 1;
+        }
+        if (self.mover_paused_avelocity != '0 0 0')
+        {
+            self.avelocity              = self.mover_paused_avelocity;
+            self.mover_paused_avelocity = '0 0 0';
+            self.SendFlags              = 1;
         }
     }
 
@@ -489,6 +595,7 @@ void() Mover_TravelTick =
             }
         }
         self.velocity = '0 0 0';
+        self.mover_paused_avelocity = '0 0 0';   // never resurrect a stale pause
         self.SendFlags = 1;
         // Drop out of the linear-motion list now that we're idle —
         // client predict pass should stop pushing players against
@@ -499,6 +606,25 @@ void() Mover_TravelTick =
         if (cb) cb();
         return;
     }
+
+    // RE-SEND EVERY TICK WHILE WE ARE ACTUALLY MOVING.
+    //
+    // SV_InitReplicatedSolidBrush sets SendFlags once at spawn, the engine clears it
+    // after the first send, and the branches above only dirty it on a state CHANGE -
+    // so a mover on this tick used to ship exactly two snapshots for a whole trip:
+    // one at Mover_Start and one on arrival.  The client's TRAIN branch caps its
+    // extrapolation at 0.1 s (cl_brushsync.qc:282), so it advanced a tenth of a
+    // second's worth, froze, and then teleported to the destination.  hl_c01_a1's
+    // func_platrot travels 216 units in 2.7 s: about 8 units of visible motion out
+    // of 216.
+    //
+    // This is the one mover tick in the tree that was missing it.  func_train
+    // (sv_func_train.qc:262) carries the same line with a comment describing the
+    // same report; so do func_tracktrain, func_door_rotating, func_rotating and
+    // func_trackautochange.  The engine dedups sends down to the client's netrate,
+    // so the cost is a snapshot per netframe, not per tick.
+    if (self.velocity != '0 0 0' || self.avelocity != '0 0 0')
+        self.SendFlags = 1;
 
     self.nextthink = self.ltime + tick_dt;
 };
@@ -511,6 +637,10 @@ void(vector destination, float move_speed, void() move_done) Mover_Start =
 
     delta    = destination - self.origin;
     distance = vlen(delta);
+
+    // Fresh trip: any avelocity a previous wedge stashed belongs to the previous
+    // trip's rotation and must not be handed back mid-way through this one.
+    self.mover_paused_avelocity = '0 0 0';
 
     if (distance <= 0 || move_speed <= 0)
     {
@@ -540,10 +670,7 @@ void(vector destination, float move_speed, void() move_done) Mover_Start =
     // Mover_TravelTick removes the entry once we arrive.
     MovingBrush_AddToList(self);
 
-    float hz = cvar("sv_func_tickrate");
-    if (hz <= 0)   hz = 40;
-    if (hz > 200)  hz = 200;
-    self.nextthink = self.ltime + 1.0 / hz;
+    self.nextthink = self.ltime + Mover_TickInterval(40);
 };
 
 // ============================================================================
@@ -662,8 +789,12 @@ float DOOR_STATE_UP     = 1;
 float DOOR_STATE_TOP    = 2;
 float DOOR_STATE_DOWN   = 3;
 
-float DOOR_TRIGGER_PAD_XY = 60;
-float DOOR_TRIGGER_PAD_Z  = 8;
+// DOOR_TRIGGER_PAD_XY / DOOR_TRIGGER_PAD_Z (60 / 8) lived here and inflated the
+// touch field into a halo around the door.  Half-Life installs DoorTouch on the
+// door BRUSH (doors.cpp:323), so contact — not proximity — is the trigger.  The
+// pads are what made walk-past opens and the every-frame reversal, and what got
+// sv_door_proximity shipped at 0.  door_spawn_trigger now hugs absmin/absmax the
+// way rotdoor_spawn_trigger always did.
 
 float door_group_mark_serial;
 
@@ -682,6 +813,101 @@ void() door_go_up;
 void() door_go_down;
 void() door_use_force;
 
+// sv_triggers.qc, which compiles AFTER this file.
+void(entity caller, entity who, float useType) SUB_UseTargets;
+float(float ts) GoldSrc_TriggerStateToUseType;
+
+// ---------------------------------------------------------------------------
+//  Sven's four end-of-travel chains  (sven-coop.fgd @BaseClass OpenClosable)
+// ---------------------------------------------------------------------------
+//      fireonopening  — the door STARTS opening
+//      fireonopened   — it finishes opening      (alias: fireonopen)
+//      fireonclosing  — it STARTS closing
+//      fireonclosed   — it finishes closing      (alias: netname)
+//
+// The two aliases are vanilla Half-Life keys that Sven kept working, and the
+// `netname` one is not decoration: th_ep1_01's bell rope is a func_door whose
+// ONLY output is `netname "bellring_mngr"`, so with this unimplemented the bell
+// could be pulled and never rang.  CBaseDoor fires it from DoorHitBottom
+// (doors.cpp:699-701) — this file had no equivalent for func_door at all, though
+// func_plat already had one in sv_goldsrc_compat.qc.
+//
+// `fireonopen` is declared HERE rather than beside its plat reader because this
+// file compiles at sv_progs.src:185 and sv_goldsrc_compat.qc at :389; a field can
+// only be declared once, and the earlier declaration is the one both can see.
+.string fireonopen;
+.string fireonopening;
+.string fireonclosing;
+.string fireonopened;
+.string fireonclosed;
+
+// Read as STRINGS, deliberately.  Every *_triggerstate in the FGD defaults to
+// 2 (Toggle), and a QC .float left at 0 cannot be told from a map's explicit
+// "0" (= Off) — which would silently turn every unset key into an Off.
+.string fireonopening_triggerstate;
+.string fireonclosing_triggerstate;
+.string fireonopened_triggerstate;
+.string fireonclosed_triggerstate;
+
+void(string targ, string statestr) Door_FireChain =
+{
+    if (targ == "" || targ == __NULL__)
+        return;
+
+    float state = (statestr == "" || statestr == __NULL__) ? 2 : stof(statestr);
+
+    // Throwaway relay, the same shape Plat_FireChain uses: SUB_UseTargets walks
+    // the CALLER's .target, and the door's own .target is a different chain we
+    // must not disturb.
+    entity relay = spawn();
+    relay.classname = "door_fire";
+    relay.target    = targ;
+    SUB_UseTargets(relay, self, GoldSrc_TriggerStateToUseType(state));
+    remove(relay);
+};
+
+string() Door_ClosedTarget =
+{
+    if (self.fireonclosed && self.fireonclosed != "")
+        return self.fireonclosed;
+    return self.netname;
+};
+
+string() Door_OpenedTarget =
+{
+    if (self.fireonopened && self.fireonopened != "")
+        return self.fireonopened;
+    return self.fireonopen;
+};
+
+// Which end is "closed"?  Half-Life fires the close chain at DoorHitTop when
+// SF_DOOR_START_OPEN is set and at DoorHitBottom when it is not:
+//     // Fire the close target (if startopen is set, then "top" is closed)
+//     if ( pev->netname && (pev->spawnflags & SF_DOOR_START_OPEN) )   // HitTop
+//     if ( pev->netname && !(pev->spawnflags & SF_DOOR_START_OPEN) )  // HitBottom
+//                                              (doors.cpp:644-646, :699-701)
+// This tree swaps pos1/pos2 at spawn for START_OPEN (see func_door), so top and
+// bottom already mean what HL means by them and the test transcribes directly.
+void(float attop) Door_FireArrival =
+{
+    float closed = (self.door_flags & DOOR_START_OPEN) ? attop : !attop;
+    if (closed)
+        Door_FireChain(Door_ClosedTarget(), self.fireonclosed_triggerstate);
+    else
+        Door_FireChain(Door_OpenedTarget(), self.fireonopened_triggerstate);
+};
+
+// The two START-of-travel chains.  Sven-only (vanilla HL has no equivalent), so
+// there is no alias key to fall back on.
+void(float totop) Door_FireDeparture =
+{
+    float closing = (self.door_flags & DOOR_START_OPEN) ? totop : !totop;
+    if (closing)
+        Door_FireChain(self.fireonclosing, self.fireonclosing_triggerstate);
+    else
+        Door_FireChain(self.fireonopening, self.fireonopening_triggerstate);
+};
+
 void() door_hit_bottom =
 {
     setorigin(self, self.pos1);
@@ -690,6 +916,7 @@ void() door_hit_bottom =
     self.mover_state = MOVER_STATE_BOTTOM;
     self.SendFlags   = 1;
     Door_PlayStopSound();
+    Door_FireArrival(FALSE);
 };
 
 void() door_go_down =
@@ -699,6 +926,7 @@ void() door_go_down =
     self.door_state  = DOOR_STATE_DOWN;
     self.mover_state = MOVER_STATE_DOWN;
     Door_PlayMoveSound();
+    Door_FireDeparture(FALSE);
     Mover_Start(self.pos1, self.speed, door_hit_bottom);
 };
 
@@ -710,6 +938,7 @@ void() door_hit_top =
     self.mover_state = MOVER_STATE_TOP;
     self.SendFlags   = 1;
     Door_PlayStopSound();
+    Door_FireArrival(TRUE);
     // TOGGLE / ONE_MOVEMENT / wait<0 all suppress the auto-return.
     // ONE_MOVEMENT is the "stays open this round" semantic — even
     // damage-driven opens latch into this state until Door_RoundReset
@@ -738,6 +967,7 @@ void() door_go_up =
     self.door_state  = DOOR_STATE_UP;
     self.mover_state = MOVER_STATE_UP;
     Door_PlayMoveSound();
+    Door_FireDeparture(TRUE);
     Mover_Start(self.pos2, self.speed, door_hit_top);
 };
 
@@ -864,6 +1094,14 @@ void() door_use =
     // retry the moment the master unlocks.
     if (Door_MasterBlocks()) return;
 
+    // Sven's InventoryRules — "Prevent door being used".  Sits beside the
+    // master gate for the same reason it does: a door refused for want of the
+    // right item must still be openable the moment you come back holding it,
+    // so this must not burn the debounce either.  func_water is a clone of
+    // func_door and reaches this same function, which is why Sven lists it
+    // separately in the same breath.
+    if (!Inv_Gate(self, activator)) return;
+
     // Direct +use gate.  Half-Life's CBaseDoor::ObjectCaps grants
     // FCAP_IMPULSE_USE ONLY when SF_DOOR_USE_ONLY (256) is set; without it a
     // door is not in the player's use-trace at all and can only be opened by
@@ -961,30 +1199,91 @@ void() door_killed =
     door_use_force();
 };
 
+// Port of CBaseDoor::DoorTouch (doors.cpp:485-513).  The ladder is HL's, in HL's
+// order, with two additions marked below.
 void() door_trigger_touch =
 {
     entity oldself, oldactivator;
+    float  oldtouch;
+    entity door = self.owner;
+
+    // doors.cpp:489-491 — "Ignore touches by anything but players".
     if (other.classname != "player")
         return;
-    // No flag test here.  The trigger is only ever spawned for doors that
-    // may be touch-opened (door_spawn_trigger's caller already screens on
-    // USE_ONLY / PASS_THROUGH), and door_use applies NO_TRIGGER itself —
-    // proximity touch reaches it with sv_use_is_player_direct FALSE, so a
-    // NO_TRIGGER door still rejects it there.
-    oldself = self; oldactivator = activator;
-    activator = other;
-    self = self.owner;
+
+    // HL's SetTouch(NULL)-while-moving, expressed as a state test.  DoorTouch
+    // nulls its own touch on a successful activate (doors.cpp:511-512) and only
+    // DoorHitBottom / DoorHitTop put it back (:690-695, :626-631).  Our trigger
+    // is a separate persistent entity and cannot un-install itself the same way,
+    // so gate on the door being at its resting pose instead.  This is what closes
+    // the every-frame reversal: Door_ActivateSingle flips a TOGGLE door to
+    // door_go_down whenever it is at UP/TOP, so without this a player standing in
+    // contact re-fires it every 0.1 s (door_use's attack_finished debounce) and
+    // the door oscillates.  START_OPEN doors swap pos1/pos2 at spawn, so BOTTOM
+    // is still "at rest" for them.
+    if (door.door_state != DOOR_STATE_BOTTOM)
+        return;
+
+    // NOT from Half-Life.  Same shoulder-push test rotdoor_touch uses: brushing
+    // past should not open the door, only walking into it.  Ranked on the AABB
+    // MIDPOINT, not .origin — a GoldSrc brush entity compiled without an ORIGIN
+    // brush keeps .origin == '0 0 0', which is the normal case for a sliding
+    // func_door and would put the "toward the door" vector at the map origin.
+    // rotdoor_touch can use .origin because a rotating door's ORIGIN brush is
+    // mandatory and baked in.
+    vector to_door = ((door.absmin + door.absmax) * 0.5) - other.origin;
+    if (vlen(to_door) < 0.01)
+        return;                         // standing inside it
+    to_door = normalize(to_door);
+    if ((other.velocity * to_door) < 50)
+        return;
+
+    // doors.cpp:502-507 — "If door is somebody's target, then touching does
+    // nothing.  You have to activate the owner (e.g. button)": play the locked
+    // sound and return.  .door_player_usable already encodes exactly this ladder
+    // and inside a touch handler it reduces to "native map OR unnamed", because
+    // USE_ONLY doors never get a trigger in the first place.  Reusing it keeps
+    // the two paths from drifting, and keeps the sv_door_use_only escape hatch
+    // working the same way door_use does.  349 of the 578 door-family entities in
+    // the th_* corpus are named without 256 — this arm is the majority case.
+    if (!door.door_player_usable && cvar("sv_door_use_only"))
+    {
+        oldself = self;
+        self = door;
+        Door_PlayLockedSound();
+        self = oldself;
+        return;
+    }
+
+    // No flag test for USE_ONLY / PASS_THROUGH here: the trigger is only ever
+    // spawned for doors that may be touch-opened (func_door screens on both).
+    // door_use applies NO_TRIGGER itself — this path reaches it with
+    // sv_use_is_player_direct FALSE, so a NO_TRIGGER door (native maps' aliased
+    // bit 256) still rejects it there, as it should.
+    oldself = self; oldactivator = activator; oldtouch = sv_use_is_player_touch;
+    activator = other;                  // doors.cpp:509, m_hActivator
+    sv_use_is_player_touch = TRUE;      // lets Door_MasterBlocks click
+    self = door;
     door_use();
-    self = oldself; activator = oldactivator;
+    self = oldself; activator = oldactivator; sv_use_is_player_touch = oldtouch;
 };
 
 void() door_spawn_trigger =
 {
+    // Half-Life installs CBaseDoor::DoorTouch on the door brush itself
+    // (doors.cpp:323), so the player has to physically make contact.  Hug
+    // absmin/absmax — the brush's real world bounds — rather than the swept
+    // cmins/cmaxs, which span the door's whole travel and would fire from
+    // wherever the door is GOING to be.  The 2 qu inflation is the same one
+    // rotdoor_spawn_trigger and SV_CheckTouchTriggers' func_button arm need: a
+    // solid brush stops the player just OUTSIDE its bbox, and the engine only
+    // spreads submodel bounds by 1 unit, so a strict overlap test would barely
+    // ever fire.
     entity trigger;
     vector center, mins, maxs;
-    center  = (self.cmins + self.cmaxs) * 0.5;
-    mins    = self.cmins - center - [DOOR_TRIGGER_PAD_XY, DOOR_TRIGGER_PAD_XY, DOOR_TRIGGER_PAD_Z];
-    maxs    = self.cmaxs - center + [DOOR_TRIGGER_PAD_XY, DOOR_TRIGGER_PAD_XY, DOOR_TRIGGER_PAD_Z];
+    center  = (self.absmin + self.absmax) * 0.5;
+    mins    = self.absmin - center - '2 2 2';
+    maxs    = self.absmax - center + '2 2 2';
     trigger = spawn();
     setorigin(trigger, center);
     setsize(trigger, mins, maxs);
@@ -1086,14 +1385,21 @@ void() func_door =
     //               with the locked sound, so the player cannot open it at all.
     //   unnamed  -> by walking into it (DoorTouch activates).
     //
-    // The `!targetname` term is that second case.  We answer it with +use
-    // rather than a touch trigger on purpose: touch is what HL does, but it
-    // makes doors fly open as you brush past, and this mod ships
-    // sv_door_proximity 0 for exactly that reason.  +use is a strictly gentler
-    // superset — every door HL would open on contact still opens, just on a
-    // keypress — and no map can be broken by a door being MORE openable than
-    // Half-Life made it.  Without the term, 520 doors across the Sven corpus
-    // (507 of them GoldSrc) had no activation path left at all.
+    // The `!targetname` term is that second case.  We answer it with +use AND,
+    // now, with touch: the two bugs that made touch unusable are fixed rather
+    // than avoided — door_spawn_trigger hugs the brush instead of building a
+    // 60-unit halo out of the SWEPT bounds, and door_trigger_touch requires
+    // motion into the door and refuses while the door is off its resting pose
+    // (which is what used to flip TOGGLE doors back and forth every frame).
+    // sv_door_proximity now ships at 1.  +use remains as the gentler superset —
+    // every door HL would open on contact still opens on a keypress too — and no
+    // map can be broken by a door being MORE openable than Half-Life made it.
+    // Without the term, 520 doors across the Sven corpus (507 of them GoldSrc)
+    // had no activation path left at all.
+    //
+    // Leave this computation itself alone: it feeds sv_brushsync.qc's
+    // predict_block byte, which is a +use-PREDICTION gate.  Setting it to 1 for
+    // newly-touchable doors would make CSQC predict a +use the server refuses.
     //
     // Named-and-untriggered doors stay refused, which is HL-correct: 332 Sven
     // doors are named with nothing referencing them and are dead in HL too.
@@ -1179,6 +1485,13 @@ void() func_door =
         makevectors(self.mangle);
         self.movedir = v_forward;
         self.pos2    = self.pos1 + self.movedir * self.distance;
+        // Third site of the same "a leftover .angles on a SOLID_BSP brush relocates
+        // it about the world origin" trap — the branch above already carries this
+        // line and the SetMovedir path zeroes it too, so this one was the odd one
+        // out.  `mangle` is Quake-1-only, so no GoldSrc map reaches here today; it
+        // is fixed because the next person to read these three branches should not
+        // have to work out why two of them zero angles and one does not.
+        self.angles = '0 0 0';
     }
     else
     {
@@ -1201,7 +1514,21 @@ void() func_door =
         if (self.distance)
             self.pos2 = self.pos1 + self.movedir * self.distance;
         else
-            self.pos2 = self.pos1 + self.movedir * (fabs(self.movedir * self.size) - self.lip);
+        {
+            // The -2 is GoldSrc's, and it is not a fudge:
+            //
+            //   // Subtract 2 from size because the engine expands bboxes by 1 in
+            //   // all directions
+            //                                     (doors.cpp, CBaseDoor::Spawn)
+            //
+            // That expansion is Mod_LoadSubmodels' "spread the mins / maxs by a
+            // pixel", which FTE inherits verbatim (gl_model.c:4513, :4551), so
+            // .size arrives padded here by exactly the 2 the reference game
+            // takes back off.  Without it every lip-derived door in the corpus
+            // opened two units past where its mapper placed it.
+            vector sz = self.size - '2 2 2';
+            self.pos2 = self.pos1 + self.movedir * (fabs(self.movedir * sz) - self.lip);
+        }
     }
 
     // .angles was the movement direction and has just been zeroed; the entity was
@@ -1243,20 +1570,22 @@ void() func_door =
     self.door_state  = DOOR_STATE_BOTTOM;
     self.mover_state = MOVER_STATE_BOTTOM;
 
-    // Auto-spawn the proximity touch trigger ONLY when sv_door_proximity is on (default 0 = OFF).
-    // Off → the door opens only on +use (door_use) / target-chain / damage — never on walk-near.
-    // The proximity trigger re-fired door_use every frame the player stood in its box (via the
-    // per-frame SV_CheckTouchTriggers scan), which caused both the walk-near open AND the every-frame
-    // direction reversal.  Still gated on un-targeted (mappers wiring via target want exclusive control)
-    // + not PASS_THROUGH when re-enabled.
-    //
-    // USE_ONLY is a literal transcription of Half-Life's
+    // Auto-spawn the touch field.  Half-Life's condition is ONLY the 256 bit:
     //     if (SF_DOOR_USE_ONLY) SetTouch(NULL); else SetTouch(DoorTouch);
-    // — the flag's whole meaning in GoldSrc is "this door has no touch
-    // field".  It used to be the mod-invented USE_ABLE bit here instead,
-    // which is now dead.
+    //                                     (doors.cpp:317-323)
+    // — the flag's whole meaning in GoldSrc is "this door has no touch field".
+    // It used to be the mod-invented USE_ABLE bit here instead, which is dead.
+    //
+    // The `!self.targetname` term used to be here too and is NOT Half-Life's: a
+    // named door keeps its touch field precisely so DoorTouch can answer a
+    // shoulder with the locked click (doors.cpp:502-507).  door_trigger_touch now
+    // makes that answer, so the term is gone.
+    //
+    // PASS_THROUGH is kept: a SOLID_NOT brush cannot be walked into, and
+    // func_water forces that bit (sv_water.qc), so all 53 corpus pools stay out of
+    // this.  Do NOT "simplify" that term away — it is the only thing keeping them
+    // out now that the targetname term has gone.
     if (cvar("sv_door_proximity")
-        && !self.targetname
         && !(self.door_flags & DOOR_USE_ONLY)
         && !(self.door_flags & DOOR_PASS_THROUGH))
         door_spawn_trigger();

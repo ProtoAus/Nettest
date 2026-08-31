@@ -406,9 +406,52 @@ void() PlayerPlaceAtSpawnPoint =
 {
     entity spawnpoint;
 
+    // CHECKPOINT OVERRIDE.
+    //
+    // Once anybody has touched a point_checkpoint, that is where the party comes
+    // back - not wherever the map's info_player_deathmatch set happens to point.
+    //
+    // THIS IS A DIVERGENCE FROM SVEN AND IS MEANT TO BE.  Sven's
+    // point_checkpoint.as does exactly one thing with the dead: RespawnThink walks
+    // the client list and revives players whose m_fDeadTime predates the touch,
+    // moving each to self.pev.origin (:214-219).  It never touches the spawn set,
+    // so a player who dies AFTER the checkpoint goes back to the map's spawns and
+    // the checkpoint has no bearing on them at all.  On the They Hunger campaign
+    // that gap is papered over per-map by trigger_respawn plus swapped spawn-point
+    // groups (`churchrespawn`, `spawn02`), which is a lot of map work for a thing
+    // the checkpoint is already standing there to mean.
+    //
+    // So the checkpoint is the respawn point here, which is what a checkpoint
+    // reads as. `sv_checkpoint_respawn 0` restores the script-faithful behaviour.
+    //
+    // Ahead of the spawn-point search rather than after it because there is
+    // nothing to blend: a latched checkpoint is the answer, and running the search
+    // anyway would fire Spawn_NotifyUsed on an info_player_deathmatch nobody
+    // arrived at (spawnflag 32, "Trigger on spawn", is live on this corpus).
+    if (cp_respawn_at && !wasfreed(cp_respawn_at) && cvar("sv_checkpoint_respawn"))
+    {
+        setorigin(self, cp_respawn_at.origin + '0 0 1');
+        self.angles  = cp_respawn_at.angles;
+        self.v_angle = cp_respawn_at.angles;
+        if (cvar("sv_debug_spawns"))
+            bprint(PRINT_HIGH, sprintf("[spawn] %s -> checkpoint \"%s\" at %v\n",
+                                       self.netname, cp_respawn_at.targetname,
+                                       self.origin));
+        return;
+    }
+
     spawnpoint = PlayerGetSpawnPointEntity();
     if (!spawnpoint)
     {
+        // The (0,0,1) fallback is indistinguishable in-game from "the map
+        // teleported me into the void", so say which it was.  A map whose
+        // spawn set is toggled by name (hl_c00 turns `spawn_temp` off and
+        // `spawn1` on a second after load) lands here the moment the two
+        // halves of that hand-off disagree, and the only visible symptom is
+        // the player standing at the world origin with nothing drawn.
+        if (cvar("sv_debug_spawns"))
+            bprint(PRINT_HIGH, sprintf("[spawn] %s: NO ELIGIBLE SPAWN POINT (team %g) -> 0 0 1\n",
+                                       self.netname, self.player_team));
         setorigin(self, '0 0 1');
         return;
     }
@@ -416,6 +459,11 @@ void() PlayerPlaceAtSpawnPoint =
     setorigin(self, spawnpoint.origin + '0 0 1');
     self.angles = spawnpoint.angles;
     self.v_angle = spawnpoint.angles;
+
+    if (cvar("sv_debug_spawns"))
+        bprint(PRINT_HIGH, sprintf("[spawn] %s -> \"%s\" (%s) at %v\n",
+                                   self.netname, spawnpoint.targetname,
+                                   spawnpoint.classname, self.origin));
 
     // GoldSrc `netname` rename + spawnflag 32 "Trigger on spawn".
     Spawn_NotifyUsed(spawnpoint, self);
@@ -487,6 +535,7 @@ void() PlayerBeginTeamSelection =
     // stashing a weapon on the team-select player.  weapon_touch also
     // guards via player_team == TEAM_NONE, but resetting here means even
     // if a past frame slipped a weapon in, it's gone before gameplay.
+    W_CarryClearAll(self);
     self.slot_primary         = WEP_NONE;
     self.slot_primary_equip   = __NULL__;
     self.slot_primary_drop    = __NULL__;
@@ -561,6 +610,11 @@ void(vector org, void() spawn_func) SV_DebugSpawnWeapon =
         W_PhysDropStart(self, 0);
     }
 
+    // Publish the handle before self is restored — squadmaker's item path needs
+    // the entity back so it can stamp .sq_ownerid on it (sv_goldsrc_ammo.qc
+    // Squadmaker_SpawnItem).  Harmless for every other caller.
+    sv_last_spawned_weapon = self;
+
     self = saved_self;
 };
 
@@ -578,8 +632,55 @@ void(vector org, float weapon_id) SV_DebugSpawnWeaponId =
 	else if (weapon_id == WEP_G3SG1)          SV_DebugSpawnWeapon(org, weapon_g3sg1);
 	else if (weapon_id == WEP_CSM3)           SV_DebugSpawnWeapon(org, weapon_csm3);
 	else if (weapon_id == WEP_CSMP5)          SV_DebugSpawnWeapon(org, weapon_csmp5);
+	// The thirteen Counter-Strike 1.6 guns.
+	else if (weapon_id == WEP_CSP228)        SV_DebugSpawnWeapon(org, weapon_p228);
+	else if (weapon_id == WEP_CSFIVESEVEN)   SV_DebugSpawnWeapon(org, weapon_fiveseven);
+	else if (weapon_id == WEP_CSELITE)       SV_DebugSpawnWeapon(org, weapon_elite);
+	else if (weapon_id == WEP_CSTMP)         SV_DebugSpawnWeapon(org, weapon_tmp);
+	else if (weapon_id == WEP_CSMAC10)       SV_DebugSpawnWeapon(org, weapon_mac10);
+	else if (weapon_id == WEP_CSUMP45)       SV_DebugSpawnWeapon(org, weapon_ump45);
+	else if (weapon_id == WEP_CSP90)         SV_DebugSpawnWeapon(org, weapon_p90);
+	else if (weapon_id == WEP_CSGALIL)       SV_DebugSpawnWeapon(org, weapon_galil);
+	else if (weapon_id == WEP_CSFAMAS)       SV_DebugSpawnWeapon(org, weapon_famas);
+	else if (weapon_id == WEP_CSAUG)         SV_DebugSpawnWeapon(org, weapon_aug);
+	else if (weapon_id == WEP_CSSG552)       SV_DebugSpawnWeapon(org, weapon_sg552);
+	else if (weapon_id == WEP_CSSG550)       SV_DebugSpawnWeapon(org, weapon_sg550);
+	else if (weapon_id == WEP_CSXM1014)      SV_DebugSpawnWeapon(org, weapon_xm1014);
 	else if (weapon_id == WEP_PAINTBALL)      SV_DebugSpawnWeapon(org, weapon_paintball);
 	else if (weapon_id == WEP_DOD98K)         SV_DebugSpawnWeapon(org, weapon_dod98k);
+	else if (weapon_id == WEP_DODCOLT)        SV_DebugSpawnWeapon(org, weapon_colt);
+	else if (weapon_id == WEP_DODLUGER)       SV_DebugSpawnWeapon(org, weapon_luger);
+	else if (weapon_id == WEP_DODWEBLEY)      SV_DebugSpawnWeapon(org, weapon_webley);
+	else if (weapon_id == WEP_DODGARAND)      SV_DebugSpawnWeapon(org, weapon_garand);
+	else if (weapon_id == WEP_DODCARBINE)     SV_DebugSpawnWeapon(org, weapon_m1carbine);
+	else if (weapon_id == WEP_DODK43)         SV_DebugSpawnWeapon(org, weapon_gewehr);
+	else if (weapon_id == WEP_DODTOMMY)       SV_DebugSpawnWeapon(org, weapon_thompson);
+	else if (weapon_id == WEP_DODMP40)        SV_DebugSpawnWeapon(org, weapon_mp40);
+	else if (weapon_id == WEP_DODSTEN)        SV_DebugSpawnWeapon(org, weapon_sten);
+	else if (weapon_id == WEP_DODGREASE)      SV_DebugSpawnWeapon(org, weapon_dodgreasegun);
+	else if (weapon_id == WEP_DODMP44)        SV_DebugSpawnWeapon(org, weapon_mp44);
+	else if (weapon_id == WEP_DODBAR)         SV_DebugSpawnWeapon(org, weapon_bar);
+	else if (weapon_id == WEP_DODBREN)        SV_DebugSpawnWeapon(org, weapon_bren);
+	else if (weapon_id == WEP_DODFG42)        SV_DebugSpawnWeapon(org, weapon_fg42);
+	else if (weapon_id == WEP_DODFG42S)       SV_DebugSpawnWeapon(org, weapon_scopedfg42);
+	else if (weapon_id == WEP_DODFCARB)       SV_DebugSpawnWeapon(org, weapon_fcarb);
+	else if (weapon_id == WEP_DODENFIELD)     SV_DebugSpawnWeapon(org, weapon_enfield);
+	else if (weapon_id == WEP_DODMORTAR)      SV_DebugSpawnWeapon(org, weapon_mortar);
+	// WEP_DODBINOCS is deliberately absent: it has no world model, so there is
+	// nothing to spawn.  `wep_give binoculars` is the only way to get them.
+	else if (weapon_id == WEP_DODSCOPED98K)   SV_DebugSpawnWeapon(org, weapon_scoped98k);
+	else if (weapon_id == WEP_DODSPRING)      SV_DebugSpawnWeapon(org, weapon_spring);
+	else if (weapon_id == WEP_DODENFIELDS)    SV_DebugSpawnWeapon(org, weapon_enfield_scoped);
+	else if (weapon_id == WEP_DOD30CAL)       SV_DebugSpawnWeapon(org, weapon_30cal);
+	else if (weapon_id == WEP_DODMG34)        SV_DebugSpawnWeapon(org, weapon_mg34);
+	else if (weapon_id == WEP_DODMG42)        SV_DebugSpawnWeapon(org, weapon_mg42);
+	else if (weapon_id == WEP_DODBAZOOKA)     SV_DebugSpawnWeapon(org, weapon_bazooka);
+	else if (weapon_id == WEP_DODSCHRECK)     SV_DebugSpawnWeapon(org, weapon_pschreck);
+	else if (weapon_id == WEP_DODPIAT)        SV_DebugSpawnWeapon(org, weapon_piat);
+	else if (weapon_id == WEP_DODAMERK)       SV_DebugSpawnWeapon(org, weapon_amerknife);
+	else if (weapon_id == WEP_DODFAIRBAIRN)   SV_DebugSpawnWeapon(org, weapon_fairbairn);
+	else if (weapon_id == WEP_DODPARAKNIFE)   SV_DebugSpawnWeapon(org, weapon_paraknife);
+	else if (weapon_id == WEP_DODSPADE)       SV_DebugSpawnWeapon(org, weapon_spade);
 	else if (weapon_id == WEP_FLAKSHOTGUN)    SV_DebugSpawnWeapon(org, weapon_flakshotgun);
 	else if (weapon_id == WEP_GAUSS)          SV_DebugSpawnWeapon(org, weapon_gauss);
 	else if (weapon_id == WEP_GRENADELAUNCHER) SV_DebugSpawnWeapon(org, weapon_grenadelauncher);
@@ -588,7 +689,7 @@ void(vector org, float weapon_id) SV_DebugSpawnWeaponId =
 	else if (weapon_id == WEP_HLRPG)          SV_DebugSpawnWeapon(org, weapon_hlrpg);
 	else if (weapon_id == WEP_HLSHOTGUN)      SV_DebugSpawnWeapon(org, weapon_hlshotgun);
 	else if (weapon_id == WEP_HLSMG)          SV_DebugSpawnWeapon(org, weapon_hlsmg);
-	else if (weapon_id == WEP_M249)           SV_DebugSpawnWeapon(org, weapon_m249);
+	else if (weapon_id == WEP_M249)           SV_DebugSpawnWeapon(org, weapon_csm249);
 	else if (weapon_id == WEP_REBAR)          SV_DebugSpawnWeapon(org, weapon_rebar);
 	else if (weapon_id == WEP_SCOUT)          SV_DebugSpawnWeapon(org, weapon_scout);
 	else if (weapon_id == WEP_DEAGLE)         SV_DebugSpawnWeapon(org, weapon_deagle);
@@ -597,16 +698,47 @@ void(vector org, float weapon_id) SV_DebugSpawnWeaponId =
 	else if (weapon_id == WEP_HLGLOCK)        SV_DebugSpawnWeapon(org, weapon_hlglock);
 	else if (weapon_id == WEP_PISTOL)         SV_DebugSpawnWeapon(org, weapon_pistol);
 	else if (weapon_id == WEP_WRENCH)         SV_DebugSpawnWeapon(org, weapon_wrench);
-	else if (weapon_id == WEP_KNIFE)          SV_DebugSpawnWeapon(org, weapon_knife);
+	else if (weapon_id == WEP_KNIFE)          SV_DebugSpawnWeapon(org, weapon_csknife);
 	else if (weapon_id == WEP_HLCROWBAR)      SV_DebugSpawnWeapon(org, weapon_hlcrowbar);
 	else if (weapon_id == WEP_HLGRENADE)      SV_DebugSpawnWeapon(org, weapon_hlgrenade);
 	else if (weapon_id == WEP_SATCHEL)        SV_DebugSpawnWeapon(org, weapon_satchel);
 	else if (weapon_id == WEP_TRIPMINE)       SV_DebugSpawnWeapon(org, weapon_tripmine);
 	else if (weapon_id == WEP_SNARK)          SV_DebugSpawnWeapon(org, weapon_snark);
 	else if (weapon_id == WEP_HORNETGUN)      SV_DebugSpawnWeapon(org, weapon_hornetgun);
+	else if (weapon_id == WEP_SHOCKRIFLE)     SV_DebugSpawnWeapon(org, weapon_shockrifle);
+	else if (weapon_id == WEP_DISPLACER)      SV_DebugSpawnWeapon(org, weapon_displacer);
+	else if (weapon_id == WEP_JETPACK)        SV_DebugSpawnWeapon(org, weapon_as_jetpack);
+	else if (weapon_id == WEP_BGRAPPLE)       SV_DebugSpawnWeapon(org, weapon_grapple);
+	// They Hunger's eight.  A missing branch here is the "listed in the menu but
+	// does nothing" symptom - the row draws from the manifest, the spawn falls
+	// through to nothing, and no error is printed.
+	else if (weapon_id == WEP_TH1911)         SV_DebugSpawnWeapon(org, weapon_th1911);
+	else if (weapon_id == WEP_THTOMMY)        SV_DebugSpawnWeapon(org, weapon_thtommygun);
+	else if (weapon_id == WEP_THGREASE)       SV_DebugSpawnWeapon(org, weapon_thgreasegun);
+	else if (weapon_id == WEP_THM14)          SV_DebugSpawnWeapon(org, weapon_thm14);
+	else if (weapon_id == WEP_THM16)          SV_DebugSpawnWeapon(org, weapon_thm16a1);
+	else if (weapon_id == WEP_THSAWOFF)       SV_DebugSpawnWeapon(org, weapon_thsawedoff);
+	else if (weapon_id == WEP_THSPANNER)      SV_DebugSpawnWeapon(org, weapon_thspanner);
+	else if (weapon_id == WEP_THTESLA)        SV_DebugSpawnWeapon(org, weapon_thteslagun);
+	// Sven Co-op and Opposing Force.  A missing branch here is the "listed in
+	// the menu but does nothing" symptom - the row draws from the manifest, the
+	// spawn falls through to nothing, and no error is printed.
+	else if (weapon_id == WEP_MEDKIT)         SV_DebugSpawnWeapon(org, weapon_medkit);
+	else if (weapon_id == WEP_UZI)            SV_DebugSpawnWeapon(org, weapon_uzi);
+	else if (weapon_id == WEP_UZIAKIMBO)      SV_DebugSpawnWeapon(org, weapon_uziakimbo);
+	else if (weapon_id == WEP_MINIGUN)        SV_DebugSpawnWeapon(org, weapon_minigun);
+	else if (weapon_id == WEP_SVM16)          SV_DebugSpawnWeapon(org, weapon_m16);
+	else if (weapon_id == WEP_PIPEWRENCH)     SV_DebugSpawnWeapon(org, weapon_pipewrench);
+	else if (weapon_id == WEP_SNIPERRIFLE)    SV_DebugSpawnWeapon(org, weapon_sniperrifle);
+	else if (weapon_id == WEP_SPORELAUNCHER)  SV_DebugSpawnWeapon(org, weapon_sporelauncher);
+	else if (weapon_id == WEP_EAGLE)          SV_DebugSpawnWeapon(org, weapon_eagle);
+	else if (weapon_id == WEP_ASSHOTGUN)      SV_DebugSpawnWeapon(org, weapon_as_shotgun);
+	else if (weapon_id == WEP_ASSOFLAM)       SV_DebugSpawnWeapon(org, weapon_as_soflam);
 	else if (weapon_id == WEP_SNOWBALL)       SV_DebugSpawnWeapon(org, weapon_snowball);
 	else if (weapon_id == WEP_SLINGSHOT)      SV_DebugSpawnWeapon(org, weapon_slingshot);
 	else if (weapon_id == WEP_CSHEGRENADE)    SV_DebugSpawnWeapon(org, weapon_cshegrenade);
+	else if (weapon_id == WEP_DODMILLS)       SV_DebugSpawnWeapon(org, weapon_mills);
+	else if (weapon_id == WEP_DODSTICK)       SV_DebugSpawnWeapon(org, weapon_stick);
 	else if (weapon_id == WEP_CSFLASHBANG)    SV_DebugSpawnWeapon(org, weapon_csflashbang);
 	else if (weapon_id == WEP_CSSMOKEGRENADE) SV_DebugSpawnWeapon(org, weapon_cssmokegrenade);
 	else if (weapon_id == WEP_CFAUG)          SV_DebugSpawnWeapon(org, weapon_cfaug);
@@ -644,6 +776,13 @@ void(vector org, float weapon_id) SV_DebugSpawnWeaponId =
 	else if (weapon_id == WEP_BUTTERFLY)      SV_DebugSpawnWeapon(org, weapon_butterfly);
 	else if (weapon_id == WEP_KATANA)         SV_DebugSpawnWeapon(org, weapon_katana);
 	else if (weapon_id == WEP_CFC4)           SV_DebugSpawnWeapon(org, weapon_cfc4);
+	// The last three Opposing Force weapons.  A MISSING BRANCH HERE is the
+	// "listed in the menu but does nothing" symptom this function warns about
+	// above: the F5 row and the sv_debug_weapons grid both draw straight from the
+	// manifest, the spawn falls through to nothing, and no error is printed.
+	else if (weapon_id == WEP_OPKNIFE)        SV_DebugSpawnWeapon(org, weapon_knife);
+	else if (weapon_id == WEP_OPSAW)          SV_DebugSpawnWeapon(org, weapon_m249);
+	else if (weapon_id == WEP_PENGUIN)        SV_DebugSpawnWeapon(org, weapon_penguin);
 };
 
 // Apply the correct player model based on team + model_index.
@@ -651,7 +790,13 @@ void() PlayerApplyModel =
 {
     string mdl;
 
-    if (self.player_model_index == 5)
+    // A map script can pin an arbitrary model — th_escape hands each player one
+    // of sixteen They Hunger characters, which have nothing to do with the
+    // team/model_index table below.  Checked first and unconditionally, so a
+    // team change or a respawn cannot silently revert somebody's character.
+    if (self.player_model_override != "" && self.player_model_override != __NULL__)
+        mdl = self.player_model_override;
+    else if (self.player_model_index == 5)
         mdl = "models/player/sini.mdl";
     else if (self.player_model_index == 6)
         mdl = "models/player/chickenman/chickenman.iqm";
@@ -1088,6 +1233,17 @@ void() SV_RunCommandContinuation =
 			input_buttons = input_buttons & ~1;
 		}
 
+		// Emplaced: the synthesized-tick half.  Without it an AFK or
+		// packet-dropped player whose last real command had WASD held would be
+		// walked off their own bipod by the continuation replay.
+		if (SH_DeployLocksPlayer(self))
+		{
+			input_movevalues_x = 0;
+			input_movevalues_y = 0;
+			input_movevalues_z = 0;
+			input_buttons = input_buttons & ~PM_BTN_JUMP;
+		}
+
 		if (debug)
 			dprint(sprintf("[cmd-cont] synth %s  since_last=%.3f  mv=(%.0f %.0f)  btn=%g\n",
 				self.netname, since,
@@ -1105,6 +1261,126 @@ void() SV_RunCommandContinuation =
 		e = e.chain;
 	}
 	self = saved_self;
+};
+
+// ---------------------------------------------------------------------------
+//  CBasePlayer::WaterMove — halflife/dlls/player.cpp:1217.
+//
+//  Ported wholesale because NONE of it existed: `air_finished` had zero hits in
+//  the entire QC tree, and the FTE engine never drowns a QC-progs player either
+//  (its only `air_finished` is a member of the unused HL-DLL ABI struct in
+//  svhl_gcapi.h).  In stock Quake and in GoldSrc alike this is 100% game code,
+//  so a player could sit eyes-under indefinitely and take nothing.
+//
+//  The numbers are Half-Life's, not invented:
+//    AIRTIME 12                     player.cpp:1216
+//    only waterlevel 3 drains air   player.cpp:1232   (waist-deep does NOT)
+//    pev->dmg seeds at 2            player.cpp:3009, and is re-seeded every
+//                                   non-submerged frame at player.cpp:1244
+//    ramp is a PRE-increment        player.cpp:1273-1275 — so the FIRST hit is
+//                                   3, then 4, then 5 forever
+//    one hit per second             player.cpp:1277 (pain_finished)
+//  which lands an unarmoured 100 HP player at 3/4/5/5/5... from t+12 and kills
+//  at ~t+32.
+//
+//  The input this needs is already correct: sh_pmove.qc:1941-1957 does the
+//  three-tier contents test against the true eye point and latches the result
+//  onto the entity at sh_pmove.qc:5816.
+// ---------------------------------------------------------------------------
+const float PLAYER_AIRTIME = 12;	// player.cpp:1216
+
+.float air_finished;			// pev->air_finished
+.float drown_dmg;				// pev->dmg — doubles as the 2->3->4->5 ramp
+.float drown_pain_finished;		// pev->pain_finished (drown-private on a player)
+.float drown_dmg_taken;			// m_idrowndmg
+.float drown_dmg_restored;		// m_idrownrestored
+.float drown_recover_next;		// m_tbdPrev, the ~2 s CheckTimeBasedDamage gate
+
+void(entity p) Player_WaterMove =
+{
+	// player.cpp:1221-1225 — noclip and the already-dead are exempt.
+	if (p.movetype == MOVETYPE_NOCLIP) return;
+	if (p.is_dead || p.health <= 0)    return;
+
+	if (p.waterlevel != 3)
+	{
+		// player.cpp:1236-1241 — the gasp.  pl_wade1 only if the lung had
+		// already run dry, pl_wade2 if you were under more than 3 s.
+		if (p.air_finished < time)
+			sound(p, CHAN_VOICE, "player/pl_wade1.wav", 1, ATTN_NORM);
+		else if (p.air_finished < time + 9)
+			sound(p, CHAN_VOICE, "player/pl_wade2.wav", 1, ATTN_NORM);
+
+		// player.cpp:1243-1244.  inv_air_bonus is Sven's `effect_respiration`
+		// (sven-coop.fgd:6353, "Time before drown (seconds)"), summed at
+		// sv_item_inventory.qc:577 and until now read by nothing at all.
+		//
+		// CLAMPED, and that matters: sv_item_inventory.qc:547-551 says the key
+		// can be NEGATIVE, and an unclamped budget <= 0 leaves air_finished
+		// permanently in the past — which would fire the pl_wade1 branch above
+		// on DRY LAND every single usercmd.  (Every effect_respiration in the
+		// shipped Sven corpus is "0.0", so this term is inert there today;
+		// `effect_respiration_mode` — FGD "Subtract" — is still unparsed, so
+		// the sign can only be trusted once that lands.)
+		p.air_finished = time + max(0, PLAYER_AIRTIME + p.inv_air_bonus);
+		p.drown_dmg    = 2;
+
+		// player.cpp:1247-1258 -> CheckTimeBasedDamage's itbd_DrownRecover
+		// (player.cpp:2234-2244): hand back min(outstanding, 10) on the shared
+		// ~2 s gate (player.cpp:2205-2206) until the whole debt is repaid.
+		//
+		// drown_recover_next is deliberately NOT re-armed while submerged.
+		// HL's 2 s gate is m_tbdPrev, which free-runs across all time-based
+		// damage, so HL can begin refunding within 2 s of surfacing; re-arming
+		// it underwater would force a full 2 s wait every time.
+		if (p.drown_dmg_taken > p.drown_dmg_restored)
+		{
+			if (time >= p.drown_recover_next)
+			{
+				float idif = min(p.drown_dmg_taken - p.drown_dmg_restored, 10);
+				p.health = min(p.health + idif, 100);
+				p.drown_dmg_restored = p.drown_dmg_restored + idif;
+				p.drown_recover_next = time + 2;
+			}
+		}
+		else
+		{
+			// HL never zeroes these; it just lets both counters grow for the
+			// life.  Zeroing once the debt is settled is EQUIVALENT — the only
+			// thing either form is ever asked is the difference — and it stops
+			// the pair growing without bound.
+			p.drown_dmg_taken    = 0;
+			p.drown_dmg_restored = 0;
+		}
+		return;
+	}
+
+	// player.cpp:1269-1284 — drown!
+	if (p.air_finished < time)
+	{
+		if (p.drown_pain_finished < time)
+		{
+			p.drown_dmg = min(p.drown_dmg + 1, 5);				// player.cpp:1273-1275
+			p.drown_pain_finished = time + 1;					// player.cpp:1277
+			p.drown_dmg_taken = p.drown_dmg_taken + p.drown_dmg;	// player.cpp:1282
+
+			// Routed through the one damage chokepoint so death, kill feed,
+			// damage report and pain flash all behave.  attacker = world is
+			// deliberate: W_ApplyDamage's gib branch needs a truthy attacker,
+			// so a drowning never gibs, and PlayerKilled scores it as a
+			// suicide — both of which match HL's null-entity attacker.
+			//
+			// death_hitgroup is LOAD-BEARING, not hygiene: Armor_Absorb halves
+			// on (isHeadshot && has_helmet) at sv_money.qc:101-102, and that
+			// runs BEFORE its `armor <= 0` early-out, so a stale HITGROUP_HEAD
+			// left over from an earlier bullet would halve this hit against any
+			// helmeted player — even one with no armour at all.
+			p.death_hitgroup = HITGROUP_GENERIC;
+			sv_dmg_bits    = DMG_DROWN;
+			sv_dmg_hudtype = DMGHUD_DROWN;		// tints the pain flash, cl_hud.qc:214
+			W_ApplyDamage(world, p, p.drown_dmg);
+		}
+	}
 };
 
 void() PlayerPreThink =
@@ -1135,6 +1411,11 @@ void() PlayerPreThink =
 	if (self.carried_prop != world || self.carried_ragdoll != world)
 		self.button0 = 0;
 	W_WeaponFrame();
+	// CBasePlayer::PreThink -> WaterMove, player.cpp:1966 — and this is the
+	// SDK's own ordering: ItemPreFrame() (player.cpp:1965, i.e. W_WeaponFrame
+	// above) immediately precedes it, and PreThink's train block — ported below
+	// as TrackTrain_DriverTick — is the next block after it at player.cpp:1999.
+	Player_WaterMove(self);
 	// Grapple press-and-hold edge detect — rising edge of PM_BTN_GRAPPLE
 	// (+grapple / +button9) spawns the hook, falling edge releases it.
 	// Runs BEFORE PullTick so a falling-edge release in the same tick
@@ -1166,6 +1447,47 @@ void() PlayerPreThink =
 	// Momentary rotating-button poll — same per-frame held-+use pattern;
 	// drives momentary_rot_button → momentary_door (see sv_momentary.qc).
 	Momentary_TickInteraction(self);
+	// Medkit charge regeneration — Sven's medkit is "self-generating" and this
+	// tree's never was.  Here rather than in W_MedkitFrame because that only
+	// ticks while the medkit is SELECTED and stops at the idle retire, so a
+	// medic with it holstered (i.e. most of the time) would never refill.
+	SH_MedkitRegenTick(self);
+	// Wall chargers — the third user of the held-+use poll, and for the same
+	// reason the other two need it: `impulse 11` only fires on the rising edge
+	// (cl_player.qc:414), so a charger driven by .use alone would need the key
+	// mashed ten times a second.  See sv_chargers.qc.
+	Charger_TickInteraction(self);
+	// func_tracktrain driver poll — the fourth user of this per-frame slot, and
+	// the closest analogue of what it mirrors: this IS CBasePlayer::PreThink's
+	// train block (player.cpp:1999-2088).  Steps the throttle on a +forward /
+	// +back tap and applies HL's dismount conditions.  No-op when not driving.
+	TrackTrain_DriverTick(self);
+	// func_pushable — the fifth, and the one that needs this slot most literally.
+	// A crate is SOLID_BSP, so by the time PM_PlayerMove has run there is no
+	// velocity left pointing into it to push with; this reads the intent from
+	// input_movevalues while it still exists.  See sv_func_pushable.qc.
+	FuncPushable_TickInteraction(self);
+
+	// FOOTSTEPS ARE A NOISE MONSTERS CAN HEAR.  Half-Life feeds player movement
+	// into CSoundEnt as bits_SOUND_PLAYER sized by how hard you are moving, and
+	// this tree had nothing of the kind - a player could sprint through a room of
+	// idle guards and the only thing any of them could hear was a gunshot.
+	//
+	// Emitted from here rather than from wherever the footstep SOUND is played,
+	// because that is CSQC: the client decides what a footstep sounds like, the
+	// server decides who heard it.  Driving it off the server's own velocity and
+	// ground state keeps the two from having to agree about anything.
+	//
+	// FL_ONGROUND gates it: falling is silent until you land, which is both
+	// correct and what stops a long drop broadcasting the whole way down.
+	if (self.flags & FL_ONGROUND)
+	{
+		vector hv = self.velocity;
+		hv_z = 0;
+		AI_HeardFootstep(self, vlen(hv),
+		                 (self.flags & FL_DUCKING) || self.pm_in_duck);
+	}
+
 	makevectors(self.v_angle);
 	if (self.button2)
 		PlayerJump();
@@ -1210,20 +1532,22 @@ void() PlayerCheckFallDamage =
             self.health = self.health - damage;
 
             // Send damage flash only to the victim.  Must write the SAME
-            // payload as the weapons path (sv_weapons.qc): dmg byte + 3
-            // attacker-origin coords — the CSQC_EVENT_DAMAGE_FLASH receiver
-            // reads all four.  Omitting the coords made the client read 12
-            // bytes past this event into the next one (e.g. the fall-death
+            // payload as the weapons path (sv_weapons.qc): dmg byte + hud-type
+            // byte + 3 attacker-origin coords — the CSQC_EVENT_DAMAGE_FLASH
+            // receiver reads all five.  Omitting the coords made the client read
+            // 12 bytes past this event into the next one (e.g. the fall-death
             // kill-feed below), desyncing the CSQC event stream → the
             // "Illegible server message" crash.  Fall damage has no external
             // attacker, so write the victim's own origin (same fallback the
-            // weapons path uses → a non-directional flash, no hit arrow).
+            // weapons path uses → a non-directional flash, no hit arrow), and
+            // DMGHUD_NONE: falling is not a damage type the HUD names.
             if (SV_PlayerHasNetchan(self))   // skip bots (no netchan); engine-truth guard
             {
                 msg_entity = self;
                 WriteByte(MSG_ONE, SVC_CGAMEPACKET);
                 WriteByte(MSG_ONE, CSQC_EVENT_DAMAGE_FLASH);
                 WriteByte(MSG_ONE, bound(1, damage, 255));
+                WriteByte(MSG_ONE, DMGHUD_NONE);
                 WriteCoord(MSG_ONE, self.origin_x);
                 WriteCoord(MSG_ONE, self.origin_y);
                 WriteCoord(MSG_ONE, self.origin_z);
@@ -1281,6 +1605,12 @@ void() PlayerPostThink =
 
     PlayerCheckFallDamage();
     SH_PlayerAnim_Update();
+
+    // Sven item_inventory upkeep: prune anything a multi_manager "#2" slot
+    // removed out from under us, and push the HUD when the chain changed.
+    // Early-outs on inv_head == world, so a player on a map with no inventory
+    // pays one compare per frame.
+    Inv_PlayerFrame(self);
 
     // Prop Hunt: pin the server entity's angles to the SHOWN prop orientation
     // (full 3-axis pose composed from the stored basis) AFTER the anim update, so
@@ -1381,6 +1711,7 @@ const float VP_SF_GRAPPLE  = 8;  // grapple_rope_active (+ anchor when active) �
 // Player_VisualProxy_Sync to decide which section bits to dirty.
 .float vps_last_v_pitch;
 .float vps_last_anim_top_gen;
+.float vps_last_anim_top_rate;   // torso playback rate x32, as sent
 .float vps_last_weaponstate;	// nettest killcam/spectate: remote viewmodel anim state
 .float vps_last_wep_action;	// wep_action_id (mod 256) — change == a new weapon action started
 .float vps_last_weapon;
@@ -1457,6 +1788,9 @@ float(entity playerent, float changedflags) Player_Visual_SendEntity =
 		WriteByte(MSG_ENTITY, self.vps_last_anim_top_gen);
 		WriteByte(MSG_ENTITY, self.vps_last_weaponstate);	// nettest killcam/spectate
 		WriteByte(MSG_ENTITY, self.vps_last_wep_action);
+		// Torso playback rate x32 — matched read in cl_player.qc's VP_SF_ANIM_CL
+		// block.  MUST stay last in this section; anything appended goes after it.
+		WriteByte(MSG_ENTITY, self.vps_last_anim_top_rate);
 	}
 
 	if (bits & VP_SF_IDENTITY)
@@ -1739,13 +2073,20 @@ void(entity player) Player_VisualProxy_Sync =
 		bits |= VP_SF_POSE;
 
 	float next_wep_action = player.wep_action_id - floor(player.wep_action_id / 256) * 256;
+	// Torso playback rate, quantised to 1/32 for the byte on the wire.  1 (=32)
+	// is the overwhelmingly common value, so this costs nothing in practice —
+	// the section only redirties when a weapon whose body animation is longer
+	// than its action starts one.  Bounded 1..255 so a zero can never reach the
+	// client and stall the pose.
+	float next_anim_top_rate = bound(1, floor(player.anim_top_rate * 32 + 0.5), 255);
 	if (vis.frame != player.frame
 	    || vis.baseframe != player.baseframe
 	    || vis.flags != player.flags
 	    || vis.vps_last_v_pitch != player.v_angle_x
 	    || vis.vps_last_anim_top_gen != player.anim_top_gen
 	    || vis.vps_last_weaponstate != player.weaponstate
-	    || vis.vps_last_wep_action != next_wep_action)
+	    || vis.vps_last_wep_action != next_wep_action
+	    || vis.vps_last_anim_top_rate != next_anim_top_rate)
 		bits |= VP_SF_ANIM;
 
 	float next_health = bound(0, player.health, 255);
@@ -1754,6 +2095,13 @@ void(entity player) Player_VisualProxy_Sync =
 	float next_bodygroup = 0;
 	if (player.player_team == TEAM_RED && player.ammo_cfc4 > 0 && player.weapon != WEP_CFC4)
 		next_bodygroup |= 1;
+	// Bits 1 and 2 = tactical shield carried / raised.  Riding the bodygroup
+	// byte rather than opening a new section: it is already sent on the identity
+	// change-gate, it is already a bitfield, and the shield changes exactly as
+	// rarely as the C4 backpack does.  CSQC reads them to pick the shielded
+	// player-animation family and to hang p_shield on the model.
+	if (player.has_shield)      next_bodygroup |= 2;
+	if (player.shield_deployed) next_bodygroup |= 4;
 	// Life generation (1..255, byte-wrap, never 0) — hitclaims carry this
 	// so a stale corpse / old-life proxy can't damage the respawned player.
 	float next_life_serial = player.player_life_serial;
@@ -1800,6 +2148,7 @@ void(entity player) Player_VisualProxy_Sync =
 	vis.colormap  = player.colormap;
 	vis.vps_last_v_pitch      = player.v_angle_x;
 	vis.vps_last_anim_top_gen = player.anim_top_gen;
+	vis.vps_last_anim_top_rate = next_anim_top_rate;
 	vis.vps_last_weaponstate  = player.weaponstate;
 	vis.vps_last_wep_action   = next_wep_action;
 	vis.vps_last_weapon       = player.weapon;
@@ -1887,6 +2236,9 @@ float(entity playerent, float changedflags) PM_PredictionProxy_SendEntity =
 		WriteByte (MSG_ENTITY, self.pm_oldbuttons);
 		WriteFloat(MSG_ENTITY, self.pm_timecarry);
 		WriteFloat(MSG_ENTITY, self.pm_teleport_time);
+		WriteCoord(MSG_ENTITY, self.pm_teleport_org_x);
+		WriteCoord(MSG_ENTITY, self.pm_teleport_org_y);
+		WriteCoord(MSG_ENTITY, self.pm_teleport_org_z);
 		WriteFloat(MSG_ENTITY, self.pm_ladder_detach_time);
 		WriteFloat(MSG_ENTITY, self.pm_fuser2);
 		WriteFloat(MSG_ENTITY, self.spread_penalty);
@@ -1928,6 +2280,24 @@ float(entity playerent, float changedflags) PM_PredictionProxy_SendEntity =
 		WriteByte (MSG_ENTITY, self.ph_hull_minz + 64);	// -64..63 biased to a byte
 		WriteByte (MSG_ENTITY, self.ph_hull_height);
 		WriteByte (MSG_ENTITY, self.ph_yaw_locked);
+			// Half-Life's long jump module.  PM_CheckJump reads it on BOTH sides,
+			// so an unreplicated bit means the client predicts a 268 u/s jump
+			// while the server runs 560 and the player rubber-bands mid-flight.
+			// Fixed 1 byte, always written — KEEP BEFORE the conditional car
+			// block below, for the same reason the four bytes above say so.
+			WriteByte (MSG_ENTITY, self.pm_longjump);
+		// Sven item_inventory holder effects.  PM_LoadMovevars scales
+		// mv_maxspeed / mv_gravity / mv_friction by the first three and
+		// Weapon_LowerBlocksFire reads the fourth, all on BOTH sides — so an
+		// unreplicated value is a rubber-band while carrying, not a cosmetic
+		// difference.  Fixed 4 bytes, always written, and KEPT BEFORE the
+		// conditional car block below for the reason the four Prop Hunt bytes
+		// above give: a fixed-size byte must never sit after a conditional
+		// section.
+		WriteByte (MSG_ENTITY, bound(0, self.pm_inv_speed_pct,    255));
+		WriteByte (MSG_ENTITY, bound(0, self.pm_inv_gravity_pct,  255));
+		WriteByte (MSG_ENTITY, bound(0, self.pm_inv_friction_pct, 255));
+		WriteByte (MSG_ENTITY, self.pm_inv_blockfire ? 1 : 0);
 		// prop_car: the driven car's origin + velocity so CSQC extrapolates a render-smooth chase cam
 		// (the follow cam anchored to the tick-pinned player "stepped").  Only when actually in a car.
 		if (self.pm_incar)
@@ -1948,6 +2318,16 @@ float(entity playerent, float changedflags) PM_PredictionProxy_SendEntity =
 		WriteByte(MSG_ENTITY, self.slot_secondary);
 		WriteByte(MSG_ENTITY, self.slot_melee);
 		WriteByte(MSG_ENTITY, self.slot_utility);
+		// Carry lists — FIXED 4+4 bytes, packed and 0-terminated.  Deliberately
+		// not length-prefixed and not variable: the v24 note below records that a
+		// fixed-size field must never sit after a conditional, and the cheapest way
+		// to honour that is to have no conditional at all.  Weapon ids top out at
+		// WMF_WEP_LAST (100), so a byte has 155 to spare.
+		float ci;
+		for (ci = 0; ci < CARRY_MAX; ci = ci + 1)
+			WriteByte(MSG_ENTITY, self.carry_primary[ci]);
+		for (ci = 0; ci < CARRY_MAX; ci = ci + 1)
+			WriteByte(MSG_ENTITY, self.carry_secondary[ci]);
 		WriteByte(MSG_ENTITY, self.weapon);
 		WriteByte(MSG_ENTITY, self.previous_weapon);
 		WriteByte(MSG_ENTITY, self.weaponstate);
@@ -1961,6 +2341,25 @@ float(entity playerent, float changedflags) PM_PredictionProxy_SendEntity =
 		WriteByte(MSG_ENTITY, self.zoomstage);
 		WriteByte(MSG_ENTITY, self.snowball_has_slingshot ? 1 : 0);
 		WriteByte(MSG_ENTITY, self.snowball_use_slingshot ? 1 : 0);
+		// satchel_state decides whether +attack throws or DETONATES, and
+		// whether the weapon is selectable at all (W_UtilityEntityHasWeapon).
+		// The client maintained its own copy purely through prediction with
+		// nothing to reconcile it, so the two could drift apart permanently
+		// and the client would predict the wrong one of two very different
+		// actions.  HOLD/ARMED/SPENT fits a byte.
+		WriteByte(MSG_ENTITY, self.satchel_state);
+		// The DoD mortar's emplaced stance.  Here beside satchel_state for the
+		// same reason: both sides predict it off a button, and a client whose copy
+		// drifted would predict the wrong one of two very different actions — and
+		// here a stale flag either locks movement that should be free or lets a
+		// planted tube walk.  Reconciled unconditionally on the client, outside
+		// trust_server_ammo, since a stance has no predicted decrement to protect.
+		WriteByte(MSG_ENTITY, self.wep_deployed ? 1 : 0);
+		// The FAMAS fire selector — 0 = full auto, 1 = 3-round burst.  Here for
+		// the same reason as satchel_state and wep_deployed above it: +attack does
+		// one of two very different things depending on it, so a client whose copy
+		// had drifted would predict the wrong one outright.
+		WriteByte(MSG_ENTITY, self.famas_burst_mode ? 1 : 0);
 		// Speed-factor blend state — preserves in-flight transition
 		// across reconcile so client replay and server pmove stay
 		// synchronized through ping-window weapon switches.
@@ -1993,9 +2392,11 @@ float(entity playerent, float changedflags) PM_PredictionProxy_SendEntity =
 		// server, handgun shows 0/0, fixed by the next round" bug — the
 		// next PlayerSpawn is the only thing that re-arms the mask.
 		//
-		// The whole section is 12 bytes and only rides a real ammo
+		// The whole section is 17 bytes and only rides a real ammo
 		// change, so unconditional writes cost at most ~10 bytes over
 		// the old sub-delta and make a dropped ammo update self-healing.
+		// KEEP IN LOCK-STEP: the reader in cl_player.qc, the pm_ammo_mb*
+		// diff below, BOTH baseline re-arms, and PM_CSQC_PROXY_VERSION.
 		WriteByte(MSG_ENTITY, self.slot_primary_mag);
 		WriteByte(MSG_ENTITY, self.slot_primary_ammo);
 		WriteByte(MSG_ENTITY, self.slot_primary_aux);
@@ -2008,6 +2409,64 @@ float(entity playerent, float changedflags) PM_PredictionProxy_SendEntity =
 		WriteByte(MSG_ENTITY, self.ammo_csflashbang);
 		WriteByte(MSG_ENTITY, self.ammo_cssmokegrenade);
 		WriteByte(MSG_ENTITY, self.ammo_cfc4);
+		// The satchel's +attack now picks throw-vs-detonate off this value,
+		// so a drifted client predicts the wrong action outright.
+		WriteByte(MSG_ENTITY, self.ammo_satchel);
+		// Tripmine and snark: this section is their ONLY channel to the client.
+		// W_SlotAmmo_UsesSlot is FALSE for SLOT_UTILITY weapons, so the slot
+		// bridge correctly skips them; without these two bytes the client's
+		// counts stayed at 0 for the whole map and every client-side ammo gate
+		// failed — no place/throw animation, HUD stuck on 0, and
+		// W_UtilityPlayerHasWeapon reporting you don't own a weapon the server
+		// has you holding.  (The claim that used to sit here — that deployables
+		// "auto-switch on empty so their drift self-corrects" — cannot work for
+		// a value that starts at 0 and is never raised.)
+		WriteByte(MSG_ENTITY, self.ammo_tripmine);
+		WriteByte(MSG_ENTITY, self.ammo_snark);
+		// Medkit and SOFLAM, for exactly the same reason as the two above —
+		// they are SLOT_UTILITY, so the slot bridge skips them and this is
+		// their only channel.  They were added to the game after the tripmine
+		// and snark fix and never got the same treatment: they were copied
+		// onto the proxy entity (a server-side field write that is never
+		// serialised) and had no mask bit, so they could not even mark the
+		// section dirty.  The visible result was a HUD stuck on 0 while the
+		// SHARED try-fire gate (compiled into both VMs) had the client refuse
+		// to fire and the server — holding the real count — fire anyway.
+		WriteByte(MSG_ENTITY, self.ammo_medkit);
+		WriteByte(MSG_ENTITY, self.ammo_soflam);
+		// The penguin — the LAST SLOT_UTILITY count with no channel at all, and
+		// the fourth weapon to be caught by this same hole (tripmine and snark in
+		// v22, medkit and soflam in v23).  It was added after the v23 fix and got
+		// neither a byte nor a mask bit nor a proxy copy, so W_UtilityRingAt walks
+		// past it, the HUD reads 0 for as long as you carry it, and
+		// SH_PenguinTryThrow's `ammo_penguin <= 0` gate — which is SHARED, so the
+		// client runs it too — refused every throw the server would have allowed.
+		WriteByte(MSG_ENTITY, self.ammo_penguin);
+		// The two Day of Defeat grenades — Mills bomb and stick grenade — added
+		// with their mask bits, proxy copies and reader in the SAME change, which
+		// is the whole lesson of the four weapons above this line.  Every one of
+		// them shipped with the byte missing or only half the plumbing, and the
+		// symptom is always the same and always looks like something else: HUD
+		// stuck on 0, and SH_CSGrenadeTryPinPull (SHARED, so the client runs it)
+		// refusing a throw the server would have allowed.
+		WriteByte(MSG_ENTITY, self.ammo_dodmills);
+		WriteByte(MSG_ENTITY, self.ammo_dodstick);
+		// The BINOCULARS, and they are the sixth weapon caught by this hole — but
+		// by a different route, which is why the file's own header argued its way
+		// OUT of shipping a byte and was wrong to.  It has no rounds, so ownership
+		// was written as `slot_utility == WEP_DODBINOCS` on the reasoning that
+		// "there is no count to ship".  That test is CIRCULAR: slot_utility is the
+		// selection CURSOR, and W_UtilityRefreshSlotBinding rebuilds the cursor by
+		// walking the ring asking W_UtilityPlayerHasWeapon of each weapon — which,
+		// for these, asked whether the cursor was already on them.  The first
+		// refresh after they were given (any pickup, any drop, any death) moved the
+		// cursor and they could never be owned again.  Reported as "binoculars
+		// despawn immediately and I can't switch to them".
+		//
+		// So they get a count after all: 1 while carried, 0 when not.  That drops
+		// them into the same machinery as every other utility instead of a private
+		// rule, and there is nothing circular left.
+		WriteByte(MSG_ENTITY, self.ammo_dodbinocs);
 
 		// Consume the detector.  PM_SyncPredictionProxy accumulates bits
 		// with |= across multiple sync calls per tick, so without this
@@ -2107,6 +2566,7 @@ void(entity player) PM_SyncPredictionProxy =
 	    proxy.pm_oldbuttons       != player.pm_oldbuttons ||
 	    proxy.pm_timecarry        != player.pm_timecarry ||
 	    proxy.pm_teleport_time    != player.pm_teleport_time ||
+	    proxy.pm_teleport_org     != player.pm_teleport_org ||
 	    proxy.pm_ladder_detach_time != player.pm_ladder_detach_time ||
 	    proxy.pm_fuser2           != player.pm_fuser2 ||
 	    proxy.spread_penalty      != player.spread_penalty ||
@@ -2123,12 +2583,27 @@ void(entity player) PM_SyncPredictionProxy =
 	    proxy.codstamina_punished != player.codstamina_punished ||
 	    proxy.pm_fire_suppress_until != player.pm_fire_suppress_until ||
 	    proxy.pm_carrying != player.pm_carrying ||
+	    // THE FOUR v26 ITEM-INVENTORY BYTES.  Found by the same audit that found
+	    // wep_deployed above, and broken the same way: written on the wire, read,
+	    // stored and reconciled — and never copied player->proxy, so all four
+	    // serialised the proxy edict's own zero.  Sven's item_inventory can halve
+	    // the holder's speed (th_escape's car battery does exactly that) and block
+	    // their weapons, and PM_LoadMovevars / Weapon_LowerBlocksFire read all four
+	    // on BOTH sides — so carrying one rubber-banded every step and mispredicted
+	    // every trigger pull.  0 reads as "unchanged" for the three percentages and
+	    // as "not blocked" for the flag, which is why it failed silently rather than
+	    // loudly.
+	    proxy.pm_inv_speed_pct    != player.pm_inv_speed_pct ||
+	    proxy.pm_inv_gravity_pct  != player.pm_inv_gravity_pct ||
+	    proxy.pm_inv_friction_pct != player.pm_inv_friction_pct ||
+	    proxy.pm_inv_blockfire    != player.pm_inv_blockfire ||
 	    proxy.pm_driving != player.pm_driving ||
 	    proxy.pm_incar != player.pm_incar ||
 	    proxy.ph_hull_halfxy != player.ph_hull_halfxy ||
 	    proxy.ph_hull_minz != player.ph_hull_minz ||
 	    proxy.ph_hull_height != player.ph_hull_height ||
-	    proxy.ph_yaw_locked != player.ph_yaw_locked)
+	    proxy.ph_yaw_locked != player.ph_yaw_locked ||
+	    proxy.pm_longjump != player.pm_longjump)
 		bits |= PM_SF_MOVEMENT;
 
 	// Detect weapon-state changes
@@ -2145,6 +2620,30 @@ void(entity player) PM_SyncPredictionProxy =
 	    proxy.zoomstage       != player.zoomstage ||
 	    proxy.snowball_has_slingshot != player.snowball_has_slingshot ||
 	    proxy.snowball_use_slingshot != player.snowball_use_slingshot ||
+	    proxy.satchel_state          != player.satchel_state ||
+	    // THE TWO v29 BYTES.  Both were added to the wire, the reader, the
+	    // sv_confirmed_* store and the reconcile — and to NEITHER this diff nor the
+	    // baseline copy below, which is the one step of the checklist that has no
+	    // symptom at either end.  PM_PredictionProxy_SendEntity runs with `self` =
+	    // the PROXY edict, so a field never copied player->proxy serialises the
+	    // proxy's own never-assigned zero, forever, while every other end of the
+	    // plumbing reads as complete.
+	    //
+	    // What it cost: the client reconciled wep_deployed = 0 twenty times a
+	    // second on top of its own correct predicted flip, so the mortar / BAR /
+	    // MG34 / MG42 / .30 cal could never be deployed as far as CSQC was
+	    // concerned.  Every reported symptom followed from that one word — the
+	    // un-deploy played the PLANT take because SeqStance was handed the wrong
+	    // stance, it exited early because StanceDuration was handed the same wrong
+	    // stance, the emplaced idle showed the standing pose, +attack did nothing
+	    // because the shared try-fire's `if (!self.wep_deployed) return 0` refused
+	    // on the client (and with sv_trust_clienthits 1 the client's refusal is
+	    // what stops the server firing), and movement rubber-banded because
+	    // SH_DeploySpeedFactor is shared and the two sides read different flags.
+	    // famas_burst_mode was invisible the same way: the selector moved and
+	    // +attack kept predicting full auto.
+	    proxy.wep_deployed     != player.wep_deployed ||
+	    proxy.famas_burst_mode != player.famas_burst_mode ||
 	    proxy.pm_weapon_blend_progress != player.pm_weapon_blend_progress ||
 	    proxy.pm_weapon_prev_factor    != player.pm_weapon_prev_factor ||
 	    proxy.view_kick_pitch     != player.view_kick_pitch ||
@@ -2153,6 +2652,18 @@ void(entity player) PM_SyncPredictionProxy =
 	    proxy.view_kick_yaw_vel   != player.view_kick_yaw_vel ||
 	    proxy.view_kick_burst_idx != player.view_kick_burst_idx)
 		bits |= PM_SF_WEAPON_STATE;
+
+	// Carry lists.  A loop, not another || term, because the condition above is a
+	// single expression.  THIS AND THE BASELINE COPY BELOW MUST LAND TOGETHER:
+	// with the diff and no copy the section re-sends every tick forever; with the
+	// copy and no diff the client's lists freeze at their first value, so cycling
+	// predicts correctly on the server and wrongly on the client and every
+	// reconcile snaps the viewmodel.  Neither failure throws.
+	float cdi;
+	for (cdi = 0; cdi < CARRY_MAX; cdi = cdi + 1)
+		if (proxy.carry_primary[cdi]   != player.carry_primary[cdi]
+		 || proxy.carry_secondary[cdi] != player.carry_secondary[cdi])
+			bits |= PM_SF_WEAPON_STATE;
 
 	// Ammo diff for canonical slot ammo + multi-carry utility counts.
 	float mb0 = 0, mb1 = 0, mb2 = 0, mb3 = 0, mb4 = 0, mb5 = 0, mb6 = 0;
@@ -2170,6 +2681,15 @@ void(entity player) PM_SyncPredictionProxy =
 	if (proxy.ammo_csflashbang     != player.ammo_csflashbang)     mb1 |= 2;
 	if (proxy.ammo_cssmokegrenade  != player.ammo_cssmokegrenade)  mb1 |= 4;
 	if (proxy.ammo_cfc4            != player.ammo_cfc4)            mb1 |= 8;
+	if (proxy.ammo_satchel         != player.ammo_satchel)         mb1 |= 16;
+	if (proxy.ammo_tripmine        != player.ammo_tripmine)        mb1 |= 32;
+	if (proxy.ammo_snark           != player.ammo_snark)           mb1 |= 64;
+	if (proxy.ammo_medkit          != player.ammo_medkit)          mb1 |= 128;
+	if (proxy.ammo_soflam          != player.ammo_soflam)          mb2 |= 1;
+	if (proxy.ammo_penguin         != player.ammo_penguin)         mb2 |= 2;
+	if (proxy.ammo_dodmills        != player.ammo_dodmills)        mb2 |= 4;
+	if (proxy.ammo_dodstick        != player.ammo_dodstick)        mb2 |= 8;
+	if (proxy.ammo_dodbinocs       != player.ammo_dodbinocs)       mb2 |= 16;
 
 	// OR (accumulate), don't overwrite.  PlayerSpawn can call
 	// PM_SyncPredictionProxy twice in one tick (once via
@@ -2215,6 +2735,7 @@ void(entity player) PM_SyncPredictionProxy =
 	proxy.pm_oldbuttons    = player.pm_oldbuttons;
 	proxy.pm_timecarry     = player.pm_timecarry;
 	proxy.pm_teleport_time        = player.pm_teleport_time;
+	proxy.pm_teleport_org         = player.pm_teleport_org;
 	proxy.pm_ladder_detach_time   = player.pm_ladder_detach_time;
 	proxy.pm_fuser2               = player.pm_fuser2;
 	proxy.spread_penalty          = player.spread_penalty;
@@ -2231,12 +2752,18 @@ void(entity player) PM_SyncPredictionProxy =
 	proxy.codstamina_punished     = player.codstamina_punished;
 	proxy.pm_fire_suppress_until  = player.pm_fire_suppress_until;
 	proxy.pm_carrying             = player.pm_carrying;
+	// Pairs with the four v26 diff terms above — see the note there.
+	proxy.pm_inv_speed_pct        = player.pm_inv_speed_pct;
+	proxy.pm_inv_gravity_pct      = player.pm_inv_gravity_pct;
+	proxy.pm_inv_friction_pct     = player.pm_inv_friction_pct;
+	proxy.pm_inv_blockfire        = player.pm_inv_blockfire;
 	proxy.pm_driving              = player.pm_driving;
 	proxy.pm_incar                = player.pm_incar;
 	proxy.ph_hull_halfxy          = player.ph_hull_halfxy;
 	proxy.ph_hull_minz            = player.ph_hull_minz;
 	proxy.ph_hull_height          = player.ph_hull_height;
 	proxy.ph_yaw_locked           = player.ph_yaw_locked;
+	proxy.pm_longjump             = player.pm_longjump;
 
 	proxy.slot_primary     = player.slot_primary;
 	proxy.slot_secondary   = player.slot_secondary;
@@ -2251,8 +2778,23 @@ void(entity player) PM_SyncPredictionProxy =
 	proxy.zoomstage       = player.zoomstage;
 	proxy.snowball_has_slingshot = player.snowball_has_slingshot;
 	proxy.snowball_use_slingshot = player.snowball_use_slingshot;
+	proxy.satchel_state          = player.satchel_state;
+	// Pairs with the two v29 diff terms above — see the note there.  The file's
+	// own carry-list comment states the rule this violated: the diff and the
+	// baseline copy MUST land together, because a copy with no diff freezes the
+	// client at the first value and a diff with no copy re-sends forever.  These
+	// two had neither, which is the third and quietest way to get it wrong.
+	proxy.wep_deployed     = player.wep_deployed;
+	proxy.famas_burst_mode = player.famas_burst_mode;
 	proxy.pm_weapon_blend_progress = player.pm_weapon_blend_progress;
 	proxy.pm_weapon_prev_factor    = player.pm_weapon_prev_factor;
+	// Pairs with the carry diff above — see the note there.
+	float cci;
+	for (cci = 0; cci < CARRY_MAX; cci = cci + 1)
+	{
+		proxy.carry_primary[cci]   = player.carry_primary[cci];
+		proxy.carry_secondary[cci] = player.carry_secondary[cci];
+	}
 	proxy.view_kick_pitch     = player.view_kick_pitch;
 	proxy.view_kick_yaw       = player.view_kick_yaw;
 	proxy.view_kick_pitch_vel = player.view_kick_pitch_vel;
@@ -2279,6 +2821,13 @@ void(entity player) PM_SyncPredictionProxy =
 	proxy.ammo_awp        = player.ammo_awp;
 	proxy.mag_98k         = player.mag_98k;
 	proxy.ammo_98k        = player.ammo_98k;
+	// NOTHING FOR THE TWELVE DAY OF DEFEAT WEAPONS, deliberately.  Every
+	// .mag_*/.ammo_* pair copied here belongs to a weapon that predates the
+	// slot-ammo wire and still carries its ammo in its own field.  The DoD
+	// twelve are SLOT_PRIMARY / SLOT_SECONDARY and ride slot_primary_mag /
+	// slot_secondary_mag instead (shared/sh_weapon_slotammo.qc's two dispatch
+	// tables), which is already synced above -- exactly as the thirteen
+	// Counter-Strike guns do, none of which appears in this list either.
 	proxy.mag_shotgun     = player.mag_shotgun;
 	proxy.ammo_shotgun    = player.ammo_shotgun;
 	proxy.mag_m3          = player.mag_m3;
@@ -2304,12 +2853,60 @@ void(entity player) PM_SyncPredictionProxy =
 	proxy.mag_hlglock     = player.mag_hlglock;
 	proxy.ammo_hlglock    = player.ammo_hlglock;
 	proxy.ammo_hlegon     = player.ammo_hlegon;
+	// They Hunger's eight.
+	proxy.mag_th1911      = player.mag_th1911;
+	proxy.ammo_th1911     = player.ammo_th1911;
+	proxy.mag_thtommy     = player.mag_thtommy;
+	proxy.ammo_thtommy    = player.ammo_thtommy;
+	proxy.mag_thgrease    = player.mag_thgrease;
+	proxy.ammo_thgrease   = player.ammo_thgrease;
+	proxy.mag_thm14       = player.mag_thm14;
+	proxy.ammo_thm14      = player.ammo_thm14;
+	proxy.mag_thm16       = player.mag_thm16;
+	proxy.ammo_thm16      = player.ammo_thm16;
+	proxy.mag_thsawoff    = player.mag_thsawoff;
+	proxy.ammo_thsawoff   = player.ammo_thsawoff;
+	proxy.ammo_thtesla    = player.ammo_thtesla;
+	// Sven Co-op and Opposing Force.  Omitting one of these does not break the
+	// server - it breaks PREDICTION, which reads as the magazine flickering back
+	// to a stale value one frame after every shot.
+	proxy.mag_uzi         = player.mag_uzi;
+	proxy.ammo_uzi        = player.ammo_uzi;
+	proxy.mag_uziakimbo   = player.mag_uziakimbo;
+	proxy.ammo_uziakimbo  = player.ammo_uziakimbo;
+	proxy.ammo_minigun    = player.ammo_minigun;
+	proxy.minigun_spin    = player.minigun_spin;
+	proxy.mag_svm16       = player.mag_svm16;
+	proxy.ammo_svm16      = player.ammo_svm16;
+	proxy.mag_sniper      = player.mag_sniper;
+	proxy.ammo_sniper     = player.ammo_sniper;
+	proxy.mag_spore       = player.mag_spore;
+	proxy.ammo_sporelauncher = player.ammo_sporelauncher;
+	// The spore loader's per-insert credit is a pure function of these two plus
+	// wep_anim_start, and it now runs on BOTH sides — so the latched count and the
+	// insert cursor have to reach the client or its prediction credits a different
+	// number of spores from the server's.
+	proxy.spore_reload_rounds = player.spore_reload_rounds;
+	proxy.spore_reload_stage  = player.spore_reload_stage;
+	proxy.mag_eagle       = player.mag_eagle;
+	proxy.ammo_eagle      = player.ammo_eagle;
+	proxy.mag_asshotgun   = player.mag_asshotgun;
+	proxy.ammo_asshotgun  = player.ammo_asshotgun;
+	proxy.ammo_medkit     = player.ammo_medkit;
+	proxy.ammo_soflam     = player.ammo_soflam;
+	proxy.ammo_penguin    = player.ammo_penguin;
+	proxy.ammo_dodmills   = player.ammo_dodmills;
+	proxy.ammo_dodstick   = player.ammo_dodstick;
+	proxy.ammo_dodbinocs  = player.ammo_dodbinocs;
 	proxy.mag_paintball   = player.mag_paintball;
 	proxy.ammo_paintball  = player.ammo_paintball;
 	proxy.ammo_cshegrenade = player.ammo_cshegrenade;
 	proxy.ammo_csflashbang = player.ammo_csflashbang;
 	proxy.ammo_cssmokegrenade = player.ammo_cssmokegrenade;
 	proxy.ammo_cfc4 = player.ammo_cfc4;
+	proxy.ammo_satchel = player.ammo_satchel;
+	proxy.ammo_tripmine = player.ammo_tripmine;
+	proxy.ammo_snark = player.ammo_snark;
 
 	proxy.slot_primary_mag    = player.slot_primary_mag;
 	proxy.slot_primary_ammo   = player.slot_primary_ammo;
@@ -2351,8 +2948,8 @@ void(entity player) PM_EnsurePredictionProxy =
 	{
 		proxy.SendFlags = proxy.SendFlags | PM_SF_MOVEMENT | PM_SF_WEAPON_STATE | PM_SF_AMMO;
 		proxy.pm_ammo_mb0 = 255;
-		proxy.pm_ammo_mb1 = 15;   // bits 1/2/4 = he/flash/smoke, bit 8 = ammo_cfc4 (C4 carry)
-		proxy.pm_ammo_mb2 = 0;
+		proxy.pm_ammo_mb1 = 255;  // bits 1/2/4 = he/flash/smoke, 8 = ammo_cfc4 (C4 carry), 16 = ammo_satchel, 32 = ammo_tripmine, 64 = ammo_snark, 128 = ammo_medkit
+		proxy.pm_ammo_mb2 = 31;   // bits: 1 soflam, 2 penguin, 4 dodmills, 8 dodstick, 16 dodbinocs
 		proxy.pm_ammo_mb3 = 0;
 		proxy.pm_ammo_mb4 = 0;
 		proxy.pm_ammo_mb5 = 0;
@@ -2388,6 +2985,12 @@ void() W_GiveStartingAmmo =
 	self.mag_m3 = 0;               self.ammo_m3 = 0;
 	self.mag_mp5 = 0;              self.ammo_mp5 = 0;
 	self.mag_98k = 0;              self.ammo_98k = 0;
+	// The twelve Day of Defeat weapons are NOT listed here, for the same reason
+	// the thirteen Counter-Strike guns are not: this block exists for weapons
+	// whose ammo lives only in their own field.  Theirs lives in the slot-ammo
+	// cache, which W_SlotAmmo_ClearForWeapon already empties on drop and which
+	// W_SlotAmmo_LoadCurrent rewrites from on every switch, so zeroing the
+	// per-weapon fields here would be undone on the next tick anyway.
 	self.mag_flakshotgun = 0;
 	self.ammo_gauss = 0;
 	self.mag_grenadelauncher = 0;
@@ -2404,9 +3007,40 @@ void() W_GiveStartingAmmo =
 	self.mag_glock = 0;            self.ammo_glock = 0;
 	self.mag_357 = 0;              self.ammo_357 = 0;
 	self.mag_hlglock = 0;          self.ammo_hlglock = 0;
+	self.mag_th1911 = 0;           self.ammo_th1911 = 0;
+	self.mag_thtommy = 0;          self.ammo_thtommy = 0;
+	self.mag_thgrease = 0;         self.ammo_thgrease = 0;
+	self.mag_thm14 = 0;            self.ammo_thm14 = 0;
+	self.mag_thm16 = 0;            self.ammo_thm16 = 0;
+	self.mag_thsawoff = 0;         self.ammo_thsawoff = 0;
+	self.ammo_thtesla = 0;
+	self.mag_uzi = 0;        self.ammo_uzi = 0;
+	self.mag_uziakimbo = 0;  self.ammo_uziakimbo = 0;
+	self.ammo_minigun = 0;   self.minigun_spin = 0;
+	self.mag_svm16 = 0;      self.ammo_svm16 = 0;
+	self.mag_sniper = 0;     self.ammo_sniper = 0;
+	self.mag_spore = 0;      self.ammo_sporelauncher = 0;
+	self.mag_eagle = 0;      self.ammo_eagle = 0;
+	self.mag_asshotgun = 0;  self.ammo_asshotgun = 0;
+	self.ammo_medkit = 0;    self.ammo_soflam = 0;
+	self.ammo_dodmills = 0;  self.ammo_dodstick = 0;
+	self.ammo_dodbinocs = 0;
 	self.mag_pistol = 0;           self.ammo_pistol = 0;
 	self.ammo_hlgrenade = 0;
 	self.ammo_snowball = 0;
+	// Clear the previous life's satchels HERE, not only in PlayerKilled.
+	//
+	// satchel_state was never reset anywhere before, which was harmless while it
+	// only chose a viewmodel - but W_UtilityPlayerHasWeapon now reads it as "I
+	// have charges out", so a stale ARMED would make the player permanently own
+	// a satchel they do not have.  Resetting it alone is not enough either: not
+	// every respawn goes through PlayerKilled (round restart and team change do
+	// not), and the harness caught exactly that - a bot respawned mid-test with
+	// state reset to HOLD while two of its charges were still sitting on the
+	// map, unreachable by anything.
+	// W_SatchelDeactivateAll removes the charges AND sets HOLD, so it is the
+	// single correct call on every spawn path.
+	W_SatchelDeactivateAll(self);
 	self.ammo_cshegrenade = 0;
 	self.ammo_csflashbang = 0;
 	self.ammo_cssmokegrenade = 0;
@@ -2419,6 +3053,22 @@ void() W_GiveStartingAmmo =
 	// field before an equip sees a ghost count.  Kept in the same order as the
 	// .float declarations so a new cf weapon is easy to slot in.
 	self.mag_cfaug = 0;            self.ammo_cfaug = 0;
+	// The thirteen Counter-Strike 1.6 guns, wiped for the same reason as the
+	// CrossFire bank above: a weapon that is NOT in any slot after this call would
+	// otherwise keep last loadout's count in its legacy register.
+	self.mag_p228         = 0;     self.ammo_p228         = 0;
+	self.mag_fiveseven    = 0;  self.ammo_fiveseven    = 0;
+	self.mag_elite        = 0;    self.ammo_elite        = 0;
+	self.mag_tmp          = 0;      self.ammo_tmp          = 0;
+	self.mag_mac10        = 0;    self.ammo_mac10        = 0;
+	self.mag_ump45        = 0;    self.ammo_ump45        = 0;
+	self.mag_p90          = 0;      self.ammo_p90          = 0;
+	self.mag_galil        = 0;    self.ammo_galil        = 0;
+	self.mag_famas        = 0;    self.ammo_famas        = 0;
+	self.mag_aug          = 0;      self.ammo_aug          = 0;
+	self.mag_sg552        = 0;    self.ammo_sg552        = 0;
+	self.mag_sg550        = 0;    self.ammo_sg550        = 0;
+	self.mag_xm1014       = 0;   self.ammo_xm1014       = 0;
 	self.mag_cfawm = 0;            self.ammo_cfawm = 0;
 	self.mag_cfbarrett = 0;        self.ammo_cfbarrett = 0;
 	self.mag_cfddeagle = 0;        self.ammo_cfddeagle = 0;
@@ -2483,6 +3133,25 @@ void() W_GiveStartingAmmo =
 			else if (util_wep == WEP_CSHEGRENADE)     self.ammo_cshegrenade    = MAX_AMMO_CSHEGRENADE;
 			else if (util_wep == WEP_CSFLASHBANG)     self.ammo_csflashbang    = MAX_AMMO_CSFLASHBANG;
 			else if (util_wep == WEP_CSSMOKEGRENADE)  self.ammo_cssmokegrenade = MAX_AMMO_CSSMOKEGRENADE;
+			else if (util_wep == WEP_DODMILLS)        self.ammo_dodmills       = MAX_AMMO_DODMILLS;
+			else if (util_wep == WEP_DODSTICK)        self.ammo_dodstick       = MAX_AMMO_DODSTICK;
+			else if (util_wep == WEP_PENGUIN)         self.ammo_penguin        = MAX_AMMO_PENGUIN;
+			// The binoculars ARE here now.  They have no world pickup at all — no
+			// w_binoculars.mdl, so no weapon_binoculars() and no drop function —
+			// which is exactly why the duplicate-utility reject argued against
+			// below cannot apply to them: there is nothing lying on the floor for
+			// it to block.  Their count is the fix for the circular slot-based
+			// ownership described in sh_wpn_dodbinocs.qc's header.
+			else if (util_wep == WEP_DODBINOCS)       self.ammo_dodbinocs      = 1;
+			// WEP_MEDKIT AND WEP_ASSOFLAM ARE STILL DELIBERATELY ABSENT, and the
+			// asymmetry reads like two missing rows, so: both are owned by SLOT as
+			// well as by ammo (sh_wpn_snowball.qc W_UtilityEntityOwns).  Setting a
+			// count here would grant them, but it WOULD ALSO trip the ammo-based
+			// duplicate-utility reject at sv_weapons.qc:3607 and permanently block
+			// picking one up off the world, which is the failure
+			// sh_wpn_svmedkit.qc:570 documents.  Both DO have world pickups, so
+			// that hazard is real for them and not for the binoculars.
+			// So only the FIRST id in sv_default_utility may be one of those two.
 			else if (util_wep == WEP_SLINGSHOT)
 			{
 				self.snowball_has_slingshot = TRUE;
@@ -2540,10 +3209,193 @@ void() W_RefreshPrimarySlot =
 		self.slot_primary_drop  = W_MP5Drop;
 		self.mag_mp5 = MAX_MAG_MP5;     self.ammo_mp5 = MAX_AMMO_MP5;
 		break;
+	// --- The thirteen Counter-Strike 1.6 guns. ---
+	case WEP_CSTMP:
+		self.slot_primary_equip = W_CSTmpEquip;
+		self.slot_primary_drop  = W_CSTmpDrop;
+		self.mag_tmp = MAX_MAG_CSTMP;  self.ammo_tmp = MAX_AMMO_CSTMP;
+		break;
+	case WEP_CSMAC10:
+		self.slot_primary_equip = W_CSMac10Equip;
+		self.slot_primary_drop  = W_CSMac10Drop;
+		self.mag_mac10 = MAX_MAG_CSMAC10;  self.ammo_mac10 = MAX_AMMO_CSMAC10;
+		break;
+	case WEP_CSUMP45:
+		self.slot_primary_equip = W_CSUmp45Equip;
+		self.slot_primary_drop  = W_CSUmp45Drop;
+		self.mag_ump45 = MAX_MAG_CSUMP45;  self.ammo_ump45 = MAX_AMMO_CSUMP45;
+		break;
+	case WEP_CSP90:
+		self.slot_primary_equip = W_CSP90Equip;
+		self.slot_primary_drop  = W_CSP90Drop;
+		self.mag_p90 = MAX_MAG_CSP90;  self.ammo_p90 = MAX_AMMO_CSP90;
+		break;
+	case WEP_CSGALIL:
+		self.slot_primary_equip = W_CSGalilEquip;
+		self.slot_primary_drop  = W_CSGalilDrop;
+		self.mag_galil = MAX_MAG_CSGALIL;  self.ammo_galil = MAX_AMMO_CSGALIL;
+		break;
+	case WEP_CSFAMAS:
+		self.slot_primary_equip = W_CSFamasEquip;
+		self.slot_primary_drop  = W_CSFamasDrop;
+		self.mag_famas = MAX_MAG_CSFAMAS;  self.ammo_famas = MAX_AMMO_CSFAMAS;
+		break;
+	case WEP_CSAUG:
+		self.slot_primary_equip = W_CSAugEquip;
+		self.slot_primary_drop  = W_CSAugDrop;
+		self.mag_aug = MAX_MAG_CSAUG;  self.ammo_aug = MAX_AMMO_CSAUG;
+		break;
+	case WEP_CSSG552:
+		self.slot_primary_equip = W_CSSg552Equip;
+		self.slot_primary_drop  = W_CSSg552Drop;
+		self.mag_sg552 = MAX_MAG_CSSG552;  self.ammo_sg552 = MAX_AMMO_CSSG552;
+		break;
+	case WEP_CSSG550:
+		self.slot_primary_equip = W_CSSg550Equip;
+		self.slot_primary_drop  = W_CSSg550Drop;
+		self.mag_sg550 = MAX_MAG_CSSG550;  self.ammo_sg550 = MAX_AMMO_CSSG550;
+		break;
+	case WEP_CSXM1014:
+		self.slot_primary_equip = W_CSXM1014Equip;
+		self.slot_primary_drop  = W_CSXM1014Drop;
+		self.mag_xm1014 = MAX_MAG_CSXM1014;  self.ammo_xm1014 = MAX_AMMO_CSXM1014;
+		break;
 	case WEP_DOD98K:
 		self.slot_primary_equip = W_98KEquip;
 		self.slot_primary_drop  = W_98KDrop;
 		self.mag_98k = MAX_MAG_98K;     self.ammo_98k = MAX_AMMO_98K;
+		break;
+	// --- Day of Defeat primaries ---
+	case WEP_DODGARAND:
+		self.slot_primary_equip = W_DodGarandEquip;
+		self.slot_primary_drop  = W_DodGarandDrop;
+		self.mag_dodgarand = MAX_MAG_DODGARAND;  self.ammo_dodgarand = MAX_AMMO_DODGARAND;
+		break;
+	case WEP_DODCARBINE:
+		self.slot_primary_equip = W_DodCarbineEquip;
+		self.slot_primary_drop  = W_DodCarbineDrop;
+		self.mag_dodcarbine = MAX_MAG_DODCARBINE;  self.ammo_dodcarbine = MAX_AMMO_DODCARBINE;
+		break;
+	case WEP_DODK43:
+		self.slot_primary_equip = W_DodK43Equip;
+		self.slot_primary_drop  = W_DodK43Drop;
+		self.mag_dodk43 = MAX_MAG_DODK43;  self.ammo_dodk43 = MAX_AMMO_DODK43;
+		break;
+	case WEP_DODTOMMY:
+		self.slot_primary_equip = W_DodTommyEquip;
+		self.slot_primary_drop  = W_DodTommyDrop;
+		self.mag_dodtommy = MAX_MAG_DODTOMMY;  self.ammo_dodtommy = MAX_AMMO_DODTOMMY;
+		break;
+	case WEP_DODMP40:
+		self.slot_primary_equip = W_DodMP40Equip;
+		self.slot_primary_drop  = W_DodMP40Drop;
+		self.mag_dodmp40 = MAX_MAG_DODMP40;  self.ammo_dodmp40 = MAX_AMMO_DODMP40;
+		break;
+	case WEP_DODSTEN:
+		self.slot_primary_equip = W_DodStenEquip;
+		self.slot_primary_drop  = W_DodStenDrop;
+		self.mag_dodsten = MAX_MAG_DODSTEN;  self.ammo_dodsten = MAX_AMMO_DODSTEN;
+		break;
+	case WEP_DODGREASE:
+		self.slot_primary_equip = W_DodGreaseEquip;
+		self.slot_primary_drop  = W_DodGreaseDrop;
+		self.mag_dodgrease = MAX_MAG_DODGREASE;  self.ammo_dodgrease = MAX_AMMO_DODGREASE;
+		break;
+	case WEP_DODMP44:
+		self.slot_primary_equip = W_DodMP44Equip;
+		self.slot_primary_drop  = W_DodMP44Drop;
+		self.mag_dodmp44 = MAX_MAG_DODMP44;  self.ammo_dodmp44 = MAX_AMMO_DODMP44;
+		break;
+	case WEP_DODBAR:
+		self.slot_primary_equip = W_DodBarEquip;
+		self.slot_primary_drop  = W_DodBarDrop;
+		self.mag_dodbar = MAX_MAG_DODBAR;  self.ammo_dodbar = MAX_AMMO_DODBAR;
+		break;
+	// --- Day of Defeat, third batch ---
+	// The Bren and the two FG42s share one equip/drop pair (sh_wpn_dodauto.qc),
+	// same arrangement as the MGs and the launchers: it reads self.weapon, which
+	// W_TryEquipSlot has already set by the time it calls them.
+	case WEP_DODBREN:
+		self.slot_primary_equip = W_DodAutoEquip;
+		self.slot_primary_drop  = W_DodAutoDrop;
+		self.mag_dodbren = SH_DodAutoMaxMag(WEP_DODBREN);
+		self.ammo_dodbren = SH_DodAutoMaxAmmo(WEP_DODBREN);
+		break;
+	case WEP_DODFG42:
+		self.slot_primary_equip = W_DodAutoEquip;
+		self.slot_primary_drop  = W_DodAutoDrop;
+		self.mag_dodfg42 = SH_DodAutoMaxMag(WEP_DODFG42);
+		self.ammo_dodfg42 = SH_DodAutoMaxAmmo(WEP_DODFG42);
+		break;
+	case WEP_DODFG42S:
+		self.slot_primary_equip = W_DodAutoEquip;
+		self.slot_primary_drop  = W_DodAutoDrop;
+		self.mag_dodfg42s = SH_DodAutoMaxMag(WEP_DODFG42S);
+		self.ammo_dodfg42s = SH_DodAutoMaxAmmo(WEP_DODFG42S);
+		break;
+	case WEP_DODFCARB:
+		self.slot_primary_equip = W_DodFCarbEquip;
+		self.slot_primary_drop  = W_DodFCarbDrop;
+		self.mag_dodfcarb = MAX_MAG_DODFCARB;  self.ammo_dodfcarb = MAX_AMMO_DODFCARB;
+		break;
+	case WEP_DODENFIELD:
+		self.slot_primary_equip = W_DodEnfEquip;
+		self.slot_primary_drop  = W_DodEnfDrop;
+		self.mag_dodenfield = MAX_MAG_DODENF;  self.ammo_dodenfield = MAX_AMMO_DODENF;
+		break;
+	case WEP_DODMORTAR:
+		self.slot_primary_equip = W_DodMortarEquip;
+		self.slot_primary_drop  = W_DodMortarDrop;
+		self.mag_dodmortar = MAX_MAG_DODMORTAR;  self.ammo_dodmortar = MAX_AMMO_DODMORTAR;
+		break;
+	// --- Day of Defeat, second batch ---
+	// The machine guns and the launchers share one equip/drop pair apiece
+	// (sh_wpn_dodmgs.qc, sh_wpn_dodat.qc): both read self.weapon, which
+	// W_TryEquipSlot has already set by the time it calls them.
+	case WEP_DODSCOPED98K:
+		self.slot_primary_equip = W_DodS98KEquip;
+		self.slot_primary_drop  = W_DodS98KDrop;
+		self.mag_dodscoped98k = MAX_MAG_DODS98K;  self.ammo_dodscoped98k = MAX_AMMO_DODS98K;
+		break;
+	case WEP_DODSPRING:
+		self.slot_primary_equip = W_DodSpringEquip;
+		self.slot_primary_drop  = W_DodSpringDrop;
+		self.mag_dodspring = MAX_MAG_DODSPRING;  self.ammo_dodspring = MAX_AMMO_DODSPRING;
+		break;
+	case WEP_DODENFIELDS:
+		self.slot_primary_equip = W_DodEnfSEquip;
+		self.slot_primary_drop  = W_DodEnfSDrop;
+		self.mag_dodenfields = MAX_MAG_DODENFS;  self.ammo_dodenfields = MAX_AMMO_DODENFS;
+		break;
+	case WEP_DOD30CAL:
+		self.slot_primary_equip = W_DodMGEquip;
+		self.slot_primary_drop  = W_DodMGDrop;
+		self.mag_dod30cal = 100;  self.ammo_dod30cal = 200;
+		break;
+	case WEP_DODMG34:
+		self.slot_primary_equip = W_DodMGEquip;
+		self.slot_primary_drop  = W_DodMGDrop;
+		self.mag_dodmg34 = 50;  self.ammo_dodmg34 = 150;
+		break;
+	case WEP_DODMG42:
+		self.slot_primary_equip = W_DodMGEquip;
+		self.slot_primary_drop  = W_DodMGDrop;
+		self.mag_dodmg42 = 50;  self.ammo_dodmg42 = 150;
+		break;
+	case WEP_DODBAZOOKA:
+		self.slot_primary_equip = W_DodATEquip;
+		self.slot_primary_drop  = W_DodATDrop;
+		self.mag_dodbazooka = 1;  self.ammo_dodbazooka = 4;
+		break;
+	case WEP_DODSCHRECK:
+		self.slot_primary_equip = W_DodATEquip;
+		self.slot_primary_drop  = W_DodATDrop;
+		self.mag_dodschreck = 1;  self.ammo_dodschreck = 4;
+		break;
+	case WEP_DODPIAT:
+		self.slot_primary_equip = W_DodATEquip;
+		self.slot_primary_drop  = W_DodATDrop;
+		self.mag_dodpiat = 1;  self.ammo_dodpiat = 3;
 		break;
 	case WEP_FLAKSHOTGUN:
 		self.slot_primary_equip = W_FlakShotgunEquip;
@@ -2586,10 +3438,110 @@ void() W_RefreshPrimarySlot =
 		self.mag_hlsmg = MAX_MAG_HLSMG;         self.ammo_hlsmg = MAX_AMMO_HLSMG;
 		self.ammo_hlsmg_grenades = MAX_AMMO_HLSMG_GRENADES;
 		break;
+	// They Hunger's six primaries.
+	case WEP_THTOMMY:
+		self.slot_primary_equip = W_THTommyEquip;
+		self.slot_primary_drop  = W_THTommyDrop;
+		self.mag_thtommy = MAX_MAG_THTOMMY;     self.ammo_thtommy = MAX_AMMO_THTOMMY;
+		break;
+	case WEP_THGREASE:
+		self.slot_primary_equip = W_THGreaseEquip;
+		self.slot_primary_drop  = W_THGreaseDrop;
+		self.mag_thgrease = MAX_MAG_THGREASE;   self.ammo_thgrease = MAX_AMMO_THGREASE;
+		break;
+	case WEP_THM14:
+		self.slot_primary_equip = W_THM14Equip;
+		self.slot_primary_drop  = W_THM14Drop;
+		self.mag_thm14 = MAX_MAG_THM14;         self.ammo_thm14 = MAX_AMMO_THM14;
+		break;
+	case WEP_THM16:
+		self.slot_primary_equip = W_THM16Equip;
+		self.slot_primary_drop  = W_THM16Drop;
+		self.mag_thm16 = MAX_MAG_THM16;         self.ammo_thm16 = MAX_AMMO_THM16;
+		break;
+	case WEP_THSAWOFF:
+		self.slot_primary_equip = W_THSawoffEquip;
+		self.slot_primary_drop  = W_THSawoffDrop;
+		self.mag_thsawoff = MAX_MAG_THSAWOFF;   self.ammo_thsawoff = MAX_AMMO_THSAWOFF;
+		break;
+	case WEP_THTESLA:
+		self.slot_primary_equip = W_THTeslaEquip;
+		self.slot_primary_drop  = W_THTeslaDrop;
+		self.ammo_thtesla = MAX_AMMO_THTESLA;
+		break;
+	case WEP_MINIGUN:
+		self.slot_primary_equip = W_MinigunEquip;
+		self.slot_primary_drop  = W_MinigunDrop;
+		self.ammo_minigun = MAX_AMMO_MINIGUN;
+		break;
+	case WEP_SVM16:
+		self.slot_primary_equip = W_SVM16Equip;
+		self.slot_primary_drop  = W_SVM16Drop;
+		self.mag_svm16 = MAX_MAG_SVM16;         self.ammo_svm16 = MAX_AMMO_SVM16;
+		// The M203, which this case never seeded - compare WEP_HLSMG above, the
+		// same launcher on a different rifle, which has always had this line.
+		// Dormant until now only because nothing reached WEP_SVM16 by string key:
+		// this function is the grant path for wep_give, the buy menu,
+		// game_player_equip, the map .cfg equip lists and squadmaker, and every
+		// one of them goes through WeaponManifest_IdFromKey, where "m16" used to
+		// resolve to the HL SMG.  Promoting the key without this would have
+		// handed 42 maps' worth of players an M16 with zero grenades; only the
+		// floor-pickup path (W_SVM16PickupCopy) was ever correct.
+		self.ammo_svm16_grenades = MAX_AMMO_SVM16_GRENADES;
+		break;
+	case WEP_SNIPERRIFLE:
+		self.slot_primary_equip = W_SniperEquip;
+		self.slot_primary_drop  = W_SniperDrop;
+		self.mag_sniper = MAX_MAG_SNIPER;       self.ammo_sniper = MAX_AMMO_SNIPER;
+		break;
+	case WEP_SPORELAUNCHER:
+		self.slot_primary_equip = W_SporeEquip;
+		self.slot_primary_drop  = W_SporeDrop;
+		self.mag_spore = MAX_MAG_SPORE;         self.ammo_sporelauncher = MAX_AMMO_SPORE;
+		break;
+	case WEP_ASSHOTGUN:
+		self.slot_primary_equip = W_ASShotgunEquip;
+		self.slot_primary_drop  = W_ASShotgunDrop;
+		self.mag_asshotgun = MAX_MAG_ASSHOTGUN; self.ammo_asshotgun = MAX_AMMO_ASSHOTGUN;
+		break;
+	// FOUR THAT WERE NEVER HERE.  Hornetgun, shock rifle, displacer and
+	// barnacle grapple all carry WMF_FLAG_LOADOUT and all have a
+	// SV_DebugSpawnWeaponId branch, so they can be SPAWNED on the floor from
+	// the F5 panel and picked up — but W_RefreshPrimarySlot clears
+	// slot_primary_equip at the top and this switch had no case for any of
+	// them, so buying one or loading out with one left the slot holding a
+	// null equip pointer.  That is the "listed but does nothing" report, and
+	// it is why they could only be spawned as pickups.  Caught by the
+	// "every advertised weapon can be given" assertion in sv_main.qc.
+	case WEP_HORNETGUN:
+		self.slot_primary_equip = W_HGunEquip;
+		self.slot_primary_drop  = W_HGunDrop;
+		self.ammo_hornet = MAX_AMMO_HORNET;
+		break;
+	case WEP_SHOCKRIFLE:
+		self.slot_primary_equip = W_ShockEquip;
+		self.slot_primary_drop  = W_ShockDrop;
+		self.ammo_shockrifle = MAX_AMMO_SHOCKRIFLE;
+		break;
+	case WEP_DISPLACER:
+		self.slot_primary_equip = W_DispEquip;
+		self.slot_primary_drop  = W_DispDrop;
+		self.ammo_displacer = MAX_AMMO_DISPLACER;
+		break;
+	case WEP_BGRAPPLE:
+		// No ammo of any kind — the tongue is free.
+		self.slot_primary_equip = W_BGrapEquip;
+		self.slot_primary_drop  = W_BGrapDrop;
+		break;
 	case WEP_M249:
 		self.slot_primary_equip = W_M249Equip;
 		self.slot_primary_drop  = W_M249Drop;
 		self.mag_m249 = MAX_MAG_M249;           self.ammo_m249 = MAX_AMMO_M249;
+		break;
+	case WEP_OPSAW:
+		self.slot_primary_equip = W_SawEquip;
+		self.slot_primary_drop  = W_SawDrop;
+		self.mag_saw = MAX_MAG_SAW;             self.ammo_saw = MAX_AMMO_SAW;
 		break;
 	case WEP_REBAR:
 		self.slot_primary_equip = W_RebarEquip;
@@ -2726,6 +3678,19 @@ void() W_RefreshPrimarySlot =
 		self.slot_primary_drop  = W_GravGunDrop;
 		// infinite energy — no mag/ammo
 		break;
+	// The two UZIs, moved down from W_RefreshSecondarySlot.  They had to travel
+	// with the manifest and the pickup entities or the three would disagree -
+	// see the note beside WMF_WEP_UZI in sh_weapon_manifest.qc.
+	case WEP_UZI:
+		self.slot_primary_equip = W_UziEquip;
+		self.slot_primary_drop  = W_UziDrop;
+		self.mag_uzi = MAX_MAG_UZI;             self.ammo_uzi = MAX_AMMO_UZI;
+		break;
+	case WEP_UZIAKIMBO:
+		self.slot_primary_equip = W_UziAkEquip;
+		self.slot_primary_drop  = W_UziAkDrop;
+		self.mag_uziakimbo = MAX_MAG_UZIAKIMBO; self.ammo_uziakimbo = MAX_AMMO_UZIAKIMBO;
+		break;
 	default:
 		self.slot_primary = WEP_NONE;
 		break;
@@ -2741,6 +3706,13 @@ void() W_RefreshSecondarySlot =
 	self.slot_secondary_drop  = __NULL__;
 	switch (self.slot_secondary)
 	{
+	// WEP_UZI / WEP_UZIAKIMBO used to head this list; they are PRIMARY now and
+	// live in W_RefreshPrimarySlot.
+	case WEP_EAGLE:
+		self.slot_secondary_equip = W_EagleEquip;
+		self.slot_secondary_drop  = W_EagleDrop;
+		self.mag_eagle = MAX_MAG_EAGLE;         self.ammo_eagle = MAX_AMMO_EAGLE;
+		break;
 	case WEP_DEAGLE:
 		self.slot_secondary_equip = W_DeagleEquip;
 		self.slot_secondary_drop  = W_DeagleDrop;
@@ -2760,6 +3732,18 @@ void() W_RefreshSecondarySlot =
 		self.slot_secondary_equip = W_HLGlockEquip;
 		self.slot_secondary_drop  = W_HLGlockDrop;
 		self.mag_hlglock = MAX_MAG_HLGLOCK; self.ammo_hlglock = MAX_AMMO_HLGLOCK;
+		break;
+	case WEP_TH1911:
+		self.slot_secondary_equip = W_TH1911Equip;
+		self.slot_secondary_drop  = W_TH1911Drop;
+		self.mag_th1911 = MAX_MAG_TH1911;       self.ammo_th1911 = MAX_AMMO_TH1911;
+		break;
+	// Same omission as the four in W_RefreshPrimarySlot — see the note there.
+	case WEP_JETPACK:
+		self.slot_secondary_equip = W_JetEquip;
+		self.slot_secondary_drop  = W_JetDrop;
+		self.mag_jetpack = MAX_MAG_JETPACK;     self.ammo_jetpack = MAX_AMMO_JETPACK;
+		self.ammo_jetfuel = MAX_FUEL_JETPACK;
 		break;
 	case WEP_PISTOL:
 		self.slot_secondary_equip = W_PistolEquip;
@@ -2792,6 +3776,43 @@ void() W_RefreshSecondarySlot =
 		self.mag_cfmk23 = MAX_MAG_CFMK23; self.ammo_cfmk23 = MAX_AMMO_CFMK23;
 		self.cfmk23_silenced = TRUE;
 		break;
+	// The three Counter-Strike 1.6 pistols.  They live HERE, in the SECONDARY
+	// refresh, and not beside the ten CS primaries: W_RefreshPrimarySlot is only
+	// ever called for a primary, so a secondary case placed in its switch
+	// compiles clean, is never reached, and leaves the weapon visible in every
+	// menu and impossible to hand out.  sv_satchel_test's give sweep is what
+	// catches that, and did.
+	case WEP_CSP228:
+		self.slot_secondary_equip = W_CSP228Equip;
+		self.slot_secondary_drop  = W_CSP228Drop;
+		self.mag_p228 = MAX_MAG_CSP228;  self.ammo_p228 = MAX_AMMO_CSP228;
+		break;
+	// --- Day of Defeat sidearms ---
+	case WEP_DODCOLT:
+		self.slot_secondary_equip = W_DodColtEquip;
+		self.slot_secondary_drop  = W_DodColtDrop;
+		self.mag_dodcolt = MAX_MAG_DODCOLT;  self.ammo_dodcolt = MAX_AMMO_DODCOLT;
+		break;
+	case WEP_DODLUGER:
+		self.slot_secondary_equip = W_DodLugerEquip;
+		self.slot_secondary_drop  = W_DodLugerDrop;
+		self.mag_dodluger = MAX_MAG_DODLUGER;  self.ammo_dodluger = MAX_AMMO_DODLUGER;
+		break;
+	case WEP_DODWEBLEY:
+		self.slot_secondary_equip = W_DodWebleyEquip;
+		self.slot_secondary_drop  = W_DodWebleyDrop;
+		self.mag_dodwebley = MAX_MAG_DODWEBLEY;  self.ammo_dodwebley = MAX_AMMO_DODWEBLEY;
+		break;
+	case WEP_CSFIVESEVEN:
+		self.slot_secondary_equip = W_CSFiveSevenEquip;
+		self.slot_secondary_drop  = W_CSFiveSevenDrop;
+		self.mag_fiveseven = MAX_MAG_CSFIVESEVEN;  self.ammo_fiveseven = MAX_AMMO_CSFIVESEVEN;
+		break;
+	case WEP_CSELITE:
+		self.slot_secondary_equip = W_CSEliteEquip;
+		self.slot_secondary_drop  = W_CSEliteDrop;
+		self.mag_elite = MAX_MAG_CSELITE;  self.ammo_elite = MAX_AMMO_CSELITE;
+		break;
 	case WEP_CSUSP:
 		self.slot_secondary_equip = W_CSUSPEquip;
 		self.slot_secondary_drop  = W_CSUSPDrop;
@@ -2816,6 +3837,54 @@ void() W_RefreshSecondarySlot =
 		W_SlotAmmo_SaveLegacy(self, self.slot_secondary);
 };
 
+// Re-point a slot's equip/drop function pointers at whatever its cursor now
+// names, WITHOUT granting ammo.
+//
+// This is mandatory once a cursor can move within a slot, and it is the subtlest
+// part of multi-carry.  W_TryEquipSlot's guard is `self.weapon != slot_weapon`:
+// move the cursor without rebinding and that guard now PASSES while
+// slot_primary_equip still points at the previous gun's equip function, so the
+// old weapon's viewmodel, fire function and animations end up bound to a new
+// weapon id.  It reads as correct and plays as a ghost weapon.
+//
+// W_Refresh*Slot conflates binding with granting a full magazine — every one of
+// its 78 case arms does `self.mag_x = MAX_MAG_x` — so calling it raw on a cursor
+// move would hand out a free reload on every press of the slot key.  Snapshotting
+// around the call buys the binding half only.  Splitting those two functions into
+// bind / bind+fill halves is the tidier fix and stays deferred; measured, it is
+// 78 arms across 447 lines, and this wrapper is correct once it snapshots the
+// right thing.
+//
+// THE SNAPSHOT COMES FROM THE WEAPON, NOT FROM THE SLOT CACHE, and that one word
+// is the whole bug.  It used to read the canonical registers — which describe
+// whatever the cursor pointed at BEFORE this call — and then stamp those numbers
+// onto the incoming weapon.  Three reported faults were the same line:
+//   * the F5 bench (and the buy menu, and game_player_equip, and map-cfg equip)
+//     handing out a weapon with 0/0, because at the carry limit W_DropSlotForBuy
+//     had just zeroed the outgoing gun's legacy;
+//   * below the limit, the new gun silently inheriting the old gun's counts;
+//   * dying with two primaries and both drops carrying the held gun's magazine.
+// W_SlotAmmo_ReadWeapon reads the weapon's own authoritative store instead.
+void(float slot) W_RebindSlot =
+{
+	float wep = (slot == SLOT_PRIMARY) ? self.slot_primary : self.slot_secondary;
+	if (wep == WEP_NONE)
+		return;
+
+	W_SlotAmmo_ReadWeapon(self, wep);
+	float m = slotammo_mag;
+	float a = slotammo_ammo;
+	float x = slotammo_aux;
+
+	if (slot == SLOT_PRIMARY)
+		W_RefreshPrimarySlot();
+	else
+		W_RefreshSecondarySlot();
+
+	W_SlotAmmo_SetForWeapon(self, wep, m, a, x);
+	W_SlotAmmo_LoadLegacy(self, wep);
+};
+
 // Re-equip the MELEE slot from self.slot_melee.
 void() W_RefreshMeleeSlot =
 {
@@ -2827,9 +3896,31 @@ void() W_RefreshMeleeSlot =
 		self.slot_melee_equip = W_WrenchEquip;
 		self.slot_melee_drop  = W_WrenchDrop;
 		break;
+	case WEP_THSPANNER:
+		self.slot_melee_equip = W_THSpannerEquip;
+		self.slot_melee_drop  = W_THSpannerDrop;
+		break;
+	case WEP_PIPEWRENCH:
+		self.slot_melee_equip = W_PWrenchEquip;
+		self.slot_melee_drop  = W_PWrenchDrop;
+		break;
 	case WEP_KNIFE:
 		self.slot_melee_equip = W_KnifeEquip;
 		self.slot_melee_drop  = W_KnifeDrop;
+		break;
+	// The four DoD melee weapons share one equip/drop pair (sh_wpn_dodmelee.qc):
+	// identical four-sequence layout, per-weapon numbers looked up from
+	// self.weapon, which W_TryEquipSlot has already set when it calls these.
+	case WEP_DODAMERK:
+	case WEP_DODFAIRBAIRN:
+	case WEP_DODPARAKNIFE:
+	case WEP_DODSPADE:
+		self.slot_melee_equip = W_DodMeleeEquip;
+		self.slot_melee_drop  = W_DodMeleeDrop;
+		break;
+	case WEP_OPKNIFE:
+		self.slot_melee_equip = W_OpKnifeEquip;
+		self.slot_melee_drop  = W_OpKnifeDrop;
 		break;
 	case WEP_HLCROWBAR:
 		self.slot_melee_equip = W_CrowbarEquip;
@@ -2882,6 +3973,21 @@ void() W_RefreshUtilitySlot =
 		self.slot_utility_drop  = W_SnarkDrop;
 		self.ammo_snark = MAX_AMMO_SNARK;
 		break;
+	case WEP_PENGUIN:
+		self.slot_utility_equip = W_PenguinEquip;
+		self.slot_utility_drop  = W_PenguinDrop;
+		self.ammo_penguin = MAX_AMMO_PENGUIN;
+		break;
+	case WEP_MEDKIT:
+		self.slot_utility_equip = W_MedkitEquip;
+		self.slot_utility_drop  = W_MedkitDrop;
+		self.ammo_medkit = MAX_AMMO_MEDKIT;
+		break;
+	case WEP_ASSOFLAM:
+		self.slot_utility_equip = W_SoflamEquip;
+		self.slot_utility_drop  = W_SoflamDrop;
+		self.ammo_soflam = SOFLAM_MAX_CARRY;
+		break;
 	case WEP_SNOWBALL:
 		self.slot_utility_equip = W_SnowballEquip;
 		self.slot_utility_drop  = W_SnowballDrop;
@@ -2891,6 +3997,31 @@ void() W_RefreshUtilitySlot =
 		self.slot_utility_equip = W_CSHEGrenadeEquip;
 		self.slot_utility_drop  = W_CSHEGrenadeDrop;
 		self.ammo_cshegrenade = MAX_AMMO_CSHEGRENADE;
+		break;
+	// The two DoD grenades ride the SAME lifecycle as the three CS ones — see
+	// the header of sh_wpn_csgrenades.qc, which now covers five thrown grenades
+	// across two games rather than three across one.
+	case WEP_DODMILLS:
+		self.slot_utility_equip = W_DodMillsEquip;
+		self.slot_utility_drop  = W_DodMillsDrop;
+		self.ammo_dodmills = MAX_AMMO_DODMILLS;
+		break;
+	case WEP_DODSTICK:
+		self.slot_utility_equip = W_DodStickEquip;
+		self.slot_utility_drop  = W_DodStickDrop;
+		self.ammo_dodstick = MAX_AMMO_DODSTICK;
+		break;
+	// The binoculars are a TOOL: no ammo, and no drop function at all, because
+	// dod ships no w_binoculars.mdl for one to setmodel.  Ownership is
+	// slot_utility-based — see the header of sh_wpn_dodbinocs.qc.
+	case WEP_DODBINOCS:
+		self.slot_utility_equip = W_DodBinocsEquip;
+		self.slot_utility_drop  = __NULL__;
+		// The carry count — 1 while held.  Without this the binoculars were
+		// owned only while the selection cursor happened to be on them, and the
+		// first slot refresh disowned them permanently.  See the header of
+		// sh_wpn_dodbinocs.qc.
+		self.ammo_dodbinocs = 1;
 		break;
 	case WEP_CSFLASHBANG:
 		self.slot_utility_equip = W_CSFlashbangEquip;
@@ -2929,21 +4060,56 @@ void() W_RefreshUtilitySlot =
 void(float wep) W_GiveWeaponToSlot =
 {
 	float slot = WeaponManifest_Slot(wep);
+	// PRIMARY / SECONDARY now only throw something away when the slot is FULL,
+	// which at mp_max* = 1 reduces to the old unconditional swap exactly.
+	//
+	// This is the bug a GoldSrc map hits: game_player_equip and maps/<name>.cfg
+	// both come through here, so a map listing two primaries used to give the
+	// first and then drop it on the floor the instant the second arrived.  With a
+	// limit of 2 the player keeps both, which is what the map was asking for.
+	//
+	// The victim is the SELECTED weapon of that slot, not the oldest, so at limit
+	// 1 the behaviour is bit-identical to before.
 	if (slot == WMF_SLOT_PRIMARY)
 	{
-		// Drop the gun already in this slot (if any) as a pickup, carrying
-		// its ammo, before installing the new one.  Skip when re-buying the
-		// same weapon (that just refills via the refresh below).
-		if (self.slot_primary != WEP_NONE && self.slot_primary != wep)
-			W_DropSlotForBuy(0, self.slot_primary, self.slot_primary_drop);
-		self.slot_primary = wep;
+		if (W_CarryIndexOf(self, SLOT_PRIMARY, wep) < 0)
+		{
+			if (W_CarryCount(self, SLOT_PRIMARY) >= W_CarryLimit(SLOT_PRIMARY)
+			    && self.slot_primary != WEP_NONE)
+			{
+				// LATCH THE VICTIM FIRST.  W_DropSlotForBuy sets slot_primary to
+				// WEP_NONE itself, so reading it afterwards removes nothing and the
+				// dropped gun stays in the carry list forever - the list then fills
+				// with weapons the player does not have and W_CarryHas approves
+				// them.  Caught by sv_satchel_test, which only failed at a limit
+				// above 1 because at 1 this branch runs before anything accumulates.
+				float victim = self.slot_primary;
+				W_DropSlotForBuy(0, victim, self.slot_primary_drop);
+				W_CarryRemove(self, SLOT_PRIMARY, victim);
+			}
+			W_CarryAdd(self, SLOT_PRIMARY, wep);
+		}
+		// PointAt persists whatever was selected into ITS store before the cursor
+		// moves, so giving a second primary can no longer wipe the first.
+		W_SlotAmmo_PointAt(self, SLOT_PRIMARY, wep);
 		W_RefreshPrimarySlot();
 	}
 	else if (slot == WMF_SLOT_SECONDARY)
 	{
-		if (self.slot_secondary != WEP_NONE && self.slot_secondary != wep)
-			W_DropSlotForBuy(1, self.slot_secondary, self.slot_secondary_drop);
-		self.slot_secondary = wep;
+		if (W_CarryIndexOf(self, SLOT_SECONDARY, wep) < 0)
+		{
+			if (W_CarryCount(self, SLOT_SECONDARY) >= W_CarryLimit(SLOT_SECONDARY)
+			    && self.slot_secondary != WEP_NONE)
+			{
+				// Latch first — see the note in the PRIMARY arm above.
+				// Separate name: QC scopes locals to the whole function.
+				float victim2 = self.slot_secondary;
+				W_DropSlotForBuy(1, victim2, self.slot_secondary_drop);
+				W_CarryRemove(self, SLOT_SECONDARY, victim2);
+			}
+			W_CarryAdd(self, SLOT_SECONDARY, wep);
+		}
+		W_SlotAmmo_PointAt(self, SLOT_SECONDARY, wep);
 		W_RefreshSecondarySlot();
 	}
 	else if (slot == WMF_SLOT_MELEE)
@@ -2982,6 +4148,35 @@ void() PlayerSpawn =
 	self.is_dead = FALSE;
 	self.death_time = 0;
 	self.pending_round_join = FALSE;
+	// The gib latch the medkit's revive reads.  Cleared HERE rather than at the
+	// point of death so it survives the whole time the body is lying there,
+	// which is exactly the window a medic can act in.
+	self.death_was_gib = FALSE;
+
+	// sv_waitforplayer's release latch.  sv_trigger_logic.qc:63 declares this
+	// and its comment says "Flipped TRUE on the first PlayerSpawn
+	// (sv_player.qc)" — but the assignment was never written, so the global sat
+	// at 0 for the entire life of the server.  Two things wait on it and both
+	// therefore waited forever whenever sv_waitforplayer was enabled:
+	// trigger_auto's dispatch (sv_trigger_logic.qc:75) and func_tracktrain's
+	// startspeed autostart (sv_func_tracktrain.qc:774), each of which just
+	// re-scheduled its own think at 0.1-0.25 s intervals for the whole map.
+	// Latent at the shipped default (sv_waitforplayer 0), which is why nobody
+	// hit it, but the cvar is documented as admin-toggleable and turning it on
+	// silently disabled every intro sequence in the game.
+	sv_first_player_spawned = TRUE;
+
+	// func_tracktrain: release the controls on (re)spawn.
+	//
+	// MANDATORY, not tidiness.  TrackTrain_DriverTick is driven from
+	// PlayerPreThink, which early-returns for a dead player a few lines above
+	// its call site — so a driver who dies at the controls never reaches the
+	// tick's own eviction test, and pm_ontrain survives into the next life.
+	// The pmove lock reads that flag and zeroes input_movevalues, so the
+	// respawned player would stand frozen with no way to recover.  The vehicle
+	// systems don't need this because a func_vehicle thinks every tick and
+	// checks its own driver; a parked tracktrain doesn't think at all.
+	TrainControls_Dismount(self);
 
 	// Prop Hunt: every spawn starts undisguised (covers round restarts —
 	// RoundRestart respawns everyone through here).  No-op when clean.
@@ -3046,12 +4241,31 @@ void() PlayerSpawn =
 	self.frame = CSANIM_IDLE;
 	self.movetype = MOVETYPE_NONE;  // engine physics off; we run our own
 	self.health = 100;
+	// player.cpp:3008-3009 — a fresh lung, and pev->dmg seeded to the 2 that
+	// makes the first drown tick land on 3.
+	self.air_finished        = time + PLAYER_AIRTIME;
+	self.drown_dmg           = 2;
+	self.drown_pain_finished = 0;
+	self.drown_dmg_taken     = 0;
+	self.drown_dmg_restored  = 0;
+	self.drown_recover_next  = 0;
+	// Not somebody's lunch any more.  Without this a player who DIED in a
+	// barnacle's tongue keeps a dangling .barn_holder, and Barnacle_GrabVictim
+	// refuses anyone who already has one — so he could never be grabbed again
+	// for the rest of the map.
+	self.barn_holder         = world;
+	self.barn_killtime       = 0;
+	self.barn_saved_pm_movetype = 0;
 	// CS economy: Kevlar / helmet / defuse kit are lost on death — clear
 	// them every (re)spawn so they must be re-bought each life.  money is
 	// NOT reset here (it persists across lives/rounds; see Money_EnsureStart).
 	self.armor = 0;
 	self.has_helmet = 0;
 	self.has_defusekit = 0;
+	// ...and so is the tactical shield.  Cleared rather than dropped: the drop
+	// already happened at the moment of death (W_DropAllWeaponsOnDeath), and a
+	// second one here would mint a duplicate on every respawn.
+	SH_ShieldClear(self);
 	self.velocity = '0 0 0';
 	PlayerPlaceAtSpawnPoint();
 	// PlayerPlaceAtSpawnPoint puts origin at the spawn point (typically the
@@ -3073,6 +4287,11 @@ void() PlayerSpawn =
 	self.pm_waterjumptime = 0;
 	self.pm_in_duck      = FALSE;
 	self.pm_duck_msec    = 0;
+	// Half-Life clears the long jump module on spawn (dlls/player.cpp:3019).
+	// MUST stay above GamePlayerEquip_EquipSpawningPlayer and MapCfgEquip_Apply
+	// further down, both of which re-grant it from the map's manifest — clearing
+	// after them would strip the module on every respawn on all 17 hc2 maps.
+	self.pm_longjump     = 0;
 	self.pm_oldbuttons   = 0;
 	self.pm_timecarry    = 0;
 	self.pm_step_time    = 0;
@@ -3084,6 +4303,12 @@ void() PlayerSpawn =
 	self.grapple_anchor       = '0 0 0';
 	self.pm_grapple_held_last = 0;
 	Carry_Drop(self);   // drop any prop carried from the previous life
+	// Sven item_inventory.  Two steps, not one: Inv_DropAll honours
+	// holder_keep_on_respawn per item, and Inv_PlayerReset then clears the
+	// effects_permanent latch — the FGD calls that "Permanent? (Until
+	// respawn)", so respawning is precisely where it ends.
+	Inv_DropAll(self, INV_LEAVE_RESPAWN);
+	Inv_PlayerReset(self);
 	self.flags           = self.flags & ~FL_DUCKING;
 	self.wep_action_id   = 0;
 	self.gauss_charge_state = 0;
@@ -3123,6 +4348,8 @@ void() PlayerSpawn =
 				self.slot_melee = WEP_MELEE;
 			self.slot_utility   = Weapon_FirstIdFromList(cvar_string("sv_default_utility"), WEP_NONE);
 		}
+		// Loadout assigns the cursors wholesale; mirror them into the carry lists.
+		W_CarryResyncFromCursors(self);
 		W_GiveStartingAmmo();
 	}
 	else if (self.survived_round)
@@ -3140,6 +4367,7 @@ void() PlayerSpawn =
 		self.slot_secondary = WEP_NONE;
 		self.slot_melee     = WEP_NONE;
 		self.slot_utility   = WEP_SNOWBALL;
+		W_CarryResyncFromCursors(self);
 		W_GiveStartingAmmo();
 	}
 	else
@@ -3157,6 +4385,7 @@ void() PlayerSpawn =
 		// extras get their starting ammo in W_GiveStartingAmmo's post-
 		// pass and are reachable via the utility-cycle key.
 		self.slot_utility   = Weapon_FirstIdFromList(cvar_string("sv_default_utility"), WEP_NONE);
+		W_CarryResyncFromCursors(self);
 		W_GiveStartingAmmo();
 	}
 	self.survived_round = 0;  // consume the flag so it doesn't leak to future spawns
@@ -3166,6 +4395,18 @@ void() PlayerSpawn =
 	// PlayerSpawn).  Runs after the default loadout so the map's choices win.
 	// A map with no game_player_equip pays one find() that returns world.
 	GamePlayerEquip_EquipSpawningPlayer(self);
+
+	// Sven's maps/<mapname>.cfg equipment manifest, last so the map cfg is the
+	// final word on the loadout.  It no-ops when a give-mode game_player_equip
+	// exists without APPEND_MAP_CFG, which is the precedence rule Sven's own
+	// manual states ("the map cfg is ignored for per-player settings").
+	MapCfgEquip_Apply(self);
+
+	// The map script's PlayerSpawn hook, after BOTH equip paths — Sven's own
+	// script hooks run last and overwrite whatever health the spawn set, which
+	// is how Hazardous Course 2's Extreme mode gets its 1 HP.  No-op unless the
+	// map cfg named a script we have a native stand-in for.
+	MapScript_PlayerSpawn(self);
 
 	// Defuse: if no terrorist was alive when the round's bomb assignment ran,
 	// it deferred (sv_defuse_pending_red_pickup) — the first RED to spawn here
@@ -3216,8 +4457,8 @@ void() PlayerSpawn =
 	{
 		self.pm_prediction_proxy.SendFlags = self.pm_prediction_proxy.SendFlags | PM_SF_AMMO;
 		self.pm_prediction_proxy.pm_ammo_mb0 = 255;
-		self.pm_prediction_proxy.pm_ammo_mb1 = 15;   // bits 1/2/4 = he/flash/smoke, bit 8 = ammo_cfc4 (C4 carry)
-		self.pm_prediction_proxy.pm_ammo_mb2 = 0;
+		self.pm_prediction_proxy.pm_ammo_mb1 = 255;  // bits 1/2/4 = he/flash/smoke, 8 = ammo_cfc4 (C4 carry), 16 = ammo_satchel, 32 = ammo_tripmine, 64 = ammo_snark, 128 = ammo_medkit
+		self.pm_prediction_proxy.pm_ammo_mb2 = 15;   // bits: 1 soflam, 2 penguin, 4 dodmills, 8 dodstick
 		self.pm_prediction_proxy.pm_ammo_mb3 = 0;
 		self.pm_prediction_proxy.pm_ammo_mb4 = 0;
 		self.pm_prediction_proxy.pm_ammo_mb5 = 0;
@@ -3252,6 +4493,17 @@ void() PlayerSpawn =
 		self = saved_self;
 		sv_debug_weapon_spawning = FALSE;
 	}
+
+	// The Half-Life reserved targetnames (sv_triggers.qc).  LAST in PlayerSpawn,
+	// mirroring UpdateClientData's position in HL: after both equip paths, the
+	// map-script hook and the weapon bind, so a map firing off game_playerspawn
+	// sees a fully built player.
+	//
+	// This is what makes Sven's hl_c00 playable — all four of its
+	// `game_playerspawn` trigger_relays are the ONLY source for their targets,
+	// and one of them starts the tram.  Without this the map spawns you inside a
+	// motionless tram in a dark bay and nothing ever happens.
+	SV_FireSpawnReservedNames(self);
 };
 
 void() PutClientInServer =
@@ -3288,7 +4540,17 @@ void() ClientDisconnect =
 	self.is_bot = FALSE;	// engine recycles this slot — don't let a stale bot flag ride into a real client (see SV_PlayerHasNetchan)
 
 	Carry_Drop(self);   // release any carried prop so it falls and the link clears
+	// Sven item_inventory.  Upstream does NOT document what happens on
+	// disconnect — there is no FGD key and no wiki sentence for it, and the
+	// engine's only primitive (RemoveAllFromHolder) defaults to DESTROYING
+	// rather than dropping.  Dropping is the right call for a co-op mod: the
+	// quest item a leaver was carrying stays in play, and return_timelimit puts
+	// it back on its pedestal on its own.  Forced, so holder_can_drop cannot
+	// strand an item on an edict that is about to be recycled.
+	Inv_DropAll(self, INV_LEAVE_GONE);
+	Inv_PlayerReset(self);
 	PropHunt_ClearDisguise(self);	// slot recycles — no stale disguise on the next occupant
+	TrainControls_Dismount(self);	// clear the train's tt_driver back-link before this edict is recycled
 
 	if (self.pm_prediction_proxy)
 	{
@@ -3318,6 +4580,12 @@ void() ClientDisconnect =
 	self.death_time = 0;
 	self.player_team = TEAM_NONE;
 	self.player_model_index = 0;
+	// The slot is about to be recycled by whoever connects next, so a map
+	// script's character model and roster row must not follow them in.  See
+	// .player_model_override in sv_customdefs.qc.
+	self.player_model_override = "";
+	self.thesc_char = 0;
+	self.targetname = "";
 	self.weapon = WEP_NONE;
 	self.velocity = '0 0 0';
 	self.modelindex = 0;
@@ -3335,6 +4603,12 @@ void() ClientDisconnect =
 
 	bprint(PRINT_HIGH, self.netname);
 	bprint(PRINT_HIGH, " has left the game.\n");
+
+	// Map-script ClientDisconnect hook.  th_escape fails the run when the last
+	// living player goes, and quitting is one of the ways that happens — the
+	// AngelScript registers this hook for exactly that case.  Runs after the
+	// slot has been cleared above so the walk cannot count this player.
+	MapScript_PlayerDiedOrLeft();
 };
 
 
@@ -3864,6 +5138,9 @@ string(float fieldval, string cvarnm) CarGet_Pair =
 };
 
 float(entity p, string cmd) AIDbg_Command;	// server/sv_ai_debugcmds.qc
+// server/sv_weapondebugcmds.qc, which compiles immediately AFTER this file
+// because it calls W_GiveWeaponToSlot / SV_DebugSpawnWeaponId from here.
+float(entity p, string cmd) WepDbg_Command;
 
 void(string command_string) SV_ParseClientCommand =
 {
@@ -3875,6 +5152,47 @@ void(string command_string) SV_ParseClientCommand =
 	// compares that return FALSE immediately for anything not prefixed ai_.
 	if (AIDbg_Command(self, cmd))
 		return;
+
+	// F5 weapon panel (server/sv_weapondebugcmds.qc), same reasoning: all three
+	// commands are wep_ prefixed and fall through immediately otherwise.
+	if (WepDbg_Command(self, cmd))
+		return;
+
+	// Sven item_inventory's client commands.  Sven ships `inventorylist` (a
+	// console listing) and `dropitem <what>`, plus a VGUI panel this mod has no
+	// equivalent of; both spellings of the listing are accepted because the
+	// wiki and the engine disagree about which one it is, and neither name is
+	// otherwise taken.
+	if (cmd == "inventory" || cmd == "inventorylist")
+	{
+		Inv_PrintToConsole(self);
+		return;
+	}
+	if (cmd == "dropitem")
+	{
+		// "*" (or no argument) throws everything droppable, a bare name throws
+		// that item, "#N" throws by entity index for an item with no name.
+		float dropped = Inv_DropByName(self, argv(1));
+		if (!dropped)
+			sprint(self, PRINT_HIGH, "Nothing to drop.\n");
+		return;
+	}
+
+	// The torch, reported by the client that owns it (client/cl_flashlight.qc).
+	//
+	// PURELY INFORMATIONAL, which is what makes accepting a client's word for it
+	// safe: nothing about the player's own state, weapons, movement or damage
+	// reads this.  The only consumer is monster AI deciding whether a beam is
+	// falling on it, so the worst a lying client can do is fail to spook a
+	// cockroach, or spook one that should not have been spooked.  The light
+	// itself is drawn client-side and always has been, so the server was never
+	// the authority here and pretending otherwise would cost a protocol change
+	// for nothing.
+	if (cmd == "fl")
+	{
+		self.player_flashlight = (stof(argv(1)) != 0);
+		return;
+	}
 
 	if (cmd == "spectrack")
 	{
@@ -4408,6 +5726,28 @@ void() SV_RunClientCommand =
 		input_buttons = input_buttons & ~1;
 	}
 
+	// EMPLACED WEAPONS — the real command path's half of the freeze-grade lock.
+	// NOT an else-if: the round freeze and a planted bipod are independent, and
+	// either one alone should hold the player.
+	//
+	// button0 is deliberately left ALONE, unlike the round freeze above: an
+	// emplaced machine gun is supposed to shoot.  Jump and the vertical channel
+	// ARE stripped, which is the one thing SH_DeploySpeedFactor could never do —
+	// PM_CheckJump reads input_buttons and never consults mv_maxspeed, so a
+	// bipodded MG42 could hop in place, gun and all.
+	//
+	// This is the SERVER half, and it is the half the C4 plant freeze never got:
+	// that one is CSQC-only, so it is only as good as the client that builds the
+	// usercmd.  SH_DeploySpeedFactor inside the server's own pmove remains the
+	// authoritative backstop for both.
+	if (SH_DeployLocksPlayer(self))
+	{
+		input_movevalues_x = 0;
+		input_movevalues_y = 0;
+		input_movevalues_z = 0;
+		input_buttons = input_buttons & ~PM_BTN_JUMP;
+	}
+
 	// func_vehicle: capture the driver's REAL throttle/steer intent HERE, before
 	// PM_PlayerMove's driver-lock zeros input_movevalues.  Capturing in the real
 	// command path (not the shared pmove stash) stops the low-netfps continuation
@@ -4423,6 +5763,15 @@ void() SV_RunClientCommand =
 		self.car_in_fwd   = input_movevalues_x;
 		self.car_in_side  = input_movevalues_y;
 		self.car_in_brake = (input_buttons & PM_BTN_JUMP) ? 1 : 0;   // Space = handbrake / drift
+	}
+	// func_tracktrain: same capture, same reason.  The pmove driver-lock zeroes
+	// input_movevalues for a train driver too, so the throttle has to read the
+	// intent stashed here.  TrackTrain_DriverTick turns it into HL's rising-edge
+	// quarter step (sv_func_traincontrols.qc).
+	if (self.pm_ontrain)
+	{
+		self.tt_in_fwd  = input_movevalues_x;
+		self.tt_in_side = input_movevalues_y;
 	}
 
 	PM_PlayerMove();

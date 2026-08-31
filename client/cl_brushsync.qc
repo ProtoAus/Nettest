@@ -412,6 +412,10 @@ float() CSQC_SolidBrush_Predraw =
 .vector pos2;           // open/top position
 .float speed;           // movement speed
 .float door_locked;     // TRUE if door has DOOR_LOCKED spawnflag
+.float door_toggles;    // TRUE when the door carries TOGGLE (32).  Only a TOGGLE
+                        // door closes on a re-press from TOP; every other door
+                        // ignores the press server-side, so predicting the close
+                        // animates a transition that is never confirmed.
 .float brush_material;  // BREAKABLE_* code (0 = default/concrete);
                         // read by Impact_ClassifyLocal for per-surface
                         // particle effects on the local shooter.
@@ -424,6 +428,9 @@ float() CSQC_SolidBrush_Predraw =
                           // breaks (matches server's BreakableSpawnDebris).
 .float brush_cnt;         // Mapper/spawn-default gib count. Mirrors
                           // self.cnt on the server breakable.
+// .brush_instant_melee (GoldSrc SF_BREAK_CROWBAR) is declared in
+// shared/sh_customdefs.qc — sh_weapon_logic.qc compiles long before this file
+// and is where the melee path reads it.
 .float brush_broken_predicted;  // Local flag: the shooter predicted a
                                 // break on this brush. Gates duplicate
                                 // predicted break sounds until the next
@@ -536,6 +543,14 @@ void() CSQC_SolidBrush_Update =
     if (new_renderfx > 0 && self.renderfx == 0)
         self.renderfx_spawn = cltime;
     self.renderfx = new_renderfx;
+    // GoldSrc alternate-texture selector — see the long note at the matching
+    // WriteByte in server/sv_brushsync.qc.  Nothing else is needed on this side:
+    // .frame is a standard engine field, these entities already draw with
+    // MASK_ENGINE, and pr_csqc.c:471 copies it straight into the framestate the
+    // renderer reads.  THE POSITION OF THIS READ IS LOAD-BEARING — the delta is
+    // an untagged positional stream, so this must stay exactly where its
+    // WriteByte is, and both VMs must be rebuilt together.
+    self.frame = readbyte();
     self.is_aaatrigger = readbyte();
     // Server-intent non-solid bit — TRUE when self.solid == SOLID_NOT
     // on the server.  Without this CSQC always forced SOLID_BSP for
@@ -613,18 +628,35 @@ void() CSQC_SolidBrush_Update =
     else
         self.predraw = __NULL__;
 
+    btype = readbyte();
+    self.brush_is_rotating = readbyte();
+
     // Publish into the shared rotating-brush list so PM_CheckRotatingCarry
     // can mirror the server's carry math during pmove.  Idempotent —
     // the helper checks for a duplicate before linking.  Toggle off
     // when avelocity returns to zero so a stopped brush doesn't keep
     // showing up in the carry walk.
-    if (avel != '0 0 0')
+    //
+    // ...EXCEPT a TRAIN or VEHICLE brush, which must never be on this list:
+    // PM_CheckMovingPushers' train branch already orbits the rider by the
+    // brush's own yaw delta (sh_pmove.qc:3952-4015), so a brush on BOTH lists
+    // gets its rotation applied to the player TWICE per pmove substep.
+    //
+    // func_platrot is the class that has both, and it is the reported "the
+    // player rotates 2x the amount, the rotation is being doubled up" on
+    // hl_c01_a1's `ele_2`.  The server half of this lives in Plat_RotStart
+    // (sv_goldsrc_compat.qc), but fixing it there alone would have changed
+    // nothing here: THIS list is rebuilt purely from the wire's avelocity and
+    // never mirrors the server's membership, so both halves are needed.
+    //
+    // Reading btype first is why those two lines moved above this block — the
+    // brush type arrives after the velocities in the wire, and the decision
+    // cannot be made without it.
+    if (avel != '0 0 0'
+     && btype != BRUSH_TYPE_TRAIN && btype != BRUSH_TYPE_VEHICLE)
         RotatingBrush_AddToList(self);
     else
         RotatingBrush_RemoveFromList(self);
-
-    btype = readbyte();
-    self.brush_is_rotating = readbyte();
 
     sv_state = 0;
     if (btype == BRUSH_TYPE_CONVEYOR)
@@ -642,6 +674,7 @@ void() CSQC_SolidBrush_Update =
         self.speed = readfloat();
         sv_state   = readbyte();
         self.door_locked = readbyte();
+        self.door_toggles = readbyte();	// order MUST match sv_brushsync.qc
 
         // Publish into the shared linear-motion list while the brush
         // is in transit (non-zero velocity).  PM_CheckMovingPushers
@@ -679,10 +712,16 @@ void() CSQC_SolidBrush_Update =
     self.brush_max_health = readshort();
     self.brush_cnt        = readbyte();
 
-    // Broken flag — func_breakable sets this when destroyed and clears
-    // it on round restart. Client flips drawmask/solid instead of
-    // remove()-ing, so the entity slot survives for the next round.
-    float broken = readbyte();
+    // Flag byte.
+    //   bit 0 — broken.  func_breakable sets this when destroyed and clears it
+    //           on round restart.  Client flips drawmask/solid instead of
+    //           remove()-ing, so the entity slot survives for the next round.
+    //   bit 1 — BREAKABLE_INSTANT_CROWBAR (GoldSrc SF_BREAK_CROWBAR).  Needed
+    //           here because the client's breakclaim is what actually spends
+    //           the brush's HP under the default sv_trust_clientbreak 1.
+    float brushflags = readbyte();
+    float broken = brushflags & 1;
+    self.brush_instant_melee    = (brushflags & 2) ? 1 : 0;
     self.brush_broken_confirmed = broken;
 
     // Clear the predicted-break flag ONLY when the server resets the
@@ -962,6 +1001,25 @@ void(entity hit) CSQC_PredictMoverActivate =
         // from TOP state (button_fire guards against UP/TOP).  Only doors
         // can be toggled back from TOP.
         if (hit.brush_type == BRUSH_TYPE_BUTTON)
+            return;
+
+        // ...and of those, ONLY a TOGGLE door.  Door_ActivateSingle
+        // (sv_doors.qc:1063) closes from TOP only when DOOR_TOGGLE is set;
+        // rotdoor_use (sv_doors_rotating.qc:906) does the same with
+        // DOORROT_TOGGLE.  A non-TOGGLE door parked at TOP — the mapper's
+        // `wait -1` "stay open" — is never going to close, so predicting it
+        // starts a rotation the server never confirms: the predraw's 0.05s
+        // mover-state lookahead cap (line 185) freezes the brush a few degrees
+        // shut, no snapshot arrives to correct it because a refused press
+        // dirties no SendFlags, and the replica keeps a non-zero avelocity on
+        // the rotating-brush list so PM_CheckRotatingCarry shoves anyone who
+        // walks into it.  That is the reported "closes for one frame, stops,
+        // and acts buggy on touch".
+        // The predicate is TOGGLE, NOT the "One Way" flag: ONE_WAY (16, HL
+        // SF_DOOR_ONEWAY, doors.cpp:590) only restricts which way the door
+        // swings and says nothing about whether it can close.  On th_ep1_01
+        // three of the twelve affected doors do not carry it at all.
+        if (!hit.door_toggles)
             return;
 
         hit.mover_state = MOVER_STATE_DOWN;

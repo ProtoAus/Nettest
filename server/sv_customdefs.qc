@@ -153,6 +153,13 @@ void(entity player) W_GrappleRelease;
 .float  pp_scrape_var;       // on prop: which scrape variant the active loop is playing — latched at
                              // start and re-used on a volume re-issue, so a material with several
                              // scrape loops (wood 6, plastic 5, concrete 3) doesn't swap timbre mid-slide
+.float  pp_scrape_deadline;  // on prop: watchdog stamp — refreshed on every tick that WANTS the loop
+                             // playing, so it expires only when the thing that was refreshing it died.
+                             // See PhysFiles_ScrapeWatchdog (sv_physprop.qc).
+.float  pp_scrape_reissue_at; // on prop: next time to replay the (non-looping) sample for a long drag
+.vector pp_scrape_prog_org;  // on prop: origin at the last progress sample — see the progress gate in
+.float  pp_scrape_prog_next; // PhysFiles_StartScrape.  A prop that keeps asking to scrape while going
+.float  pp_scrape_muted;     // nowhere (an ODE pile jittering in place) is muted until it really travels.
 .vector car_scrape_normal;   // on car: latched wall normal while grinding along BSP (0 0 0 = not grinding)
 
 // Unified phys-object config (po_*) — set per object BEFORE PhysObj_Setup so the
@@ -263,6 +270,45 @@ float() Map_IsGoldSrc =
 // byte — declared here because SV_UseTarget and brushsync both compile before
 // the door files.
 .float  door_player_usable;
+// Sven's "Only Trigger" (sven-coop.fgd:976).
+//
+// THIS IS A BREAKABLE KEY, NOT AN ACTIVATION KEY, and it used to be read as the
+// latter — "the door answers its target chain and refuses the player outright".
+// In sven-coop.fgd it lives in the Door base class inside a contiguous run of
+// func_breakable keys re-exposed as keyvalues (breakable, fireonbreak, material,
+// instantbreak, weapon, explosion, gibmodel, explodemagnitude, displayname,
+// onlytrigger, breakontrigger, repairable, showhudinfo, immunetoclients,
+// explosivesonly) — the Door base needs them as KEYS because its own spawnflag
+// bits are already spoken for by the door flags.  `onlytrigger` carries the
+// identical display string, "Only Trigger", as func_breakable's spawnflag 1,
+// whose meaning is: only a trigger can BREAK it, damage cannot.
+//
+// Two independent checks agree.  func_train_fg entities carry the key (18 in the
+// corpus), and a train is never "opened", so it cannot be an open-gate; on
+// fallguys_s2 they carry it alongside `armorvalue 500` and `dmg 999999`, i.e. in
+// a hit-points context.  And of the 65 corpus entities that set it, exactly ONE
+// has no targetname — pizza_ya_san1's *38 func_door_rotating — which under the
+// old reading could be opened by literally nothing: not +use, not a shoulder
+// push, not damage (no health key), and not a trigger chain (no name to call).
+// That is the reported "*38 barely opens" door.
+//
+// So it now gates the DAMAGE-open path only (rotdoor_killed), mirroring
+// func_breakable's BREAKABLE_TRIGGER_ONLY, and no longer touches +use, touch, or
+// CSQC prediction.  Caveat worth keeping: Sven Co-op is closed-source, so this
+// rests on the FGD's key grouping plus the corpus distribution, not on
+// decompiled behaviour.
+.float  onlytrigger;
+
+// "A press aimed at this entity must fall THROUGH to whatever is behind it."
+//
+// Split out of onlytrigger, which used to be borrowed for this.  The two are
+// unrelated: this one is the QC spelling of Half-Life's ObjectCaps() withholding
+// FCAP_IMPULSE_USE, so the entity is not in the player's use search at all and
+// SV_UseTarget must report NOT-HANDLED rather than consume the press (the
+// through-walls trace loop and the cone fallback both stop at the first handled
+// entity).  Trigger chains still reach .use normally.  Set by trigger_btarget
+// without SF_BTARGET_USE (sv_th_entities.qc); doors never set it.
+.float  use_passthrough;
 
 // Same shape, same reason: monsters carry a .use purely so trigger chains pass
 // through them, and SV_UseTarget (which compiles before sv_monsters.qc) has to
@@ -273,6 +319,15 @@ float() Map_IsGoldSrc =
 
 entity activator;       // entity that triggered the current use/touch
 float sv_use_is_player_direct;  // TRUE only during SV_PlayerTryUse
+
+// TRUE only while a door's proximity trigger is re-entering door_use /
+// rotdoor_use.  Half-Life's CBaseDoor::DoorTouch gives the player the locked
+// click on a refusal (doors.cpp:496-497, :502-507); a trigger chain hitting the
+// same locked door stays silent.  sv_use_is_player_direct cannot make that
+// distinction because the touch sweep runs from PM_PlayerMove, not
+// SV_PlayerTryUse — hence a second flag rather than widening the first one,
+// which NO_TRIGGER / USE_ONLY discriminate on.
+float sv_use_is_player_touch;
 
 // Player-vs-monster .touch dispatches, counted so "the roach is not squished"
 // can be told apart from "the roach was never touched".  Before the monster
@@ -345,6 +400,16 @@ void(entity victim) SV_Paint_OnDamage;
 .float map_weapon;          // TRUE if this weapon was placed in the map (not dropped)
 .void() map_weapon_spawn;   // spawn function to call on reset
 entity map_weapon_chain;    // linked list of map weapon spawn records
+// The entity SV_DebugSpawnWeapon most recently put on the floor.  That function
+// builds the pickup on a temporary `self` and restores the caller's, so the
+// handle was otherwise unrecoverable — which is fine for the debug menu it was
+// written for, but not for squadmaker, which has to stamp .sq_ownerid onto the
+// child it just dispensed.  A global rather than a return value because the
+// call sites are spread across three compile units.  Declared HERE, ahead of
+// both of them.  It is a global and not a field on purpose: a .field would
+// claim that spelling in the BSP keyvalue namespace (sv_multi_manager.qc
+// MM_CollisionScan explains what that costs).
+entity sv_last_spawned_weapon;
 .entity map_weapon_next;    // next in chain
 .vector map_weapon_origin;  // original spawn position
 .vector map_weapon_angles;  // original spawn angles
@@ -404,28 +469,18 @@ const float LIGHT_START_OFF = 1;
 .float light_state;          // 0 = off, 1 = on (current)
 .float light_default_state;  // re-applied at round restart
 
-// Apply the current on/off state to the lightmap via lightstyle().
-// "m" (109) = full bright (BSP-baked level); "a" (97) = dark.
-// Lights without a switchable style index are no-ops here.
-void() Light_ApplyState =
-{
-	if (self.style <= 0) return;
-	if (self.light_state)
-		lightstyle(self.style, "m");
-	else
-		lightstyle(self.style, "a");
-};
+// "Custom Appearance" — a raw lightstyle string, a..z, where 'a' is black and
+// 'z' is brightest.  Declared here rather than beside global_light_control (its
+// other reader, sv_th_entities.qc) because `light` itself needs it and this file
+// compiles at sv_progs.src:22 against that one's :428.
+.string pattern;
 
-// .use callback — fires when something targets this light.  Each
-// fire flips the on/off state.  Buttons re-fire on auto-return so
-// non-toggle buttons produce a momentary-pulse effect; TOGGLE
-// buttons stay pressed and the light keeps the new state.
-void() Light_Use =
-{
-	if (self.style <= 0) return;
-	self.light_state = self.light_state ? 0 : 1;
-	Light_ApplyState();
-};
+// Bodies live further down this file, immediately after the USE_* constants:
+// Light_Use needs them for CLight's ShouldToggle guard and they are declared at
+// :923-953, below here.  Forward-declared rather than moved wholesale so `light`
+// and Light_RoundReset stay beside the fields they drive.
+void() Light_ApplyState;
+void() Light_Use;
 
 void() light =
 {
@@ -472,6 +527,23 @@ void() Light_RoundReset =
 .float sv_crosshair_disabled;
 .float sv_zoomstage;
 
+// The last point_checkpoint anybody touched, or world.  Read by
+// PlayerPlaceAtSpawnPoint as a respawn override; written by Checkpoint_Touch.
+//
+// A GLOBAL rather than a field on the player because a checkpoint in a co-op
+// campaign is a party-wide fact - one person reaching it moves everybody's
+// respawn forward, which is the whole reason the entity exists.  Declared here
+// rather than in sv_checkpoint.qc because sv_player.qc compiles first and QC
+// forward-declares functions but not variables.
+entity cp_respawn_at;
+
+// The player's torch, as reported by that player's own CSQC (`cmd fl`, handled
+// in SV_ParseClientCommand).  The flashlight is drawn entirely client-side, so
+// this is the server's only knowledge of it and it exists for exactly one
+// consumer: monster AI that is supposed to react to being lit.  Nothing
+// authoritative reads it — see the note at the command handler.
+.float player_flashlight;
+
 // Per-player team fields — auto-networked to each client via clientstat()
 .float player_team;
 .float player_model_index;  // 0-3, which character model the player chose
@@ -515,6 +587,72 @@ float red_team_score;       // rounds won by red team
 // same global cvar copied into each player's slot.
 .float sv_func_tickrate_value;
 
+// ---------------------------------------------------------------------------
+// THE MOVER TICK MUST NOT BE SHORTER THAN THE SERVER'S PHYSICS FRAME.
+// ---------------------------------------------------------------------------
+// Every mover in this mod is a MOVETYPE_PUSH brush that sets a velocity and
+// re-aims on a fixed tick (sv_func_tickrate, 64 Hz for trains, 40 for doors).
+// The engine advances such a brush by
+//
+//     movetime = min(host_frametime, nextthink - ltime)          sv_phys.c
+//     if (WPhys_Push(...)) ltime += movetime;
+//
+// and it is called ONCE per physics frame.  So when the tick is SHORTER than the
+// server's frame, the brush is handed one tick of travel per frame instead of one
+// frame of travel, and it moves at
+//
+//     speed * tick * server_fps
+//
+// A 30 fps server ran every train, door, plat and lift in the game at HALF its
+// authored speed, and nothing said so: the brush was internally consistent -
+// 240 units per second of ITS OWN clock - it was its clock that had stopped
+// keeping up.  Measured on th_ep1_00's intro truck: 99 mover ticks in 3.12
+// real seconds against the 199 a 64 Hz tick asks for, ltime lagging `time` by a
+// steadily growing 11 -> 21 seconds, and the truck arriving at its first corner
+// 14 s after departure instead of 7.  That is the reported "the car doesn't move
+// as early as it should - the title screen appears before it reaches the
+// destination"; the title is on a multi_manager, which runs on the server clock
+// and was never late.
+//
+// The fix is to schedule no faster than the server can actually run, so movetime
+// is host_frametime instead of a clamp.  The mover then travels at exactly
+// `speed` regardless of frame rate; only how often it RE-AIMS changes, which
+// costs a little cornering accuracy on a slow server and nothing else.
+//
+// The interval is MEASURED rather than read from a cvar, because the QC
+// `frametime` global is not the number that matters here (it reports the tick the
+// pusher was given, not the frame it was given it in) and because a server's real
+// frame rate moves with load.  StartFrame samples `time` once per physics frame;
+// the value rises immediately and decays slowly, so one long hitch lengthens the
+// tick for a moment and a sustained slowdown lengthens it for good.
+float sv_mover_frame_interval;   // measured physics-frame length, seconds
+float sv_mover_frame_lasttime;   // previous StartFrame's `time`
+
+// `fallback_hz` is the per-class default used when sv_func_tickrate is unset:
+// 64 for trains, 40 for doors and momentaries, matching what each site used
+// before this was factored out.
+float(float fallback_hz) Mover_TickInterval =
+{
+    float hz = cvar("sv_func_tickrate");
+    if (hz <= 0)   hz = fallback_hz;
+    if (hz > 200)  hz = 200;
+
+    float iv = 1.0 / hz;
+    if (sv_mover_frame_interval > iv)
+        iv = sv_mover_frame_interval;
+
+    // CAPPED AT 0.05, and the number is not arbitrary: it is the same bound
+    // CSQC clamps its forward extrapolation of a mover to (cl_brushsync.qc).
+    // Past that the client has nothing left to extrapolate and the brush visibly
+    // freezes between snapshots, so lengthening the tick further would trade a
+    // speed error the player cannot see for a stutter they can.  A server slower
+    // than 20 Hz keeps the old behaviour - movers run slow - which is the lesser
+    // of the two and is a server-performance problem, not a mover problem.
+    if (iv > 0.05)
+        iv = 0.05;
+    return iv;
+};
+
 // Per-player stats for gamemode system
 .float sv_round_phase;
 .float sv_freeze_timeleft;
@@ -524,6 +662,11 @@ float red_team_score;       // rounds won by red team
 // Death tracking
 .float is_dead;             // TRUE if player died this round
 .float death_time;          // server time when player died (0 = alive, -1 = past delay)
+// Latched TRUE by the lethal-headshot gib branch in sv_weapons.qc, cleared by
+// PlayerSpawn.  The medkit's revive reads it: Sven's rule is that a gibbed body
+// cannot be brought back, and once the corpse's modelindex has been zeroed there
+// is nothing else left to ask.
+.float death_was_gib;
 .float sv_death_delay_left; // clientstat: seconds left in death delay
 .float sv_is_dead;          // clientstat: 1 when dead, 0 when alive
 .float sv_blue_score;       // clientstat: blue team round wins
@@ -541,11 +684,28 @@ float red_team_score;       // rounds won by red team
 .float sv_armor;       // clientstat mirror (STAT_ARMOR)
 .float has_helmet;     // Kevlar+Helmet — cuts headshot damage
 .float has_defusekit;  // doubles bomb-defuse speed (defusing team only)
+// The HEV suit, as a BOOLEAN, separate from .armor.  Half-Life's item_suit
+// grants no armour at all - it sets pev->weapons & (1<<WEAPON_SUIT), which is
+// what gates the HUD, the flashlight and the voice (dlls/items.cpp:174-201).
+// This mod deliberately diverges and grants armour instead (see the long note
+// on GoldSrc_Suit_Touch), because none of those things are gated here - but
+// "did you pick up a suit" is still a question maps ask, and .armor cannot
+// answer it because item_battery raises that too.  Sven's trigger_suitcheck
+// reads exactly this bit.  NOTHING is gated on it; it is a signal, not a rule.
+.float has_suit;
 .float money_started;  // 1 once mp_cashstart granted (so first team-join inits once)
 .float buyzone_time;   // last server time the player overlapped an allowed func_buyzone
 .float sv_in_buyzone;  // clientstat mirror (STAT_IN_BUYZONE) — 1 when the player may buy
 .float sv_can_plant_c4; // clientstat mirror (STAT_CAN_PLANT) — 1 when the C4 carrier may plant here
+.float sv_can_medkit;   // clientstat mirror (STAT_CAN_MEDKIT) — MEDKIT_CAN_HEAL | MEDKIT_CAN_REVIVE
+.float sv_can_soflam;   // clientstat mirror (STAT_CAN_SOFLAM) — 1 when a strike can be called
 .float sv_bomb_planted; // clientstat mirror (STAT_BOMB_PLANTED) — 1 while a planted_c4 is live in Defuse
+// clientstat mirror (STAT_SHIELD) — SHIELD_CARRIED | SHIELD_DEPLOYED.  The
+// LOCAL player's copy: the shield decides their view model, their movement
+// speed and whether their trigger works, and CSQC predicts all three.  Other
+// players' shields ride the visual proxy's bodygroup bits instead (sv_player.qc),
+// because that is what CSQC already reads to decide how to draw someone else.
+.float sv_shield_state;
 
 // nettest progression spine (Part 1) — persistent XP / levels.  Authoritative
 // .prog_* fields load from / save to the sqlite player store (sv_progression.qc);
@@ -743,6 +903,103 @@ const float USE_ON     = 1;
 const float USE_SET    = 2;
 const float USE_TOGGLE = 3;
 
+// USE_UNSET is NOT a GoldSrc value.  It exists because USE_OFF is 0, and 0 is
+// also what a QC global reads before anyone assigns it -- so "the caller wants
+// Off" and "the caller never said" were the same bit pattern, and
+// Trigger_UseTargets (sv_doors.qc) resolved the ambiguity in favour of the
+// latter by rewriting 0 to USE_TOGGLE.  Net effect: EVERY explicit Off in the
+// mod was silently promoted to Toggle at the last dispatch hop.
+//
+// The visible casualty was th_ep1_00's intro.  Its `roadratmngr` multi_manager
+// says `"pickup" "0#0"` (Off at t=0) and `"pickup#1" "8#1"` (On at t=8) to stop
+// the truck while a headcrab crosses the road.  MM_ValueUseType
+// (sv_multi_manager.qc:104-121) decoded both correctly; the Off then arrived at
+// func_tracktrain_use as USE_TOGGLE, and the measured log line quoted in
+// sv_func_tracktrain.qc says exactly that -- `useType=3`.
+//
+// -1 is chosen so the value is outside the GoldSrc range: every `== USE_OFF`
+// test in the tree now means what it says.
+//
+// THE `sub_use_type ? sub_use_type : USE_TOGGLE` IDIOM IS STILL WRONG AND MUST
+// BE CONVERTED EVERYWHERE.  Be clear about why, because it looks harmless: on
+// USE_UNSET (-1) the ternary takes the truthy branch and passes -1 along, which
+// Trigger_UseTargets then normalises back to USE_TOGGLE -- so the *unset* case
+// still lands correctly and hides the problem.  The case it gets wrong is the
+// one that matters: an explicit USE_OFF is 0, which is FALSY, so the ternary
+// throws it away and substitutes USE_TOGGLE exactly as before.  Write
+// `(sub_use_type == USE_UNSET) ? USE_TOGGLE : sub_use_type` instead.
+const float USE_UNSET  = -1;
+
+// ---------------------------------------------------------------------------
+//  `light` — the two halves that need the USE_* constants above.
+//  Forward-declared beside the light fields further up this file.
+// ---------------------------------------------------------------------------
+// useType pass-through global — declared authoritatively in sv_doors.qc:78.
+// Re-declared here for the same reason sv_triggers.qc and sv_th_entities.qc do
+// it: QC accepts identical re-decls, and this file compiles first.
+float sub_use_type;
+
+// Apply the current on/off state to the lightmap via lightstyle().
+// "m" (109) = full bright (BSP-baked level); "a" (97) = dark.
+// Lights without a switchable style index are no-ops here.
+void() Light_ApplyState =
+{
+	if (self.style <= 0) return;
+	if (self.light_state)
+	{
+		// THE PATTERN IS THE "ON" APPEARANCE, not full-bright.  CLight::Spawn:
+		//     if (FBitSet(pev->spawnflags, SF_LIGHT_START_OFF))
+		//         LIGHT_STYLE(m_iStyle, "a");
+		//     else if (m_iszPattern)
+		//         LIGHT_STYLE(m_iStyle, (char *)STRING(m_iszPattern));
+		//     else
+		//         LIGHT_STYLE(m_iStyle, "m");
+		//                                   (halflife/dlls/lights.cpp:96-101)
+		// A custom style index plus a `pattern` key is how GoldSrc authors a
+		// flashing or pulsing SWITCHABLE lamp.  th_escape's start button is
+		// style 70 with pattern "aaaaaaaazzzzzzzz" — eight frames dark, eight
+		// bright, i.e. a slow yellow blink — and forcing "m" here is exactly why
+		// it came up as a solid lamp instead.
+		if (self.pattern && self.pattern != "")
+			lightstyle(self.style, self.pattern);
+		else
+			lightstyle(self.style, "m");
+	}
+	else
+		lightstyle(self.style, "a");
+};
+
+// .use callback — fires when something targets this light.
+//
+// KNOWN DIVERGENCE, kept deliberately: Half-Life gates all of this on
+// `m_iStyle >= 32` (lights.cpp:94, :112), leaving styles 1..31 — the BSP
+// compiler's own baked animation slots — alone.  This tree gates on `style > 0`
+// instead, which also drives those.  Narrowing it to HL's rule would stop
+// switchable lights on styles 1..31 responding at all, and native maps here may
+// rely on them, so the wider gate stays until that is measured.
+void() Light_Use =
+{
+	if (self.style <= 0) return;
+
+	// CBaseToggle::ShouldToggle (applied at lights.cpp:114): an explicit ON to a
+	// lamp already on, or an explicit OFF to one already off, is a no-op.  Only
+	// TOGGLE/SET actually flip unconditionally.  Without this every fire flipped,
+	// so th_escape's startbutt_ms_mm — which fires its lights with useType 1 (On)
+	// — would turn one OFF whenever it happened to already be lit.
+	float ut = sub_use_type;
+	if (ut != USE_TOGGLE && ut != USE_SET && ut != USE_UNSET)
+	{
+		if (self.light_state && ut == USE_ON)   return;
+		if (!self.light_state && ut == USE_OFF) return;
+	}
+
+	// HL flips unconditionally once ShouldToggle has passed — which lands on the
+	// right state for an explicit ON/OFF precisely because the guard above has
+	// already rejected the cases where a flip would be wrong.
+	self.light_state = self.light_state ? 0 : 1;
+	Light_ApplyState();
+};
+
 // ---------------------------------------------------------------------------
 // GoldSrc game_text keys.
 //
@@ -767,6 +1024,139 @@ const float USE_TOGGLE = 3;
 // hand in that same hook, since `entity` cannot be a QC field name.
 .string m_iszentity;    // monster to claim/speak: a targetname, or a classname
 
+// Sven Co-op's `weaponbox` — a container whose keyvalues ARE its contents, one
+// key per ammo pool.  Declared here for the same reason as the game_text keys:
+// ED_ParseUnknownEpair harvests them and lives at compile position 112, while
+// the class that reads them (sv_goldsrc_ammo.qc) is at 228.
+//
+// Deliberately NOT named after the BSP keys.  A `.float buckshot` or `.float
+// uranium` would be claiming very generic words globally in a single-namespace
+// language, and `tripmine`/`Snarks` would sit next to the real .ammo_tripmine /
+// .ammo_snark fields waiting to be confused with them.  The wbox_ prefix keeps
+// the mapping explicit and the collision surface at zero.
+.float wbox_9mm;
+.float wbox_357;
+.float wbox_buckshot;
+.float wbox_bolts;
+.float wbox_556;
+.float wbox_argren;
+.float wbox_rockets;
+.float wbox_uranium;
+.float wbox_762;         // the BSP key is "m40a1" — Sven names it after the rifle
+.float wbox_spore;
+.float wbox_handgrenade;
+.float wbox_satchel;
+.float wbox_tripmine;
+.float wbox_snarks;
+
+// func_breakable / func_pushable "Spawn On Break": an index into the Sven FGD's
+// 39-entry pickup table, dispatched by Breakable_SpawnObject.  Declared HERE
+// rather than beside the rest of the breakable keys in sv_func_pushable.qc
+// (position 151) because sv_breakable.qc reads it at position 28 - functions
+// can be forward-declared in QC, fields cannot.
+// .float, not .string: the FGD types it as choices, so the engine converts the
+// "17" in the entity lump to 17 and the dispatch compares numerically.
+.float spawnobject;
+
+// func_breakable / func_pushable "Explode Magnitude (0=none)".  Same reason as
+// spawnobject for living here: sv_breakable.qc (position 28) fires the explosion
+// and sv_func_pushable.qc (position 151) is where the rest of the key block sits.
+//
+// HL stores it in pev->impulse via CBreakable::KeyValue (func_break.cpp:111) and
+// reads it back through ExplosionMagnitude() (func_break.h:50); Explodable() is
+// simply `> 0`, which is also the FGD default, so an unset brush never explodes.
+//
+// NOT to be confused with `ExplodeDamage`, which three hl_c05_a1 breakables set.
+// That key appears in no FGD, no Sven manual page and nowhere in the HL SDK, so
+// Sven ignores it too - honouring it here would be a divergence AWAY from the
+// reference, not toward it.  Left unbound deliberately.
+.float explodemagnitude;
+
+// ---------------------------------------------------------------------------
+//  Sven Co-op's InventoryRules baseclass (sven-coop.fgd:424-461).
+//
+//  Declared HERE and not in server/sv_item_inventory.qc (position 265), which
+//  is where the rest of the inventory lives, because the entities that HONOUR
+//  these keys all compile earlier: sv_doors.qc (185), sv_trigger_once_multi.qc
+//  (193), sv_buttons.qc (215), sv_trigger_hurt.qc (221),
+//  sv_trigger_changelevel.qc (241).  QC forward-declares functions but not
+//  fields — same constraint, and the same resolution, as `spawnobject` above.
+//
+//  Sven's own list of the classes that carry this block is func_button,
+//  func_rot_button, func_door, func_door_rotating, func_tankcontrols,
+//  func_traincontrols, func_water, trigger_changelevel, trigger_once,
+//  trigger_hurt and trigger_multiple.
+//
+//  item_inventory reuses the first six spellings for its OWN collect filters
+//  (the FGD labels them "Collect: ..." there and "Inventory: ..." here, but
+//  they are the same key names and the same meaning), so those are shared
+//  rather than duplicated.
+//
+//  DECLARING THESE IS NOT COSMETIC.  ED_FindField runs before the
+//  ED_ParseUnknownEpair hook, so until now every one of these keys fell
+//  through to MM_AddSlot and allocated a junk mm_slot edict — and the three
+//  bare `item_*` spellings fell into the game_player_equip harvest instead and
+//  allocated a gpe_item child that nothing ever reaps.  Measured on th_escape:
+//  36 permanently-leaked gpe_item edicts plus junk slots carrying
+//  key="weight" value="16" and key="effect_damage" value="100.0".  Binding the
+//  fields delivers the values AND stops the leak in one move.
+// ---------------------------------------------------------------------------
+.string item_name_required;         // activator must hold ALL of these
+.string item_group_required;        // ...from these group(s)
+.float  item_group_required_num;    // how many; 0 = every item that EXISTS in the group
+.string item_name_canthave;         // activator must hold NONE of these
+.string item_group_canthave;        // ...from these group(s)
+.float  item_group_canthave_num;    // how many fails it; 0 = not even one
+.string target_on_fail;             // fired when the rules reject the activator
+
+.float  pass_ignore_use_triggers;   // suppress the matched items' target_on_use
+.string pass_drop_item_name;        // on pass: force-drop these
+.string pass_drop_item_group;
+.float  pass_ignore_drop_triggers;
+.string pass_return_item_name;      // on pass: send these home
+.string pass_return_item_group;
+.float  pass_ignore_return_triggers;
+.string pass_destroy_item_name;     // on pass: destroy these  <- th_escape's drop-off pads
+.string pass_destroy_item_group;
+.float  pass_ignore_destroy_triggers;
+
+// Why the holder is losing their inventory.  Passed to Inv_DropAll
+// (sv_item_inventory.qc), and declared HERE because PlayerKilled is in
+// sv_weapons.qc at position 45 — it can forward-declare the function but not
+// these values.
+//
+// The two keep flags do not compose the way they read: holder_keep_on_respawn
+// cannot save an item holder_keep_on_death already dropped, because the death
+// comes first.  Surviving a full death -> respawn cycle needs both set.
+const float INV_LEAVE_DEATH   = 0;   // honour the item's holder_keep_on_death
+const float INV_LEAVE_RESPAWN = 1;   // honour the item's holder_keep_on_respawn
+const float INV_LEAVE_GONE    = 2;   // holder is disconnecting; nothing stays
+
+// `acceleration` is a SHARED BSP key spelling: trigger_camera reads it as its
+// units/sec^2 dolly ramp, and func_trackvehicle reads it as the 1..10 engine
+// responsiveness dial from Sven's func_trackvehicle.as.  Same name, same type,
+// different classes — so one declaration, not two.
+//
+// A map script's override for the player model.  Empty means "use the team /
+// model_index table", which is every map but one.  Set by th_escape's
+// StartCharacters stand-in (server/sv_mapscript_thescape.qc) to one of the
+// sixteen They Hunger character models, and read by PlayerApplyModel
+// (sv_player.qc) — declared here because those two files are 63 apart in the
+// compile order and neither can see the other's fields.
+//
+// Cleared on disconnect, NOT on respawn: the character you were assigned is
+// yours for the map, and th_escape respawns players three times in its own
+// ending sequence alone.
+.string player_model_override;
+
+// It used to live in sv_trigger_camera.qc, which compiles at position 433.
+// sv_func_trackvehicle.qc has to sit immediately after sv_func_tracktrain.qc
+// (position 255) because it inherits that file's TT_* constants and .tt_*
+// FIELDS, and QC forward-declares functions but not fields — so the camera's
+// declaration was 177 files too late to be visible.  Moving it up is the only
+// resolution that keeps both classes reading the same bound key.
+.float  acceleration;
+
 .float  gt_effect;      // 0 fade in/out, 1 credits, 2 typewriter
 .float  gt_x;           // 0..1 screen fraction, -1 = centre
 .float  gt_y;
@@ -790,8 +1180,53 @@ const float USE_TOGGLE = 3;
 .entity gpe_next_item;    // on each gpe_item: next in chain
 // netname holds the classname to give, count holds the quantity.
 
+// ---------------------------------------------------------------------------
+// trigger_createentity's harvested child keys (server/sv_trigger_createentity.qc).
+//
+// Same shape and same reason as the game_player_equip chain above: the mapper
+// writes an arbitrary set of '-'-prefixed keyvalues ("-model" "*158") that are
+// meant to be replayed onto a CHILD entity, so there is no fixed key set to
+// declare and ED_ParseUnknownEpair has to harvest them onto a chain.
+//
+// The chain itself REUSES gpe_first_item / gpe_next_item rather than growing a
+// second pair of link fields — a trigger_createentity and a game_player_equip
+// are never the same edict, and a census of all 121 corpus maps finds a
+// '-'-prefixed key on exactly two classnames (trigger_createentity and
+// fallguys' trigger_create_ents), neither of which hands out equipment.  Only
+// the key/value payload needs its own fields, and it needs BOTH as strings —
+// the gpe node's `count` is a float.
+//
+// Declared here rather than in sv_trigger_createentity.qc because the harvest
+// happens in server/sv_multi_manager.qc, which compiles far earlier, and QC
+// forward-declares functions but not FIELDS.
+// ---------------------------------------------------------------------------
+.string ce_child_key;     // on each ce_key node: the key with its '-' stripped
+.string ce_child_value;   // on each ce_key node: the value, verbatim
+
 // Shared by func_vehicle (track width, for ground-follow roll sampling) and
 // env_laser (Sven's beam-width key is `width`, not env_beam's `BoltWidth`).
 // Declared here because sv_env_laser.qc compiles at 118 and sv_func_vehicle.qc
 // at 132 — the laser needs it first.
 .float  width;
+
+// ---------------------------------------------------------------------------
+// the `sound` map key, which CANNOT be a field
+// ---------------------------------------------------------------------------
+// `sound` is builtin #8 (ftedefs/fteextensions.qc:1693), and QuakeC puts fields
+// and functions in ONE namespace — so `.float sound;` does not merely shadow the
+// builtin, it makes every sound() call in the tree a compile error.  Exactly the
+// collision sv_goldsrc_ammo.qc:504 documents for `ammo_357`, and it has the same
+// shape of answer: the key cannot bind directly, so something else has to carry
+// it.  There is no spawnfunc_-style prefix for a KEY, so the value is harvested
+// in ED_ParseUnknownEpair (sv_multi_manager.qc) into the field below.
+//
+// A STRING, not a float, because the corpus disagrees about the type: 8 uses on
+// monster_tentacle are the integer impact-material selector (tentacle.cpp:338-342
+// reads it with atoi), while 37 on Sven's own trigger_qualifier and
+// trigger_hudsprite are .ogg PATHS.  One field serves both; each reader converts.
+//
+// Declared here rather than beside its one consumer because the harvest happens
+// in sv_multi_manager.qc at :177 and mon_tentacle.qc compiles at :293 — QC
+// forward-declares functions but not fields, the same reason the ce_child_* pair
+// above lives here.
+.string hl_soundkey;

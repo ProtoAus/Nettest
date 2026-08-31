@@ -212,7 +212,7 @@ void() CSQC_PredictRebarCommand =
             {
                 sound(self, CHAN_WEAPON, "sounds/weapons/wpn_rebar/fire.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_MuzzleFlash();
+                CSQC_MuzzleFlash(MUZZLE_TINT_DEFAULT);
 
                 // Instant hitscan trace — spawn stuck rebar + impact at hit point
                 {

@@ -40,6 +40,13 @@ void() BrushSync_ApplyRenderKeys;        // sv_brushsync.qc
 // HL sprite flags.
 const float SF_SPRITE_START_ON  = 1;
 const float SF_SPRITE_PLAY_ONCE = 2;
+// Sven's "Once + Remove" (sven-coop.fgd:2036) — play through once, then delete
+// the entity rather than just hiding it.  It was unimplemented, and the failure
+// was not benign: a bit-4 sprite has bit 2 CLEAR, so it fell through to the
+// toggle arm at the bottom of env_sprite_use and latched on PERMANENTLY where
+// it should have flashed once and gone.  117 env_sprites in the corpus set this
+// bit; 72 of them set it alone.
+const float SF_SPRITE_ONCE_REMOVE = 4;
 
 // `framerate` and `wait` are reused from elsewhere; declare if not
 // already in scope.  `.float framerate` is declared in sv_cycler_sprite.qc
@@ -103,6 +110,14 @@ void() env_sprite_anim_think =
         // One-shot: stop on the last frame.
         if (self.frame >= self.es_frameend)
         {
+            // "Once + Remove" deletes rather than hides — HL's CSprite::Animate
+            // ends on UTIL_Remove for that flag instead of TurnOff.
+            if (self.spawnflags & SF_SPRITE_ONCE_REMOVE)
+            {
+                env_sprite_hide();
+                remove(self);
+                return;
+            }
             env_sprite_hide();
             return;
         }
@@ -118,9 +133,22 @@ void() env_sprite_anim_think =
     self.nextthink = time + (1.0 / self.es_framerate);
 };
 
+// SF_SPRITE_ONCE_REMOVE's tail: HL's CSprite::Animate calls UTIL_Remove instead
+// of TurnOff when the sprite is flagged to remove itself, so the entity is gone
+// rather than merely hidden.  Hide first so any client already drawing it stops.
+void() env_sprite_hide;
+void() env_sprite_once_remove =
+{
+    env_sprite_hide();
+    remove(self);
+};
+
 void() env_sprite_use =
 {
-    if (self.spawnflags & SF_SPRITE_PLAY_ONCE)
+    // "Once + Remove" implies "Once" — the two are one behaviour in Sven's FGD,
+    // and a bit-4 sprite does NOT also set bit 2.  Without this the whole
+    // play-once arm below is skipped and the sprite latches on forever.
+    if (self.spawnflags & (SF_SPRITE_PLAY_ONCE | SF_SPRITE_ONCE_REMOVE))
     {
         // Single-shot — fire, schedule auto-hide.  If already
         // visible (a retrigger arrived mid-play), HL hides
@@ -142,7 +170,8 @@ void() env_sprite_use =
         if (self.wait > 0)
         {
             self.es_frameend = 0;
-            self.think       = env_sprite_hide;
+            self.think       = (self.spawnflags & SF_SPRITE_ONCE_REMOVE)
+                             ? env_sprite_once_remove : env_sprite_hide;
             self.nextthink   = time + self.wait;
             return;
         }
@@ -161,7 +190,8 @@ void() env_sprite_use =
         }
 
         self.es_frameend = 0;
-        self.think       = env_sprite_hide;
+        self.think       = (self.spawnflags & SF_SPRITE_ONCE_REMOVE)
+                         ? env_sprite_once_remove : env_sprite_hide;
         self.nextthink   = time + 1.0;
         return;
     }

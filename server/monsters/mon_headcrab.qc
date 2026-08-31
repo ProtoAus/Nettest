@@ -36,45 +36,44 @@ const float HC_LEAP_RANGE   = 256;
 const float HC_ATTACK_DELAY = 2.0;	// m_flNextAttack, set on launch
 const float HC_LEAP_MAXVEL  = 650;	// "don't jump too far/fast"
 
+// headcrab.cpp:118-150.  ONE deliberate divergence, recorded here rather than
+// silently: Valve's pIdleSounds is hc_idle1-3 and its pAlertSounds is hc_alert1
+// alone, but hc_idle4, hc_idle5 and hc_alert2 all ship in valve/sound/headcrab/
+// and are unmistakably headcrab idles.  705 placements is the most of any class
+// in the corpus, so the extra variety is worth keeping and costs nothing.
+//
+// hc_pain1-3 were precached by this file and played by NOTHING - the class had no
+// .ai_painsound at all.  That is the defect this block fixes.
+const string SND_HC_IDLE   = "headcrab/hc_idle1.wav headcrab/hc_idle2.wav headcrab/hc_idle3.wav headcrab/hc_idle4.wav headcrab/hc_idle5.wav";
+const string SND_HC_ALERT  = "headcrab/hc_alert1.wav headcrab/hc_alert2.wav";
+const string SND_HC_ATTACK = "headcrab/hc_attack1.wav headcrab/hc_attack2.wav headcrab/hc_attack3.wav";
+const string SND_HC_PAIN   = "headcrab/hc_pain1.wav headcrab/hc_pain2.wav headcrab/hc_pain3.wav";
+const string SND_HC_DIE    = "headcrab/hc_die1.wav headcrab/hc_die2.wav";
+
 void() Headcrab_Precache =
 {
 	precache_model("models/headcrab.mdl");
-	precache_sound("headcrab/hc_idle1.wav");
-	precache_sound("headcrab/hc_idle2.wav");
-	precache_sound("headcrab/hc_idle3.wav");
-	precache_sound("headcrab/hc_idle4.wav");
-	precache_sound("headcrab/hc_idle5.wav");
-	precache_sound("headcrab/hc_alert1.wav");
-	precache_sound("headcrab/hc_alert2.wav");
-	precache_sound("headcrab/hc_attack1.wav");
-	precache_sound("headcrab/hc_attack2.wav");
-	precache_sound("headcrab/hc_attack3.wav");
-	precache_sound("headcrab/hc_die1.wav");
-	precache_sound("headcrab/hc_die2.wav");
-	precache_sound("headcrab/hc_headbite.wav");
-	precache_sound("headcrab/hc_pain1.wav");
-	precache_sound("headcrab/hc_pain2.wav");
-	precache_sound("headcrab/hc_pain3.wav");
+	AI_SndPrecache(SND_HC_IDLE);
+	AI_SndPrecache(SND_HC_ALERT);
+	AI_SndPrecache(SND_HC_ATTACK);
+	AI_SndPrecache(SND_HC_PAIN);
+	AI_SndPrecache(SND_HC_DIE);
+	precache_sound("headcrab/hc_headbite.wav");	// direct sound() call; keeps F210
 };
 
 // ---------------------------------------------------------------------------
 // sounds
 // ---------------------------------------------------------------------------
+// The idle keeps its own function rather than becoming a plain .ai_snd_idle: HL
+// plays a crab's idle at ATTN_IDLE, and the entity carries ONE .ai_snd_atten for
+// all four families.  Sven's `gag` key means "this one keeps quiet"; AI_SndPlay
+// honours it, so a gagged monster still runs the same task list and just makes no
+// noise doing it.
 void() Headcrab_IdleSound =
 {
-	// Sven's `gag` key means "this one keeps quiet".  Honoured here rather than
-	// in the schedule so a gagged monster still runs the same task list.
 	if (self.gag)
 		return;
-	float n = ceil(random() * 5);
-	sound(self, CHAN_VOICE, sprintf("headcrab/hc_idle%g.wav", n), 1, ATTN_IDLE);
-};
-
-void() Headcrab_AlertSound =
-{
-	if (self.gag)
-		return;
-	sound(self, CHAN_VOICE, sprintf("headcrab/hc_alert%g.wav", ceil(random() * 2)), 1, ATTN_NORM);
+	AI_Sound(self, CHAN_VOICE, AI_SndPick(SND_HC_IDLE), 1, ATTN_IDLE);
 };
 
 // ---------------------------------------------------------------------------
@@ -93,6 +92,22 @@ void() Headcrab_LeapTouch =
 	if (other.takedamage != DAMAGE_YES && other.classname != "player")
 		return;
 
+	// NEVER BITE YOUR OWN KIND.  headcrab.cpp:350-353:
+	//     if ( pOther->Classify() == Classify() )
+	//         return;
+	// This guard was dropped when the rest of LeapTouch was ported, and it is most
+	// of the "headcrabs and houndeyes kill each other" report.  A leap is a physical
+	// touch, so without it a crab launching at the player bites every crab and every
+	// other monster it clips on the way - and with 705 headcrab placements in the
+	// corpus that is a lot of accidental collateral.  Note this is deliberately a
+	// CLASS test rather than a classname one: HL's Classify() groups the headcrab
+	// variants together, so a baby crab does not bite a standard one either.
+	//
+	// It reads AI_ClassOf rather than .ai_class directly so a map's `classify`
+	// override is honoured on both sides, exactly as the faction layer does.
+	if (AI_ClassOf(other) == AI_ClassOf(self))
+		return;
+
 	// Back on the ground: the leap is over, so this is just a bump.
 	if (self.flags & FL_ONGROUND)
 	{
@@ -104,7 +119,7 @@ void() Headcrab_LeapTouch =
 	if (dmg <= 0)
 		dmg = HC_DAMAGE_DEFAULT;
 
-	sound(self, CHAN_WEAPON, "headcrab/hc_headbite.wav", 1, ATTN_NORM);
+	AI_Sound(self, CHAN_WEAPON, "headcrab/hc_headbite.wav", 1, ATTN_NORM);
 	W_ApplyDamage(self, other, dmg);
 
 	self.touch = __NULL__;
@@ -165,8 +180,7 @@ void() Headcrab_Event =
 	self.ai_nextattack = time + HC_ATTACK_DELAY;
 	self.touch         = Headcrab_LeapTouch;
 
-	if (!self.gag)
-		sound(self, CHAN_VOICE, sprintf("headcrab/hc_attack%g.wav", ceil(random() * 3)), 1, ATTN_NORM);
+	AI_SndPlay(self, CHAN_VOICE, SND_HC_ATTACK);
 };
 
 // ---------------------------------------------------------------------------
@@ -187,8 +201,9 @@ void() Headcrab_CheckAttack =
 
 void() Headcrab_Death =
 {
-	if (!self.gag)
-		sound(self, CHAN_VOICE, sprintf("headcrab/hc_die%g.wav", ceil(random() * 2)), 1, ATTN_NORM);
+	AI_SndPlay(self, CHAN_VOICE, SND_HC_DIE);
+	// Disarm the leap hook.  A crab killed IN FLIGHT still carries an armed touch,
+	// and a corpse that bites is not a corpse.
 	self.touch = __NULL__;
 };
 
@@ -232,8 +247,32 @@ void(entity m) Headcrab_ClassInit =
 	// has never been its ground speed - it is the LEAP, which is applied by anim
 	// event and is unaffected by this.  At 150 it chased the player down like a
 	// dog, which is not how they behave in Half-Life at all.
+	//
+	// Re-measured against every headcrab model actually mounted, and the stock
+	// figures above are confirmed exact - hlclassic/headcrab.mdl is walk 9.54 /
+	// run 50.20, and the opfor, bm_sts, cards/ori and svencoop variants are all
+	// within a unit of it.
 	m.ai_speed_walk = 10;
 	m.ai_speed_run  = 50;
+
+	// THE THEY HUNGER CRAB IS A DIFFERENT MODEL WITH DIFFERENT AUTHORED PACE.
+	// models/hunger/hungercrab.mdl runs its walk at 60 fps over 36 frames and
+	// its run at 60 fps over 31, giving walk 15.43 / run 78.00 by the same
+	// GetSequenceInfo formula - roughly 1.55x the stock crab both ways.  Driving
+	// it at the stock numbers makes the feet skate badly, which is most visible
+	// in th_ep1_00's opening: `ratty` crosses the road in front of the stopped
+	// pickup on three scripted_sequence marks, and at stock pace the animation
+	// runs ahead of the body for the whole crossing.
+	//
+	// A table rather than a derivation because no QC builtin exposes
+	// seq->linearmovement; the numbers above are parsed straight out of the .mdl
+	// headers.  Add a row if another crab model turns up with its own pace.
+	if (m.model == "models/hunger/hungercrab.mdl")
+	{
+		m.ai_speed_walk = 15.4;
+		m.ai_speed_run  = 78;
+	}
+
 	m.ai_yaw_speed  = 280;
 	m.ai_yawspeed   = Headcrab_YawSpeed;
 
@@ -242,12 +281,14 @@ void(entity m) Headcrab_ClassInit =
 	// class override that only re-derives the generic answer is a place for the
 	// two to drift apart.
 	m.ai_checkattack = Headcrab_CheckAttack;
-	m.ai_idlesound   = Headcrab_IdleSound;
-	m.ai_alertsound  = Headcrab_AlertSound;
+	m.ai_idlesound   = Headcrab_IdleSound;	// ATTN_IDLE; see the note above it
+	m.ai_snd_alert   = SND_HC_ALERT;
+	m.ai_snd_pain    = SND_HC_PAIN;		// THE MISSING HOOK: three precached
+						// samples the class could never reach
 	m.ai_event       = Headcrab_Event;
 	m.ai_death       = Headcrab_Death;
 
-	if (m.bloodcolor <= 0)
+	if (m.bloodcolor == 0)
 		m.bloodcolor = 195;		// HL BLOOD_COLOR_GREEN
 };
 

@@ -26,13 +26,38 @@
 // Compile order: listed in sv_progs.src before sv_bots.qc + sv_main.qc.
 // ----------------------------------------------------------------------------
 
-const float NAV_NODE_MAX   = 2048;	// hard cap (logs + caps cleanly if exceeded — never overruns)
+// Hard cap (logs + caps cleanly if exceeded — never overruns).
+//
+// 4096 WAS TRIED AND REVERTED — do not raise this again without re-measuring.
+// desertcircle fills this array exactly and still comes out in 10 components with
+// 90.7% of nodes in the largest, so the cap genuinely is the binding constraint on
+// its connectivity, and the supplement flood is bounded by this constant alone
+// (see nav_supp_phase).  Doubling it measured:
+//
+//     nodes 2048 -> 4096, largest component 90.7% -> 97.3%, components 10 -> 9
+//     BUT map-load nav build 0.364s -> 8.53s, link-slot evictions 0 -> 93,
+//     qwprogs.dat 9.3MB -> 14.4MB, and fteqcc compile ~40s -> >300s
+//
+// 6.6% more connectivity is not worth a 23x load-time stall on every map plus a
+// 5MB progs and a five-minute build.  The same symptom — monsters spending their
+// wander legs on goals they cannot reach — is addressed for free by the component
+// filter in Nav_PickRoamGoal instead.  If this is revisited, the thing to fix is
+// the superlinear link-building cost, not the constant.
+const float NAV_NODE_MAX   = 2048;
 const float NAV_LINK_MAX   = 16;	// neighbours per node
 const float NAV_PATH_MAX   = 128;	// longest path / reconstruct buffer
 const float NAV_QUEUE_MAX  = 1024;	// flood BFS ring buffer
 
 const float NAV_NODE_HEIGHT = 32;	// node floats this far above the floor
-const float NAV_STEP_HEIGHT = 22;	// max step a link may climb
+// Max step a link may climb.  This WAS 22, which is not a number the engine has
+// ever agreed to: walkmove steps by movevars.stepheight (server/sv_move.c:215),
+// which is PM_DEFAULTSTEPHEIGHT = 18 (common/bothdefs.h:1163) unless pm_stepheight
+// is set, and the runtime AI already knows that - AI_REACH_STEP is 18
+// (sv_ai_move.qc:57).  The builder promising 22 meant every gate keyed off this
+// constant would approve a climb walkmove then refuses, and a monster handed a
+// waypoint it cannot reach grinds against the obstruction playing its walk cycle.
+// If it ever needs to vary, it has to come from pm_stepheight, not from taste.
+const float NAV_STEP_HEIGHT = 18;
 const float NAV_FLOOR_TRACE = 2048;	// how far down to look for floor
 const float NAV_MIN_INFONODES = 6;	// >= this many info_nodes -> use them, skip auto-grid
 // Max link length for the info_node all-pairs pass.  This was 384, which was the
@@ -65,6 +90,19 @@ float  nav_build_serial;	// bumped each (re)build so nav-debug proxies resend th
 float  nav_air[NAV_NODE_MAX];
 float  nav_count;
 float  nav_cap_logged;	// latched once the node cap is hit (don't corrupt nav_count)
+
+// Connected-component id per node, 0 = not yet computed.  Filled as a free
+// by-product of Nav_ReportComponents, which already floods every component to
+// count them - so this costs one array and no extra traversal.
+//
+// It exists so a reachability question can be answered in O(1) instead of the
+// flood Nav_PickRoamGoal's comment used to say it would need.  CAVEAT: the flood
+// honours nav_path_avoid, and that mask differs between a monster and a bot, so
+// these ids describe connectivity under whichever mask was set when the graph was
+// last analysed.  Good enough for rejecting a roam goal (a hint, checked again by
+// the real path request); NOT a substitute for a path search.
+float  nav_comp[NAV_NODE_MAX];
+float  nav_comp_valid;	// nav_comp matches the current graph build
 
 // --- links (flat: node*NAV_LINK_MAX + k) ---
 float  nav_linkcount[NAV_NODE_MAX];
@@ -234,9 +272,23 @@ float  nav_qtail;
 // --- builder state ---
 float  nav_state;
 float  nav_have_infonodes;
+
+// --- sparse-graph supplement (see Nav_Tick) ---
+// 0 = not started / not needed, 1 = seeded and flooding, 2 = re-linking, 3 = done.
+//
+// The flood is bounded by NAV_NODE_MAX alone and deliberately has no smaller
+// ceiling of its own.  A soft cap was tried and measured worse for no benefit:
+// nothing allocates nodes after the build, so reserved headroom is simply unused,
+// and on desertcircle capping the supplement at +1024 left the graph at 84.1% in
+// one piece where letting it use the array reaches 90.7%.  Nav_AddNode caps
+// cleanly at the hard bound, so "run until the array is full" is a safe stop.
+float  nav_supp_phase;
+float  nav_supp_before;		// largest component before supplementing, for the log
 float  nav_link_cursor;		// progress through the all-pairs link pass
 float  nav_floor_ok;		// set by Nav_FloorDrop
 float  nav_dbg_floor, nav_dbg_dz, nav_dbg_walk, nav_dbg_dedup, nav_dbg_add;	// flood diagnostics
+float  nav_dbg_mover;		// floor drops refused: the "floor" was a crate / door / train
+float  nav_dbg_step;		// flood candidates refused: the step up is taller than a leg
 float  nav_dbg_lastcount;	// heartbeat throttle
 float  nav_build_start;		// server time the build left NAVB_IDLE
 
@@ -268,25 +320,9 @@ entity() Nav_TracePass = { if (nav_probe_bypass) return world; return nav_probe;
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
-
-// Drop a point to the floor and return floor + NAV_NODE_HEIGHT.  Sets
-// nav_floor_ok FALSE if there's no walkable floor below (steep / void).
-vector(vector p) Nav_FloorDrop =
-{
-	vector down = p; down_z = down_z - NAV_FLOOR_TRACE;
-	traceline(p + '0 0 8', down, MOVE_NOMONSTERS, world);
-	nav_floor_ok = FALSE;
-	if (trace_startsolid || trace_allsolid)
-		return p;
-	if (trace_fraction >= 1)
-		return p;				// no floor found
-	if (trace_plane_normal_z < 0.7)
-		return p;				// too steep to stand
-	nav_floor_ok = TRUE;
-	vector r = trace_endpos;
-	r_z = r_z + NAV_NODE_HEIGHT;
-	return r;
-};
+// Nav_FloorDrop is defined below Nav_EntBlocks rather than here, because it has to
+// ask that question about whatever it lands on and this file carries no forward
+// references (see the header note).
 
 // Why the last Nav_Walkable call answered the way it did.  Set on EVERY exit so
 // the link-pass diagnostics (sv_nav_linkdebug) can attribute rejections instead of
@@ -301,7 +337,14 @@ float nav_walk_frac;
 float nav_walk_startsolid;	// recorded separately: it CROSSES the reason codes
 entity nav_walk_blocker;	// what said no, for the sv_nav_linkdebug 2 dump
 
-vector NAV_SWEEP_MINS = '-16 -16 -10';
+// The sweep box hangs off the NODE, which floats NAV_NODE_HEIGHT above the floor,
+// so mins_z sets how much obstruction the sweep is deliberately blind to: the
+// bottom face sits at floor + (NAV_NODE_HEIGHT + mins_z).  That blind zone is the
+// step-up allowance, and it therefore has to BE the step-up allowance -
+// NAV_NODE_HEIGHT - NAV_STEP_HEIGHT, i.e. 32 - 18.  It was -10, which put the
+// bottom face at floor+22 and made anything up to 22 units tall invisible to the
+// only test most links ever get, four units past what walkmove will climb.
+vector NAV_SWEEP_MINS = '-16 -16 -14';
 vector NAV_SWEEP_MAXS = '16 16 40';
 const float NAV_SWEEP_MAXPASS = 4;	// movers a single link may be let through
 
@@ -332,6 +375,46 @@ float(entity e) Nav_EntBlocks =
 	// against it is worse than one that walks around.  Revisit when there is
 	// break-the-obstacle behaviour to route into.
 	return TRUE;
+};
+
+// Drop a point to the floor and return floor + NAV_NODE_HEIGHT.  Sets
+// nav_floor_ok FALSE if there's no walkable floor below (steep / void / a surface
+// that will not still be there later).
+//
+// THE LANDING-SURFACE TEST IS THE POINT.  This trace passes `world` and
+// MOVE_NOMONSTERS, so it stops on any solid entity - and func_pushable is
+// SOLID_BSP (sv_func_pushable.qc:1010), which means every crate on the map got a
+// node planted neatly on its lid.  Worse, a pushable is brush_type TRAIN
+// (sv_func_pushable.qc:930), so Nav_EntBlocks calls it a mover and the link sweep
+// walks straight THROUGH it to reach that node: the graph ended up asserting a
+// route over the top of a box that a monster cannot climb and that the player can
+// shove out from under the node in any case.
+//
+// Nav_EntBlocks already encodes exactly the right question - "is this a surface,
+// or is it something that moves out of the way?" - so reuse it.  World and static
+// brushes (func_wall, func_breakable) keep their nodes; doors, trains, pushables,
+// vehicles and every non-SOLID_BSP prop lose them.
+vector(vector p) Nav_FloorDrop =
+{
+	vector down = p; down_z = down_z - NAV_FLOOR_TRACE;
+	traceline(p + '0 0 8', down, MOVE_NOMONSTERS, world);
+	nav_floor_ok = FALSE;
+	if (trace_startsolid || trace_allsolid)
+		return p;
+	if (trace_fraction >= 1)
+		return p;				// no floor found
+	if (trace_plane_normal_z < 0.7)
+		return p;				// too steep to stand
+	if (trace_ent != world)
+		if (!Nav_EntBlocks(trace_ent))
+		{
+			nav_dbg_mover = nav_dbg_mover + 1;
+			return p;			// a crate lid / door top / train roof
+		}
+	nav_floor_ok = TRUE;
+	vector r = trace_endpos;
+	r_z = r_z + NAV_NODE_HEIGHT;
+	return r;
 };
 
 // Distance from p along unit dir to leave the box mn..mx.  0 if dir is degenerate.
@@ -552,15 +635,98 @@ const float NAV_PROFILE_REACH = 512;	// how far down to look for ground AT ALL
 // the steepest surface Quake lets anything stand on - climbs exactly one sample
 // spacing per sample, so the allowance is that plus a step.  Anything beyond it is
 // a wall face or a cliff, not terrain a walker follows.
-const float NAV_PROFILE_JUMP  = 70;	// NAV_PROFILE_STEP + NAV_STEP_HEIGHT
+const float NAV_PROFILE_JUMP  = 66;	// NAV_PROFILE_STEP + NAV_STEP_HEIGHT
 
 // Why the last profile failed, for `sv_nav_linkfloor 2`.
 const float NAVP_NOFLOOR = 1;
 const float NAVP_JUMPUP  = 2;
 const float NAVP_JUMPDN  = 3;
+const float NAVP_STEPUP  = 4;	// the rise is a face, not a ramp
+const float NAVP_STEPBAD = 5;	// could not resolve the ground across the rise
 float  nav_prof_why;
 vector nav_prof_at;
 float  nav_prof_prevz, nav_prof_fz;
+
+// ---------------------------------------------------------------------------
+// step-height gate  —  is this rise a RAMP, or is it a WALL?
+// ---------------------------------------------------------------------------
+// The profile above samples the ground every NAV_PROFILE_STEP units, and at that
+// spacing a climb and a cliff look identical: a 40-unit crate and a gentle ramp
+// both read as "the floor is 40 higher than it was 48 units ago".  Every gate in
+// the builder tolerated that, so a node planted on a crate lid linked to the floor
+// beside it, the monster was handed a waypoint 40 units up, walkmove refused to
+// climb it, and it stood there scraping its walk animation against the box.  That
+// is the reported bug, and this is the test that was missing.
+//
+// The discriminator is RESOLUTION.  A ramp spreads its climb evenly, so at any
+// sampling interval it rises by about that interval; a face puts its entire height
+// between two adjacent probes no matter how finely you subdivide.  So when the
+// coarse pass sees a rise worth questioning, re-walk just that segment at leg
+// scale and demand that no single sub-step exceeds what walkmove will climb.
+//
+// Cost is paid only where there IS a rise - flat ground and downhill never touch
+// this - and it is bounded at NAV_CLIMB_MAXFINE traces per rising segment.
+const float NAV_CLIMB_FINE    = 8;	// horizontal spacing of the refinement probe
+const float NAV_CLIMB_MAXFINE = 16;	// sub-samples per refined segment, hard cap
+
+// p0/p1 supply the XY of the two coarse samples; z0/z1 are the FLOOR heights
+// already measured there.  The z components of p0/p1 are ignored - the probe picks
+// its own start height, see below.
+float(vector p0, float z0, vector p1, float z1) Nav_ClimbRefine =
+{
+	vector flat = p1 - p0; flat_z = 0;
+	float run = vlen(flat);
+	// Two samples with no horizontal separation and a rise between them is the
+	// definition of a wall face.  There is nothing to subdivide: refuse.
+	if (run < 1)
+		return FALSE;
+
+	float n = ceil(run / NAV_CLIMB_FINE);
+	if (n > NAV_CLIMB_MAXFINE)
+		n = NAV_CLIMB_MAXFINE;
+
+	// Probe downward from a step above the HIGHER of the two floors, not from the
+	// chord between the nodes.  The coarse pass can start on the chord because the
+	// box sweep already proved the chord is clear; here the chord is precisely what
+	// is in dispute, and across a rise it routinely passes through the solid of the
+	// step being measured - a trace started in there reports the step's own surface
+	// as the floor and the whole test quietly answers "fine".
+	float top = z0;
+	if (z1 > top) top = z1;
+	top = top + NAV_NODE_HEIGHT;
+
+	float prev = z0;
+	float i;
+	for (i = 1; i <= n; i = i + 1)
+	{
+		vector p = p0 + (p1 - p0) * (i / n);
+		p_z = top;
+		vector down = p;
+		down_z = down_z - (NAV_PROFILE_REACH + NAV_NODE_HEIGHT);
+		nav_trace_spent = nav_trace_spent + 1;
+		traceline(p, down, MOVE_NOMONSTERS, world);
+		if (trace_startsolid || trace_allsolid)
+			return FALSE;			// under an overhang; nothing to climb onto
+		if (trace_fraction >= 1)
+			return FALSE;			// a hole in the middle of the climb
+		float fz = trace_endpos_z;
+		// The rise test.  This is the one that fires on a crate.
+		if (fz - prev > NAV_STEP_HEIGHT)
+			return FALSE;
+		// ...and a surface can clear the rise test by being shallow while still
+		// being too steep to stand on, which is not a walk either.  0.7 is the same
+		// threshold Nav_FloorDrop and Nav_WalkableStepped use.
+		if (trace_plane_normal_z < 0.7)
+			return FALSE;
+		prev = fz;
+	}
+	// The final sub-sample lands on p1, so `prev` should already be z1 - but only to
+	// within the probe's own accuracy, and the cap on n can leave the last stretch
+	// coarser than intended.  Charge whatever is left against the step budget too.
+	if (z1 - prev > NAV_STEP_HEIGHT)
+		return FALSE;
+	return TRUE;
+};
 
 float(vector a, vector b) Nav_FloorProfile =
 {
@@ -572,7 +738,18 @@ float(vector a, vector b) Nav_FloorProfile =
 	// anything to walk on between these" matters most.
 	float dist = vlen(b - a);
 	if (dist <= NAV_PROFILE_STEP)
-		return TRUE;				// too short to hide anything
+	{
+		// Too short to hide a PIT - one sample spacing of ground cannot conceal a
+		// hole - but emphatically not too short to hide a STEP, and this early-out
+		// used to return TRUE before either question was asked.  A node sitting on a
+		// crate lid is very often within one sample spacing of the floor node beside
+		// it, so this was the exact shape the whole gate exists to catch, walking out
+		// of the front door.
+		if ((b_z - a_z) > NAV_STEP_HEIGHT)
+			if (!Nav_ClimbRefine(a, a_z - NAV_NODE_HEIGHT, b, b_z - NAV_NODE_HEIGHT))
+				{ nav_prof_why = NAVP_STEPUP; return FALSE; }
+		return TRUE;
+	}
 
 	float n = ceil(dist / NAV_PROFILE_STEP);
 	if (n > NAV_PROFILE_MAX)
@@ -586,6 +763,7 @@ float(vector a, vector b) Nav_FloorProfile =
 	// it cost 9 links on hl_c01_a1 and took the largest component from 94 nodes
 	// down to 59, because the links it rejected were the ones bridging areas.
 	float prevz = a_z - NAV_NODE_HEIGHT;
+	vector prevp = a;			// XY the refinement re-walks from
 	float i;
 	for (i = 1; i <= n; i = i + 1)
 	{
@@ -604,9 +782,21 @@ float(vector a, vector b) Nav_FloorProfile =
 		float fz = trace_endpos_z;
 		nav_prof_fz = fz;
 		float dz = fz - prevz;
-		if (dz >  NAV_PROFILE_JUMP)	{ nav_prof_why = NAVP_JUMPUP; return FALSE; }
 		if (dz < -NAV_PROFILE_JUMP)	{ nav_prof_why = NAVP_JUMPDN; return FALSE; }
+		// Going UP is where a walker's limits bite, and where they were not being
+		// applied.  Past a 45-degree average there is nothing to discuss - no surface
+		// that steep can be stood on - so reject without paying for traces.  In
+		// between, ask whether the climb is spread out like a ramp or stacked up like
+		// a face; only the second one is what the monster cannot do.
+		if (dz > NAV_STEP_HEIGHT)
+		{
+			if (dz > NAV_PROFILE_JUMP)
+				{ nav_prof_why = NAVP_JUMPUP; return FALSE; }
+			if (!Nav_ClimbRefine(prevp, prevz, p, fz))
+				{ nav_prof_why = NAVP_STEPUP; return FALSE; }
+		}
 		prevz = fz;
+		prevp = p;
 	}
 	return TRUE;
 };
@@ -838,6 +1028,138 @@ void() Nav_SeedFromSpawns =
 	Nav_SeedClass("info_player_teamspawn");
 };
 
+// How near a node has to be for a monster spawn point to count as "covered".
+// Generous on purpose: this is not "can it path", it is "is there any graph here
+// at all".  The dz is tight because a node on the floor BELOW a balcony is not
+// coverage for the balcony, which is precisely desertcircle's castle problem.
+const float NAV_SUPP_COVER   = 256;
+const float NAV_SUPP_COVERDZ = 64;
+
+// Where MONSTERS appear, which is not where players do.  Seeding the flood only
+// from player spawns (Nav_SeedFromSpawns) means a squadmaker on a balcony three
+// hundred units above the nearest info_node produces children with nothing to
+// path on, and no amount of re-linking the EXISTING nodes can fix that - there is
+// no node there to link.
+//
+// Map-placed monsters are the cheapest correct seed points available: they are
+// already standing on legal floor by construction.
+void() Nav_SeedFromMonsterSpots =
+{
+	Nav_SeedClass("squadmaker");
+	Nav_SeedClass("monstermaker");
+
+	entity e;
+	for (e = world; (e = nextent(e)); )
+		if (e.flags & FL_MONSTER)
+			Nav_SeedPoint(e.origin);
+};
+
+// Count monster spawn points with no graph near them.  Deliberately separate from
+// the seeding pass because the DECISION has to be made before anything is added.
+float() Nav_UncoveredMonsterSpots =
+{
+	float n = 0;
+	entity e;
+	for (e = world; (e = nextent(e)); )
+	{
+		if (e.classname != "squadmaker" && e.classname != "monstermaker"
+		    && !(e.flags & FL_MONSTER))
+			continue;
+		vector p = Nav_FloorDrop(e.origin);
+		if (!nav_floor_ok)
+			continue;
+		if (Nav_FindNear(p, NAV_SUPP_COVER, NAV_SUPP_COVERDZ) < 0)
+			n = n + 1;
+	}
+	return n;
+};
+
+// ---------------------------------------------------------------------------
+// Wander support (Sven `freeroam`) — see AI_WantsToRoam in sv_ai_core.qc
+// ---------------------------------------------------------------------------
+vector(float idx) Nav_NodePos =
+{
+	if (idx < 0 || idx >= nav_count)
+		return '0 0 0';
+	return nav_pos[idx];
+};
+
+// A random ground node between minr and maxr of `from`, or -1 if there is none.
+//
+// Reservoir sampling in ONE pass: the obvious implementation builds a candidate
+// list first, and nav_count is now routinely into four figures on a supplemented
+// map, so that would be a 2048-entry scratch array per wander leg per monster.
+// Each qualifying node replaces the pick with probability 1/seen, which is a
+// uniform draw over the qualifying set without ever storing it.
+//
+// REACHABILITY IS NOW TESTED, via `srccomp` - pass 0 to skip it.
+//
+// It used to be skipped entirely, on the reasoning that "is this node in my
+// component" costs a flood and an unreachable pick fails cheaply in the path
+// request.  Both halves were wrong on a big map.  The flood is free: components
+// are already computed by Nav_ReportComponents at build time and now recorded per
+// node in nav_comp[].  And the failure is not cheap - on desertcircle the graph
+// is 10 components with the largest holding 90.7% of 2048 nodes, so a pick from
+// another component costs a path request, a NOPATH, and then AI_WantsToRoam's
+// 3-7 s throttle before the monster tries again.  That is the walk-stop-wait-
+// repeat that reads as "they don't move far".
+//
+// Still only a hint: nav_comp reflects whichever nav_path_avoid mask was set when
+// the graph was last analysed, so the real path request remains the authority.
+float(vector from, float minr, float maxr, float srccomp) Nav_PickRoamGoal =
+{
+	if (nav_state != NAVB_READY || nav_count <= 0)
+		return -1;
+
+	// >>> srccomp 0 MEANS "NOT ON THE GRAPH", NOT "NO FILTER". <<<
+	//
+	// Component ids are 1-BASED (Nav_ReportComponents increments `comps` before it
+	// assigns), so 0 is Nav_ComponentAt's failure value - and its failure case is
+	// common, not exotic: it goes through Nav_NearestNode, which requires LINE OF
+	// SIGHT to a candidate node and returns -1 when it has none.  A monster spawned
+	// inside a closed crypt, a stairwell or a sealed closet has exactly that, and
+	// th_ep1_01's own build log counts 41 monster spawn points with no graph within
+	// 256 units.
+	//
+	// Reading that 0 as "don't filter" was the worst available response.  Measured
+	// on th_ep1_01: 40 components, largest 716 of 1264 nodes (56.6%), 19 isolated.
+	// So an unfiltered pick lands in an unreachable component roughly half the
+	// time; AI_PathRequest then returns NOPATH, and AI_MoveAlongPath's no-waypoint
+	// fallback heads STRAIGHT FOR THE GOAL - which walks the monster into whatever
+	// wall lies between it and a node it can never reach, where it grinds out its
+	// walk cycle.  That is the reported "spawns, walks into the corner".  Every
+	// freeroam monster on the map is a candidate, and the two crypt_monstr7 zombies
+	// both carry `freeroam 2`.
+	//
+	// Refusing is strictly better: TASK_GET_PATH_ROAM's own 5-second throttle
+	// holds, the monster idles instead of shouldering masonry, and it is
+	// self-correcting - the moment it can see a node it roams normally.
+	//
+	// nav_comp_valid FALSE is a genuinely different case: the graph exists but has
+	// not been analysed, so NOBODY can filter and an unfiltered pick is all there
+	// is.  That path is deliberately left alone.
+	if (nav_comp_valid && srccomp <= 0)
+		return -1;
+
+	float filter = (srccomp > 0 && nav_comp_valid);
+
+	float i, seen = 0, pick = -1;
+	for (i = 0; i < nav_count; i = i + 1)
+	{
+		if (nav_air[i])
+			continue;			// air nodes are for flyers, not walkers
+		if (filter && nav_comp[i] != srccomp)
+			continue;			// unreachable from here - don't waste the leg
+		float d = vlen(nav_pos[i] - from);
+		if (d < minr || d > maxr)
+			continue;
+		seen = seen + 1;
+		if (random() * seen < 1)
+			pick = i;
+	}
+	return pick;
+};
+
 // Expand one flooded node in the 8 horizontal directions.
 void(float idx) Nav_FloodExpand =
 {
@@ -858,6 +1180,17 @@ void(float idx) Nav_FloodExpand =
 		float dz = dropped_z - base_z;
 		if (dz > NAV_STEP_HEIGHT * 2 || dz < -128)
 			{ nav_dbg_dz = nav_dbg_dz + 1; continue; }	// too tall a step up / fell off a cliff
+		// The doubled allowance above is about GRID SPACING, not about legs: two
+		// samples sv_nav_gridstep apart can straddle more than one stair tread, so a
+		// flat step-height cap would refuse every staircase.  What it must not do is
+		// let a single unbroken face through, and for that the rise has to be walked
+		// at leg scale.  This is the flood's half of the fix - the link pass has the
+		// other half in Nav_FloorProfile - and it matters more, because the flood is
+		// what decides a node gets PLANTED up there at all.
+		if (dz > NAV_STEP_HEIGHT)
+			if (!Nav_ClimbRefine(base, base_z - NAV_NODE_HEIGHT,
+			                     dropped, dropped_z - NAV_NODE_HEIGHT))
+				{ nav_dbg_step = nav_dbg_step + 1; continue; }
 		if (!Nav_Walkable(base, dropped))
 			{ nav_dbg_walk = nav_dbg_walk + 1; continue; }
 		float ex = Nav_FindNear(dropped, step * 0.6, NAV_STEP_HEIGHT);
@@ -893,6 +1226,7 @@ float navdbg_cand, navdbg_rej_dist, navdbg_rej_air;
 float navdbg_ok_clear, navdbg_ok_mover;
 float navdbg_rej_world, navdbg_rej_static, navdbg_rej_startsolid, navdbg_rej_floor;
 float navdbg_rej_clip;		// links kept but flagged as monsterclip-only
+float navdbg_rej_step;		// of rej_floor: rejected because the rise is a face
 float navdbg_alt_step, navdbg_alt_los, navdbg_alt_walk;
 float navdbg_frac_early, navdbg_frac_mid, navdbg_frac_late;
 float navdbg_walk_falsepos;	// pairs the stepped walk REJECTS that the sweep accepted
@@ -937,7 +1271,7 @@ void() Nav_LinkDebugReset =
 	navdbg_cand = 0; navdbg_rej_dist = 0; navdbg_rej_air = 0;
 	navdbg_ok_clear = 0; navdbg_ok_mover = 0;
 	navdbg_rej_world = 0; navdbg_rej_static = 0; navdbg_rej_startsolid = 0; navdbg_rej_floor = 0;
-	navdbg_rej_clip = 0;
+	navdbg_rej_clip = 0; navdbg_rej_step = 0;
 	navdbg_alt_step = 0; navdbg_alt_los = 0; navdbg_alt_walk = 0;
 	navdbg_frac_early = 0; navdbg_frac_mid = 0; navdbg_frac_late = 0;
 	navdbg_walk_falsepos = 0;
@@ -954,6 +1288,7 @@ void() Nav_LinkDebugReport =
 	dprint(sprintf("[navlink] rejected world=%g static=%g nofloor=%g (startsolid=%g)\n",
 	               navdbg_rej_world, navdbg_rej_static, navdbg_rej_floor, navdbg_rej_startsolid));
 	dprint(sprintf("[navlink] monsterclip-only links kept+flagged: %g\n", navdbg_rej_clip));
+	dprint(sprintf("[navlink] of nofloor, refused as un-climbable step: %g\n", navdbg_rej_step));
 	dprint(sprintf("[navlink] blocked at frac <0.05=%g 0.05-0.9=%g >0.9=%g\n",
 	               navdbg_frac_early, navdbg_frac_mid, navdbg_frac_late));
 	dprint(sprintf("[navlink] would recover: +stepup=%g  bare-LOS=%g  stepped-walk=%g\n",
@@ -1068,7 +1403,13 @@ void(float a) Nav_LinkNode =
 		float dz = delta_z;
 		delta_z = 0;
 		float run = vlen(delta);
-		if (dz > run + NAV_STEP_HEIGHT)		continue;
+		// Climbing faster than 45 degrees averaged over the whole link is not a walk
+		// under any arrangement of the ground in between, because no surface that
+		// steep can be stood on.  The slack this used to carry (`run + a step`) let a
+		// node one step-height above a neighbour directly overhead count as reachable.
+		// A pure vertical step within a leg's reach is still fine - that is a kerb.
+		if (dz > NAV_STEP_HEIGHT)
+			if (dz > run)			continue;
 		if (dz < -(run + NAV_WALK_DROP))	continue;
 		if (dbg) navdbg_cand = navdbg_cand + 1;
 
@@ -1165,6 +1506,8 @@ void(float a) Nav_LinkNode =
 			if (!Nav_FloorProfile(pa, nav_pos[b]))
 			{
 				navdbg_rej_floor = navdbg_rej_floor + 1;
+				if (nav_prof_why == NAVP_STEPUP)
+					navdbg_rej_step = navdbg_rej_step + 1;
 				if (usefloor >= 2)
 				{
 					dprint(sprintf("[navfloor] %g->%g len=%g why=%g at %v\n",
@@ -1473,6 +1816,20 @@ float(vector org) Nav_NearestNode =
 	// Nothing in the shortlist was visible.  Rare, and the honest answer may still
 	// be out there, so pay for the exhaustive scan rather than report failure.
 	return Nav_NearestNodeLinear(org);
+};
+
+// Which connected component is this world position in?  0 = unknown (no graph, no
+// nearby node, or the ids are stale after a rebuild).  Lives here rather than
+// beside nav_comp because it needs Nav_NearestNode, and this file deliberately
+// carries no forward references - see the note in sv_progs.src.
+float(vector org) Nav_ComponentAt =
+{
+	if (!nav_comp_valid || nav_state != NAVB_READY)
+		return 0;
+	float n = Nav_NearestNode(org);
+	if (n < 0 || n >= nav_count)
+		return 0;
+	return nav_comp[n];
 };
 
 // A* between two NODE INDICES.  Split out of Nav_FindPath so the self-test can
@@ -1971,7 +2328,9 @@ float(float start, float goal) Nav_ValidateResult =
 //
 // Reuses navtst_visit as scratch (the self-test's reference search is not running
 // while this executes) and the builder's own BFS ring buffer.
-void() Nav_ReportComponents =
+// Returns the size of the LARGEST component, so the builder can act on it and not
+// merely print it.  Everything else about the function is unchanged.
+float() Nav_ReportComponents =
 {
 	navtst_stamp = navtst_stamp + 1;
 	float mystamp = navtst_stamp;
@@ -1988,10 +2347,12 @@ void() Nav_ReportComponents =
 		float size = 0;
 		nav_qhead = 0; nav_qtail = 0;
 		navtst_visit[seed] = mystamp;
+		nav_comp[seed] = comps;
 		Nav_Enqueue(seed);
 		while (!Nav_QueueEmpty())
 		{
 			float cur = Nav_Dequeue();
+			nav_comp[cur] = comps;
 			size = size + 1;
 			float lc = nav_linkcount[cur]; float k;
 			for (k = 0; k < lc; k = k + 1)
@@ -2012,12 +2373,14 @@ void() Nav_ReportComponents =
 		if (size <= 1)		isolated = isolated + 1;
 	}
 	nav_qhead = 0; nav_qtail = 0;
+	nav_comp_valid = TRUE;
 
 	float pct = 0;
 	if (nav_count > 0)
 		pct = (biggest * 100) / nav_count;
 	dprint(sprintf("[navtest] components=%g largest=%g (%g%% of %g nodes) isolated=%g\n",
 	               comps, biggest, pct, nav_count, isolated));
+	return biggest;
 };
 
 // Every link must exist in both directions.  A one-way edge is invisible to
@@ -2433,10 +2796,17 @@ void() Nav_Reset =
 	nav_count = 0;
 	nav_cap_logged = 0;
 	nav_have_infonodes = 0;
+	// Per-map, like everything else here: FTE keeps progs across a changelevel, so
+	// a phase left at "done" would skip the measurement on the next map entirely.
+	nav_supp_phase = 0;
+	nav_supp_before = 0;
 	nav_qhead = 0; nav_qtail = 0;
 	nav_link_cursor = 0;
 	nav_state = NAVB_IDLE;
 	nav_build_serial = nav_build_serial + 1;	// invalidate any streamed nav-debug graph
+	// Component ids describe the PREVIOUS graph.  Not cleared (2048 writes for
+	// nothing) - just marked stale, and every reader is required to check.
+	nav_comp_valid = FALSE;
 
 	// nav_stamp deliberately NOT reset.
 	//
@@ -2460,6 +2830,7 @@ void() Nav_Reset =
 	for (hp = 0; hp < NAV_NODE_MAX; hp = hp + 1)
 		nav_heappos[hp] = 0;
 	nav_dbg_floor = 0; nav_dbg_dz = 0; nav_dbg_walk = 0; nav_dbg_dedup = 0; nav_dbg_add = 0;
+	nav_dbg_mover = 0; nav_dbg_step = 0;
 	nav_dbg_lastcount = 0;
 	nav_dbg_nodrop = 0;
 	nav_dbg_clipvols = 0;
@@ -2497,6 +2868,8 @@ void() Nav_PrintStats =
 		nav_count, links, nav_have_infonodes, nav_state));
 	dprint(sprintf("^5[nav] flood reject: floor=%g dz=%g wall=%g dedup=%g add=%g\n",
 		nav_dbg_floor, nav_dbg_dz, nav_dbg_walk, nav_dbg_dedup, nav_dbg_add));
+	dprint(sprintf("^5[nav] flood reject: step=%g (rise is a face)  mover-lid=%g (crate/door/train top)\n",
+		nav_dbg_step, nav_dbg_mover));
 	dprint(sprintf("^5[nav] build took %gs, link-slot evictions=%g\n",
 		time - nav_build_start, nav_link_evictions));
 	dprint(sprintf("^5[nav] info_nodes with no floor beneath: %g\n", nav_dbg_nodrop));
@@ -2519,6 +2892,72 @@ void() Nav_PrintStats =
 		Nav_ReportComponents();
 		nav_path_avoid = 0;
 	}
+};
+
+// ---------------------------------------------------------------------------
+//  Sparse-graph supplement
+// ---------------------------------------------------------------------------
+// GoldSrc semantics are "info_nodes ARE the graph", and Nav_Tick implements that:
+// six or more of them and the auto-grid is skipped entirely.  That is faithful and
+// it is right for a map whose author noded it properly.  It is wrong for a map
+// that sprinkled a token handful over a huge playfield, because the result is not
+// a sparse graph, it is a SHATTERED one, and a monster in the wrong fragment can
+// never reach anything.
+//
+// desertcircle measured, before this: 192 info_nodes over roughly 7400 x 7360
+// units, `components=6 largest=103 (53.6% of 192)`.  Nearly half the graph could
+// not reach the other half, and the node cloud topped out at z=912 while the
+// castle squadmakers sit at z=896..1152 - so the busiest spawn points on the map
+// had nothing under them at all.
+//
+// The supplement runs ONLY when the graph measures badly, so a well-noded map is
+// untouched and pays one component count for the privilege.  It is bounded: the
+// flood gets its own soft node ceiling, well under NAV_NODE_MAX, because a full
+// grid flood of a map this size would need ~5800 nodes against a 2048 array and
+// would truncate somewhere arbitrary.
+//
+// HONEST LIMIT: this fills gaps AROUND spawn points and player starts and then
+// re-links everything.  It does not promise to merge every component - a fragment
+// separated by a thousand units of unwalkable desert stays separate, and the
+// after-log says so.  What it does guarantee is that somewhere a monster can
+// actually be standing, there is graph.
+float() Nav_SupplementIfSparse =
+{
+	if (nav_supp_phase)
+		return FALSE;			// already ran, or re-linking after one
+	if (!nav_have_infonodes)
+		return FALSE;			// the auto-grid path is not what this is for
+
+	// Absent cvar means enabled.  cvar() reads 0 for a name registered later than
+	// the caller, and the nav build starts on the first StartFrame - see the
+	// sv_mapglobals lesson.  Only an explicit 0 disables.
+	if (cvar_string("sv_nav_supplement") != "" && !cvar("sv_nav_supplement"))
+		return FALSE;
+
+	float biggest = Nav_ReportComponents();
+	float want    = cvar("sv_nav_supplement_pct");
+	if (want <= 0 || want > 100)
+		want = 90;
+
+	float uncovered = Nav_UncoveredMonsterSpots();
+	float fragmented = (nav_count > 0 && (biggest * 100) < (nav_count * want));
+
+	if (!fragmented && !uncovered)
+		return FALSE;
+
+	dprint(sprintf("^5[nav] supplementing: largest component %g/%g (want %g%%), "
+	               "%g monster spawn point(s) with no graph within %g units\n",
+	               biggest, nav_count, want, uncovered, NAV_SUPP_COVER));
+
+	nav_supp_before = biggest;
+	nav_supp_phase  = 1;
+
+	nav_qhead = 0; nav_qtail = 0;
+	Nav_SeedFromSpawns();
+	Nav_SeedFromMonsterSpots();
+
+	nav_state = NAVB_FLOOD;
+	return TRUE;
 };
 
 // Called every SV_StartFrame.  Kicks off + advances the incremental build.
@@ -2558,6 +2997,18 @@ void() Nav_Tick =
 		}
 		if (Nav_QueueEmpty())
 		{
+			// A supplement flood has to be STITCHED to the graph it supplemented.
+			// Nav_FloodExpand only links each new node to the node it grew from
+			// (:873) plus any existing node it lands on top of (:866), so without a
+			// second link pass the new patch is just another component - which is
+			// the exact disease being treated.
+			if (nav_supp_phase == 1)
+			{
+				nav_supp_phase  = 2;
+				nav_link_cursor = 0;
+				nav_state       = NAVB_LINK;
+				return;
+			}
 			nav_state = NAVB_READY;
 			Nav_GridBuild();	// graph is immutable from here
 			Nav_PrintStats();
@@ -2590,6 +3041,24 @@ void() Nav_Tick =
 		{
 			if (Nav_LinkSweepAdvance())
 				return;		// diagnostic sweep wants another radius
+
+			// Measure, and fill the gaps if the graph came out shattered.  Returns
+			// TRUE having switched us to NAVB_FLOOD; we come back through here once
+			// more with nav_supp_phase == 2, which short-circuits it.
+			if (Nav_SupplementIfSparse())
+				return;
+
+			if (nav_supp_phase == 2)
+			{
+				nav_supp_phase = 3;
+				// No component count here: Nav_PrintStats runs a few lines below
+				// and reports one anyway, and printing two identical [navtest]
+				// lines back to back reads like the build ran twice.
+				dprint(sprintf("^5[nav] supplement done: %g info_nodes -> %g nodes, "
+				               "largest component was %g before - see below for after\n",
+				               nav_have_infonodes, nav_count, nav_supp_before));
+			}
+
 			nav_state = NAVB_READY;
 			Nav_GridBuild();	// graph is immutable from here
 			Nav_PrintStats();

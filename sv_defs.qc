@@ -425,6 +425,23 @@ int serverid;	/* The unique id of this server within the server cluster. */
 .float subblend2frac;
 .float basesubblendfrac;
 .float basesubblend2frac;
+// PATCH 155: Half-Life's pev->framerate — a multiplier on the playback speed of
+// the sequence in .frame.  Networked in entity_state_t under PEXT2_FRAMERATE.
+//
+// 0 (and therefore every entity that never touches it) means 1.0.  NEGATIVE
+// plays the sequence BACKWARDS from its end, which is what a model node-graph
+// transition walked in reverse needs — HL's FindTransition returns *piDir = -1
+// for exactly that case (animation.cpp:477).
+//
+// NOT called `framerate`, deliberately: `.float framerate` is already a
+// MAPPER KEY declared in four places here (sh_hlbeamfx.qc, sv_cycler_sprite.qc,
+// sv_env_beam.qc, sh_wpn_hltripmine.qc) and set to 10 or 15 by cycler_sprite and
+// env_sprite entities in the map corpus.  QC has ONE namespace, so naming the
+// engine field `framerate` would bind that key to it and silently run every one
+// of those entities at its own key value as an animation multiplier.
+// sv_env_sprite.qc:223 states the old assumption in as many words — "`.framerate`
+// is a mod-declared field, invisible to the engine" — and this keeps it true.
+.float animrate;
 .void() customphysics;	/* Called once each physics frame, overriding the entity's .movetype field and associated logic. You'll probably want to use tracebox to move it through the world. Be sure to call .think as appropriate. */
 .entity tag_entity;
 .float tag_index;
@@ -749,7 +766,12 @@ void(vector vang) makevectors = #1; /*
 void(entity e, vector o) setorigin = #2; /*
 		Changes e's origin to be equal to o. Also relinks collision state (as well as setting absmin+absmax), which is required after changing .solid */
 
-void(entity e, string m) setmodel = #3; /*
+// RENAMED for shared/sh_modellist.qc, which defines the QC function `setmodel`
+// that every caller in the tree binds to.  Sven's globalmodellist needs one
+// chokepoint in front of 321 setmodel sites; renaming the builtin here is that
+// chokepoint, at the cost of zero call-site edits.  Call _raw only from the
+// wrapper.
+void(entity e, string m) setmodel_raw = #3; /*
 		Looks up m in the model precache list, and sets both e.model and e.modelindex to match. BSP models will set e.mins and e.maxs accordingly, other models depend upon the value of sv_gameplayfix_setmodelrealbox - for compatibility you should always call setsize after all pickups or non-bsp models. Also relinks collision state. */
 
 void(entity e, vector min, vector max) setsize = #4; /*
@@ -761,7 +783,12 @@ void() breakpoint = #6; /*
 float() random = #7; /*
 		Returns a random value between 0 and 1. Be warned, this builtin can return 1 in most engines, which can break arrays. */
 
-void(entity e, float chan, string samp, float vol, float atten, optional float speedpct, optional float flags, optional float timeofs) sound = #8; /*
+// RENAMED for shared/sh_soundlist_global.qc, which defines the QC function
+// `sound` that every caller in the tree binds to.  Sven's globalsoundlist needs
+// one chokepoint in front of every emitter; renaming the builtin here is that
+// chokepoint, at the cost of zero call-site edits.  Call _raw only from the
+// wrapper.
+void(entity e, float chan, string samp, float vol, float atten, optional float speedpct, optional float flags, optional float timeofs) sound_raw = #8; /*
 		Starts a sound centered upon the given entity.
 		chan is the entity sound channel to use, channel 0 will allow you to mix many samples at once, others will replace the old sample
 		'samp' must have been precached first
@@ -809,10 +836,14 @@ entity(entity start, .string fld, string match) find = #18; /*
 		Scan for the next entity with a given field set to the given 'match' value. start should be either world, or the previous entity that was found. Returns world on failure/if there are no more.
 		If you have many many entities then you may find that hashtables will give more performance (but requires extra upkeep). */
 
-string(string s) precache_sound = #19; /*
+// RENAMED - see the note on sound_raw above.  shared/sh_soundlist_global.qc owns
+// the name `precache_sound` now.
+string(string s) precache_sound_raw = #19; /*
 		Precaches a sound, making it known to clients and loading it from disk. This builtin (strongly) should be called during spawn functions. This builtin must be called for the sound before the sound builtin is called, or it might not even be heard. */
 
-string(string s) precache_model = #20; /*
+// RENAMED — see the note on setmodel_raw above.  shared/sh_modellist.qc owns
+// the name `precache_model` now; call _raw only from that wrapper.
+string(string s) precache_model_raw = #20; /*
 		Precaches a model, making it known to clients and loading it from disk if it has a .bsp extension. This builtin (strongly) should be called during spawn functions. This must be called for each model name before setmodel may use that model name.
 		Modelindicies precached in SSQC will always be positive. CSQC precaches will be negative if they are not also on the server. */
 

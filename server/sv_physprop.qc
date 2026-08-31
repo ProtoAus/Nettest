@@ -79,6 +79,29 @@ float(string cvar_name) PhysProp_SafeDamp =
 const float PHYSPROP_VOID_Z    = -10000;
 const float PHYSPROP_COORD_CAP = 65536;    // sanity cap for X/Y/Z — anything larger is runaway
 
+// Both defined further down this file; QC forward-declares functions.
+void(entity prop)   PhysFiles_StopScrape;
+void(entity player) Carry_Drop;
+
+// Everything that must happen before a prop edict is thrown away.
+//
+// The carry release is the important half and it is NOT optional.  FTE's ED_Free
+// preserves the edict's fields (pr_edict.c:174-208 — the clear is commented
+// out), so Carry_Tick's stale-link guard does NOT trip on a freed prop:
+// Carry_IsCarriable still sees MOVETYPE_PHYSICS and po_carry_enabled, and
+// prop.carried_by is still the player.  The carrier therefore goes on servoing a
+// FREED edict every frame — physics_enable on a free ent, .velocity/.angles/
+// .SendFlags writes — with player.pm_carrying stuck TRUE, until ED_Alloc hands
+// that slot to some new entity, at which point Carry_Tick is quietly driving
+// whatever now lives there.  (The guard's own comment claims it catches "prop
+// removed by the void watchdog"; it cannot.)
+void() PhysProp_TeardownForRemove =
+{
+	PhysFiles_StopScrape(self);
+	if (self.carried_by != world)
+		Carry_Drop(self.carried_by);
+};
+
 void() PhysProp_VoidWatchdog =
 {
 	if (self.origin_z < PHYSPROP_VOID_Z
@@ -93,6 +116,7 @@ void() PhysProp_VoidWatchdog =
 		if (cvar("sv_debug_physprops"))
 			dprint(sprintf("[physprop] removing %s at %v (escaped world bounds)\n",
 				self.classname, self.origin));
+		PhysProp_TeardownForRemove();
 		physics_enable(self, FALSE);
 		remove(self);
 		return;
@@ -110,6 +134,7 @@ void() PhysProp_VoidWatchdog =
 		if (cvar("sv_debug_physprops"))
 			dprint(sprintf("[physprop] removing %s at %v (stuck in BSP > 5s)\n",
 				self.classname, self.origin));
+		PhysProp_TeardownForRemove();
 		physics_enable(self, FALSE);
 		remove(self);
 		return;
@@ -579,6 +604,21 @@ void(vector point, vector normal, float bucket) PhysFiles_SmokeEvent =
 // one-shots) so an impact doesn't cut the loop and vice-versa.
 const float CHAN_PHYSPROP_SCRAPE = 6;
 
+// How long after the last "keep scraping" tick the watchdog force-stops a loop.
+// The normal cut is 0.2 s (pp_slide_active_until), so this is 10x the healthy path
+// and only ever fires when the code that owns the loop has stopped running at all.
+const float SCRAPE_MAX_STALE = 2.0;
+
+// Sweep cadence, and a live-count so the sweep costs nothing when no prop is scraping.
+// The count is deliberately re-derived by each sweep rather than decremented in
+// StopScrape: an entity removed while latched clears its own fields, so a decrement
+// would be missed and the counter would drift up forever.  Over-counting is harmless
+// (one extra sweep, which then corrects it); under-counting would skip the sweep.
+const float SCRAPE_SWEEP_INTERVAL = 1.0;
+float scrape_sweep_next;
+float pp_scrape_live;
+float pp_dbg_scrape_swept;      // force-stops the watchdog has issued this map
+
 // Trace from the box CENTRE along `dir` to the struck surface and spawn the smoke puff
 // THERE (on the floor/wall the model actually contacts), not at the model centre.  Falls
 // back to the base if the trace misses.  Shared by impacts (dir = impact direction) and
@@ -608,11 +648,20 @@ void(entity prop, vector dir, float bucket) PhysFiles_SmokeAlong =
 // and `metal hard` from 6 with no code change.  Smoke/spark PARTICLES stay universal; only
 // the SOUND paths vary by material.  Kinds are MSND_HARD / MSND_SOFT / MSND_SCRAPE.
 
+// Impacts emitted this map, and the last emitter's identity — the rate check for
+// "a dropped weapon bangs and smokes every frame".  Reported by sv_debug_physprops.
+float pp_dbg_impacts;
+
 // A real surface impact: a soft or hard sound (by speed, from the object's material) +
 // a smoke puff at the struck surface.  Rate-limited by pp_impact_cooldown so a tumbling/
 // bouncing prop makes one sound.  `dir` is the impact direction (approach velocity).
 void(entity prop, float speed, vector dir) PhysFiles_EmitImpact =
 {
+	pp_dbg_impacts = pp_dbg_impacts + 1;
+	if (pp_cached_debug)
+		dprint(sprintf("[physprop] impact %s ent=%g spd=%g imin=%g cd=%g org=%v\n",
+		               prop.classname, num_for_edict(prop), speed,
+		               pp_cached_impact_min_speed, pp_cached_impact_cooldown, prop.origin));
 	prop.pp_impact_cooldown = time + pp_cached_impact_cooldown;
 	float hard = (speed >= pp_cached_impact_hard_speed);
 	string snd = MatSnd_Pick(prop.po_sndset, hard ? MSND_HARD : MSND_SOFT);
@@ -623,17 +672,70 @@ void(entity prop, float speed, vector dir) PhysFiles_EmitImpact =
 
 // A free prop scraping along a surface: a periodic dust puff at the floor it's scraping
 // (trace straight down), rate-limited.  The looping scrape SOUND is separate (StartScrape).
+float pp_dbg_slides;            // slide dust puffs emitted this map (companion to pp_dbg_impacts)
 void(entity prop) PhysFiles_DoSlide =
 {
+	pp_dbg_slides = pp_dbg_slides + 1;
+	if (pp_cached_debug)
+		dprint(sprintf("[physprop] slidepuff %s ent=%g org=%v t=%g\n",
+		               prop.classname, num_for_edict(prop), prop.origin, time));
 	prop.pp_slide_next = time + pp_cached_slide_interval;
 	PhysFiles_SmokeAlong(prop, '0 0 -1', 0);
 };
 
 // Map slide speed → scrape volume (faster = louder).
+//
+// The floor was 0.30 and the ceiling was reached at 400 u/s.  A death force-drops up
+// to twelve weapons onto ONE point (W_DropAllWeaponsOnDeath), each its own entity and
+// so each its own scrape channel, and each also fires a full-volume impact one-shot —
+// so "very loud" in the report was not an exaggeration, it was a dozen scrapes at no
+// less than 30% apiece stacked on top of each other.  A 0.10 floor keeps a slow slide
+// audible without a pile of them dominating the mix.
 float(float speed) PhysFiles_ScrapeVol =
 {
-	return bound(0.3, speed * (1.0 / 400), 1.0);
+	return bound(0.10, speed * (1.0 / 700), 0.55);
 };
+
+// How long the sample plays before it is replayed for a still-ongoing drag.
+//
+// The scrape used to be issued with SOUNDFLAG_FORCELOOP, which rewinds the channel
+// forever: the ONLY thing that can ever end such a sound is a cancel message arriving
+// on the same entity and channel.  That makes every bug in this file's stop paths an
+// UNBOUNDED bug, which is how "it scrapes for the rest of the map" keeps happening.
+// Without the flag the sample simply ends, so the worst case becomes one sample length
+// (1.84 s at the shortest, 5.13 s at the longest — measured from the wavs), and a long
+// legitimate drag is kept alive by re-issuing here instead.
+//
+// 1.6 is under the SHORTEST scrape wav on disk (wood_plank_*, 1.84 s) so there is no
+// silent gap in a continuous drag.  If a shorter scrape wav is ever added to
+// scripts/materialsounds.txt this has to come down with it.
+//
+// ONE ASSET DEFEATS THIS AND IT IS WORTH KNOWING: concrete_block_scrape_rough_loop1.wav
+// is the only scrape sample carrying a `cue ` chunk, and FTE reads cue points as loop
+// points (snd_mem.c:1329) — so that one still self-loops with no flag at all, and it is
+// also what `glass` borrows.  It is bounded by the progress gate below rather than by
+// the flag; `snd_ignorecueloops 1` is the client-side escape hatch if it ever misbehaves.
+const float SCRAPE_REISSUE = 1.6;
+
+// THE PROGRESS GATE — the actual cure for a scrape that never stops.
+//
+// PhysFiles_StartScrape refreshes the watchdog deadline on EVERY call, so the watchdog
+// structurally cannot fire while anything keeps asking for the loop; and the normal cut
+// only happens once the slide test goes false for 0.2 s.  Both of those assume that
+// "asking to scrape" means "moving".  An ODE pile does not honour that assumption:
+// twelve weapon drops spawned on one origin interpenetrate, and the jitter that comes
+// out of resolving them sits above sv_physprop_slide_min_speed (35) indefinitely while
+// the prop travels nowhere.  It also cannot fall below sv_physprop_sleep_speed (8) to
+// go to sleep, so the one path that would have stopped the scrape is starved as well.
+// The server believes the slide is legitimate and keeps it up forever.
+//
+// So: measure DISPLACEMENT, not speed.  A prop that covers less than SCRAPE_PROGRESS_MIN
+// units in SCRAPE_PROGRESS_WINDOW seconds is not sliding whatever its velocity says, and
+// is muted until it demonstrably travels again.  12 units in half a second is ~24 u/s of
+// real progress, comfortably below a genuine push and far above jitter.
+const float SCRAPE_PROGRESS_WINDOW = 0.5;
+const float SCRAPE_PROGRESS_MIN    = 12;
+float pp_dbg_scrape_jitter;     // props muted by the progress gate this map
 
 // Start (or keep alive) the looping scrape sound at a speed-scaled volume, and refresh
 // the slide-stop grace.  Shared by the free-slide (phys_files_think) and carry-drag
@@ -641,51 +743,252 @@ float(float speed) PhysFiles_ScrapeVol =
 // re-issuing the loop on a notable speed change — but re-issuing RESTARTS the sample (the
 // engine has no in-place volume control from QC), so it's throttled + deadbanded (a
 // steady-speed drag never re-issues) and for a rough scrape the re-trigger is ~inaudible.
-void(entity prop, float speed) PhysFiles_StartScrape =
+// RETURNS whether this prop is genuinely sliding — i.e. whether the progress gate let
+// it through.  It is not merely informational: the caller owns the DUST PUFF, and the
+// puff has to be gated by the same test as the loop.
+//
+// THE BUG THAT MADE THIS A RETURN VALUE.  The gate used to sit here and here only,
+// silencing the sound and nothing else, and the note below the sound latch said so out
+// loud ("the dust puffs from PhysFiles_DoSlide still fire").  A dropped weapon is the
+// case that turns that into a visible bug rather than a footnote: ODE resolves a light
+// gun-shaped body resting on the floor with residual jitter that sits ABOVE
+// sv_physprop_slide_min_speed (35) and BELOW the sleep cut, so the gun is permanently
+// "sliding" while travelling nowhere.  The loop was correctly muted within half a
+// second; the puffs kept firing at sv_physprop_slide_interval (0.09 = 11 Hz) for as
+// long as the gun lay there.  That is the reported "smoke every frame while it is on
+// the ground, like a constant making-contact".
+//
+// The second half of the same bug is the material with no scrape wav.  The old
+// "playing" branch was gated on .pp_scrape_active, which such a prop never sets, so the
+// displacement sample never ran for it at all and it could not be muted by any route.
+// The fresh-slide branch below seats the anchor independently of the sound, so the gate
+// now applies to every slider whether or not it has a sample to play.
+float(entity prop, float speed) PhysFiles_StartScrape =
 {
+	// --- progress gate, see SCRAPE_PROGRESS_* above ---------------------------
+	// Muted: watch for real travel, and say nothing until there is some.  This
+	// re-anchors on every window, so a prop that jitters forever stays silent
+	// forever while a crate that is genuinely shoved is speaking again within
+	// half a second.
+	if (prop.pp_scrape_muted)
+	{
+		if (time < prop.pp_scrape_prog_next)
+			return FALSE;
+		float moved = vlen(prop.origin - prop.pp_scrape_prog_org);
+		prop.pp_scrape_prog_org  = prop.origin;
+		prop.pp_scrape_prog_next = time + SCRAPE_PROGRESS_WINDOW;
+		if (moved < SCRAPE_PROGRESS_MIN)
+			return FALSE;
+		prop.pp_scrape_muted = FALSE;
+	}
+	// FRESH slide — the 0.2 s grace from the previous one has lapsed (or this prop has
+	// never slid).  Seat the displacement anchor instead of judging this tick against a
+	// stale origin, and let the slide through: half a second from now is soon enough to
+	// find out whether it is going anywhere.
+	else if (time > prop.pp_slide_active_until)
+	{
+		prop.pp_scrape_prog_org  = prop.origin;
+		prop.pp_scrape_prog_next = time + SCRAPE_PROGRESS_WINDOW;
+	}
+	// Continuing: sample displacement over the window and mute if there is none.
+	else if (time >= prop.pp_scrape_prog_next)
+	{
+		float travelled = vlen(prop.origin - prop.pp_scrape_prog_org);
+		prop.pp_scrape_prog_org  = prop.origin;
+		prop.pp_scrape_prog_next = time + SCRAPE_PROGRESS_WINDOW;
+		if (travelled < SCRAPE_PROGRESS_MIN)
+		{
+			PhysFiles_StopScrape(prop);
+			prop.pp_scrape_muted  = TRUE;
+			pp_dbg_scrape_jitter  = pp_dbg_scrape_jitter + 1;
+			if (pp_cached_debug)
+				dprint(sprintf("[physprop] scrape muted (no progress) %s ent=%g at %v\n",
+				               prop.classname, num_for_edict(prop), prop.origin));
+			return FALSE;
+		}
+	}
+
 	prop.pp_slide_active_until = time + 0.2;   // grace before the loop cuts after sliding stops
+	// Watchdog stamp — refreshed on EVERY call, i.e. on every tick that still wants the loop
+	// playing, so it expires only once whatever was refreshing it has stopped running.  A long
+	// legitimate drag keeps pushing it forward and is never cut; a prop whose think died mid-slide
+	// gets swept SCRAPE_MAX_STALE seconds later.  See PhysFiles_ScrapeWatchdog.
+	prop.pp_scrape_deadline    = time + SCRAPE_MAX_STALE;
 	float vol = PhysFiles_ScrapeVol(speed);
 	// Variant COUNT comes from the material's table rows.  A material with no scrape loop
-	// slides SILENTLY (the dust puffs from PhysFiles_DoSlide still fire, and pp_scrape_active
-	// stays FALSE so PhysFiles_StopScrape correctly no-ops).  glass and rubber ship no scrape
-	// wavs but BORROW one in materialsounds.txt, so in practice this only trips on a missing
-	// or typo'd data file — MatSnd_Pick deliberately has NO kind-fallback for SCRAPE, because
-	// a one-shot forced under SOUNDFLAG_FORCELOOP machine-guns.
+	// slides SILENTLY — and it is still SLIDING, so this returns TRUE and the caller's dust
+	// puff still fires; the progress gate above has already had its say.  glass and rubber
+	// ship no scrape wavs but BORROW one in materialsounds.txt, so in practice this only
+	// trips on a missing or typo'd data file — MatSnd_Pick deliberately has NO kind-fallback
+	// for SCRAPE, because a one-shot forced under SOUNDFLAG_FORCELOOP machine-guns.
 	float nvar = MatSnd_Count(prop.po_sndset, MSND_SCRAPE);
 	if (nvar <= 0)
-		return;
+		return TRUE;
 	if (!prop.pp_scrape_active)
 	{
 		// Latch the variant so the volume re-issue below replays the SAME sample.
 		prop.pp_scrape_var = floor(random() * nvar);
 		if (prop.pp_scrape_var >= nvar) prop.pp_scrape_var = nvar - 1;
 		sound(prop, CHAN_PHYSPROP_SCRAPE, MatSnd_Path(prop.po_sndset, MSND_SCRAPE, prop.pp_scrape_var),
-		      vol, ATTN_NORM, 100, SOUNDFLAG_FORCELOOP | SOUNDFLAG_FOLLOW);
+		      vol, ATTN_NORM, 100, SOUNDFLAG_FOLLOW);
 		prop.pp_scrape_active     = TRUE;
 		prop.pp_scrape_vol        = vol;
 		prop.pp_scrape_revol_next = time + 0.12;
+		prop.pp_scrape_reissue_at = time + SCRAPE_REISSUE;
+		// (The progress anchor is NOT seated here any more.  The fresh-slide branch at the
+		//  top already seated it this same tick, and it has to live there rather than here
+		//  so that a material with no scrape sample — which never reaches this latch — is
+		//  still measured.)
+		// Arms the watchdog sweep.  Only ever incremented — each sweep re-derives the
+		// true count, so an entity removed while latched cannot leave this stuck high.
+		pp_scrape_live            = pp_scrape_live + 1;
 	}
 	else if (pp_cached_scrape_track && time >= prop.pp_scrape_revol_next
 	         && fabs(vol - prop.pp_scrape_vol) >= 0.12)
 	{
 		sound(prop, CHAN_PHYSPROP_SCRAPE, MatSnd_Path(prop.po_sndset, MSND_SCRAPE, prop.pp_scrape_var),
-		      vol, ATTN_NORM, 100, SOUNDFLAG_FORCELOOP | SOUNDFLAG_FOLLOW);
+		      vol, ATTN_NORM, 100, SOUNDFLAG_FOLLOW);
 		prop.pp_scrape_vol        = vol;
 		prop.pp_scrape_revol_next = time + 0.12;
+		prop.pp_scrape_reissue_at = time + SCRAPE_REISSUE;
 	}
+	// A THIRD clause, deliberately not folded into either of the two above.  Now that
+	// the sample does not self-loop, a drag longer than the wav needs replaying — but
+	// the first branch re-rolls pp_scrape_var and increments pp_scrape_live, so
+	// re-entering it every 1.6 s would swap timbre mid-drag and inflate the live
+	// counter forever.  This one reuses the latched variant and touches neither.
+	else if (time >= prop.pp_scrape_reissue_at)
+	{
+		sound(prop, CHAN_PHYSPROP_SCRAPE, MatSnd_Path(prop.po_sndset, MSND_SCRAPE, prop.pp_scrape_var),
+		      vol, ATTN_NORM, 100, SOUNDFLAG_FOLLOW);
+		prop.pp_scrape_vol        = vol;
+		prop.pp_scrape_reissue_at = time + SCRAPE_REISSUE;
+	}
+	return TRUE;
 };
 
-// Stop the looping scrape sound if it's playing.  Empty-string sound() is a NO-OP in
-// this engine (sfx==NULL guard — see cl_rain.qc), and stopsound() is client-only, so we
-// cancel a FORCELOOP by playing a real silent sample (null.wav) on the same channel,
-// which replaces it.
+// Stop the looping scrape sound if it's playing.
+//
+// WHY null.wav AND NOT ONE OF THE TWO OBVIOUS THINGS.  Both are dead ends, and the
+// second one is dead for a reason that is not obvious and was previously recorded here
+// incorrectly:
+//   * empty-string sound() never leaves the server — sv_send.c:1302
+//     `else if (!*sample) return;`
+//   * stopsound() is NOT "client-only".  SSQC has it (pr_cmds.c:11512 and :11522 both
+//     register PF_StopSound) and it does the right thing server-side, ending in
+//     SVQ1_StartSound(..., NULL sample, ..., CF_SV_RELIABLE).  It is inert because of
+//     the CLIENT: the extended parser bails on the precache lookup BEFORE it reaches
+//     the stop branch — cl_parse.c:5616 `if (!cl.sound_name[sound_num]) return;` runs
+//     ahead of :5623 `if (!sound_num) S_StopSound(ent, channel);`, and sound_name is
+//     filled from index 1, so a stop (index 0) is always dropped. (CSQC's own
+//     stopsound is a different builtin again and addresses -entnum, disjoint from the
+//     +entnum a server sound lands on — pr_csqc.c:4702.)
+// So the only cancel that reaches a client is a real sample on the same entity and
+// channel, which the mixer overrides in place (snd_dma.c:2629-2647, and note
+// SND_PickChannel never steals a busy channel — it grows the array instead, so a
+// stranded FORCELOOP can never be reclaimed by anything else).
+//
+// SOUNDFLAG_RELIABLE IS THE WHOLE FIX FOR "THE SCRAPE NEVER STOPS", and it is not
+// about packet loss.  SV_StartSound picks the multicast scope from that flag:
+//
+//     sv_send.c:1319  if (reliable || !sv_phs.value || !attenuation) use_phs = false;
+//     sv_send.c:1352  SV_MulticastCB(origin, reliable ? MULTICAST_PHS_R : MULTICAST_PHS, ...)
+//     sv_send.c:1354  SV_MulticastCB(origin, reliable ? MULTICAST_ALL_R : MULTICAST_ALL, ...)
+//     sv_send.c:936   case MULTICAST_ALL_R: ... mask = NULL;      // every client, no PHS test
+//
+// So an unflagged stop is filtered by the PHS of the PROP'S position, exactly like the
+// start.  Walk away from a gun you dropped while it is still sliding and you leave its
+// PHS; the prop then comes to rest somewhere you can no longer hear, the server issues
+// the stop, the PHS test drops it before it reaches you — and snd_mix.c rewinds a
+// CF_FORCELOOP channel forever.  The server believes it stopped the sound.  You hear it
+// scrape for the rest of the map.  That is the reported bug, and it needs no removal, no
+// dead think and no lost latch to happen: just distance.
+//
+// FTE'S OWN AUTHOR DOCUMENTED THIS EXACT FAILURE AND APPLIED THIS EXACT FIX — just not
+// to a class of entity we use.  sv_send.c:1373, verbatim: "these sounds are often looped,
+// and if the start is in the phs and the end isn't/gets dropped, then you end up with an
+// annoying infinitely looping sample", immediately followed by :1377 `chflags |=
+// CF_SV_RELIABLE;`.  It is inside `if (solid == SOLID_BSP || solid == SOLID_BSPTRIGGER)`
+// at :1364, so a dropped weapon (SOLID_PHYSICS_BOX / _TRIMESH) never qualifies for it.
+// The flag costs no wire bits either: only CF_NETWORKED bits reach the packet
+// (sv_send.c:1172), and CF_SV_RELIABLE is not one of them (sound.h:130).
+//
+// The start deliberately stays PHS-scoped (you should not hear a scrape begin across the
+// map).  A client that never heard the start and receives this stop merely plays silence
+// on an idle channel, which costs nothing.
+//
+// Reachability is conditional, which is worth knowing before concluding this fixed
+// someone's report: the PHS has to exist at all.  sv_init.c:481 skips building it when
+// sv_calcphs is 0, when it would exceed 1 MB, or when deathmatch AND coop are both 0 —
+// and with no PHS, `case MULTICAST_PHS:` broadcasts anyway (sv_send.c:944-945), so the
+// bug cannot occur.  This mod forces deathmatch 1 from the menu, so on an ordinary map
+// the PHS IS built and the bug IS live; on a map big enough to blow the 1 MB cap it
+// never was.
+//
+// ONE FILTER THE FLAG DOES *NOT* CLEAR: dimensions.  SVQ1_StartSound passes the emitting
+// entity's .dimension_seen as the multicast mask (sv_send.c:1393), and SV_Multicast drops
+// any client whose .dimension_see misses it (sv_send.c:751, :1017) — a test that sits
+// BEFORE the `if (!mask) break;` broadcast shortcut at :759, so MULTICAST_ALL_R is
+// filtered too.  Benign today only because players are given dimension_see 255
+// (sv_player.qc:4099) and nothing ever writes .dimension_seen on a prop — note that is a
+// DIFFERENT field from the .dimension_solid / .dimension_hit this mod writes on props
+// constantly, and PHYSDROP_DIM (256) sits outside the 255 default.  If a prop ever gains
+// a .dimension_seen, this stop silently stops arriving again.
 void(entity prop) PhysFiles_StopScrape =
 {
 	if (prop.pp_scrape_active)
 	{
-		sound(prop, CHAN_PHYSPROP_SCRAPE, "sounds/null.wav", 1, ATTN_NORM);
-		prop.pp_scrape_active = FALSE;
+		sound(prop, CHAN_PHYSPROP_SCRAPE, "sounds/null.wav", 1, ATTN_NORM,
+		      100, SOUNDFLAG_RELIABLE);
+		prop.pp_scrape_active     = FALSE;
+		prop.pp_scrape_deadline   = 0;
+		prop.pp_scrape_reissue_at = 0;
+		// A prop that has genuinely stopped starts its next slide with a clean
+		// sheet.  The progress gate re-mutes it within half a second if the next
+		// slide is jitter again, and this is what stops a single bad episode from
+		// silencing an honest push later on.  (The mute path sets .pp_scrape_muted
+		// AFTER calling this, so it is not undone by this line.)
+		prop.pp_scrape_muted      = FALSE;
 	}
+};
+
+// Belt-and-braces cutoff for every way a latch can be stranded ON the server: a think
+// that stopped being scheduled, a think reassigned out from under the FX code
+// (W_PhysDropFallbackToToss repoints .think at weapon_become_solid), a prop handed
+// between the free-slide and carry-drag paths, or any future path that forgets to call
+// StopScrape.  Cannot help with an entity that was REMOVED while latched — its fields
+// are already cleared by then, which is why the removal paths call StopScrape directly.
+//
+// Cost: skipped entirely while pp_scrape_live is 0, which is almost always.  When a prop
+// IS sliding it is one nextent() walk per second.
+void() PhysFiles_ScrapeWatchdog =
+{
+	if (time < scrape_sweep_next)
+		return;
+	scrape_sweep_next = time + SCRAPE_SWEEP_INTERVAL;
+	if (pp_scrape_live <= 0)
+		return;
+
+	float live = 0;
+	entity e = nextent(world);
+	while (e)
+	{
+		if (e.pp_scrape_active)
+		{
+			if (time > e.pp_scrape_deadline)
+			{
+				PhysFiles_StopScrape(e);
+				pp_dbg_scrape_swept = pp_dbg_scrape_swept + 1;
+				if (pp_cached_debug)
+					dprint(sprintf("[physprop] scrape watchdog force-stopped %s ent=%g at %v\n",
+					               e.classname, num_for_edict(e), e.origin));
+			}
+			else
+				live = live + 1;
+		}
+		e = nextent(e);
+	}
+	pp_scrape_live = live;
 };
 
 // Cheap confirming trace: is the prop resting on / just above a surface (vs airborne)?
@@ -736,9 +1039,15 @@ void(float lin) PhysObj_DetectContactFX =
 			if (PhysFiles_OnSurface(self))
 			{
 				// Sliding along a surface: keep the scrape loop alive (volume by speed) + puffs.
-				PhysFiles_StartScrape(self, horizspeed);
-				if (time >= self.pp_slide_next)
-					PhysFiles_DoSlide(self);
+				// THE PUFF IS GATED ON THE RETURN VALUE, not fired unconditionally.  A prop whose
+				// ODE jitter reads as 35+ qu/s while it travels nowhere — every dropped weapon
+				// resting on a floor — is muted by the progress gate inside StartScrape, and
+				// firing the dust anyway is what buried a dropped gun in smoke at 11 Hz forever.
+				if (PhysFiles_StartScrape(self, horizspeed))
+				{
+					if (time >= self.pp_slide_next)
+						PhysFiles_DoSlide(self);
+				}
 			}
 		}
 	}
@@ -1246,8 +1555,12 @@ void() PhysObj_Think =
 	    || fabs(self.origin_x) > PHYSPROP_COORD_CAP
 	    || fabs(self.origin_y) > PHYSPROP_COORD_CAP)
 	{
-		if (self.po_fx_enabled)
-			PhysFiles_StopScrape(self);   // don't leave the scrape loop playing on a removed ent
+		// UNGATED.  StopScrape already self-guards on .pp_scrape_active, so the
+		// po_fx_enabled test bought nothing and opened a hole: Carry_Tick's
+		// StartScrape (below) is NOT gated on po_fx_enabled, so a prop that
+		// started its loop while being dragged could reach here with the loop
+		// running and po_fx_enabled clear, and keep playing after the remove().
+		PhysFiles_StopScrape(self);   // don't leave the scrape loop playing on a removed ent
 		physics_enable(self, FALSE);
 		remove(self);
 		return;
@@ -2337,12 +2650,16 @@ void(entity player) Carry_Tick =
 		if (prop.pp_was_touching && actual_speed >= cvar("sv_physprop_slide_min_speed"))
 		{
 			// Sustained contact + moving = dragging → scrape loop (volume by speed) + puffs
-			// at the actual contacted surface.
-			PhysFiles_StartScrape(prop, actual_speed);
-			if (time >= prop.pp_slide_next)
+			// at the actual contacted surface.  Puff gated on the progress test for the same
+			// reason as the free-prop path — though `actual_speed` here is a real origin
+			// delta rather than ODE's velocity, so this one was never the jitter case.
+			if (PhysFiles_StartScrape(prop, actual_speed))
 			{
-				prop.pp_slide_next = time + cvar("sv_physprop_slide_interval");
-				PhysFiles_SmokeAlong(prop, hit_normal * -1, 0);
+				if (time >= prop.pp_slide_next)
+				{
+					prop.pp_slide_next = time + cvar("sv_physprop_slide_interval");
+					PhysFiles_SmokeAlong(prop, hit_normal * -1, 0);
+				}
 			}
 		}
 		else if (!prop.pp_was_touching && time >= prop.pp_impact_cooldown

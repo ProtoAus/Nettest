@@ -19,6 +19,10 @@ string(float idx) Door_LookupLockedSound;                            // sv_doors
 string(float idx) Door_LookupUnlockedSound;                          // sv_doors.qc
 string(float idx) Button_LookupSound;                                // sv_doors.qc
 void(string snd) Door_PrecacheIfReal;                                // sv_doors.qc
+// Sven InventoryRules gate — defined in sv_item_inventory.qc (position 265),
+// which compiles after this file; the KEY FIELDS it reads are in
+// sv_customdefs.qc for exactly that reason.
+float(entity rules, entity who) Inv_Gate;                            // sv_item_inventory.qc
 
 // Shared fields — declared authoritatively in sv_doors.qc.
 // Redeclared here so this file compiles standalone; QC accepts
@@ -141,6 +145,18 @@ void() button_wait =
     // 2 Set / 3 Toggle, sven-coop.fgd:2174) — no transposition, unlike
     // `triggerstate`.  FGD default is 3, which is USE_TOGGLE anyway.
     //
+    // The ternary below has the same shape as the sub_use_type bug USE_UNSET
+    // closes (sv_customdefs.qc), and for a FIELD it cannot be fixed the same
+    // way: FTE binds a declared field straight from the keyvalue, so an absent
+    // `use_type` and an explicit `use_type 0` are both 0 by the time the spawn
+    // function runs, and telling them apart would mean routing the key through
+    // the ED_ParseUnknownEpair hook the way sv_multi_manager.qc does.
+    //
+    // Measured before leaving it alone: 1019 `use_type` keys across the 137-map
+    // corpus (Sven + local + vanilla) — 995 of value 3, 22 of 2, 2 of 1, and
+    // ZERO of 0.  No map asks a button to fire an explicit Off, so this is
+    // latent.  If one ever does, the harvest-hook route above is the fix.
+    //
     // SUB_UseTargets rather than the bare walker: func_button inherits
     // Targetx, so `killtarget` and `delay` are real keys the two-arg form
     // silently drops.  Measured: 16 of pizza_ya_san1's 30 buttons carry a
@@ -225,6 +241,10 @@ void() button_fire =
 
 void() button_use =
 {
+    // Sven's InventoryRules — func_button and func_rot_button are both on the
+    // list of classes it gates ("Prevent button being used").
+    if (!Inv_Gate(self, activator))
+        return;
     self.enemy = activator;
     button_fire();
 };
@@ -232,6 +252,8 @@ void() button_use =
 void() button_touch =
 {
     if (other.classname != "player")
+        return;
+    if (!Inv_Gate(self, other))
         return;
     // TOUCH_ACTIVATES gate — buttons no longer fire on touch by
     // default, mappers must opt in.  +use-only is the standard
@@ -394,6 +416,36 @@ void() func_button =
     }
     self.pos1 = self.origin;
 
+    // SetMovedir RUNS FOR EVERY BUTTON, NOT JUST MOVING ONES, and hoisting it here
+    // is the whole fix for "the button is invisible and non-collidable but I can
+    // still +use it".
+    //
+    // SetMovedir (sv_push.qc:25) is the ONLY thing that zeroes .angles, and GoldSrc
+    // overloads `angles` on a mover to mean its movement DIRECTION, not a rotation of
+    // the brushwork.  The two branches below used to skip it, so a DONT_MOVE button
+    // kept the mapper's angles on a SOLID_BSP brush - and a GoldSrc submodel compiled
+    // without an ORIGIN brush carries ABSOLUTE world bounds with .origin '0 0 0', so
+    // World_LinkEdict (engine/server/world.c:585-622) rotates that box about the world
+    // origin.  hl_c01_a1's `ele_top_bttn` (mins -1873 -2786 -1120, angles '0 90 0')
+    // linked at x 2784..2786 - about 4650 units from the brush.  PVS leafs come from
+    // that box, so it never reaches a client; the narrowphase rotates the same way, so
+    // traces miss it.
+    //
+    // Half-Life never had this bug because CBaseButton::Spawn calls SetMovedir(pev)
+    // UNCONDITIONALLY at buttons.cpp:465 - before SET_MODEL - and applies the
+    // DONT_MOVE pos2 collapse afterwards at :490-492.  Same order here now.
+    //
+    // Measured: 278 of the corpus's 2011 DONT_MOVE buttons also carry a non-zero
+    // angles key, across 31 maps (stadium4 83, polar_rescue 80, tf_original 43,
+    // hl_c01_a1 7, hl_c02_a1 7, hl_c06 6).
+    //
+    // A mapper-supplied `movedir` still wins, so save it across the call: SetMovedir
+    // derives movedir FROM angles and would otherwise overwrite it.
+    vector premovedir = self.movedir;
+    SetMovedir();
+    if (premovedir != '0 0 0')
+        self.movedir = premovedir;
+
     // DONT_MOVE: pin pos2 to pos1 so any code path that touches pos2
     // (button_wait's setorigin guard, defensive Mover_Start) becomes
     // a no-op even if a future caller forgets the spawnflag check.
@@ -401,17 +453,22 @@ void() func_button =
     {
         self.pos2 = self.pos1;
     }
-    else if (self.movedir != '0 0 0')
+    else if (premovedir != '0 0 0')
     {
+        // An explicit `movedir` key IS the offset, not a direction to scale - 29
+        // func_buttons in the corpus set one.  Unchanged from before the hoist.
         self.pos2 = self.pos1 + self.movedir;
+    }
+    else if (self.distance)
+    {
+        self.pos2 = self.pos1 + self.movedir * self.distance;
     }
     else
     {
-        SetMovedir();
-        if (self.distance)
-            self.pos2 = self.pos1 + self.movedir * self.distance;
-        else
-            self.pos2 = self.pos1 + self.movedir * (fabs(self.movedir * self.size) - self.lip);
+        // Same -2 as func_door and momentary_door, same reason: CBaseButton::Spawn
+        // takes back the pixel Mod_LoadSubmodels spreads submodel bounds by.
+        vector sz = self.size - '2 2 2';
+        self.pos2 = self.pos1 + self.movedir * (fabs(self.movedir * sz) - self.lip);
     }
 
     // Same ordering trap as func_door: SV_InitReplicatedSolidBrush linked this brush

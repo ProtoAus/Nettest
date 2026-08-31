@@ -251,7 +251,7 @@ void() CSQC_PredictGLCommand =
                 else
                     sound(self, CHAN_WEAPON, "sounds/weapons/wpn_grenadelauncher/fire3.wav", 1, ATTN_NONE);
                 CSQC_RecordPredictedWeaponSound();
-                CSQC_MuzzleFlash();
+                CSQC_MuzzleFlash(MUZZLE_TINT_DEFAULT);
 
                 // Spawn fake grenade projectile for instant visual
                 {

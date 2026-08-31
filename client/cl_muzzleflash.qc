@@ -27,9 +27,22 @@ void(vector view_pos, vector view_ang) CSQC_ViewFX_PoseViewmodelForBoneLookup;
 
 float csqc_muzzleflash_time;       // cltime when the last flash started
 float csqc_muzzleflash_duration;   // how long the flash lasts
+// Per-weapon flash tint.  The dlight below used to be hardcoded to the powder
+// orange every ballistic weapon wants, which meant the gauss, egon, hivehand and
+// shock rifle -- none of which burn powder -- lit the room orange while their
+// own beam or bolt was cyan/blue/green.
+vector csqc_muzzleflash_colour;
+
+// Burning powder.  What every conventional firearm passes; only weapons that
+// are not firing powder (gauss, displacer, shock rifle, tesla) name their own.
+const vector MUZZLE_TINT_DEFAULT = '1 0.8 0.4';
 
 const float MUZZLE_FLASH_RADIUS   = 300;
 const float MUZZLE_FLASH_DURATION = 0.1;
+
+// Defined further down; the dlight draw below needs it to place the light at the
+// barrel rather than at the eye.
+vector() CSQC_MuzzleLightPos;
 
 // --- Sprite muzzle flash state -------------------------------
 //
@@ -111,11 +124,23 @@ void() CSQC_MuzzleFlash_Precache =
 };
 
 // Called from weapon prediction when a shot fires.
-// Triggers a dynamic light at the player's view position.
-void() CSQC_MuzzleFlash =
+// Triggers a dynamic light at the gun muzzle.
+//
+// `colour` is 0..1 RGB and is REQUIRED -- it must never be `optional`.  FTEQCC
+// writes nothing to OFS_PARM0 for an omitted optional arg (qcc_pr_comp.c:9186)
+// and PR_EnterFunction copies the DECLARED parm count regardless
+// (pr_exec.c:553), so an unpassed one reads whatever the previous call left in
+// the parameter globals.  That is not theoretical: it shipped, and because this
+// is the first statement inside each shared hitscan helper the stale word was
+// that helper's own first argument -- HLSG_PELLETS (8) made the shotgun flash
+// blinding white, a 0.01 spread constant made the Python and SMG flash green.
+// Pass MUZZLE_TINT_DEFAULT unless the weapon burns something other than powder.
+// Same trap, same resolution as HUD_DrawWeaponSlot's flash_red (cl_hud.qc:828).
+void(vector colour) CSQC_MuzzleFlash =
 {
     csqc_muzzleflash_time = cltime;
     csqc_muzzleflash_duration = MUZZLE_FLASH_DURATION;
+    csqc_muzzleflash_colour = colour;
     // Guarantee the peak (frac == 1.0) frame draws even when the
     // cl_dlight_update_hz throttle would have skipped this render.
     CSQC_DlightGate_ForceUpdate();
@@ -158,12 +183,16 @@ void() CSQC_DrawMuzzleFlash =
     frac = 1.0 - (age / csqc_muzzleflash_duration);
     radius = MUZZLE_FLASH_RADIUS * scale * frac;
 
-    // Position at the camera (view origin)
-    pos = getproperty(VF_ORIGIN);
-
-    // Push forward and up from the camera to simulate muzzle position
-    makevectors(getproperty(VF_ANGLES));
-    pos = pos + v_forward * 8 + v_up * 4;
+    // Position at the BARREL, not the eye.  This used to be the view origin
+    // pushed forward 8 and up 4, which lights whatever you are facing instead of
+    // what is beside the gun -- fire down a corridor with a wall at your right
+    // shoulder and the wall stayed dark.  CSQC_MuzzleFlashWorldPos is the same
+    // answer the tracer ribbons already start from: it re-poses the current
+    // weapon's muzzle attachment every frame, so it is ADS-correct and follows
+    // the viewmodel's own sway rather than the camera's.  It falls back to the
+    // old camera-relative point for weapons that never stamp one, so nothing
+    // regresses for them.
+    pos = CSQC_MuzzleLightPos();
 
     // cl_dlight_update_hz throttle — see CSQC_DlightGate_Tick in
     // cl_main.qc.  Frame age/scale bookkeeping above always runs so
@@ -172,7 +201,20 @@ void() CSQC_DrawMuzzleFlash =
     if (csqc_dlight_update_this_frame)
         // PFLAGS_NOSHADOW: dlight is at camera origin so a shadow-casting
         // light here makes the viewmodel cast harsh shadows on itself.
-        dynamiclight_add(pos, radius, '1 0.8 0.4' * frac, 0, "", PFLAGS_NOSHADOW);
+    {
+        // Sanity clamp, not a default: every caller now states its tint (the
+        // parameter is required).  This only stops a future mistake from
+        // producing a wildly oversaturated or negative light -- it degrades to
+        // powder orange instead.  It is deliberately NOT an `== '0 0 0'` test:
+        // that is what silently failed before, because an exact vector compare
+        // against stale parameter globals essentially never matches.
+        vector tint = csqc_muzzleflash_colour;
+        if (tint_x < 0 || tint_y < 0 || tint_z < 0
+            || tint_x > 1 || tint_y > 1 || tint_z > 1
+            || tint == '0 0 0')
+            tint = MUZZLE_TINT_DEFAULT;
+        dynamiclight_add(pos, radius, tint * frac, 0, "", PFLAGS_NOSHADOW);
+    }
 };
 
 // --- Sprite muzzle flash --------------------------------------
@@ -343,6 +385,26 @@ vector() CSQC_MuzzleFlashWorldPos =
          + v_forward * csqc_muzzle_debug_offset_x
          + v_right   * csqc_muzzle_debug_offset_y
          + v_up      * csqc_muzzle_debug_offset_z;
+};
+
+// Where the muzzle-flash DLIGHT goes.
+//
+// Same answer as CSQC_MuzzleFlashWorldPos when the active weapon has a muzzle,
+// so the light comes off the barrel and lights what is beside the gun rather
+// than what you happen to be facing.  They differ only in the fallback: the
+// tracer path above deliberately wants the bare camera origin (its
+// camera-collinear detection keys off exactly that), whereas a light sitting
+// precisely at the eye illuminates almost nothing.  So weapons that never stamp
+// a muzzle offset -- the beam and energy guns, the launchers -- keep the small
+// forward/up push the light has always used.
+vector() CSQC_MuzzleLightPos =
+{
+    if (csqc_muzzle_attach_bone != "" || csqc_muzzle_debug_offset != '0 0 0')
+        return CSQC_MuzzleFlashWorldPos();
+
+    vector pos = (vector)getproperty(VF_ORIGIN);
+    makevectors((vector)getproperty(VF_ANGLES));
+    return pos + v_forward * 8 + v_up * 4;
 };
 
 // Look up an $attachment-style point on the active viewmodel and

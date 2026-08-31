@@ -284,7 +284,7 @@ void() W_MeleeStrike =
     makevectors(self.v_angle);
     src = self.origin + self.view_ofs;
     end = src + (v_forward * range);
-    W_WeaponTraceLine(src, end);
+    W_MeleeTrace(src, end);     // line, then HL's head-hull fallback
 
     float saved_dim = dimension_send;
     dimension_send  = dimension_send & ~self.dimension_seen;
@@ -455,7 +455,7 @@ void() CSQC_PredictMeleeStrike =
         || (trace_ent.classname == "player_visual_proxy");
 
     if (is_player_hit)
-        CSQC_SendHitclaim(trace_ent, dmg, 0);
+        CSQC_SendHitclaim(trace_ent, dmg, 0, HITGROUP_GENERIC);
     else
         CSQC_PredictBreakableBreak(trace_ent, dmg);
 

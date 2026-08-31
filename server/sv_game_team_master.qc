@@ -83,13 +83,39 @@ void() game_counter_use =
 {
     if (!IsMasterTriggered(self.master, activator))
         return;
-    self.frags = self.frags + 1;
+
+    // THE USE TYPE PICKS THE DIRECTION.  CGameCounter::Use, maprules.cpp:698-712:
+    //     case USE_ON:
+    //     case USE_TOGGLE:  CountUp();          break;
+    //     case USE_OFF:     CountDown();        break;
+    //     case USE_SET:     SetCountValue(...); break;
+    // This used to count up unconditionally, which is why th_escape's opening
+    // never ended.  Its `startbutt_ms_cnt` is seeded `frags 30` and fired once a
+    // second with USE_OFF (the multi_manager value "1#0") — a thirty-second
+    // COUNTDOWN to zero.  Counting up instead walked away from the limit and the
+    // start button stayed mastered off forever, so the map reported "wait 30
+    // seconds" no matter how long you waited.
+    //
+    // USE_SET is deliberately not handled here: HL takes its new value from the
+    // Use call's `value` argument, which this tree's chain dispatch does not
+    // carry.  game_counter_set (sv_th_entities.qc) is the entity that exists to
+    // stamp a value and it is what every map in the corpus actually uses, so a
+    // SET arriving here is left as a no-op rather than guessed at.
+    if (sub_use_type == USE_OFF)
+        self.frags = self.frags - 1;
+    else if (sub_use_type != USE_SET)
+        self.frags = self.frags + 1;
 
     // Bit 4 "Fire if over limit" only matters once the counter has been
     // pushed past the threshold without resetting — i.e. when RESET is off.
     float hit = (self.spawnflags & SF_GCOUNTER_OVERLIMIT)
                 ? (self.frags >= self.health)
                 : (self.frags == self.health);
+    if (cvar("sv_debug_use"))
+        dprint(sprintf("[game_counter] \"%s\": %g -> %g (limit %g)%s\n",
+                       self.targetname, self.frags - ((sub_use_type == USE_OFF) ? -1 : 1),
+                       self.frags, self.health, hit ? "  HIT" : ""));
+
     if (!hit)
         return;
 
@@ -126,7 +152,22 @@ of 10 would stall the map.
 */
 void() game_counter =
 {
-    if (!self.health)
+    // Limit Value.  Half-Life leaves pev->health at 0 when the key is absent and
+    // tests CountValue() == LimitValue(), so an absent limit means "count to
+    // zero" — which is exactly what a counter SEEDED with a non-zero Initial
+    // Value is for.  th_escape's startbutt_ms_cnt is `frags 30` with no `health`,
+    // fired once a second with USE_OFF: a thirty-second countdown to 0.
+    //
+    // The 1 fallback is kept for the other shape only: a counter that starts at 0
+    // and counts UP can never reach a limit of 0, so 0 would stall it.  Measured
+    // over the 612 game_counters in the mounted corpus, just 9 omit `health` — 6
+    // of those also omit `frags` (the -sp_campaign_portal chapter-intro counters
+    // this fallback was written for), and the 3 that seed it (th_escape's,
+    // svencoop2's endzonecount, sc_robination's checknoobs_c) all want 0.
+    //
+    // `health 0` written explicitly is indistinguishable from absent here, and
+    // that is harmless: both mean the same thing to Half-Life.
+    if (!self.health && !self.frags)
         self.health = 1;
     self.use = game_counter_use;
 };

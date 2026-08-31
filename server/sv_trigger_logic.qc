@@ -51,8 +51,14 @@ void() trigger_relay =
 //  trigger_auto
 //
 //  Fires once at map load (after `delay` seconds, default 0.2).  Used
-//  to kick off scripted intros.  globalstate is accepted-but-ignored
-//  pending env_global support.
+//  to kick off scripted intros.
+//
+//  `globalstate` gates the fire (triggers.cpp:178): the named global must be ON
+//  or the auto does nothing at all.  29 placements in the corpus use it, and
+//  hl_c07_a2 is the one to know about — its two bay-screen autos name a global
+//  that NO env_global anywhere ever defines, so in real Half-Life they never
+//  fire and the player has to press the two buttons.  Before this gate existed
+//  we pressed them for them at map load.
 // ============================================================================
 
 const float SF_AUTO_FIREONCE = 1;
@@ -75,6 +81,22 @@ void() trigger_auto_think =
     if (cvar("sv_waitforplayer") && !sv_first_player_spawned)
     {
         self.nextthink = time + 0.1;
+        return;
+    }
+
+    // triggers.cpp:178.  Note what HL does NOT do here: it does not reschedule.
+    // The think has already been consumed, so a gated-out auto is simply over —
+    // it will not fire later even if the global comes on afterwards.  Matching
+    // that matters, because the alternative (poll until the global flips) would
+    // fire hl_c07_a2's bay screens the moment anything switched those names on.
+    if (!GlobalState_GateOpen(self.globalstate))
+    {
+        if (cvar("sv_debug_use"))
+            print(sprintf("[trigger_auto] \"%s\" -> \"%s\" suppressed: globalstate "
+                          "\"%s\" is %g, not ON\n", self.targetname, self.target,
+                          self.globalstate, GlobalState_Get(self.globalstate)));
+        if (self.spawnflags & SF_AUTO_FIREONCE)
+            remove(self);
         return;
     }
 
@@ -103,6 +125,7 @@ Fires its target automatically when the map loads.
 "triggerstate"  0=off, 1=on, 2=toggle (default toggle)
 "delay"         seconds to wait after map load (default 0.2)
 "killtarget"    entity to remove on fire
+"globalstate"   only fire if this global is ON (sv_globalstate.qc)
 */
 void() trigger_auto =
 {

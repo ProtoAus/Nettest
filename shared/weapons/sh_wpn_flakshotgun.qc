@@ -119,6 +119,10 @@ void() W_FlakShotgunShoot =
     src = self.origin + self.view_ofs;
 
     pellet = 0;
+    // Tag every impact this loop emits as one pellet of a single blast, so
+    // remote viewers bypass their per-shot decal/effect caps (all pellets
+    // share one wep_action_id).  See sv_impact_is_blast in sv_weapons.qc.
+    sv_impact_is_blast = 1;
     while (pellet < FLAKSHOTGUN_PELLETS)
     {
         sx  = SH_SpreadJitter(self.wep_action_id + pellet, 0) * FLAKSHOTGUN_SPREAD;
@@ -178,6 +182,7 @@ void() W_FlakShotgunShoot =
 
         pellet += 1;
     }
+    sv_impact_is_blast = 0;
 };
 
 void() W_FlakShotgunFire =

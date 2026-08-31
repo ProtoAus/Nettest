@@ -65,6 +65,14 @@ const float SATCHEL_THROW_AVELOCITY_Y   = 400;    // satchel.cpp:401
 const float SATCHEL_GRAVITY             = 0.5;    // satchel.cpp:84
 const float SATCHEL_FRICTION            = 0.8;    // satchel.cpp:85
 
+// w_satchel.mdl ships exactly two sequences: 0 "idle" (the charge stood on its
+// end, which is how it sits in the world-model pickup) and 1 "onback" (lying
+// flat, face up).  CSatchelCharge::Spawn ends with `pev->sequence = 1`
+// (satchel.cpp:88), so a THROWN charge is on its back in Half-Life and an
+// UNTHROWN one on the ground is not.  Leaving .frame at 0 is what left every
+// charge in this tree standing upright like a little tombstone.
+const float SATCHEL_SEQ_ONBACK          = 1;      // satchel.cpp:88
+
 const float SATCHEL_THROW_DELAY         = 1.0;    // satchel.cpp:417
 const float SATCHEL_DETONATE_DELAY      = 0.5;    // satchel.cpp:382
 const float SATCHEL_DRYFIRE_DELAY       = 0.2;
@@ -129,6 +137,17 @@ float(float now) SH_SatchelTickState =
 // +attack — throw a charge.  satchel.cpp:353: the throw is refused only
 // while chargeReady == 2, i.e. between pressing the detonator and the idle
 // putting the satchel back in your hand.
+//
+// Returns  1 threw, 0 blocked, -1 dry-fire, -2 "detonate instead" (see below).
+//
+// The -2 case is a DELIBERATE DIVERGENCE from Half-Life, which never detonates
+// on primary - satchel.cpp:351 is `if (m_chargeReady != 2) Throw();` and
+// Throw() (:391) silently does nothing at zero ammo.  Faithfully ported, that
+// leaves +attack as a key that clicks at you and does nothing whenever you have
+// thrown everything you had, which reads as a broken detonator rather than as
+// the wrong key.  So: with charges live and nothing left to throw, +attack
+// detonates.  Every case where the throw could still do something is untouched,
+// so multi-charge play is exactly HL's - throw up to five, then blow them.
 float(float now) SH_SatchelTryThrow =
 {
     if (Weapon_SprintBlocksFire()) return 0;
@@ -138,7 +157,17 @@ float(float now) SH_SatchelTryThrow =
     if (self.satchel_state == SATCHEL_STATE_SPENT) return 0;
 
     if (self.ammo_satchel <= 0)
-    { self.attack_finished = now + SATCHEL_DRYFIRE_DELAY; return -1; }
+    {
+        // Nothing left to throw but something out there to set off.  Note this
+        // returns WITHOUT touching attack_finished: the dry-fire push below was
+        // able to starve the +attack2 gate at sv_weapons.qc:3801 when both keys
+        // were held, and the caller's SH_SatchelTryDetonate sets its own delay.
+        if (self.satchel_state == SATCHEL_STATE_ARMED)
+            return -2;
+
+        self.attack_finished = now + SATCHEL_DRYFIRE_DELAY;
+        return -1;
+    }
 
     self.ammo_satchel   -= 1;
     self.satchel_state   = SATCHEL_STATE_ARMED;
@@ -214,8 +243,35 @@ void() W_SatchelChargeTouch =
         return;
 
     self.gravity = 1;                       // satchel.cpp:99
-    self.velocity  = self.velocity  * 0.95; // satchel.cpp:110
-    self.avelocity = self.avelocity * 0.9;  // satchel.cpp:111
+
+    // THE DAMPING IS GROUND-ONLY, and that is the whole reason the charge
+    // skitters across a floor in Half-Life instead of dying where it lands.
+    //
+    // satchel.cpp:103-113 gates both multipliers behind an explicit downward
+    // trace, comment and all:
+    //     // HACKHACK - On ground isn't always set, so look for ground underneath
+    //     UTIL_TraceLine(pev->origin, pev->origin - Vector(0,0,10),
+    //                    ignore_monsters, edict(), &tr);
+    //     if (tr.flFraction < 1.0)
+    //     {
+    //         // add a bit of static friction
+    //         pev->velocity  = pev->velocity  * 0.95;
+    //         pev->avelocity = pev->avelocity * 0.9;
+    //     }
+    // Applying 0.95/0.9 on EVERY contact instead — which is what this used to
+    // do — charges the static-friction tax to wall grazes and ceiling clips as
+    // well.  A charge lobbed down a corridor clips the wall once on the way out
+    // and lands with most of its throw speed already gone, so it drops at your
+    // feet rather than sliding away down the hall.
+    //
+    // ignore_monsters matters too: a charge bouncing off a player or a monster
+    // must not be treated as having found ground.  MOVE_NOMONSTERS is that.
+    traceline(self.origin, self.origin - '0 0 10', MOVE_NOMONSTERS, self);
+    if (trace_fraction < 1.0)
+    {
+        self.velocity  = self.velocity  * 0.95; // satchel.cpp:110
+        self.avelocity = self.avelocity * 0.9;  // satchel.cpp:111
+    }
 
     if (!(self.flags & FL_ONGROUND) && vlen(self.velocity) > 10)
     {
@@ -259,42 +315,142 @@ entity(entity thrower, vector org, vector vel) W_SatchelChargeSpawn =
     c.movetype  = MOVETYPE_BOUNCE;
     c.solid     = SOLID_BBOX;
     setmodel(c, SATCHEL_CHARGE_MODEL);
-    setsize(c, '-4 -4 -4', '4 4 4');        // satchel.cpp:76 — point-sized, steppable
+    c.frame = SATCHEL_SEQ_ONBACK;           // satchel.cpp:88 — thrown charges lie flat
+    setsize(c, '-4 -4 -4', '4 4 4');        // satchel.cpp:76 — point-sized to HL
+    // ...but NOT point-sized to FTE, which picks the world clipping hull from
+    // the bbox SIZE with Quake's `size[0] < 3` threshold (q1bsp.c:1554) rather
+    // than GoldSrc's `size[0] <= 8`.  size[0] here is 8, so without this the
+    // charge collides with the world as HL's 32x32x36 crouch hull (hulls[3],
+    // gl_model.c:5564), offset by clip_mins - mins = (-12,-12,-14), i.e. a
+    // volume 28 units oversized in +x/+y.  It stops short of walls and can come
+    // to rest visibly hanging off a ledge.  Same defect as the snark — see the
+    // long note in sh_wpn_hlsnark.qc's W_SnarkSpawn.  1 == hulls[0] == point.
+    c.hull = 1;
     setorigin(c, org);
     c.velocity    = vel;
     c.avelocity_y = SATCHEL_THROW_AVELOCITY_Y;
     c.gravity     = SATCHEL_GRAVITY;
-    c.friction    = SATCHEL_FRICTION;
+    // .friction is NOT the MOVETYPE_BOUNCE damping in FTE — no server physics
+    // path reads that field (only ODE's contact mu, com_phys_ode.c:2771).  The
+    // backoff comes from .bouncefactor: `1 + bouncefactor`, default 1.5
+    // (sv_phys.c:1447).  GoldSrc's is `2.0 - pev->friction`, so the conversion
+    // is bouncefactor = 1 - friction: 0.8 here gives HL's backoff of 1.2, a
+    // noticeably deader bounce than the 1.5 this charge has been using.
+    c.bouncefactor = 1 - SATCHEL_FRICTION;
     c.touch       = W_SatchelChargeTouch;
     c.think       = W_SatchelChargeThink;
     c.nextthink   = time + 0.1;
     return c;
 };
 
-// satchel.cpp:365 — every charge this player owns, anywhere on the map.  HL
-// bounds the sweep to a 4096-unit sphere; that is an artefact of
-// UTIL_FindEntityInSphere being the only search it had, not a design choice,
-// so the sweep here is by classname over the whole map.
-void(entity who) W_SatchelDetonateAll =
+// HL's DeactivateSatchels (multiplay_gamerules.cpp, on PlayerKilled).  It
+// REMOVES the charges rather than detonating them - a detonation on death
+// would be a free posthumous frag - and it is the reason PlayerSpawn can
+// reset satchel_state to HOLD honestly: without this, a player who died with
+// charges out would respawn disowning charges that were still on the map with
+// nothing left able to set them off.
+//
+// The cached c.chain is enough HERE, because remove() does not touch any other
+// entity's .chain -- nxt is already read and stays valid.  Do not generalise that
+// to W_SatchelDetonateAll below: exploding runs findradius, which REBUILDS .chain
+// across the map, and no amount of look-ahead survives that.  This function is
+// safe only because removing is all it does.
+void(entity who) W_SatchelDeactivateAll =
 {
+    if (!who) return;
     entity c = findchain(classname, "monster_satchel");
-    entity oldself = self;
     while (c)
     {
         entity nxt = c.chain;
         if (c.owner == who)
-        {
-            self = c;
-            W_SatchelChargeExplode();
-            self = oldself;
-        }
+            remove(c);
         c = nxt;
     }
+    who.satchel_state = SATCHEL_STATE_HOLD;
 };
+
+// satchel.cpp:365 — every charge this player owns, anywhere on the map.  HL
+// bounds the sweep to a 4096-unit sphere; that is an artefact of
+// UTIL_FindEntityInSphere being the only search it had, not a design choice,
+// so the sweep here is by classname over the whole map.
+//
+// TWO PASSES, and the split is load-bearing.  Exploding inside the findchain walk
+// corrupts it: W_SatchelChargeExplode -> W_RadiusExplode uses findradius
+// (sh_weapon_standard.qc:608), and findchain and findradius BUILD THEIR LISTS IN
+// THE SAME .chain FIELD.  Caching `nxt` only protects the current hop -- by the
+// second detonation nxt.chain has already been overwritten, so from there the loop
+// walks the blast-radius list instead of the satchel list.  Charges past the second
+// survived ("doesn't blow them ALL up"), and worse, `if (c.owner == who)` then
+// matched arbitrary player-owned entities inside the 375-unit sphere
+// (player_visual_proxy, pm_prediction_proxy, tripmine_beam) and explode+remove()d
+// them.  Latent until the wep_nextframe freeze above was fixed, because nothing
+// detonated at all; and invisible to W_SatchelSelfTest, which uses exactly 2
+// charges -- the one count where the cached nxt still happens to be right.
+//
+// HL is immune because UTIL_FindEntityInSphere is a stateless edict-index scan
+// with no per-entity link field to clobber.
+//
+// remove() during the walk was never the hazard the old comment claimed; the
+// findradius inside the explosion was.
+// Re-scan per charge rather than snapshotting the list up front.  A snapshot
+// would need a fixed bound, and there is no honest one: W_SatchelPickupCopy caps
+// CARRIED ammo at 5 but never counts live charges the way HL's AddDuplicate does
+// (satchel.cpp:177), so throwing five, picking more up and throwing again leaves
+// more than five out.  A snapshot could also hold a charge that a previous blast
+// already remove()d.  W_SatchelChargeExplode ends in remove(), so re-finding
+// always shrinks the set and the loop terminates; the counter is a backstop
+// against an explosion that somehow fails to remove.
+void(entity who) W_SatchelDetonateAll =
+{
+    entity oldself = self;
+    float  guard = 0;
+
+    for (;;)
+    {
+        entity target = world;
+        entity c = findchain(classname, "monster_satchel");
+        while (c)
+        {
+            if (c.owner == who)
+            {
+                target = c;
+                break;
+            }
+            c = c.chain;
+        }
+
+        if (!target)
+            break;
+
+        guard = guard + 1;
+        if (guard > 64)
+        {
+            dprint("[satchel] W_SatchelDetonateAll: bailed at 64 - a charge is not being removed\n");
+            break;
+        }
+
+        self = target;
+        W_SatchelChargeExplode();
+        self = oldself;
+    }
+};
+
+// Defined just below; W_SatchelFire's out-of-charges branch calls it.
+void() W_SatchelAltFire;
 
 void() W_SatchelFire =
 {
     float r = SH_SatchelTryThrow(time);
+
+    // -2: nothing left to throw, charges live.  Route into the SAME detonate
+    // path +attack2 uses rather than duplicating it - SH_SatchelTryDetonate
+    // owns the SPENT transition, the animation timing and attack_finished.
+    if (r == -2)
+    {
+        W_SatchelAltFire();
+        return;
+    }
+
     if (r == 1)
     {
         makevectors(self.v_angle);
@@ -305,7 +461,16 @@ void() W_SatchelFire =
         // (satchel.cpp:409), not when the animation finishes.
         self.weaponmodel = SATCHEL_RADIO_VIEWMODEL;
         self.weaponframe = SATCHEL_RADIO_SEQ_DRAW;
-        self.wep_nextframe = 0;
+        // MUST schedule, not clear.  sv_weapons.qc:3820 only calls wepframe when
+        // wep_nextframe > 0, so a 0 here retires W_SatchelFrame permanently --
+        // and W_SatchelFrame is the only thing that reaches SH_WeaponEnterIdle.
+        // weaponstate then sits at WS_FIRE forever, and SH_SatchelTryThrow:147 /
+        // SH_SatchelTryDetonate:180 both refuse on exactly that, so you got one
+        // charge per equip and a dead detonator.  CSQC has no such gate
+        // (cl_weapons.qc:1592 predicts unconditionally), so the client threw and
+        // the server did not -- which is why the charge never appeared and the
+        // ammo count flickered back.  0 is only correct in a holster path.
+        self.wep_nextframe = time + SATCHEL_FRAME_INTERVAL;
     }
     else if (r == -1)
         sound(self, CHAN_WEAPON, "sounds/weapons/dryfire1.wav", 1, ATTN_NORM);
@@ -316,7 +481,7 @@ void() W_SatchelAltFire =
     if (!SH_SatchelTryDetonate(time)) return;
 
     self.weaponframe   = SATCHEL_RADIO_SEQ_FIRE;
-    self.wep_nextframe = 0;
+    self.wep_nextframe = time + SATCHEL_FRAME_INTERVAL;   // see W_SatchelFire
     W_SatchelDetonateAll(self);
 };
 
@@ -333,6 +498,25 @@ void() W_SatchelFrame =
             self.satchel_state = SATCHEL_STATE_HOLD;
             if (self.ammo_satchel <= 0 && self.weapon == WEP_SATCHEL)
             {
+                // Re-point slot_utility BEFORE trying to switch.  Without this
+                // the auto-switch was a literal no-op: slot_utility still said
+                // WEP_SATCHEL, and W_SelectWeapon early-returns on
+                // `new_weapon == cur` (sv_weapons.qc), so the `return` below
+                // then skipped the whole fallback chain and left the player
+                // holding a satchel they no longer owned.  Every other utility
+                // weapon already does this at spend time (hlgrenade, snark,
+                // tripmine all call W_UtilityNextAfterSpent); the satchel is the
+                // one that never did, because its retire is deferred until the
+                // last charge has actually been detonated.
+                //
+                // That deferral is correct and is HL's rule -- CSatchel::Holster
+                // clears the weapon bit only when the count is 0 AND
+                // m_chargeReady is 0, so you keep the radio while charges are
+                // live (satchel.cpp:340-347, :277-291).  This tree already
+                // encodes the ownership half of that in
+                // W_UtilityPlayerHasWeapon; only the slot re-point was missing.
+                self.slot_utility = W_UtilityNextAfterSpent(WEP_SATCHEL);
+
                 if      (self.slot_utility)   W_SelectWeapon(self.slot_utility);
                 else if (self.slot_primary)   W_SelectWeapon(self.slot_primary);
                 else if (self.slot_secondary) W_SelectWeapon(self.slot_secondary);
@@ -425,7 +609,15 @@ void() CSQC_PredictSatchelCommand =
     if (input_buttons & 1)
     {
         float r = SH_SatchelTryThrow(csqc_pred_time);
-        if (r == 1)
+        // -2: out of charges with satchels live, so +attack detonates.  Mirrors
+        // W_SatchelFire exactly - same shared gate, same detonate call - so the
+        // two sides cannot disagree about which of the two things the key did.
+        if (r == -2)
+        {
+            if (SH_SatchelTryDetonate(csqc_pred_time))
+                CSQC_MarkPendingWeaponAck();
+        }
+        else if (r == 1)
         {
             CSQC_MarkPendingWeaponAck();
             self.weapon_viewmodel = SATCHEL_RADIO_VIEWMODEL;
@@ -441,7 +633,13 @@ void() CSQC_PredictSatchelCommand =
         }
     }
 
-    if (input_buttons & 2)
+    // Bit 4 is +attack2.  This read bit 2 for the whole life of the file, which
+    // is PM_BTN_JUMP (sh_pmove.qc:42) - so the detonator predicted nothing on
+    // the key that actually detonates (the server still did it, with no local
+    // radio animation, which is what made the weapon feel dead) and predicted a
+    // phantom detonation on +jump.  Every other secondary-fire weapon in the
+    // tree tests 4; see sh_weapon_logic.qc:320.
+    if (input_buttons & 4)
     {
         if (SH_SatchelTryDetonate(csqc_pred_time))
             CSQC_MarkPendingWeaponAck();
@@ -454,6 +652,12 @@ void() CSQC_PredictSatchelCommand =
             self.satchel_state = SATCHEL_STATE_HOLD;
             if (self.ammo_satchel <= 0)
             {
+                // Mirror of the server's re-point above -- CSQC_PredictSelectWeapon
+                // has the same `new_weapon == self.weapon` early-return, so
+                // without this the predicted switch was a no-op too and the two
+                // sides at least agreed about being stuck.
+                self.slot_utility = W_UtilityNextAfterSpent(WEP_SATCHEL);
+
                 if      (self.slot_utility)   CSQC_PredictSelectWeapon(self.slot_utility);
                 else if (self.slot_primary)   CSQC_PredictSelectWeapon(self.slot_primary);
                 else if (self.slot_secondary) CSQC_PredictSelectWeapon(self.slot_secondary);
@@ -500,6 +704,17 @@ void() CSQC_SatchelEquip =
     self.csqc_display_frame  = CSQC_SatchelDisplayFrame;
     self.csqc_drop_clear     = CSQC_SatchelDropClear;
     self.weapon_uses_sequences = TRUE;
+    // FLIPPED — reported left-handed in game, and it is the ONLY Half-Life or
+    // Opposing Force weapon in the tree that needs this.  The reason is the mount
+    // order rather than anything about the satchel: svencoop is line 1 of
+    // fs_addons.txt, and Sven ships its own remodelled v_satchel.mdl (375 KB) and
+    // v_satchel_radio.mdl (386 KB) against Valve's 82 KB / 61 KB, so neither of
+    // these two paths loads a Valve asset any more.  Sven's pair was authored the
+    // other way round from Valve's.  One field covers both viewmodels because
+    // SH_SatchelViewmodel only swaps the path, not the flip.
+    //
+    // cl_lefthand XORs against this, so reverting is one word.
+    self.weapon_viewmodel_flip = TRUE;
 };
 
 #endif // CSQC

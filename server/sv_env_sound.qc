@@ -6,6 +6,10 @@
 // and setup_reverb only to the client VM.
 //
 
+// Re-declaration, not the definition: .radius is declared first in
+// sv_ai_defs.qc (which compiles at :29 against this file's :202) and is shared
+// with info_bigmomma's arrival tolerance and scripted_sentence's speaker search.
+// All three are the BSP key "radius" on classes that are never each other.
 .float radius;
 .float roomtype;
 

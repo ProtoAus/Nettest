@@ -166,8 +166,13 @@ float() CSQC_CodScope_HidesViewmodel =
         || csqc_codscope_phase == CODSCOPE_PHASE_SCOPED
         || csqc_codscope_phase == CODSCOPE_PHASE_FADING_OUT)
         return 1;
+    // Weapon_HasZoomView covers the binoculars too — and because their zoomstage
+    // is only raised at the END of down_to_up and dropped on the FIRST frame of
+    // up_to_down (SH_DodBinocsZoomEngaged), the raise and the lower both stay
+    // visible and only the held view is hidden.  That is the same rule the comment
+    // above states for RAISING / FALLING.
     if (predicted_player.zoomstage > 0
-        && Weapon_HasScope(predicted_player.weapon))
+        && Weapon_HasZoomView(predicted_player.weapon))
         return 1;
     return 0;
 };
@@ -514,9 +519,25 @@ void() CSQC_CodScope_UpdateState =
     // eventually releases +button4.
     float sprint_btn = (csqc_live_buttons & PM_BTN_SPRINT) ? 1 : 0;
     float scoped = CSQC_CodScope_IsScoped();
+
+    // A weapon on the LEGACY zoomstage path is aiming too.  Hoisted up here
+    // from the sway block below, which has always gated on `scoped ||
+    // cs_zoomed` — while hold-breath tested `scoped` ALONE.
+    //
+    // That asymmetry is a real bug, not a style nit: CSQC_CodScope_IsScoped()
+    // is CoD-phase only, and a weapon only reaches the CoD phase if it
+    // declared a scope class through W_SetADSProfile.  Any WMF_FLAG_SCOPE
+    // weapon that didn't — the crossbow and the G3SG1 today — therefore got
+    // the full sway treatment with no way whatsoever to steady it, and
+    // +sprint while scoped did nothing.  The two gates have to agree: if it
+    // sways, it must be steadyable.
+    float cs_zoomed = predicted_player.zoomstage > 0
+                   && Weapon_HasScope(predicted_player.weapon);
+    float aiming = scoped || cs_zoomed;
+
     float stamina_locked = PM_ReadMovevar("sv_codstamina", 0) > 0
                         && predicted_player.codstamina_punished;
-    float wants_holdbreath = scoped && sprint_btn && !stamina_locked;
+    float wants_holdbreath = aiming && sprint_btn && !stamina_locked;
     if (wants_holdbreath && !csqc_codscope_holdbreath_active)
     {
         localsound("sounds/player/breathin.wav");
@@ -525,7 +546,9 @@ void() CSQC_CodScope_UpdateState =
     }
     else if (!wants_holdbreath && csqc_codscope_holdbreath_active)
     {
-        if (scoped)
+        // `aiming`, not `scoped` — otherwise releasing +sprint on a legacy-zoom
+        // weapon swallows the breathout it just played breathin for.
+        if (aiming)
             localsound("sounds/player/breathout.wav");
         csqc_codscope_holdbreath_active = 0;
     }
@@ -650,9 +673,9 @@ void() CSQC_CodScope_UpdateState =
     // aiming".  Gated on (legacy zoomstage OR cod scoped) AND
     // sv_snipersway; otherwise zero so the bias is a clean no-op for
     // un-scoped fire.
-    float cs_zoomed = predicted_player.zoomstage > 0
-                   && Weapon_HasScope(predicted_player.weapon);
-    if ((scoped || cs_zoomed) && serverkeyfloat("sv_snipersway", 0) > 0)
+    // cs_zoomed / aiming are computed up beside the hold-breath gate now, so
+    // the two cannot drift apart again.
+    if (aiming && serverkeyfloat("sv_snipersway", 0) > 0)
     {
         vector hv = predicted_player.velocity;
         hv_z = 0;

@@ -42,15 +42,39 @@
 // Half-Life's own header claims "Max of 1023 sentences"; the shipped file
 // actually holds 1065, counted both by this parser and independently outside the
 // engine.  1024 was therefore not merely tight, it silently dropped 41 real lines
-// - and the overflow report is the only reason that was visible at all.  2048
-// leaves room for the sentences a map ships inside its own content.
-const float SENT_MAX = 2048;
+// - and the overflow report is the only reason that was visible at all.
+//
+// 2048 was not enough either, and unlike the 1024 case this was happening in the
+// shipped build rather than in theory.  Every hc2_* map layers
+// svencoop_downloads/sound/hc2/sentences.txt (1062 entries) on top of valve's
+// 1065, and the log said so on every single run:
+//     [sentences] sound/hc2/sentences.txt: 983 extra sentence(s)
+//     [sentences] SENT_MAX (2048) overflowed: 83 line(s) dropped
+// 2127 raw is the real worst case for a two-file load; the union of ALL six
+// sentence files present on this install is 2149 distinct names.  4096 clears
+// both with room for a map that ships its own, and the table is two string
+// arrays, so the cost is address space rather than anything that runs.
+//
+// DE-DUPLICATING ON INSERT WAS CONSIDERED AND REJECTED.  It would be a linear
+// scan per inserted line, i.e. ~1.1M string compares to layer hc2's 1062 entries
+// on valve's 1065, paid at map load - and it would buy nothing a user can see.
+// First-wins (below) already makes a later duplicate unreachable, so dedup only
+// reclaims table slots, and at 4096 there are ~1900 spare.  If the extra sentence
+// files are ever layered in (see Sentences_Load), revisit this together with the
+// linear Sentences_IndexOf scan rather than on its own.
+const float SENT_MAX = 4096;
 
-string sent_name[SENT_MAX];	// "SC_1MUMBLE", already uppercased
+string sent_name[SENT_MAX];	// "BA_BUTTON" as written in the file - see Sentences_IndexOf
 string sent_line[SENT_MAX];	// "scientist/c1a0_sci_mumble", modifiers stripped
 float  sent_count;
 float  sent_overflow;
 float  sent_loaded;
+
+// Worldspawn key naming a SECOND sentences file the map ships - see the note on
+// Sentences_Load.  Lower case, both because that is how th_ep3_04 spells it and
+// because GoldSrc_TryCaseFoldedField (sv_multi_manager.qc:410) can only rescue a
+// missed key by folding it DOWN.
+.string sentence_file;
 
 // Seconds between the words of a multi-word sentence.
 //
@@ -138,25 +162,20 @@ string(string s) Sentences_Squeeze =
 	return out;
 };
 
-// Load sound/sentences.txt once.  Called from worldspawn, which is also the only
-// place precache_sound may run - and every word of every sentence has to be
-// precached there or SV_StartSound refuses it at play time.  That is exactly the
-// failure the body-drop sounds had.
-void() Sentences_Load =
+// Append one sentences file to the table.  Returns how many entries it added.
+//
+// Split out of Sentences_Load so a SECOND, map-supplied file can be layered on
+// top of Half-Life's - see Sentences_Load's `sentence_file` note.  Entries are
+// appended rather than merged, and Sentences_IndexOf walks from 0, so the FIRST
+// definition of a name wins.  That is the conservative order: a map cannot
+// silently redefine a stock HL group out from under the monsters that use it.
+float(string path) Sentences_LoadFile =
 {
-	if (sent_loaded)
-		return;
-	sent_loaded = TRUE;
-	sent_count  = 0;
+	float added = 0;
 
-	float fh = fopen("sound/sentences.txt", FILE_READ);
+	float fh = fopen(path, FILE_READ);
 	if (fh < 0)
-	{
-		// Not an error worth shouting about: a server with no Half-Life mounted
-		// simply has no HL dialogue, and every caller below degrades to silence.
-		dprint("[sentences] sound/sentences.txt not found - HL dialogue unavailable\n");
-		return;
-	}
+		return 0;
 
 	// TERMINATION IS NOT `while (line)`, and this cost two builds to pin down.
 	//
@@ -207,8 +226,70 @@ void() Sentences_Load =
 		sent_name[sent_count] = strzone(substring(line, 0, sp));
 		sent_line[sent_count] = strzone(substring(line, sp + 1, -1));
 		sent_count = sent_count + 1;
+		added = added + 1;
 	}
 	fclose(fh);
+	return added;
+};
+
+// Load the sentence table once.  Called from worldspawn, which is also the only
+// place precache_sound may run - and every word of every sentence has to be
+// precached there or SV_StartSound refuses it at play time.  That is exactly the
+// failure the body-drop sounds had.
+//
+// TWO FILES, and the second one is a worldspawn key.  Half-Life's own table
+// comes from the mounted valve install; a map may add its own with
+//
+//     "sentence_file" "sound/hunger/hunger_sentences.txt"
+//
+// which is what th_ep3_04 does.  BE CLEAR ABOUT HOW LITTLE THIS BUYS, because
+// the surrounding work was scoped on a claim that turned out to be wrong: the
+// campaign's 73 scripted_sentence entities were supposed to be mute without it,
+// and they are not.  69 of the 73 use Sven's `+path/file.wav` literal-sample
+// form, which sv_goldsrc_compat.qc has implemented (and precached) all along.
+// Of the remaining four, three name stock Half-Life groups (SC_TENT, BA_HEAR,
+// BA_QUESTION) that already resolve out of valve's file.  Exactly ONE line in
+// the whole campaign needs this - TH_SHERIFF on th_ep2_00 - and th_ep2_00 does
+// not even set the key, which is why the load is not gated on the key alone.
+//
+// So: honour `sentence_file` when a map sets it, AND fall back to the campaign
+// file when a map's globalsoundlist says it is a They Hunger map.  The second
+// half is the part that makes TH_SHERIFF audible; without it the key would be
+// correct and useless.
+void() Sentences_Load =
+{
+	if (sent_loaded)
+		return;
+	sent_loaded = TRUE;
+	sent_count  = 0;
+
+	float n = Sentences_LoadFile("sound/sentences.txt");
+	if (!n)
+		// Not an error worth shouting about: a server with no Half-Life mounted
+		// simply has no HL dialogue, and every caller below degrades to silence.
+		dprint("[sentences] sound/sentences.txt not found - HL dialogue unavailable\n");
+
+	string extra = world.sentence_file;
+	if (extra == "" || !extra)
+	{
+		// No explicit key.  A They Hunger map is identifiable from the
+		// globalsoundlist it already sets (12 of the campaign's maps do), and
+		// that is a far better signal than the map name: it is the same key the
+		// sound replacement layer keys off, so the two cannot disagree about
+		// which maps are They Hunger.
+		string gsl = world.globalsoundlist;
+		if (gsl != "" && gsl && strstrofs(strtolower(gsl), "hunger") >= 0)
+			extra = "sound/hunger/hunger_sentences.txt";
+	}
+
+	if (extra != "" && extra)
+	{
+		float m = Sentences_LoadFile(extra);
+		if (m)
+			dprint(sprintf("[sentences] %s: %g extra sentence(s)\n", extra, m));
+		else
+			dprint(sprintf("[sentences] %s: not found\n", extra));
+	}
 
 	if (sent_overflow)
 		dprint(sprintf("[sentences] SENT_MAX (%g) overflowed: %g line(s) dropped\n",
@@ -225,14 +306,56 @@ void() Sentences_Load =
 // want both halves.  Returns FALSE for a token with no '/', which is malformed.
 string sent_dir, sent_word0;
 
+// THE DIRECTORY IS OPTIONAL AND DEFAULTS TO vox/, which this used to treat as a
+// parse failure — and it is the single largest silent gap the sentence layer has
+// had.
+//
+// GoldSrc's format puts the directory on the FIRST word only and lets every
+// later word inherit it:
+//
+//     BA_BUTTON  barney/c1a0_ba_button        <- explicit, "barney"
+//     C1A3_0     buzwarn buzwarn attention.   <- none, so "vox"
+//
+// Returning FALSE on the second form dropped the whole sentence, at both
+// precache time (Sentences_PrecacheWords skips it) and playback time
+// (Sentences_Speak returns FALSE before saying a word).  Measured against the
+// shipped valve/sound/sentences.txt: 238 of its 1065 entries have no directory,
+// so 22% of the file was unreachable — and it is not a random 22%.  It is
+// exactly the VOX set: every Black Mesa PA announcement, the C1A0_* chapter
+// groups, C1A0_START (the announcement over hl_c00's tram ride), and the WILD*
+// and C1A3_* groups the `speaker` entity reaches for by preset.
+//
+// Found by porting `speaker` — the new entity's own "no sentence or group"
+// diagnostic fired on hl_c04 and hl_c09, and the groups it named turned out to
+// be present in the file all along.
 float(string first) Sentences_SplitFirst =
 {
 	float slash = strstrofs(first, "/");
 	if (slash < 0)
-		return FALSE;
+	{
+		// No directory on the first word: GoldSrc's default.
+		sent_dir   = "vox";
+		sent_word0 = first;
+		return (sent_word0 != "");
+	}
 	sent_dir   = substring(first, 0, slash);
 	sent_word0 = substring(first, slash + 1, -1);
-	return (sent_dir != "" && sent_word0 != "");
+
+	// AN EMPTY WORD AFTER THE SLASH IS LEGAL, and rejecting it cost another 69
+	// entries on top of the 238 above.  The shape is a directory carrying only a
+	// modifier, which Sentences_StripMods then empties:
+	//
+	//     WILD0     ambience/(v30) quail1(p103), quail1(t10), quail1(p101)
+	//               -> "ambience/ quail1, quail1, quail1"
+	//
+	// so the directory applies from the first token and the first real WORD is
+	// the next one.  Sentences_WordFile already returns "" for a token that names
+	// no file and both the precache walk and Sentences_Pump skip those, so an
+	// empty word0 costs nothing and needs no special case downstream.
+	//
+	// The 69 are not obscure: HEV_MED*, HEV_HEAL* (the HEV suit's own voice) and
+	// the HG_ALERT* grunt radio set are all this shape.
+	return (sent_dir != "");
 };
 
 // Turn a sentence WORD into the filename stem it actually refers to.
@@ -298,18 +421,28 @@ void() Sentences_Precache =
 // ---------------------------------------------------------------------------
 // lookup
 // ---------------------------------------------------------------------------
-// Case-SENSITIVE, deliberately.  strtoupper is registered in pr_csqc.c and
-// pr_menu.c but NOT in the server builtin table, so on SSQC it compiles happily
-// and then does nothing useful at runtime - every name stored through it came out
-// mangled and no lookup could match, which is what made "!SC_1MUMBLE" report
-// missing while sitting at line 1061 of the very file we had just parsed.
-// Both sides are uppercase in practice: HL's file is uppercase throughout, and so
-// is every map reference in the corpus.
+// Case-INSENSITIVE, matching Half-Life.  SENTENCEG_Lookup (SDK dlls/sound.cpp:
+// 1390-1410) compares with stricmp, and maps rely on it: hl_c01_a1 writes
+// "!BA_button" and "!BA_hevno" while the shipped file stores BA_BUTTON and
+// BA_HEVNO, so a byte-exact compare made Barney mime his lines.
+//
+// THE OLD COMMENT HERE WAS WRONG ON BOTH COUNTS and is worth recording, because
+// it is what kept the bug alive.  It claimed "every map reference in the corpus
+// is uppercase" - hl_c01_a1 alone has seven that are not, and a corpus scan finds
+// 14 such misses across the Sven maps and 27 counting the valve/OpFor/Blue Shift
+// ones.  And it reasoned about strtoupper (#481), which really is client/menu
+// only; but the right builtin was always strcasecmp (#229), which IS in the
+// server table (engine/server/pr_cmds.c:11629) and does work here.
+//
+// Safe to fold case: valve's 1065 entries hold 1061 distinct names whether
+// compared sensitively or insensitively, i.e. NO two entries differ only by case,
+// so this can rescue a miss but can never make a lookup ambiguous.  The four
+// duplicates are exact repeats, already governed by the first-wins rule below.
 float(string nm) Sentences_IndexOf =
 {
 	float i;
 	for (i = 0; i < sent_count; i = i + 1)
-		if (sent_name[i] == nm)
+		if (!strcasecmp(sent_name[i], nm))
 			return i;
 	return -1;
 };
