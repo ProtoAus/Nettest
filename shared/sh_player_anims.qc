@@ -326,6 +326,127 @@ float(float mdlidx) SH_ModelIsSven =
     return (frameforname(mdlidx, "ref_hold_wrench") >= 0);
 };
 
+// ============================================================
+//  DAY OF DEFEAT — shape test and measurement probe
+// ============================================================
+//
+// A THIRD model shape, alongside Counter-Strike (index table) and Sven (name
+// table).  DoD's player models carry 345 sequences named
+// <stance>_<weapon>_<verb> — `stand_rifle_aim`, `crouch_garand_reload`,
+// `bipod_mg42_reload` — which is the REVERSE token order of Sven's
+// `ref_<verb>_<suffix>`, so SH_HLFrame cannot be reused for them; it has to be
+// imitated.  Nothing calls this yet: it is the shape test the resolver arm will
+// need, landed early so the probe below can measure with the real predicate
+// rather than a throwaway one.
+//
+// Positive test on TWO names, the same discipline SH_ModelIsSven uses:
+//   dod_idle1        the locomotion set's root — present on all five DoD models
+//   stand_rifle_aim  a weapon pose, so a model carrying DoD locomotion but no
+//                    weapon takes cannot pass
+// A model matching neither shape keeps the Counter-Strike index path, exactly as
+// before.  ORDER MATTERS at the call sites: this must be asked before the CS
+// fallback and it must not disturb SH_ModelIsSven's "zero misroutes across 151
+// models" result, so the two probes share no name.
+float(float mdlidx) SH_ModelIsDoD =
+{
+    if (mdlidx <= 0)
+        return FALSE;
+    if (frameforname(mdlidx, "dod_idle1") < 0)
+        return FALSE;
+    return (frameforname(mdlidx, "stand_rifle_aim") >= 0);
+};
+
+float sh_dodanim_reported;
+
+// One line per model per map, self-latching, in the shape of SH_HLAnimReport
+// below and of GoldSrcFX_Report / Modellist_Report.  This is Phase 0 of the DoD
+// body-animation work and it exists to answer, headlessly, the four questions
+// every later phase depends on:
+//
+//   1. does FTE load a 345-sequence studio player model at all, and does
+//      frameforname answer on it (the mount at fs_addons.txt:50 is real);
+//   2. is `Bip01 Spine` at the same bone on all five (it is — 8, on 34/34/34/35/32
+//      bone rigs), which is the basebone split the torso/legs layering needs;
+//   3. do the DoD takes resolve by name, and at WHICH INDEX;
+//   4. HOW MANY OF THOSE INDICES ARE ABOVE 255 — the visual proxy writes
+//      .frame and .baseframe as single bytes (sv_player.qc, VP_SF_ANIM), so any
+//      take at 256+ arrives at the client as index-256: a DIFFERENT REAL POSE,
+//      silently, because WriteByte masks rather than erroring.  That count is the
+//      whole argument for widening the wire, so it is measured, not asserted.
+//
+// The bone probe needs an ENTITY (gettagindex takes one, frameforname takes a
+// modelindex), so a scratch entity is spawned and removed per model.  gettagindex
+// is 1-BASED — it returns bone_index + 1 — so the printed `spine` value is one
+// more than the array index, and that off-by-one is exactly the thing the
+// server/client basebone asymmetry turns on.  Printed raw and labelled.
+void(float mdl, string label) SH_DoDReportOne =
+{
+    entity probe = spawn();
+    setmodel(probe, label);
+    float spine = gettagindex(probe, "Bip01 Spine");
+    float lleg  = gettagindex(probe, "Bip01 L Leg");
+    float lfoot = gettagindex(probe, "Bip01 R Foot");
+    remove(probe);
+
+    print(sprintf("[panim-dod] %s idx=%g seqs=%g shape=%s spine=%g lleg=%g rfoot=%g (gettagindex is 1-based)\n",
+                  label, mdl, modelframecount(mdl),
+                  SH_ModelIsDoD(mdl) ? "DoD" : (SH_ModelIsSven(mdl) ? "Sven" : "Counter-Strike"),
+                  spine, lleg, lfoot));
+
+    // A representative spread rather than all 345: one take per stance/verb
+    // class, chosen so the OVER-255 cases are in the sample.  stand_* reloads sit
+    // at 239-255 and just fit; every crouch reload and every deployed reload does
+    // not, and those are the ones the current wire silently aliases.
+    float a  = frameforname(mdl, "stand_rifle_aim");
+    float b  = frameforname(mdl, "crouch_rifle_aim");
+    float c  = frameforname(mdl, "stand_rifle_shoot");
+    float d  = frameforname(mdl, "stand_garand_reload");
+    float e  = frameforname(mdl, "crouch_garand_reload");
+    float f  = frameforname(mdl, "bipod_mg42_reload");
+    float g  = frameforname(mdl, "die_headshot");
+    float h  = frameforname(mdl, "dod_walk");
+
+    print(sprintf("[panim-dod]   stand_rifle_aim=%g crouch_rifle_aim=%g stand_rifle_shoot=%g stand_garand_reload=%g\n",
+                  a, b, c, d));
+    print(sprintf("[panim-dod]   crouch_garand_reload=%g bipod_mg42_reload=%g die_headshot=%g dod_walk=%g\n",
+                  e, f, g, h));
+
+    // The wire verdict, counted rather than claimed.
+    float over = 0;
+    if (a > 255) over = over + 1;
+    if (b > 255) over = over + 1;
+    if (c > 255) over = over + 1;
+    if (d > 255) over = over + 1;
+    if (e > 255) over = over + 1;
+    if (f > 255) over = over + 1;
+    if (g > 255) over = over + 1;
+    if (h > 255) over = over + 1;
+    print(sprintf("[panim-dod]   %g of 8 sampled takes are ABOVE 255 -> alias through the one-byte VP_SF_ANIM wire\n",
+                  over));
+};
+
+void() SH_DoDAnimReport =
+{
+    if (sh_dodanim_reported)
+        return;
+    float probe = getmodelindex("models/player/us-inf/us-inf.mdl");
+    if (probe <= 0)
+        return;                 // not loaded yet; try again next tick
+    sh_dodanim_reported = TRUE;
+
+    SH_DoDReportOne(probe, "models/player/us-inf/us-inf.mdl");
+    SH_DoDReportOne(getmodelindex("models/player/axis-inf/axis-inf.mdl"),   "models/player/axis-inf/axis-inf.mdl");
+    SH_DoDReportOne(getmodelindex("models/player/brit-inf/brit-inf.mdl"),   "models/player/brit-inf/brit-inf.mdl");
+    SH_DoDReportOne(getmodelindex("models/player/us-para/us-para.mdl"),     "models/player/us-para/us-para.mdl");
+    SH_DoDReportOne(getmodelindex("models/player/axis-para/axis-para.mdl"), "models/player/axis-para/axis-para.mdl");
+
+    // The CS models must still classify as Counter-Strike — a new positive probe
+    // that accidentally matched them would silently re-route every shipping model.
+    float cs = getmodelindex("models/player/leet/leet.iqm");
+    print(sprintf("[panim-dod] control: leet.iqm shape=%s (must be Counter-Strike)\n",
+                  SH_ModelIsDoD(cs) ? "DoD" : (SH_ModelIsSven(cs) ? "Sven" : "Counter-Strike")));
+};
+
 void() SH_HLAnimReport =
 {
     if (sh_hlanim_reported)

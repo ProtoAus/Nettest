@@ -5698,6 +5698,7 @@ void() AI_Tick =
 	// Did the Half-Life animation set reach the player models?  Same
 	// self-latching one-line shape; see its own comment for why it is permanent.
 	SH_HLAnimReport();
+	SH_DoDAnimReport();
 
 	// Run once, on the first frame rather than from AI_Init: it spawns and
 	// removes entities, and doing that inside worldspawn - while the map's own

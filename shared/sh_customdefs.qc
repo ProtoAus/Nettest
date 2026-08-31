@@ -1484,6 +1484,30 @@ void() precache_everything =
     Hitbox_RegisterModel(precache_model("models/player/numberk/numberK.iqm"));
     Hitbox_RegisterModel(precache_model("models/player/kilmer/kilmer.iqm"));
 
+    // --- Day of Defeat player models ---
+    //
+    // NOT SELECTABLE YET.  Precached so the animation probe below can measure
+    // them: getmodelindex returns 0 for an unprecached path, and every shape
+    // test in sh_player_anims.qc opens with `if (mdlidx <= 0) return FALSE;`
+    // (SH_ModelIsSven:320, SH_ModelIsDoD beside it) — so an unloaded model
+    // reports "not DoD-shaped" for the wrong reason and the measurement lies in
+    // the direction that looks like success.
+    //
+    // These come from the MOUNTED dod gamedir (fs_addons.txt:50
+    // steam:Half-Life/dod), not from the mod, so they cost nothing on the CDN —
+    // the same arrangement every DoD weapon model in this tree already relies on.
+    //
+    // Hitbox_RegisterModel is a deliberate no-op here: it bails on the model type
+    // before it looks at a bone name (com_mesh.c, Mod_AddHitbox), and these carry
+    // their own 21 native studio hitboxes with groups 1-7 — verified, no group is
+    // outside HL's range, unlike the HL monsters (see [[hitgroups-above-7-are-real]]).
+    // It is called anyway so the line reads like its eleven neighbours.
+    Hitbox_RegisterModel(precache_model("models/player/us-inf/us-inf.mdl"));
+    Hitbox_RegisterModel(precache_model("models/player/axis-inf/axis-inf.mdl"));
+    Hitbox_RegisterModel(precache_model("models/player/brit-inf/brit-inf.mdl"));
+    Hitbox_RegisterModel(precache_model("models/player/us-para/us-para.mdl"));
+    Hitbox_RegisterModel(precache_model("models/player/axis-para/axis-para.mdl"));
+
 	// Player Models / Sounds
 	precache_sound("sounds/player/use.wav");
 	precache_sound("sounds/player/spray.wav");
